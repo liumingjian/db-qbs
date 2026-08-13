@@ -313,8 +313,19 @@ commit 同步之后没有任何**程序**需要问 sink「现在怎么样了」�
 **sink 到底认不认识这个 `run_id`**。批次报 404 时，人第一个要分辨的是「sink 重启了」
 还是「`run_id` 打错了」，这件事只有 sink 能答，MySQL 那边查不出来。进度数字是顺带的。
 
-**本 ADR 不定义任何状态名**——状态集合、迁移、谁持有权威状态归
-[#28](https://github.com/liumingjian/db-qbs/issues/28)。
+~~**本 ADR 不定义任何状态名**——状态集合、迁移、谁持有权威状态归
+[#28](https://github.com/liumingjian/db-qbs/issues/28)。~~
+
+> **2026-08-13 增补（[ADR-0012](0012-run-lifecycle-and-state-authority.md) §5，
+> [#28](https://github.com/liumingjian/db-qbs/issues/28)）——本节两处订正：**
+> 1. **已终结的 run 不再回 404。** sink 为终态 run 保留内存墓碑（FIFO 32 条），
+>    `GET` 回 **200 带 `terminal`**（`SWAPPED` / `DISCARDED`）+ `purged_rows` / `swapped_rows`；
+>    `terminal` 缺席即代表「还活着」。被淘汰或 sink 重启后回 404，退化成本节原行为、不是故障。
+>    动机正是本节自己留下的洞：**commit 连接断掉后 source 来问，404 的答案是「不知道」**。
+> 2. **§7.1「commit → 已 commit 的 run」由 404 `RUN_UNKNOWN` 改为 409 `RUN_SEALED` + 墓碑。**
+>    「批次 → 已 abort 的 run 回 404」不变——那条 404 是故意的语义等价。
+>
+> 状态集合、迁移、权威归属见 ADR-0012；**协议层不新增任何错误码**。
 
 **`POST /v1/runs/{run_id}/abort`**
 ```json
