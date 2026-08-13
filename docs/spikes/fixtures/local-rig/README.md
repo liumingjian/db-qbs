@@ -12,6 +12,7 @@
 cd docs/spikes/fixtures/local-rig
 ./scripts/up.sh        # 起库 + 建等价表 + 灌边界值 + 建 dblink + 冒烟
 ./scripts/smoke.sh     # 只跑冒烟
+./scripts/run-dblink-probe.sh [脚本名]   # 跑 #6 的 dblink 探针（默认 dblink-pushdown.sql）
 ./scripts/sqlplus.sh   # 进 sqlplus
 ./scripts/down.sh      # 拆掉，连卷一起删
 ```
@@ -45,7 +46,11 @@ oracle/02-schema.sql        等价表 —— ADR-0003 每一种规范形式至�
 oracle/03-boundary-rows.sql 边界值 + t_canon_expected（期望规范形式）+ 10 万行
 oracle/04-dblink.sql        指回自身的 loopback dblink，名字沿用生产的 @FA
 mysql/10-target-schema.sql  目标端等价表，utf8mb4
+probes/dblink-pushdown*.sql #6 的 dblink 列投影探针（**不是** initdb 脚本，起库后按需跑）
 ```
+
+`probes/` 里的脚本不参与建库，靠 `scripts/run-dblink-probe.sh` 手动跑；
+它们自建/自删所需的表与 dblink，可重复执行。
 
 `oracle/` 与 `mysql/` 分别挂进两个镜像的 initdb 目录，**只在首次建库时执行一次**。
 改了 SQL 要重新生效，必须 `./scripts/down.sh && ./scripts/up.sh`（卷不删就不会重跑）。
@@ -92,7 +97,11 @@ mysql/10-target-schema.sql  目标端等价表，utf8mb4
 2. **`BINARY_DOUBLE` 的值域装不进 `NUMBER`。** 字面量不带 `d` 后缀会被当 `NUMBER` 解析并
    `ORA-01426 numeric overflow`。ADR-0003 没有为 `BINARY_FLOAT/DOUBLE` 定规范形式，
    而「一律 `TO_CHAR` 走字符串」对这两个类型的往返精度需要 #3 单独确认。
-3. **Oracle 把空串存成 `NULL`（已实测 `v_ascii` 写 `''` 后 `IS NULL`）。**
+3. **dblink 列投影 Oracle 自己会下推**（#6 已结）。内层 `SELECT *` 与投影写进内层生成的
+   远端 SQL 一字不差，`NO_MERGE` 也推不坏；绑定变量能穿过 dblink。详见
+   `docs/spikes/0001-oracle-driver.md` 第 5 节。**注意字节计数器的坑**：填充数据同值时
+   SQL*Net 会去重重复列值，测出 12 B/行的假数字，必须灌随机值。
+4. **Oracle 把空串存成 `NULL`（已实测 `v_ascii` 写 `''` 后 `IS NULL`）。**
    所以「`NULL` 与空串并存」在源端**不可能构造** —— ADR-0003 里 `NULL` 与空串的区分，
    只在目标端 MySQL 侧有意义。`CHAR(10)` 尾空格则确实保留（`LENGTH`=10），
    中文按 UTF-8 存（6 字符 / 18 字节）。

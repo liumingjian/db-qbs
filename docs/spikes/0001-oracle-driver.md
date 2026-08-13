@@ -85,7 +85,89 @@ _待填_
 
 ## 5. dblink 列投影下推（#6）
 
-_待填_
+**结论：Oracle 自己会把列投影推到远端。ADR-0004 的「把投影写进内层子查询」是防御性建议，不是必需的。**
+**绑定变量能穿过 dblink，ADR-0004 不需要改方案。**
+
+在本地替身台架（`docs/spikes/fixtures/local-rig/`，loopback dblink `@fa` 指回同一 XE 11.2.0.2）上，
+建了一张 70 列的 `t_wide_probe`（贴近生产 `t_r_fr_aststat` 的形状）灌 5000 行随机值实测。
+探针脚本 `probes/dblink-pushdown{,-2,-3}.sql`，跑法 `./scripts/run-dblink-probe.sh [脚本名]`。
+
+### 5.1 远端 SQL 里带没带列裁剪
+
+关键证据是执行计划的 **Remote SQL Information** —— 那才是真正发到远端的 SQL。
+要看到它，查询必须同时碰本地对象（纯远程查询会被判成 `fully remote statement`，整条语句发过去，
+连 `REMOTE` 行源都没有）。因此对比在「远程宽表 join 一张本地小表」的混合形状上做：
+
+| 形状 | 内层写法 | Plan hash | 发到远端的 SQL |
+|---|---|---|---|
+| A（生产原样） | `SELECT *` | 414720286 | `SELECT "ROW_ID","D_ASTSTAT","C01","C02" FROM "T_WIDE_PROBE" "A" WHERE "D_ASTSTAT"=TRUNC(:1-1)` |
+| B（ADR-0004 建议） | 投影写进内层 | 414720286 | **完全相同** |
+| A + `NO_MERGE` | `SELECT *`，禁止子查询合并 | 3814347444 | **完全相同** |
+
+三点：
+
+1. **70 列里只有 4 列过网络** —— 外层引用的 3 列，加上 WHERE 用到的 `D_ASTSTAT`。列投影下推成立。
+2. **A 与 B 的计划完全一致**（同 plan hash、同远端 SQL）。改写不带来任何收益。
+3. **连 `NO_MERGE` 都推不坏它** —— 加了 hint 后本地多一层 `VIEW`，但远端 SQL 一字不差。
+   投影裁剪不依赖子查询合并，所以它不是「碰巧生效」。
+4. 顺带：**WHERE 谓词也一并下推**了，不是拉回本地再过滤。
+
+### 5.2 网络传输量实测
+
+`v$mystat` 的 `bytes received via SQL*Net from dblink`，5000 行：
+
+| 取法 | 收字节 | B/行 |
+|---|---|---|
+| 内层 `SELECT *`，外层 3 列 | 656,992 | 131.4 |
+| 内层已投影，外层 3 列 | 656,595 | 131.3 |
+| 混合（远程 join 本地），外层 3 列 + tag | 667,448 | 133.5 |
+| **对照：真取全 70 列** | **20,830,956** | **4166.2** |
+
+前两行差 0.06%，是噪声。对照行说明计数器对列宽完全敏感（32 倍差距），
+所以前两行的「没差别」不是计数器不灵，是真没差别。
+
+> 坑（留档）：第一轮测出来只有 12 B/行，因为填充数据每行同值，**SQL\*Net 会去重重复列值**。
+> 第三轮改灌随机值才得到上面的数字。以后拿字节计数器做对比，填充数据不能同值。
+
+### 5.3 绑定变量能否穿过 dblink（这条影响 ADR-0004）
+
+**能。** `:biz_date` 到了远端仍是绑定变量，没有被拼成字面量：
+
+```
+Remote SQL Information:
+   3 - SELECT "ROW_ID","D_ASTSTAT","C01" FROM "T_WIDE_PROBE" "A" WHERE "D_ASTSTAT"=:1
+```
+
+实跑 `WHERE a.d_aststat = TO_DATE(:biz_date,'YYYY-MM-DD')` 命中 5000 行。
+（顺带印证反面：不参数化时 `TRUNC(SYSDATE-1)` 在远端变成 `TRUNC(:1-1)` ——
+`SYSDATE` 在**本地**求值后当绑定值送过去，这正是 ADR-0004 要消灭的「运行时才求值」。）
+
+### 5.4 dblink 故障的错误特征（M4 要能区分本地 / dblink 问题）
+
+| 故障 | SQLCODE | 错误文本 |
+|---|---|---|
+| 监听端口不通 | `-12541` | `ORA-12541: TNS:no listener` |
+| 主机名解析不了 | `-12154` | `ORA-12154: TNS:could not resolve the connect identifier specified` |
+| 远端口令错 | `-1017` | `ORA-01017: invalid username/password; logon denied`<br>`ORA-02063: preceding line from FA_BAD_CRED` |
+| 远端表不存在 | `-942` | `ORA-00942: table or view does not exist`<br>`ORA-02063: preceding line from FA` |
+| 本地表不存在（对照） | `-942` | `ORA-00942: table or view does not exist` |
+
+**判别规则给 M4：`ORA-02063: preceding line from <LINK_NAME>` 是 dblink 的签名。**
+它带着 link 名，且只在远端报错时出现 —— 上表最后两行错误码完全相同，
+唯一的区别就是有没有这一行。M4 的错误分类应当扫 `ORA-02063` 并抓出 link 名，
+而不是去枚举 `ORA-125xx`（TNS 层错误压根不带 `ORA-02063`，要单独归一类「连不上远端」）。
+
+另有 `v$dblink` 可查当前会话打开着哪些 dblink（`DB_LINK` / `IN_TRANSACTION`），排障时有用。
+
+### 5.5 本条**没有**回答什么
+
+- **台架是 loopback dblink**（指回同一实例），复现的是远程优化器路径的**形状**，不是跨机网络。
+  字节数真实（走了本地 listener 的 TNS），**RTT 与吞吐不真实** —— 那是 #5 的事，且 #5 也测不了。
+- **生产的 `@FA` 指向的远端库版本未知**。远端 SQL 的生成是本地 CBO 的行为，与远端版本无关，
+  但若 `htbr45.t_r_fr_aststat` 在远端其实是**视图或同义词**，下推行为可能不同 ——
+  这条要在 #2 拿到客户环境后复验一次。
+- 生产查询是否也 join 本地对象未知。若它像台架的纯远程形状一样只碰 `@FA`，
+  Oracle 会走 `fully remote statement`（整条语句发过去执行），那是更好的情况，投影问题不存在。
 
 ## 6. 客户源端机器部署 Instant Client 可行性（#7）
 
