@@ -62,8 +62,13 @@ probes/dblink-pushdown*.sql #6 的 dblink 列投影探针（**不是** initdb �
 
 覆盖到的边界：38 位满精度（正/负）、无精度声明的 `NUMBER`、高标度、尾零与负零、
 `DATE` 非零时分秒、`TIMESTAMP` 固定 6 位、中文 `VARCHAR2`/`NVARCHAR2`、`CHAR`/`NCHAR` 尾空格、
-全 `NULL` 行、`RAW`/`CLOB`/`NCLOB`/`BLOB`/`BINARY_FLOAT`/`BINARY_DOUBLE`，
-以及各自单表的 `LONG` 与 `LONG RAW`（Oracle 限一表一个）。
+全 `NULL` 行。
+
+`RAW`/`CLOB`/`NCLOB`/`BLOB`/`BINARY_FLOAT`/`BINARY_DOUBLE`，以及各自单表的 `LONG` 与 `LONG RAW`
+（Oracle 限一表一个），**在 ADR-0003 白名单之外——V1 明确不支持**（[#11](https://github.com/liumingjian/db-qbs/issues/11) 已结，
+映射预检遇到即报错拒绝）。它们的 `note` 以 `V1 排除` 开头，探针据此判 **EXCL** 而非 PASS/FAIL：
+不做断言，只回报驱动取到了什么，好在 #2 的真实类型清单命中时知道要回炉补什么。
+判据在数据里——若日后决定纳入某一类，改 `t_canon_expected` 的 `note` 与 `expected` 即可，不必动 Rust。
 
 ## 边界 —— 本台架不能答什么
 
@@ -95,8 +100,9 @@ probes/dblink-pushdown*.sql #6 的 dblink 列投影探针（**不是** initdb �
    ADR-0003 定成 `|x| < 1` **保留**小数点前的 `0`，且 `NUMBER` 的规范化定位为**校验**（不合规报错，不静默重写）。
    `t_canon_expected` 已与之一致，无需改动。
 2. **`BINARY_DOUBLE` 的值域装不进 `NUMBER`。** 字面量不带 `d` 后缀会被当 `NUMBER` 解析并
-   `ORA-01426 numeric overflow`。ADR-0003 没有为 `BINARY_FLOAT/DOUBLE` 定规范形式，
-   而「一律 `TO_CHAR` 走字符串」对这两个类型的往返精度需要 #3 单独确认。
+   `ORA-01426 numeric overflow`。这条连同 #3 实测的「309 位十进制展开」一起送走了
+   [#11](https://github.com/liumingjian/db-qbs/issues/11)：**V1 明确不支持二进制浮点**，
+   连同 `RAW`/LOB/`LONG` 一并排除，映射预检报错拒绝。
 3. **dblink 列投影 Oracle 自己会下推**（#6 已结）。内层 `SELECT *` 与投影写进内层生成的
    远端 SQL 一字不差，`NO_MERGE` 也推不坏；绑定变量能穿过 dblink。详见
    `docs/spikes/0001-oracle-driver.md` 第 5 节。**注意字节计数器的坑**：填充数据同值时

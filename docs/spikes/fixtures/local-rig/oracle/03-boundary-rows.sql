@@ -45,7 +45,7 @@ VALUES (6, 'multibyte_and_padding',
         'AB',
         N'甲乙');
 
--- 7) 二进制 / LOB / 机器浮点 —— ADR-0003 没有为这几类定规范形式（见 note）
+-- 7) 二进制 / LOB / 机器浮点 —— ADR-0003 白名单之外，V1 明确不支持（#11）；这里只为回报驱动取到什么
 INSERT INTO t_types_probe (row_id, kind, r_raw, cl_text, ncl_text, bl_bin, bf_float, bd_double)
 VALUES (7, 'binary_lob_float',
         HEXTORAW('DEADBEEF00'),
@@ -85,9 +85,18 @@ INSERT ALL
   INTO t_canon_expected VALUES (6,'V_CN',      '资产净值合计','本台架字符集为 AL32UTF8，测的是 UTF-8 路径，不是 GBK')
   INTO t_canon_expected VALUES (6,'NV_CN',     '资产净值合计',NULL)
   INTO t_canon_expected VALUES (6,'C_PAD',     'AB        ','CHAR(10) 尾部空格保留，共 10 字符')
-  INTO t_canon_expected VALUES (7,'R_RAW',     NULL,  'ADR-0003 未定义 RAW 的规范形式 —— #3 需回报，由 #8 决定是否补 ADR')
-  INTO t_canon_expected VALUES (7,'CL_TEXT',   NULL,  'ADR-0003 未定义 LOB 的规范形式')
-  INTO t_canon_expected VALUES (7,'BF_FLOAT',  NULL,  'ADR-0003 未定义 BINARY_FLOAT/DOUBLE 的规范形式；二进制浮点本身就有精度问题')
+  -- 以下为 ADR-0003 白名单之外的类型（#11 已决：V1 明确不支持，映射预检报错拒绝）。
+  -- 探针对这些单元格判 EXCL，不判对错——它们唯一的作用是回报「驱动取到了什么」，
+  -- 好在 #2 的真实类型清单命中时，能立刻看出要回炉补什么。
+  -- 判定靠 note 里的 'V1 排除' 前缀（见 spike-odpi/src/main.rs 的 judge），改这里不用改代码。
+  INTO t_canon_expected VALUES (7,'R_RAW',     NULL,  'V1 排除：RAW —— 十六进制/Base64 表示法未钉死')
+  INTO t_canon_expected VALUES (7,'BL_BIN',    NULL,  'V1 排除：BLOB —— 流式大对象，破坏行拼接 checksum 模型')
+  INTO t_canon_expected VALUES (7,'CL_TEXT',   NULL,  'V1 排除：CLOB —— 同上，且目标端需 TEXT/LONGTEXT')
+  INTO t_canon_expected VALUES (7,'NCL_TEXT',  NULL,  'V1 排除：NCLOB —— 同 CLOB')
+  INTO t_canon_expected VALUES (7,'BF_FLOAT',  NULL,  'V1 排除：BINARY_FLOAT —— 二进制浮点非十进制精确值')
+  INTO t_canon_expected VALUES (7,'BD_DOUBLE', NULL,  'V1 排除：BINARY_DOUBLE —— 字符串是 309 位十进制展开，MySQL DECIMAL 装不下')
+  INTO t_canon_expected VALUES (1,'L_TEXT',    NULL,  'V1 排除：LONG（11g 遗留）—— 同 CLOB；本行属 t_long_probe')
+  INTO t_canon_expected VALUES (1,'L_BIN',     NULL,  'V1 排除：LONG RAW（11g 遗留）—— 同 RAW；本行属 t_longraw_probe')
 SELECT * FROM dual;
 
 -- ---- 10 万行：只用来看流式 fetch 的内存形状，不看吞吐 --------------------

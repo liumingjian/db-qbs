@@ -38,7 +38,7 @@ SELECT (SELECT COUNT(*) FROM t_types_probe)    || ' ' ||
   FROM dual;" | tr '\t\r' '  ' | tr -s ' ' | grep -oE '[0-9]+( [0-9]+){4}')
 read -r probe expected bulk lng lngraw <<<"$counts"
 assert_eq "t_types_probe 行数"    7      "$probe"
-assert_eq "t_canon_expected 单元格" 23     "$expected"
+assert_eq "t_canon_expected 单元格" 28     "$expected"
 assert_eq "t_bulk_probe 行数"      100000 "$bulk"
 assert_eq "t_long_probe 行数"      1      "$lng"
 assert_eq "t_longraw_probe 行数"   1      "$lngraw"

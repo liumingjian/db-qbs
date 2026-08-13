@@ -6,8 +6,9 @@
 //!   闸门  —— `NUMBER` 能否以**字符串**取到 38 位完整精度（ADR-0003 的硬前提）。
 //!            拿不到 = 驱动不可用 = 触发 ADR-0001 复审、回退 Java。
 //!   保真  —— 逐单元格 join `t_canon_expected`，比对 ADR-0003 规范形式。
-//!   回报  —— ADR-0003 未定义规范形式的类型（RAW / LOB / BINARY_FLOAT|DOUBLE），
-//!            只如实记录驱动取到了什么，交 #8 决定是否补 ADR。
+//!   回报  —— ADR-0003 白名单之外的类型（RAW / LOB / LONG / BINARY_FLOAT|DOUBLE）。
+//!            #11 已决：V1 明确不支持，映射预检报错拒绝。这里不判对错，
+//!            只如实记录驱动取到了什么，好在 #2 的真实类型清单命中时知道要回炉补什么。
 //!
 //! 期望值一律来自 `t_canon_expected`，**不硬编码**（见台架 README）。
 
@@ -21,7 +22,7 @@ use std::fmt::Write as _;
 
 /// 一个单元格的读取结果。
 enum Cell {
-    /// 驱动取到了值，已转成规范形式（或未定义类型的可比对表示）。
+    /// 驱动取到了值，已转成规范形式（白名单外的类型则是可比对的回报表示）。
     Value { raw: String, canon: String },
     /// SQL NULL。
     Null,
@@ -58,9 +59,9 @@ struct Verdict {
 enum Outcome {
     Pass,
     Fail,
-    /// ADR-0003 未定义规范形式 —— 不判对错，只回报。
-    Unspecified,
-    /// 台架没给期望值，且不属于「ADR 未定义」—— 只观测。
+    /// ADR-0003 白名单之外 —— V1 明确不支持（#11），不判对错，只回报驱动取到了什么。
+    Excluded,
+    /// 台架没给期望值，且不属于「V1 排除」—— 只观测。
     Observed,
 }
 
@@ -69,7 +70,7 @@ impl Outcome {
         match self {
             Outcome::Pass => "PASS",
             Outcome::Fail => "FAIL",
-            Outcome::Unspecified => "UNSPEC",
+            Outcome::Excluded => "EXCL",
             Outcome::Observed => "OBS",
         }
     }
@@ -184,7 +185,7 @@ fn gate_number_full_precision(conn: &Connection) -> oracle::Result<bool> {
 }
 
 /// `(row_id, COLUMN_NAME) -> (expected, note)`；`expected` 为 `None` 表示该单元格应为 SQL NULL，
-/// 或（当 note 标明「未定义」时）ADR-0003 尚未为该类型定规范形式。
+/// 或（当 note 以「V1 排除」开头时）该类型在 ADR-0003 白名单之外，不做断言。
 type ExpectedMap = HashMap<(i32, String), (Option<String>, Option<String>)>;
 
 fn load_expected(conn: &Connection) -> oracle::Result<ExpectedMap> {
@@ -295,10 +296,15 @@ fn judge(
 ) -> Verdict {
     let key = (row_id, column.to_string());
     let (outcome, detail) = match expected.get(&key) {
-        // ADR-0003 未为该类型定规范形式 —— 只回报，不判对错。
-        Some((_, note)) if note.as_deref().is_some_and(|n| n.contains("未定义")) => (
-            Outcome::Unspecified,
-            format!("ADR 未定义规范形式；驱动取到 {}", cell.display()),
+        // ADR-0003 白名单之外 —— 只回报，不判对错。判据在数据里（t_canon_expected.note），
+        // 改 ADR 只需改台架的期望表，不必动这里。
+        Some((_, note)) if note.as_deref().is_some_and(|n| n.starts_with("V1 排除")) => (
+            Outcome::Excluded,
+            format!(
+                "{}；驱动取到 {}",
+                note.as_deref().unwrap_or_default(),
+                cell.display()
+            ),
         ),
         Some((Some(exp), note)) => {
             let actual = cell.canon();
@@ -362,11 +368,11 @@ fn report(verdicts: &[Verdict], gate_ok: bool, expected: &ExpectedMap) {
     let count = |f: fn(&Outcome) -> bool| verdicts.iter().filter(|v| f(&v.outcome)).count();
     let pass = count(|o| matches!(o, Outcome::Pass));
     let fail = count(|o| matches!(o, Outcome::Fail));
-    let unspec = count(|o| matches!(o, Outcome::Unspecified));
+    let excl = count(|o| matches!(o, Outcome::Excluded));
     let obs = count(|o| matches!(o, Outcome::Observed));
 
     println!("\n-- 汇总 --");
     println!("闸门（NUMBER 38 位字符串路径）：{}", if gate_ok { "通过" } else { "**不通过**" });
-    println!("PASS {pass} / FAIL {fail} / UNSPEC {unspec}（ADR 未定义）/ OBS {obs}（台架未给期望值）");
-    println!("期望表单元格 {}，其中已判定 {}", expected.len(), pass + fail + unspec);
+    println!("PASS {pass} / FAIL {fail} / EXCL {excl}（V1 白名单外，#11）/ OBS {obs}（台架未给期望值）");
+    println!("期望表单元格 {}，其中已判定 {}", expected.len(), pass + fail + excl);
 }

@@ -45,8 +45,8 @@ pub fn canon_number(raw: &str) -> String {
 }
 
 /// 二进制转十六进制大写 —— `RAW` / `BLOB` / `LONG RAW`。
-/// **ADR-0003 未定义这几类的规范形式**，这里只是给出一个可比对的表示，
-/// 用来回答「驱动能否无损取到字节」，不是在替 ADR 做决定。
+/// 这几类在 **ADR-0003 白名单之外，V1 明确不支持**（#11）；此处的十六进制只是一个
+/// 可比对的回报表示，用来回答「驱动能否无损取到字节」，不是规范形式。
 pub fn hex_upper(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
