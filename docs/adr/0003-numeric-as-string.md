@@ -25,7 +25,9 @@
 | DATE | `YYYY-MM-DD HH:MM:SS` |
 | TIMESTAMP | `YYYY-MM-DD HH:MM:SS.ffffff`（固定 6 位，不足补零） |
 | VARCHAR2 / NVARCHAR2 / CHAR | 原样 UTF-8；`CHAR` 保留尾部空格 |
-| NULL | 专用标记，与空字符串区分 |
+| NULL | 专用标记，与空字符串区分（**线上表示见 [ADR-0011](0011-batch-payload-wire-format.md) §2：JSON `null`**） |
+
+**本表是落库规则——同一个值写进 MySQL 时的表示。它怎么装进 HTTP 报文（容器形状、NULL、字符编码）是另一件事，见 [ADR-0011](0011-batch-payload-wire-format.md)。**
 
 ~~行 checksum = 各列规范形式按固定分隔符拼接后取 hash；整批做顺序无关聚合（XOR / 求和）。~~
 **2026-08-13 修订**：V1 不做行 checksum，校验只比行数，见

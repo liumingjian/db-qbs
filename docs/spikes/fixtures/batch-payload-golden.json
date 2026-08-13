@@ -1,0 +1,87 @@
+{
+  "_comment": "ADR-0011 的黄金 fixture。两端序列化/反序列化测试的共同输入，不是可执行的请求样例（_comment / _source_columns 两个下划线字段仅供人读，实际报文里没有）。列序即 POST /runs 的 source_columns 序（ADR-0010 §3.3）。每个值只能是 JSON string 或 null，长度必须等于列数 6。覆盖：38 位数值、ADR-0003 的 NUMBER 边界值、中文、NULL、日期、空字符串（钉死它与 null 不同）、双引号/反斜杠/制表符/换行（钉死转义走 JSON 自己那套）。",
+  "_source_columns": [
+    {
+      "name": "N_AMT",
+      "type": "NUMBER",
+      "precision": 38,
+      "scale": 10
+    },
+    {
+      "name": "C_NAME",
+      "type": "VARCHAR2",
+      "length": 50
+    },
+    {
+      "name": "C_ESC",
+      "type": "VARCHAR2",
+      "length": 200
+    },
+    {
+      "name": "C_EMPTY",
+      "type": "VARCHAR2",
+      "length": 10
+    },
+    {
+      "name": "D_BIZ",
+      "type": "DATE"
+    },
+    {
+      "name": "N_OPT",
+      "type": "NUMBER",
+      "precision": 10,
+      "scale": 0
+    }
+  ],
+  "seq": 1,
+  "rows": [
+    [
+      "12345678901234567890123456789012345678",
+      "张三",
+      "he said \"hi\" \\ done",
+      "",
+      "2026-08-13 09:15:30",
+      null
+    ],
+    [
+      "0.5",
+      "李四",
+      "tab\there",
+      "",
+      "2026-01-01 00:00:00",
+      "7"
+    ],
+    [
+      "-0.01",
+      "中文测试值",
+      "",
+      "",
+      "2026-12-31 23:59:59",
+      null
+    ],
+    [
+      "0",
+      null,
+      "",
+      "",
+      "2026-08-13 00:00:00",
+      "0"
+    ],
+    [
+      "1.23",
+      "",
+      "\\\"",
+      "",
+      "2028-02-29 12:00:00",
+      "-42"
+    ],
+    [
+      null,
+      "混合 mixed 值",
+      "line1\nline2",
+      "",
+      "2026-08-13 23:59:59",
+      null
+    ]
+  ]
+}

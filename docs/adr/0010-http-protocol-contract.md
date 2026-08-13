@@ -230,8 +230,17 @@ M1 分类码闭集：
 
 `Content-Type: application/json`，非此值 415。**M1 不压缩**——两端内网、总量 100MB 量级，
 带宽不是瓶颈，而不压时抓包能直接读出是哪一列的什么值出的问题，M1 排障价值大。
-压缩的口子留在 `Content-Encoding`，等 [#27](https://github.com/liumingjian/db-qbs/issues/27)
-定了载荷形状再看。单请求体上限 **64 MiB**（超出 413，纯防御：5000 行 × 70 列全字符串约几 MB/批）。
+~~压缩的口子留在 `Content-Encoding`，等 [#27](https://github.com/liumingjian/db-qbs/issues/27)
+定了载荷形状再看。~~单请求体上限 **64 MiB**（超出 413）。
+
+> **2026-08-13 增补（[ADR-0011](0011-batch-payload-wire-format.md) §6~§8，
+> [#27](https://github.com/liumingjian/db-qbs/issues/27)）——三处订正：**
+> 1. **「约几 MB/批」低估了一个数量级**：按 spike §4.6 的 3 kB/行估，JSON 化后典型批次**约 15 MB**。
+> 2. **64 MiB 不再是「正常路径的上限」，是断路器。** ADR-0011 §6 给批次加了 16 MiB 的字节预算
+>    （5000 行或 16 MiB 先到先切），M1 里触发 413 等同于**预算逻辑有 bug**——
+>    **缺陷不是故障**，与 `INTERNAL_PRECHECK_ESCAPE` 同类，`PAYLOAD_TOO_LARGE` 的 message 按此措辞。
+> 3. **压缩的复审线关闭**：`Content-Encoding` 连口子都不留，理由正是本节自己给的排障价值。
+>    要压是 M2 的事，届时连同重试模型一起改。
 
 | 参数 | 值 |
 |---|---|
