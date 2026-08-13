@@ -8,6 +8,8 @@ publish = false
 [dependencies]
 # 与 #3 同一驱动：封装 ODPI-C 走官方 OCI。
 oracle = "0.6"
+# 只为 getrusage —— 客户端 CPU 时间必须与墙钟分开量（#5 的 3b）。
+libc = "0.2"
 
 [[bin]]
 name = "spike-bulk"

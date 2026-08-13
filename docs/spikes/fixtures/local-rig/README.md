@@ -14,6 +14,7 @@ cd docs/spikes/fixtures/local-rig
 ./scripts/smoke.sh     # 只跑冒烟
 ./scripts/run-dblink-probe.sh [脚本名]   # 跑 #6 的 dblink 探针（默认 dblink-pushdown.sql）
 ./scripts/run-bulk-probe.sh              # 跑 #5 的内存形状探针（19 组配置矩阵）
+REPS=7 ./scripts/run-cpu-probe.sh        # 跑 #5 的客户端每行 CPU 探针（每档取中位数）
 ./scripts/sqlplus.sh   # 进 sqlplus
 ./scripts/down.sh      # 拆掉，连卷一起删
 ```
@@ -77,11 +78,17 @@ probes/dblink-pushdown*.sql #6 的 dblink 列投影探针（**不是** initdb �
    只允许向超集转，AL32UTF8 → ZHS16GBK 是收窄，不放行。
    **#3 的 GBK 中文往返测不了**，只能测 UTF-8 路径。绕开办法是拿 EE 介质自己 build 一个
    ZHS16GBK 的 11.2.0.4 镜像，要 Oracle 账号和许可，**先不做**，记为 M0 的已知缺口。
-2. **#5 的吞吐测不了，内存形状能测 —— 且已测完。** 服务端跑在模拟层上，**耗时的绝对数字是废数据**。
-   但内存形状是驱动**客户端侧**的行为，客户端是 arm64 原生、没有模拟层，所以这一半成立：
-   `t_bulk_probe` 的 10 万行已经量出「峰值随批次走、与总行数无关」，
-   跑法 `./scripts/run-bulk-probe.sh`，结论见 `docs/spikes/0001-oracle-driver.md` 第 4 节。
-   **仍不能答的是吞吐的绝对数字与真实行宽**，那两条留给客户环境。
+2. **#5 的服务端吞吐测不了，客户端侧的两条都能测 —— 且都已测完。**
+   服务端跑在模拟层上，**墙钟的绝对数字是废数据**。但内存形状与客户端每行 CPU 都是驱动
+   **客户端侧**的行为，客户端是 arm64 原生、没有模拟层，所以这两条成立：
+   - 内存形状：`t_bulk_probe` 的 10 万行量出「峰值随批次走、与总行数无关」，
+     跑法 `./scripts/run-bulk-probe.sh`。
+   - 客户端每行 CPU：`getrusage` 的 `ru_utime + ru_stime` **不计等服务端的时间**，
+     跑法 `./scripts/run-cpu-probe.sh`。同一条路径走 loopback dblink 墙钟涨 2.6 倍而
+     客户端 CPU 纹丝不动 —— 这条对照就是「计量隔离掉了模拟层」的证据。
+
+   结论都在 `docs/spikes/0001-oracle-driver.md` 第 4 节。
+   **仍不能答的是服务端吞吐的绝对秒数与真实行宽**，那两条按 ADR-0005 留给上线前复验（#2）。
 3. **替代不了 #2 的真实列清单** —— 那是客户表的属性。等价表覆盖的是「类型面」，不是「列清单」。
 
 因此本台架**不能关闭 M0 闸门**。它把 #3 从「完全没跑过」推进到「机制已验证，只差真实类型清单和 GBK 字符集」，
@@ -127,3 +134,20 @@ probes/dblink-pushdown*.sql #6 的 dblink 列投影探针（**不是** initdb �
 
 **全量驻留（`collect` 模式）那三行不是凑数的**：它证明测量手段对「内存随行数涨」
 是敏感的，所以流式那三行的「不涨」不是量不出来。任何「某某不增长」的结论都该配一条这样的反证。
+
+## #5 的客户端 CPU 探针（同一个 `spike-bulk/`）
+
+`scripts/run-cpu-probe.sh` 跑四个累进层级 `cpu0`～`cpu3`，相邻两层相减即成本分解：
+
+| 模式 | 每行做什么 | 减去上一层得到 |
+|---|---|---|
+| `cpu0` | 只迭代行，一个字段都不取 | 驱动的行推进与协议解析 |
+| `cpu1` | 取原生类型（i64 / f64 / String / `Timestamp`） | ODPI-C 取值 |
+| `cpu2` | 取 ADR-0003 规范形式文本，算完即弃 | 数值与日期 → 文本 |
+| `cpu3` | 组 `Vec<String>` + 批次缓冲（= 完整搬运路径） | 我们自己的组装与批次 |
+
+第 7 个参数 `ncols`（1..4）控制取前几列 —— 台架表只有 4 列而生产是 70 列，
+必须先知道成本是**按行摊还是按单元格摊**，外推才有依据。
+
+**判据是 CPU 不是墙钟。** `getrusage(RUSAGE_SELF)` 只计进程占用 CPU 的时间，
+等服务端那段不计入，所以模拟层影响的是墙钟。同理**这里也不能用墙钟下任何结论**。
