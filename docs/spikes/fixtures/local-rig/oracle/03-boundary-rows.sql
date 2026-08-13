@@ -75,7 +75,7 @@ INSERT ALL
   INTO t_canon_expected VALUES (3,'N_BARE',    '-12345678901234567890123456789012345678','负号前置')
   INTO t_canon_expected VALUES (3,'N_NEG',     '-0.01','负数尾零同样要去')
   INTO t_canon_expected VALUES (4,'N_SCALE10', '1234567890123456789012345678.0123456789','28+10=38 位满精度')
-  INTO t_canon_expected VALUES (4,'N_BARE',    '0.5', 'ADR-0003 只说「去前导零」，未说明小数点前的 0 是否保留；此处按保留记，若 ADR 澄清为 .5 需同步改')
+  INTO t_canon_expected VALUES (4,'N_BARE',    '0.5', '|x| < 1 保留小数点前的 0（ADR-0003 已澄清，#10）；驱动裸输出即此形')
   INTO t_canon_expected VALUES (4,'D_DATE',    '2026-08-13 14:35:09','时分秒非零，不能被抹平')
   INTO t_canon_expected VALUES (4,'TS_FRAC',   '2026-08-13 14:35:09.120000','固定 6 位补零 —— 与 NUMBER 的去尾零相反')
   INTO t_canon_expected VALUES (5,'N_BARE',    NULL,  'NULL 走专用标记')

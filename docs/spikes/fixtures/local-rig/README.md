@@ -90,10 +90,10 @@ probes/dblink-pushdown*.sql #6 的 dblink 列投影探针（**不是** initdb �
 
 固化过程中真跑了一遍，三条实测结论（`scripts/smoke.sh` 每次起台架都会重跑前两条）：
 
-1. **`TO_CHAR(0.5)` 返回 `.5`，不是 `0.5`。** ADR-0003 的 `NUMBER` 规范形式只写了「去除前导零」，
-   没说明小数点前的 `0` 该保留还是去掉 —— `-0.01` 同理返回 `-.01`。
-   两端 checksum 要可比，这个必须钉死。见 [#10](https://github.com/liumingjian/db-qbs/issues/10)。
-   `t_canon_expected` 现按**保留** `0` 记（`0.5` / `-0.01`），ADR 若定成另一边，改这张表即可。
+1. **`TO_CHAR(0.5)` 返回 `.5`，不是 `0.5`** —— 但这只是显示层行为，链路不经过 `TO_CHAR`。
+   #3 用 ODPI-C 取同一批值拿到的是 `0.5` / `-0.01`。**[#10](https://github.com/liumingjian/db-qbs/issues/10) 已结**：
+   ADR-0003 定成 `|x| < 1` **保留**小数点前的 `0`，且 `NUMBER` 的规范化定位为**校验**（不合规报错，不静默重写）。
+   `t_canon_expected` 已与之一致，无需改动。
 2. **`BINARY_DOUBLE` 的值域装不进 `NUMBER`。** 字面量不带 `d` 后缀会被当 `NUMBER` 解析并
    `ORA-01426 numeric overflow`。ADR-0003 没有为 `BINARY_FLOAT/DOUBLE` 定规范形式，
    而「一律 `TO_CHAR` 走字符串」对这两个类型的往返精度需要 #3 单独确认。
