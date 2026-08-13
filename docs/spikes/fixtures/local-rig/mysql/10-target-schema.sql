@@ -31,8 +31,11 @@ CREATE TABLE t_types_probe (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 注意 CHAR(10)：MySQL 检索 CHAR 时**默认剥掉尾部空格**，
--- 而 ADR-0003 要求 CHAR 保留尾空格。#3 要专门验这一条，
--- 结论可能是目标端必须用 VARCHAR/BINARY 而不是 CHAR。
+-- 而 ADR-0003 要求 CHAR 保留尾空格。
+-- #13 已实测坐实（spike 0001 §7.8 组 1）：CHAR 剥空格、CAST AS BINARY 救不回、
+-- PAD_CHAR_TO_FULL_LENGTH 反而凭空补空格；VARCHAR 逐字节原样。
+-- 结论：目标端建表**不得出现 CHAR**，CHAR(n)/NCHAR(n) 一律映射到 VARCHAR(n)。
+-- 本表的 c_pad / nc_pad 保留 CHAR 是**故意的反例列**，不是推荐写法。
 CREATE TABLE t_char_pad_probe (
   row_id      INT NOT NULL,
   as_char     CHAR(10),

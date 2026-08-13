@@ -15,6 +15,7 @@ cd docs/spikes/fixtures/local-rig
 ./scripts/run-dblink-probe.sh [脚本名]   # 跑 #6 的 dblink 探针（默认 dblink-pushdown.sql）
 ./scripts/run-bulk-probe.sh              # 跑 #5 的内存形状探针（19 组配置矩阵）
 REPS=7 ./scripts/run-cpu-probe.sh        # 跑 #5 的客户端每行 CPU 探针（每档取中位数）
+./scripts/run-mysql-roundtrip-probe.sh   # 跑 #13 的目标端往返实测（只起 MySQL，不用 Oracle）
 ./scripts/sqlplus.sh   # 进 sqlplus
 ./scripts/down.sh      # 拆掉，连卷一起删
 ```
@@ -49,6 +50,7 @@ oracle/03-boundary-rows.sql 边界值 + t_canon_expected（期望规范形式）
 oracle/04-dblink.sql        指回自身的 loopback dblink，名字沿用生产的 @FA
 mysql/10-target-schema.sql  目标端等价表，utf8mb4
 probes/dblink-pushdown*.sql #6 的 dblink 列投影探针（**不是** initdb 脚本，起库后按需跑）
+probes/mysql-roundtrip.sql  #13 的目标端往返实测（CHAR 尾空格 / DECIMAL 标度 / DATETIME / NULL）
 ```
 
 `probes/` 里的脚本不参与建库，靠 `scripts/run-dblink-probe.sh` 手动跑；
