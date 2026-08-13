@@ -1,0 +1,69 @@
+# M0 本地 Oracle 11.2 替身台架 —— 服务于 #9，供 #3 / #6 开箱即用。
+#
+# 平台分配是这套台架成立的关键：
+#   oracle  linux/amd64 （Rosetta 模拟）—— ARM 版 Oracle 11g 不存在，也不会有
+#   mysql   linux/arm64 原生
+#   client  linux/arm64 原生 —— Instant Client 与 spike 程序全速跑
+#
+# 因为服务端在模拟层上，本台架的**性能数字全部作废**，不能用来做 #5。
+services:
+  oracle:
+    image: gvenzl/oracle-xe:11.2.0.2-slim-faststart
+    platform: linux/amd64
+    container_name: qbs-oracle11
+    environment:
+      ORACLE_PASSWORD: spike123      # SYSTEM / SYS 口令
+      APP_USER: spike                # 台架 schema
+      APP_USER_PASSWORD: spike123
+    ports:
+      - "1521:1521"
+    volumes:
+      - ./oracle:/container-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  mysql:
+    image: mysql:8.0
+    platform: linux/arm64
+    container_name: qbs-mysql8
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: spike123
+      MYSQL_DATABASE: qbs
+      MYSQL_USER: spike
+      MYSQL_PASSWORD: spike123
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./mysql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pspike123"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    platform: linux/arm64
+    container_name: qbs-client
+    depends_on:
+      oracle:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+    environment:
+      # spike 程序按这两个变量取连接串，别在代码里写死
+      ORACLE_DSN: //oracle:1521/XE
+      ORACLE_USER: spike
+      ORACLE_PASSWORD: spike123
+      MYSQL_DSN: mysql://spike:spike123@mysql:3306/qbs
+    volumes:
+      - ../../../..:/workspace:ro   # 仓库根，方便在容器里直接看 fixtures
+    working_dir: /workspace

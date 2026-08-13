@@ -1,0 +1,41 @@
+# 台架客户端镜像 —— arm64 原生（关键：只模拟数据库，不模拟客户端）
+# Rust 编译与 ODPI-C 调用都在原生架构上跑，模拟层只压在 Oracle 服务端。
+FROM --platform=linux/arm64 debian:12-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends unzip libaio1 curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/oracle
+
+# Instant Client 19.32 直链 —— 免 Oracle 账号，不需要登录 OTN
+ARG IC_BASE=https://download.oracle.com/otn_software/linux/instantclient/1932000
+ARG IC_BASIC=instantclient-basic-linux.arm64-19.32.0.0.0dbru.zip
+ARG IC_SQLPLUS=instantclient-sqlplus-linux.arm64-19.32.0.0.0dbru.zip
+
+# 两个坑，都是实测踩出来的，别删：
+#   1. unzip 必须带 -o —— 两个 zip 都含 META-INF/MANIFEST.MF，不加会在无 tty 环境下
+#      卡在覆盖确认并以 exit 1 失败。
+#   2. download.oracle.com 对 84 MB 的 basic 包偶发断流（curl exit 18，transfer closed），
+#      所以带 --retry 与断点续传，并在解压前校验 zip 完整性 —— 半截 zip 解压出来
+#      是个能构建成功、但运行时缺 .so 的镜像，比构建失败难查得多。
+RUN set -eux; \
+    for f in "$IC_BASIC" "$IC_SQLPLUS"; do \
+      for i in 1 2 3 4 5; do \
+        curl -fSL --retry 5 --retry-all-errors --retry-delay 3 -C - \
+             -o "/tmp/$f" "$IC_BASE/$f" && unzip -tq "/tmp/$f" && break; \
+        echo "下载或校验失败，第 $i 次重试"; rm -f "/tmp/$f"; sleep 5; \
+      done; \
+      unzip -tq "/tmp/$f"; \
+      unzip -oq "/tmp/$f" -d /opt/oracle; \
+    done; \
+    rm -f /tmp/*.zip; \
+    test -f /opt/oracle/instantclient_19_32/libclntsh.so; \
+    test -x /opt/oracle/instantclient_19_32/sqlplus
+
+ENV LD_LIBRARY_PATH=/opt/oracle/instantclient_19_32
+ENV PATH=/opt/oracle/instantclient_19_32:$PATH
+# NLS_LANG 只决定客户端侧的转换目标；服务端字符集是 AL32UTF8，见 README 的边界一节。
+ENV NLS_LANG=AMERICAN_AMERICA.AL32UTF8
+
+CMD ["sleep", "infinity"]
