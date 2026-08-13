@@ -1,0 +1,17 @@
+# 一次性 spike 程序（#3）—— 不进主干构建，故意不放进任何 workspace。
+[package]
+name = "spike-odpi"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# 候选驱动 A：封装 ODPI-C 走官方 OCI。
+oracle = "0.6"
+
+[[bin]]
+name = "spike-odpi"
+path = "src/main.rs"
+
+[profile.release]
+debug = false
