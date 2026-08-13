@@ -147,3 +147,20 @@ DROP TABLE stg
 
 **校验失败照旧走「丢弃暂存表、目标表不动」**，不为取证保留暂存表：那会引入一类
 由失败产生、无人回收的孤儿表，而回收已判出 M1。代价是 **M1 放弃校验失败后的现场取证**。
+
+---
+
+## 2026-08-13 增补（[ADR-0015](0015-staging-table-write-path.md) §2，[#33](https://github.com/liumingjian/db-qbs/issues/33)）：切换语句改为显式列名
+
+上面那段伪码里的 `INSERT INTO <target> SELECT * FROM stg` 改成：
+
+```sql
+INSERT INTO <target> (`c1`, …, `cN`) SELECT `c1`, …, `cN` FROM <stg>
+```
+
+列名清单与暂存表 DDL 出自同一份映射预检结果。**代价为零**，换掉的是本 ADR 对
+「暂存表列序 = 目标表列序」这件事的**隐式依赖**——那个性质仍然成立（ADR-0009 §7 照旧按
+`ORDINAL_POSITION` 建表），只是切换语句不再靠它对齐。
+
+同一节还订正了 ADR-0010 §3.3：sink 写暂存表**不做列序重排**，`INSERT` 显式列名、
+置换交给 MySQL，于是「两个序混用」从「要靠断言拦住的错误」变成**不可表示**。

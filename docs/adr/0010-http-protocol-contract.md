@@ -106,9 +106,18 @@ ADR-0009 §3 的「按名字对齐、顺序无关」是**预检**的规则。批
 - **暂存表的列序照目标表，不照 `source_columns`**。ADR-0002 增补说「复制的是列名、列序与列类型」，
   切换事务的 `INSERT INTO <target> SELECT * FROM stg` 正是靠这个列序对上的。
   sink 建暂存表时读 `information_schema` 的 `ORDINAL_POSITION`。
-- 于是 **sink 写暂存表时必然要做一次列序重排**（`source_columns` 序 → 目标表序）。
-  这不是可以省掉的一步。两个序混用的话，预检全过、数据整整齐齐灌进错的列——
+- 于是 ~~**sink 写暂存表时必然要做一次列序重排**（`source_columns` 序 → 目标表序）。
+  这不是可以省掉的一步。~~ 两个序混用的话，预检全过、数据整整齐齐灌进错的列——
   正是 ADR-0009 §3 警告的那类静默搬错。
+
+> **2026-08-13 订正（[ADR-0015](0015-staging-table-write-path.md) §2，
+> [#33](https://github.com/liumingjian/db-qbs/issues/33)）：那次重排可以省掉，且省掉之后更强。**
+> sink 的 `INSERT` **显式列出列名、按 `source_columns` 序**，行值原样绑定，置换交给 MySQL 做。
+> 代码里没有映射表，于是「两个序混用」不是被断言拦住的错误，而是**不可表示**——
+> 列名把每个值钉到了具体的列上，写错即 `ERROR 1054` 当场炸。
+> 本节保留的仍然成立：**暂存表列序照目标表 `ORDINAL_POSITION`**；
+> 但切换语句同时改为显式列名（`INSERT INTO <target> (cols…) SELECT cols… FROM stg`），
+> 不再依赖 `SELECT *` 的列序。
 
 ### 4. commit 同步：一个请求做完封口、校验、切换
 
