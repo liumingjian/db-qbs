@@ -81,7 +81,15 @@ DELETE FROM <target> WHERE <target_date_col> >= ? AND <target_date_col> < ?
 ### 5. 目标日期列的约束
 
 **目标表必须存在一个由 `source_date_col` 直接映射过来的列，`target_date_col` 只能是它。**
-映射预检检查：该列在字段映射里，且其源列就是 `source_date_col`。不满足即拒绝运行。
+~~映射预检检查：该列在字段映射里，且其源列就是 `source_date_col`。~~不满足即拒绝运行。
+
+> **2026-08-13 订正（[ADR-0016](0016-task-definition-form.md) §2.1，
+> [#34](https://github.com/liumingjian/db-qbs/issues/34)）：M1 没有字段映射可查。**
+> ADR-0009 §3 要求两边列名集合完全相等（统一大写、顺序无关），映射恒等，
+> 于是任务定义里根本不存在一张映射表。本条**退化为一条纯字符串判定**：
+> `upper(target_date_col) == upper(source_date_col)`。语义一个字没变——恒等映射下
+> 「由 `source_date_col` 直接映射过来的列」就是同名列——只是判据从查一张不存在的表
+> 变成了比两个字符串。M2 引入非恒等映射时本条改回原文。
 
 「目标日期列由别的列推导/换算」不在 V1。
 
@@ -90,8 +98,17 @@ DELETE FROM <target> WHERE <target_date_col> >= ? AND <target_date_col> < ?
 1. 源端 SQL 中 `:biz_date` **恰好出现两次**，构成 `<col> >= :biz_date AND <col> < :biz_date + 1`
    的半开区间，两处引用**同一列** `source_date_col`。
 2. 源端 WHERE 中**不存在其他谓词**。
-3. `target_date_col` 在字段映射中存在，且源列为 `source_date_col`。
+3. `target_date_col` ~~在字段映射中存在，且源列为 `source_date_col`~~ —— 见 §5 订正，
+   M1 实为 `upper(target_date_col) == upper(source_date_col)`（[ADR-0016](0016-task-definition-form.md) §2.1）。
 4. ADR-0004 的相对时间函数扫描（`SYSDATE` / `CURRENT_DATE` / `SYSTIMESTAMP`）继续生效。
+
+> **2026-08-13 增补（[ADR-0016](0016-task-definition-form.md) §4，#34）——这四条在哪一端跑：**
+> 第 1、2、4 条都要读 SQL 文本，而 **SQL 文本不跨 HTTP**（ADR-0010 报文定稿里没有它），
+> 所以它们**结构性地只能在 source 本地跑，且发生在 `POST /runs` 之前**，
+> 与 ADR-0009 §4 的「每列显式命名 / 表达式列精度不确定」合成一段独立的
+> **「SQL 形状预检」**，一次报全部形状问题；不过则根本不发 HTTP 请求。
+> 第 3 条只比两个配置字段，同段。ADR-0010 §3.1 那句「source 一个判断都不做」
+> 的作用域随之收窄为「**逐列类型判定**一个都不做」。
 
 ## 代价
 
