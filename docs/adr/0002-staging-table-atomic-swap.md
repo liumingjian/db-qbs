@@ -124,3 +124,26 @@ M1 没有状态存储，回收机制手上除了表名什么都没有。随机�
 与 14 位时间戳（可判年龄），于是手工回收就是一句 `information_schema` 查询拼 `DROP`。
 
 **代价说清楚**：崩溃遗留的暂存表会一直占着目标库空间，直到有人手工清。POC 环境接受。
+
+---
+
+## 2026-08-13 增补（[ADR-0013](0013-verification-gate-row-counting.md)，[#29](https://github.com/liumingjian/db-qbs/issues/29)）：切换事务多一条前置语句
+
+**校验的「数暂存表」这一步放进切换事务之内**，不是事务之前：
+
+```
+BEGIN
+  SELECT COUNT(*) FROM stg          -- 门禁；不等则 ROLLBACK + 409 VERIFY_FAILED
+  DELETE FROM <target> WHERE <target_date_col> >= :d AND < :d + 1
+  INSERT INTO <target> SELECT * FROM stg
+COMMIT
+DROP TABLE stg
+```
+
+封口之后协议层已拒绝该 `run_id` 的写入，所以事务内外在协议上等价。选事务内的理由是
+**代价为零**（事务本来就要开），换来的是「**被数的那份**」与「**被切换的那份**」
+在数据库层面就是同一个快照——本 ADR 那条「校验与切换之间要封口」的动机由此在事务里免费兑现，
+不必再论证「封口之后没人能动暂存表」这句话对不对。
+
+**校验失败照旧走「丢弃暂存表、目标表不动」**，不为取证保留暂存表：那会引入一类
+由失败产生、无人回收的孤儿表，而回收已判出 M1。代价是 **M1 放弃校验失败后的现场取证**。

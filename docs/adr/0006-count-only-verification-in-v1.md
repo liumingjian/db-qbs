@@ -62,6 +62,13 @@ spike §7.4 把这条链拉出来的硬约束有六条。M1 开工前，为把�
 - **`ZHS16GBK` 中文往返**（[#2](https://github.com/liumingjian/db-qbs/issues/2) 复验清单第 3 项）
   原本指望 checksum 在上线时抓出来。现在不行了，它必须在 #2 复验时**显式逐值比对**。
 
+> **2026-08-13 增补（[ADR-0013](0013-verification-gate-row-counting.md)，
+> [#29](https://github.com/liumingjian/db-qbs/issues/29)）——「只比行数」的口径已定死。**
+> 两个数各有三种数法，选错就是门禁形同虚设：源端取 **fetch 循环累加器**、暂存表取
+> **切换事务内的 `SELECT COUNT(*)`**，批数同级参与。本 ADR 那句「行数相等但内容不同 V1 抓不到」
+> 已规格化为 ADR-0013 §9 的三条「校验**不**保证什么」，其中第 2 条是本 ADR 没点破的：
+> **`source_rows` 是 source 自报的，门禁不覆盖「源库 → source 累加器」这一段。**
+
 ## 不受影响的
 
 - **ADR-0003 的规范形式照旧。** 它不只服务 checksum，它同时是「Oracle 取到的字符串怎么写进

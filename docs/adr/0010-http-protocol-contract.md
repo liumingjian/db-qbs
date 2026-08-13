@@ -285,8 +285,13 @@ ADR-0007 已定 fetch 与推送串行，本来就不存在并发请求。
 ```
 
 `rows_written` = 本批 `INSERT` 的影响行数。它让「推了 5000 行只落 4999」**当场定位到第 n 批**，
-而不是等 commit 才发现总数差一。**校验口径归 [#29](https://github.com/liumingjian/db-qbs/issues/29)，
-本 ADR 只保证这个字段存在。**
+而不是等 commit 才发现总数差一。~~**校验口径归 [#29](https://github.com/liumingjian/db-qbs/issues/29)，
+本 ADR 只保证这个字段存在。**~~
+
+> **2026-08-13 增补（[ADR-0013](0013-verification-gate-row-counting.md) §3，#29）**：
+> 这个字段**不参与 commit 门禁的算式**，它转岗为 **source 侧的逐批硬断言**——
+> 每批响应回来立刻比 `rows_written == 本批行数`，不等则当场整 run 失败、错误带 `seq`。
+> 「当场定位」只在 source 当场断言时才兑现；不断言的话它只是一个没人看的数字。
 
 **`POST /v1/runs/{run_id}/commit`**（读超时 30 分钟）
 ```json
@@ -296,7 +301,17 @@ ADR-0007 已定 fetch 与推送串行，本来就不存在并发请求。
 ← 409 VERIFY_FAILED / 500 SWAP_FAILED / 500 INTERNAL_PRECHECK_ESCAPE / 404 RUN_UNKNOWN
 ```
 
-前两个是校验门禁的两边（怎么数、不一致怎么报归 #29）；`purged_rows` 是 §9 的保险；
+> **2026-08-13 增补（[ADR-0013](0013-verification-gate-row-counting.md)，#29）——校验口径定稿，三处订正：**
+> 1. **门禁是两组数不是一组**：`source_rows`（source 的 fetch 累加器）vs `staged_rows`
+>    （切换事务内 `SELECT COUNT(*) FROM stg`），**外加 `total_batches` vs sink 收批计数**——
+>    整批丢失在行数上像数据问题，在批数上一眼是传输问题。
+> 2. **`VERIFY_FAILED` 报文扩到五个数**：四个门禁数 + 诊断数 `sink_reported_rows`
+>    （sink 逐批 `rows_written` 之和），它把失败自动分成「写进去了又没落」与「批次没到齐」两类。
+> 3. **明确不承诺定位到批次**：逐批不符已由 §3 的 source 侧断言当场炸掉，
+>    走到 commit 的不一致按定义是「每批都自称写对了」，指不出任何一批——
+>    **sink 不保留 `seq → rows_written` 明细**。
+
+前两个是校验门禁的两边；`purged_rows` 是 §9 的保险；
 `swapped_rows` 看似冗余于 `staged_rows`，但它是**唯一能证明切换事务真的搬完了**的数字——
 两者不等意味着 `INSERT ... SELECT` 出了 ADR-0002 增补预言过的那类事
 （暂存表无唯一约束，重复键要到切换才炸）。
