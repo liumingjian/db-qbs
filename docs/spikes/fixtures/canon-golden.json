@@ -1,0 +1,55 @@
+{
+  "_comment": "ADR-0014 的黄金 fixture —— 规范形式（ADR-0003）边界值测试套件的唯一权威。台架表 t_canon_expected 不是权威（ADR-0014 §1、§8）。每条用例有 kind（该类型的规范化属于哪种操作）与 tier（m1 = 门禁必须绿；m3 = 类型未进 M1，挂起不跑）。kind=validate 的 input 是驱动给出的字符串，verdict=accept 表示恒等放行、verdict=reject 表示必须报错且不得静默修正；kind=format 的 input 是结构化时间分量（驱动给的是时间类型不是字符串，见 ADR-0003），expect 是格式化输出；kind=passthrough 表示 canon 层恒等、长度与字符集归 ADR-0009 预检；kind=bypass 表示该值根本不进 canon_* 函数。",
+  "_grammar": {
+    "NUMBER": "^(0|-?[1-9][0-9]*(\\.[0-9]*[1-9])?|-?0\\.[0-9]*[1-9])$",
+    "_grammar_note": "三支：零 / |x|>=1 / |x|<1。-0 与 0.000 落不进任何一支，故必被拒。位数上限（38 位）不进文法——长度是类型的性质，归 ADR-0009 预检。",
+    "DATE_OUTPUT": "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$",
+    "TIMESTAMP_OUTPUT": "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}$",
+    "_output_note": "DATE/TIMESTAMP 的正则是输出的断言，不是输入的门——与 NUMBER 相反。真正要测的是闰日 / 世纪边界 / 值域两端这些语义边界。"
+  },
+  "cases": [
+    { "id": "num-zero",              "type": "NUMBER",     "tier": "m1", "kind": "validate",    "verdict": "accept", "input": "0",                                        "expect": "0",                                        "basis": "ADR-0003：零一律为 0" },
+    { "id": "num-int-plain",         "type": "NUMBER",     "tier": "m1", "kind": "validate",    "verdict": "accept", "input": "100",                                      "expect": "100",                                      "basis": "ADR-0003：整数不带小数点" },
+    { "id": "num-lt-one",            "type": "NUMBER",     "tier": "m1", "kind": "validate",    "verdict": "accept", "input": "0.5",                                      "expect": "0.5",                                      "basis": "ADR-0003 §NUMBER 边界澄清（#10）：|x|<1 保留小数点前的 0" },
+    { "id": "num-neg-lt-one",        "type": "NUMBER",     "tier": "m1", "kind": "validate",    "verdict": "accept", "input": "-0.01",                                    "expect": "-0.01",                                    "basis": "ADR-0003：负号前置；负数尾零同样已去尽" },
+    { "id": "num-frac",              "type": "NUMBER",     "tier": "m1", "kind": "validate",    "verdict": "accept", "input": "1.23",                                     "expect": "1.23",                                     "basis": "ADR-0003：去小数尾零后的形态", "note": "落进 DECIMAL(38,0) 会被静默截成 1 —— 见 spikes/0001 §7.8 组 2。那是预检（ADR-0009）的职责，不是规范形式的，本套件不为此断言。" },
+    { "id": "num-38-positive",       "type": "NUMBER",     "tier": "m1", "kind": "validate",    "verdict": "accept", "input": "12345678901234567890123456789012345678",  "expect": "12345678901234567890123456789012345678",  "basis": "ADR-0003：38 位有效数字，f64 与 rust_decimal 都装不下", "note": "写进任何 s>0 的 DECIMAL 会 ERROR 1264（§7.8 组 2）。同上，归预检。" },
+    { "id": "num-38-negative",       "type": "NUMBER",     "tier": "m1", "kind": "validate",    "verdict": "accept", "input": "-12345678901234567890123456789012345678", "expect": "-12345678901234567890123456789012345678", "basis": "ADR-0003：负号前置" },
+    { "id": "num-38-split",          "type": "NUMBER",     "tier": "m1", "kind": "validate",    "verdict": "accept", "input": "1234567890123456789012345678.0123456789",  "expect": "1234567890123456789012345678.0123456789",  "basis": "28 位整数 + 10 位小数 = 38 位满精度" },
+
+    { "id": "num-drift-neg-zero",    "type": "NUMBER",     "tier": "m1", "kind": "validate",    "verdict": "reject", "input": "-0",     "basis": "ADR-0003：零一律为 0，-0 不是规范形式" },
+    { "id": "num-drift-zero-scale",  "type": "NUMBER",     "tier": "m1", "kind": "validate",    "verdict": "reject", "input": "0.000",  "basis": "尾零未去尽；其规范形式是 0" },
+    { "id": "num-drift-trail-zero",  "type": "NUMBER",     "tier": "m1", "kind": "validate",    "verdict": "reject", "input": "1.230",  "basis": "小数尾零未去尽" },
+    { "id": "num-drift-lead-zero",   "type": "NUMBER",     "tier": "m1", "kind": "validate",    "verdict": "reject", "input": "007",    "basis": "整数前导零未去尽" },
+    { "id": "num-drift-bare-dot",    "type": "NUMBER",     "tier": "m1", "kind": "validate",    "verdict": "reject", "input": ".5",     "basis": "TO_CHAR 显示层形态。在真链路上出现即说明有人绕道 TO_CHAR 取值（ADR-0003 明写不经过 TO_CHAR）——报错报得比什么都对。" },
+    { "id": "num-drift-nls-comma",   "type": "NUMBER",     "tier": "m1", "kind": "validate",    "verdict": "reject", "input": "1,23",   "basis": "NLS_NUMERIC_CHARACTERS 漂移。台架 03-boundary-rows.sql 显式 ALTER SESSION 设了 '.,'，生产会话未必——这是「驱动漂移」四个字最具体的含义。" },
+    { "id": "num-drift-sci",         "type": "NUMBER",     "tier": "m1", "kind": "validate",    "verdict": "reject", "input": "1E5",    "basis": "科学计数法。真实驱动/会话配置能产出，不是想象的畸形串。" },
+    { "id": "num-drift-sci-signed",  "type": "NUMBER",     "tier": "m1", "kind": "validate",    "verdict": "reject", "input": "1.5E+10","basis": "同上，带符号指数形态" },
+    { "id": "num-drift-plus",        "type": "NUMBER",     "tier": "m1", "kind": "validate",    "verdict": "reject", "input": "+1",     "basis": "正号不属于规范形式" },
+    { "id": "num-drift-empty",       "type": "NUMBER",     "tier": "m1", "kind": "validate",    "verdict": "reject", "input": "",       "basis": "空串不是数值；NULL 走 bypass（见 null-bypass），二者不可混同" },
+    { "id": "num-drift-space",       "type": "NUMBER",     "tier": "m1", "kind": "validate",    "verdict": "reject", "input": " 1",     "basis": "前导空白（定长数值格式的残留）" },
+    { "id": "num-drift-trail-dot",   "type": "NUMBER",     "tier": "m1", "kind": "validate",    "verdict": "reject", "input": "1.",     "basis": "悬空小数点" },
+
+    { "id": "date-plain",            "type": "DATE",       "tier": "m1", "kind": "format",      "input": { "y": 2026, "mo": 8,  "d": 13, "h": 14, "mi": 35, "s": 9 }, "expect": "2026-08-13 14:35:09", "basis": "ADR-0003：YYYY-MM-DD HH:MM:SS" },
+    { "id": "date-midnight",         "type": "DATE",       "tier": "m1", "kind": "format",      "input": { "y": 2026, "mo": 8,  "d": 13, "h": 0,  "mi": 0,  "s": 0 }, "expect": "2026-08-13 00:00:00", "basis": "零点不得被抹成纯日期——时分秒段必须恒在" },
+    { "id": "date-century-last",     "type": "DATE",       "tier": "m1", "kind": "format",      "input": { "y": 1999, "mo": 12, "d": 31, "h": 23, "mi": 59, "s": 59 }, "expect": "1999-12-31 23:59:59", "basis": "世纪边界" },
+    { "id": "date-century-first",    "type": "DATE",       "tier": "m1", "kind": "format",      "input": { "y": 2000, "mo": 1,  "d": 1,  "h": 0,  "mi": 0,  "s": 0 }, "expect": "2000-01-01 00:00:00", "basis": "世纪边界；月日必须补零到两位" },
+    { "id": "date-leap-day",         "type": "DATE",       "tier": "m1", "kind": "format",      "input": { "y": 2024, "mo": 2,  "d": 29, "h": 12, "mi": 0,  "s": 0 }, "expect": "2024-02-29 12:00:00", "basis": "闰日" },
+    { "id": "date-leap-century",     "type": "DATE",       "tier": "m1", "kind": "format",      "input": { "y": 2000, "mo": 2,  "d": 29, "h": 0,  "mi": 0,  "s": 0 }, "expect": "2000-02-29 00:00:00", "basis": "整百闰年（1900 不是闰年、2000 是）——百年规则的唯一活样本" },
+    { "id": "date-min",              "type": "DATE",       "tier": "m1", "kind": "format",      "input": { "y": 1,    "mo": 1,  "d": 1,  "h": 0,  "mi": 0,  "s": 0 }, "expect": "0001-01-01 00:00:00", "basis": "年份必须补零到四位", "note": "Oracle DATE 域（公元前 4712 起）比 MySQL DATETIME 域（1000-01-01 起）宽。域不匹配归预检，不归规范形式——见 ADR-0014 §6。" },
+    { "id": "date-max",              "type": "DATE",       "tier": "m1", "kind": "format",      "input": { "y": 9999, "mo": 12, "d": 31, "h": 23, "mi": 59, "s": 59 }, "expect": "9999-12-31 23:59:59", "basis": "值域上端" },
+
+    { "id": "vc-cn",                 "type": "VARCHAR2",   "tier": "m1", "kind": "passthrough", "input": "资产净值合计",     "expect": "资产净值合计",     "basis": "ADR-0003：原样 UTF-8。台架为 AL32UTF8，测的是 UTF-8 路径不是 GBK（ADR-0005 上线前复验第 3 项）。" },
+    { "id": "vc-trailing-space",     "type": "VARCHAR2",   "tier": "m1", "kind": "passthrough", "input": "AB        ",       "expect": "AB        ",       "basis": "VARCHAR2 的尾空格是真实数据，canon 层不得裁剪", "note": "MySQL CHAR(n) 读回时会剥掉它（§7.8 组 1），故 ADR-0009 把 CHAR(n)→VARCHAR(n) 定为硬约束。那是预检的事，本套件不为此断言。" },
+    { "id": "vc-escape-chars",       "type": "VARCHAR2",   "tier": "m1", "kind": "passthrough", "input": "a\"b\\c\td\ne",     "expect": "a\"b\\c\td\ne",     "basis": "canon 层对引号/反斜杠/制表符/换行一律恒等", "note": "转义全交给 JSON 自己（ADR-0011 §3），线上表示的断言在 batch-payload-golden.json，不在这里。" },
+    { "id": "vc-length-boundary",    "type": "VARCHAR2",   "tier": "m1", "kind": "passthrough", "input": "甲乙丙丁戊己庚辛壬癸", "expect": "甲乙丙丁戊己庚辛壬癸", "basis": "canon 层对长度恒等", "note": "n BYTE 与 n CHAR 的边界长度不在本套件——长度语义归 ADR-0009 预检（VARCHAR2(n) 下界 n' >= n）。见 ADR-0014 §6。" },
+
+    { "id": "null-bypass",           "type": "*",          "tier": "m1", "kind": "bypass",      "input": null, "expect": null, "basis": "结构性断言：NULL 不进 canon_*，直接落成 JSON null（ADR-0011 §2）。错法是「图省事让 NULL 也走一遍 canon_*、返回空串」——那会当场作废 ADR-0011「攻击面在构造上归零」这句话，而行数校验永远发现不了。", "note": "M1 源端不存在空串 VARCHAR2 值：Oracle 把空串存成 NULL（03-boundary-rows.sql 第 6 行已实测）。任何声称测到源端空串的用例都是假用例。" },
+
+    { "id": "ts-frac",               "type": "TIMESTAMP",  "tier": "m3", "kind": "format",      "input": { "y": 2026, "mo": 8, "d": 13, "h": 14, "mi": 35, "s": 9, "us": 120000 }, "expect": "2026-08-13 14:35:09.120000", "basis": "ADR-0003：固定 6 位不足补零 —— 与 NUMBER 的去尾零相反，两条写在一起才看得出这不是自相矛盾" },
+    { "id": "ts-zero-frac",          "type": "TIMESTAMP",  "tier": "m3", "kind": "format",      "input": { "y": 2026, "mo": 8, "d": 13, "h": 14, "mi": 35, "s": 9, "us": 0 },      "expect": "2026-08-13 14:35:09.000000", "basis": "小数秒为零时仍补满 6 位" },
+    { "id": "nvc-cn",                "type": "NVARCHAR2",  "tier": "m3", "kind": "passthrough", "input": "资产净值合计", "expect": "资产净值合计", "basis": "ADR-0003：与 VARCHAR2 同" },
+    { "id": "char-pad",              "type": "CHAR",       "tier": "m3", "kind": "passthrough", "input": "AB        ", "expect": "AB        ", "basis": "ADR-0003：CHAR 保留尾部空格（CHAR(10) 共 10 字符）" },
+    { "id": "nchar-pad",             "type": "NCHAR",      "tier": "m3", "kind": "passthrough", "input": "甲乙        ", "expect": "甲乙        ", "basis": "同 CHAR" }
+  ]
+}

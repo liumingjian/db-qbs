@@ -57,6 +57,8 @@
 既然驱动输出已经是规范形式，`NUMBER` 上的规范化就是**恒等变换**，实现定位相应地定成**校验**：
 按规范形式的文法校验驱动给出的字符串，合规原样放行，**不合规立即报错，不静默修正**。
 
+`RE_CANON` 的具体文法见 [ADR-0014](0014-canonical-form-boundary-test-suite.md) §7。
+
 ```rust
 fn canon_number(s: &str) -> Result<&str> {
     if !RE_CANON.is_match(s) {
@@ -122,5 +124,7 @@ fn canon_number(s: &str) -> Result<&str> {
   [ADR-0006](0006-count-only-verification-in-v1.md) 与
   [#19](https://github.com/liumingjian/db-qbs/issues/19)。
 - 规范形式的实现是全链路正确性的单点。必须有专门的、覆盖边界值的测试套件。
+  **2026-08-13：该套件的规格已由 [ADR-0014](0014-canonical-form-boundary-test-suite.md) 定下**
+  （黄金 fixture `docs/spikes/fixtures/canon-golden.json`，`RE_CANON` 的具体文法见其 §7）。
 - 白名单把「未支持的类型」变成**跑不起来**而不是**搬错**。若生产表真的含 `CLOB` 之类，
   V1 在预检阶段就停住，需要回炉补 ADR 再跑——这是刻意选的代价，见上文「两种错法不对称」。
