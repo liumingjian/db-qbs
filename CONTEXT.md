@@ -21,6 +21,11 @@
 `source` 和 `sink` 是两个独立部署的进程，只通过 HTTP 通信。`sink` 不感知 Oracle，
 `source` 不持有 MySQL 连接。
 
+两端都用 **Rust** 实现，同步阻塞 IO（ADR-0001）。`source` 通过 `oracle` crate（ODPI-C）
+连 Oracle **11g**，因此源端机器必须部署 **Oracle Instant Client 19c 完整 Basic 包**
+（离线带入，免 root）；目标端是 **MySQL 8.0**，统一 `utf8mb4`。
+选型依据见 [`docs/spikes/0001-oracle-driver.md`](docs/spikes/0001-oracle-driver.md)。
+
 ## 术语表
 
 **导入任务 (Import Task)**
