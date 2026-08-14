@@ -19,6 +19,18 @@ if grep -Eq '^[[:space:]]*declare[[:space:]]+-A' "$runner"; then
   echo "M1 acceptance runner must support the macOS Bash 3.2 baseline" >&2
   exit 1
 fi
+if grep -Eq '(^|[^[:alnum:]_])seq[[:space:]]' "$runner"; then
+  echo "M1 acceptance runner must not require GNU seq on macOS" >&2
+  exit 1
+fi
+if grep -q 'sha256sum' "$runner"; then
+  echo "M1 acceptance runner must use the macOS shasum command" >&2
+  exit 1
+fi
+grep -Fq 'shasum -a 256' "$runner" || {
+  echo "M1 acceptance runner must hash target rows with SHA-256" >&2
+  exit 1
+}
 actual=$($runner --list)
 [[ "$actual" == "$expected" ]] || {
   echo "unexpected M1 scenario list" >&2

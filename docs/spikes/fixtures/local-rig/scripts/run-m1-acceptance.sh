@@ -104,7 +104,7 @@ start_sink() {
   compose exec -T -d client sh -c \
     "echo \$\$ > /tmp/m1-sink.pid; exec $SINK_BIN --config $SINK_CONFIG > /tmp/m1-sink.jsonl 2>&1" || return 1
   local attempt
-  for attempt in $(seq 1 100); do
+  for (( attempt = 1; attempt <= 100; attempt++ )); do
     if compose exec -T client curl -sS -o /dev/null http://127.0.0.1:18080/v1/runs/not-a-run; then
       return 0
     fi
@@ -133,7 +133,7 @@ reset_sink_state() {
 }
 
 prepare_rig() {
-  for command in docker jq curl sha256sum; do
+  for command in docker jq curl shasum; do
     command -v "$command" >/dev/null || { echo "missing required command: $command" >&2; return 1; }
   done
 
@@ -187,7 +187,7 @@ assert_source_success() {
 
 narrow_hash() {
   mysql_exec "SELECT CONCAT_WS('|', ROW_ID, V_TEXT, DATE_FORMAT(D_BIZ,'%Y-%m-%d %H:%i:%s')) FROM M1_NARROW ORDER BY ROW_ID" |
-    sha256sum | cut -d' ' -f1
+    shasum -a 256 | cut -d' ' -f1
 }
 
 scenario_wide() {
@@ -230,7 +230,7 @@ scenario_source_kill() {
   compose exec -T client rm -f /tmp/m1-source.pid /tmp/m1-kill.jsonl || return 1
   compose exec -T -d client sh -c \
     "echo \$\$ > /tmp/m1-source.pid; exec $SOURCE_BIN --config $SOURCE_CONFIG --task $NARROW_TASK --biz-date $BIZ_DATE > /tmp/m1-kill.jsonl" || return 1
-  for attempt in $(seq 1 400); do
+  for (( attempt = 1; attempt <= 400; attempt++ )); do
     if compose exec -T client sh -c \
       "test -f /tmp/m1-kill.jsonl && grep -q '\"event\":\"batch_pushed\"' /tmp/m1-kill.jsonl"; then
       break
@@ -263,7 +263,7 @@ start_commit_drop_proxy() {
   compose exec -T -d client sh -c \
     "echo \$\$ > /tmp/m1-proxy.pid; exec python3 /workspace/docs/spikes/fixtures/local-rig/acceptance/commit-drop-proxy.py" || return 1
   local attempt
-  for attempt in $(seq 1 100); do
+  for (( attempt = 1; attempt <= 100; attempt++ )); do
     if compose exec -T client curl -sS -o /dev/null http://127.0.0.1:18081/v1/runs/not-a-run; then
       return 0
     fi
