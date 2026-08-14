@@ -3,7 +3,8 @@
 -- Four cases: local/dblink x non-total/total ordering. Each case takes page 3
 -- (rows 10001..15000) as its baseline, repeats the query 10 times, then repeats
 -- it after an independently committed source-table insert before the page.
--- Every comparison prints missing/added/symmetric-difference row counts.
+-- Each retry is materialized once before its missing/added/symmetric-difference
+-- row counts are calculated.
 
 SET ECHO OFF
 SET FEEDBACK OFF
@@ -15,6 +16,8 @@ SET TRIMSPOOL ON
 WHENEVER SQLERROR EXIT SQL.SQLCODE
 
 BEGIN EXECUTE IMMEDIATE 'DROP TABLE t_page_probe_result PURGE'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'DROP TABLE t_page_probe_attempt PURGE'; EXCEPTION WHEN OTHERS THEN NULL; END;
 /
 BEGIN EXECUTE IMMEDIATE 'DROP TABLE t_page_probe_baseline PURGE'; EXCEPTION WHEN OTHERS THEN NULL; END;
 /
@@ -46,6 +49,12 @@ CREATE TABLE t_page_probe_baseline (
   case_name  VARCHAR2(30) NOT NULL,
   row_id     NUMBER(8) NOT NULL,
   CONSTRAINT pk_t_page_probe_baseline PRIMARY KEY (case_name, row_id)
+);
+
+CREATE TABLE t_page_probe_attempt (
+  case_name  VARCHAR2(30) NOT NULL,
+  row_id     NUMBER(8) NOT NULL,
+  CONSTRAINT pk_t_page_probe_attempt PRIMARY KEY (case_name, row_id)
 );
 
 CREATE TABLE t_page_probe_result (
@@ -99,16 +108,27 @@ DECLARE
   BEGIN
     q := page_sql(p_suffix, p_order_by);
 
+    DELETE FROM t_page_probe_attempt WHERE case_name = p_case_name;
     EXECUTE IMMEDIATE
-      'SELECT COUNT(*) FROM (' ||
-      'SELECT row_id FROM t_page_probe_baseline WHERE case_name = :case_name ' ||
-      'MINUS ' || q || ')'
-      INTO missing USING p_case_name;
+      'INSERT INTO t_page_probe_attempt (case_name, row_id) ' ||
+      'SELECT :case_name, row_id FROM (' || q || ')'
+      USING p_case_name;
 
-    EXECUTE IMMEDIATE
-      'SELECT COUNT(*) FROM (' || q ||
-      ' MINUS SELECT row_id FROM t_page_probe_baseline WHERE case_name = :case_name)'
-      INTO added USING p_case_name;
+    SELECT COUNT(*)
+      INTO missing
+      FROM (
+        SELECT row_id FROM t_page_probe_baseline WHERE case_name = p_case_name
+        MINUS
+        SELECT row_id FROM t_page_probe_attempt WHERE case_name = p_case_name
+      );
+
+    SELECT COUNT(*)
+      INTO added
+      FROM (
+        SELECT row_id FROM t_page_probe_attempt WHERE case_name = p_case_name
+        MINUS
+        SELECT row_id FROM t_page_probe_baseline WHERE case_name = p_case_name
+      );
 
     INSERT INTO t_page_probe_result
       (phase, round_no, path, order_key, missing_rows, added_rows, symmetric_diff)
