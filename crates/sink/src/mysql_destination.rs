@@ -104,7 +104,8 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
         rows: &[Vec<Option<String>>],
         max_rows_per_insert: usize,
     ) -> Result<u64, WriteBatchError> {
-        self.pool
+        let outcome = self
+            .pool
             .with_conn(|connection| {
                 let mut transaction = connection.start_transaction(TxOpts::default())?;
                 let mut affected_rows = 0;
@@ -125,7 +126,9 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
                         .collect();
                     if let Err(error) = transaction.exec_drop(statement, Params::Positional(values))
                     {
-                        return Ok(Err(classify_write_error(error, columns, row_chunk)));
+                        return Ok(BatchWriteOutcome::Rejected(classify_write_error(
+                            error, columns, row_chunk,
+                        )));
                     }
                     affected_rows += transaction.affected_rows();
                     let warnings: Vec<(String, u16, String)> =
@@ -133,15 +136,20 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
                     if let Some((_, code, message)) =
                         warnings.into_iter().find(|(_, code, _)| *code == 1265)
                     {
-                        return Ok(Err(classify_mysql_diagnostic(
+                        return Ok(BatchWriteOutcome::Rejected(classify_mysql_diagnostic(
                             code, &message, columns, row_chunk,
                         )));
                     }
                 }
                 transaction.commit()?;
-                Ok(Ok(affected_rows))
+                Ok(BatchWriteOutcome::Written(affected_rows))
             })
-            .map_err(|error| WriteBatchError::Other(error.to_string()))?
+            .map_err(|error| WriteBatchError::Other(error.to_string()))?;
+
+        match outcome {
+            BatchWriteOutcome::Written(affected_rows) => Ok(affected_rows),
+            BatchWriteOutcome::Rejected(error) => Err(error),
+        }
     }
 
     fn atomic_swap(
@@ -227,12 +235,11 @@ fn classify_write_error(
     columns: &[String],
     rows: &[Vec<Option<String>>],
 ) -> WriteBatchError {
-    let raw = error.to_string();
     match error {
         MysqlError::MySqlError(error) if matches!(error.code, 1153 | 1264 | 1292 | 1366) => {
             classify_mysql_diagnostic(error.code, &error.message, columns, rows)
         }
-        _ => WriteBatchError::Other(raw),
+        error => WriteBatchError::Other(error.to_string()),
     }
 }
 
@@ -289,6 +296,11 @@ fn mysql_error_location(
         .cloned()
         .flatten();
     Some((columns[column_index].clone(), value))
+}
+
+enum BatchWriteOutcome {
+    Written(u64),
+    Rejected(WriteBatchError),
 }
 
 enum AtomicSwapOutcome {

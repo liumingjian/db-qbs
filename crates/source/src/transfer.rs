@@ -147,6 +147,62 @@ impl fmt::Display for TransferFailure {
 
 impl std::error::Error for TransferFailure {}
 
+impl TransferFailure {
+    pub fn new(
+        stage: RunStage,
+        message: impl Into<String>,
+        source_rows: u64,
+        total_batches: u64,
+    ) -> Self {
+        Self {
+            stage,
+            message: message.into(),
+            source_code: None,
+            sink_code: None,
+            column: None,
+            value: None,
+            commit_diagnostic: None,
+            source_rows,
+            total_batches,
+            staged_rows: None,
+            received_batches: None,
+            sink_reported_rows: None,
+            purged_rows: None,
+            fetch_ms: 0,
+            push_ms: 0,
+            commit_ms: 0,
+            cursor_ms: 0,
+        }
+    }
+
+    pub fn from_source_error(
+        stage: RunStage,
+        error: SourceReadError,
+        source_rows: u64,
+        total_batches: u64,
+    ) -> Self {
+        let mut failure = Self::new(stage, error.user_message(), source_rows, total_batches);
+        failure.source_code = error.oracle_code;
+        failure.column = error.column;
+        failure.value = error.value;
+        failure
+    }
+
+    fn with_timings(
+        mut self,
+        fetch: Duration,
+        push: Duration,
+        commit: Duration,
+        cursor: Duration,
+    ) -> Self {
+        self.fetch_ms = elapsed_ms(fetch);
+        self.push_ms = elapsed_ms(push);
+        self.commit_ms = elapsed_ms(commit);
+        self.cursor_ms = elapsed_ms(cursor);
+        self
+    }
+}
+
 pub fn generate_run_id() -> String {
     let mut random = [0u8; 3];
     rand::thread_rng().fill_bytes(&mut random);
@@ -187,13 +243,14 @@ pub fn run_transfer(
                 });
             }
             observe(TransferEvent::StageChanged(RunStage::Failed));
-            return Err(Box::new(with_timings(
-                sink_failure(error, RunStage::Preparing, 0, 0, None),
-                Duration::ZERO,
-                Duration::ZERO,
-                Duration::ZERO,
-                cursor_started.elapsed(),
-            )));
+            return Err(Box::new(
+                sink_failure(error, RunStage::Preparing, 0, 0, None).with_timings(
+                    Duration::ZERO,
+                    Duration::ZERO,
+                    Duration::ZERO,
+                    cursor_started.elapsed(),
+                ),
+            ));
         }
     };
     if opened.run_id != request.run_id {
@@ -201,13 +258,13 @@ pub fn run_transfer(
             sink,
             &request.run_id,
             &mut observe,
-            with_timings(
-                transfer_failure(
-                    RunStage::Preparing,
-                    "目标端开任务响应的 run_id 与请求不一致".to_owned(),
-                    0,
-                    0,
-                ),
+            TransferFailure::new(
+                RunStage::Preparing,
+                "目标端开任务响应的 run_id 与请求不一致",
+                0,
+                0,
+            )
+            .with_timings(
                 Duration::ZERO,
                 Duration::ZERO,
                 Duration::ZERO,
@@ -241,26 +298,13 @@ pub fn run_transfer(
                     sink,
                     &request.run_id,
                     &mut observe,
-                    with_timings(
-                        TransferFailure {
-                            stage: RunStage::Streaming,
-                            message: error.user_message(),
-                            source_code: error.oracle_code,
-                            sink_code: None,
-                            column: error.column,
-                            value: error.value,
-                            commit_diagnostic: None,
-                            source_rows,
-                            total_batches,
-                            staged_rows: None,
-                            received_batches: None,
-                            sink_reported_rows: None,
-                            purged_rows: None,
-                            fetch_ms: 0,
-                            push_ms: 0,
-                            commit_ms: 0,
-                            cursor_ms: 0,
-                        },
+                    TransferFailure::from_source_error(
+                        RunStage::Streaming,
+                        error,
+                        source_rows,
+                        total_batches,
+                    )
+                    .with_timings(
                         fetch_time,
                         push_time,
                         Duration::ZERO,
@@ -275,16 +319,16 @@ pub fn run_transfer(
                 sink,
                 &request.run_id,
                 &mut observe,
-                with_timings(
-                    transfer_failure(
-                        RunStage::Streaming,
-                        format!(
-                            "源端行宽断言失败：describe 有 {expected_columns} 列，当前行有 {} 个值",
-                            row.len()
-                        ),
-                        source_rows,
-                        total_batches,
+                TransferFailure::new(
+                    RunStage::Streaming,
+                    format!(
+                        "源端行宽断言失败：describe 有 {expected_columns} 列，当前行有 {} 个值",
+                        row.len()
                     ),
+                    source_rows,
+                    total_batches,
+                )
+                .with_timings(
                     fetch_time,
                     push_time,
                     Duration::ZERO,
@@ -316,13 +360,13 @@ pub fn run_transfer(
                     sink,
                     &request.run_id,
                     &mut observe,
-                    with_timings(
-                        sink_failure(error, RunStage::Streaming, source_rows, total_batches, None),
-                        fetch_time,
-                        push_time,
-                        Duration::ZERO,
-                        cursor_started.elapsed(),
-                    ),
+                    sink_failure(error, RunStage::Streaming, source_rows, total_batches, None)
+                        .with_timings(
+                            fetch_time,
+                            push_time,
+                            Duration::ZERO,
+                            cursor_started.elapsed(),
+                        ),
                 )
             })?;
             serialized_row_bytes = 0;
@@ -348,13 +392,13 @@ pub fn run_transfer(
                 sink,
                 &request.run_id,
                 &mut observe,
-                with_timings(
-                    sink_failure(error, RunStage::Streaming, source_rows, total_batches, None),
-                    fetch_time,
-                    push_time,
-                    Duration::ZERO,
-                    cursor_started.elapsed(),
-                ),
+                sink_failure(error, RunStage::Streaming, source_rows, total_batches, None)
+                    .with_timings(
+                        fetch_time,
+                        push_time,
+                        Duration::ZERO,
+                        cursor_started.elapsed(),
+                    ),
             )
         })?;
     }
@@ -372,19 +416,21 @@ pub fn run_transfer(
                 None
             };
             observe(TransferEvent::StageChanged(RunStage::Failed));
-            return Err(Box::new(with_timings(
+            return Err(Box::new(
                 sink_failure(
                     error,
                     RunStage::Committing,
                     source_rows,
                     total_batches,
                     diagnostic,
+                )
+                .with_timings(
+                    fetch_time,
+                    push_time,
+                    commit_time,
+                    cursor_started.elapsed(),
                 ),
-                fetch_time,
-                push_time,
-                commit_time,
-                cursor_started.elapsed(),
-            )));
+            ));
         }
     };
 
@@ -393,8 +439,8 @@ pub fn run_transfer(
         || committed.swapped_rows != committed.staged_rows
     {
         observe(TransferEvent::StageChanged(RunStage::Failed));
-        return Err(Box::new(with_timings(
-            transfer_failure(
+        return Err(Box::new(
+            TransferFailure::new(
                 RunStage::Committing,
                 format!(
                     "目标端 commit 响应行数断言失败：source_rows={} staged_rows={} swapped_rows={}",
@@ -402,12 +448,9 @@ pub fn run_transfer(
                 ),
                 source_rows,
                 total_batches,
-            ),
-            fetch_time,
-            push_time,
-            commit_time,
-            cursor_started.elapsed(),
-        )));
+            )
+            .with_timings(fetch_time, push_time, commit_time, cursor_started.elapsed()),
+        ));
     }
 
     observe(TransferEvent::StageChanged(RunStage::Succeeded));
@@ -547,66 +590,29 @@ fn sink_failure(
     total_batches: u64,
     commit_diagnostic: Option<String>,
 ) -> TransferFailure {
-    let gate = error.gate.clone();
-    TransferFailure {
-        stage,
-        message: format!("目标端：{}", error.message),
-        source_code: None,
-        sink_code: error.code,
-        column: error.column,
-        value: error.value,
-        commit_diagnostic,
-        source_rows,
-        total_batches,
-        staged_rows: gate.as_ref().map(|counts| counts.staged_rows),
-        received_batches: gate.as_ref().map(|counts| counts.received_batches),
-        sink_reported_rows: gate.as_ref().map(|counts| counts.sink_reported_rows),
-        purged_rows: None,
-        fetch_ms: 0,
-        push_ms: 0,
-        commit_ms: 0,
-        cursor_ms: 0,
-    }
-}
-
-fn transfer_failure(
-    stage: RunStage,
-    message: String,
-    source_rows: u64,
-    total_batches: u64,
-) -> TransferFailure {
-    TransferFailure {
-        stage,
+    let SinkError {
+        code,
         message,
-        source_code: None,
-        sink_code: None,
-        column: None,
-        value: None,
-        commit_diagnostic: None,
+        column,
+        value,
+        gate,
+        ..
+    } = error;
+    let mut failure = TransferFailure::new(
+        stage,
+        format!("目标端：{message}"),
         source_rows,
         total_batches,
-        staged_rows: None,
-        received_batches: None,
-        sink_reported_rows: None,
-        purged_rows: None,
-        fetch_ms: 0,
-        push_ms: 0,
-        commit_ms: 0,
-        cursor_ms: 0,
+    );
+    failure.sink_code = code;
+    failure.column = column;
+    failure.value = value;
+    failure.commit_diagnostic = commit_diagnostic;
+    if let Some(gate) = gate {
+        failure.staged_rows = Some(gate.staged_rows);
+        failure.received_batches = Some(gate.received_batches);
+        failure.sink_reported_rows = Some(gate.sink_reported_rows);
     }
-}
-
-fn with_timings(
-    mut failure: TransferFailure,
-    fetch: Duration,
-    push: Duration,
-    commit: Duration,
-    cursor: Duration,
-) -> TransferFailure {
-    failure.fetch_ms = elapsed_ms(fetch);
-    failure.push_ms = elapsed_ms(push);
-    failure.commit_ms = elapsed_ms(commit);
-    failure.cursor_ms = elapsed_ms(cursor);
     failure
 }
 

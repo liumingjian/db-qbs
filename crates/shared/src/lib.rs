@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 
 use chrono::{NaiveDate, SecondsFormat, Utc};
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 static CANONICAL_NUMBER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(0|-?[1-9][0-9]*(\.[0-9]*[1-9])?|-?0\.[0-9]*[1-9])$")
@@ -75,8 +75,7 @@ pub enum LogLevel {
     Error,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogEvent {
     CliFailed,
     SourceStarted,
@@ -135,6 +134,15 @@ impl LogEvent {
             Self::SinkUnavailable => "sink_unavailable",
             Self::HttpResponseFailed => "http_response_failed",
         }
+    }
+}
+
+impl Serialize for LogEvent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
     }
 }
 

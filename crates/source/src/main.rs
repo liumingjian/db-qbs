@@ -141,26 +141,8 @@ fn run() -> bool {
                     ("message", json!("Oracle cursor preparation failed")),
                 ],
             );
-            let failure = TransferFailure {
-                stage: RunStage::Preparing,
-                message: error.user_message(),
-                source_code: error.oracle_code,
-                sink_code: None,
-                column: error.column,
-                value: error.value,
-                commit_diagnostic: None,
-                source_rows: 0,
-                total_batches: 0,
-                staged_rows: None,
-                received_batches: None,
-                sink_reported_rows: None,
-                purged_rows: None,
-                fetch_ms: 0,
-                push_ms: 0,
-                commit_ms: 0,
-                cursor_ms: 0,
-            };
-            emit_failed_run(&failure, Some(&run_id), &task_path);
+            let failure = TransferFailure::from_source_error(RunStage::Preparing, error, 0, 0);
+            emit_failed_run(&failure, &run_id, &task_path);
             return false;
         }
     };
@@ -178,26 +160,8 @@ fn run() -> bool {
                     ("message", json!("sink client preparation failed")),
                 ],
             );
-            let failure = TransferFailure {
-                stage: RunStage::Preparing,
-                message,
-                source_code: None,
-                sink_code: None,
-                column: None,
-                value: None,
-                commit_diagnostic: None,
-                source_rows: 0,
-                total_batches: 0,
-                staged_rows: None,
-                received_batches: None,
-                sink_reported_rows: None,
-                purged_rows: None,
-                fetch_ms: 0,
-                push_ms: 0,
-                commit_ms: 0,
-                cursor_ms: 0,
-            };
-            emit_failed_run(&failure, Some(&run_id), &task_path);
+            let failure = TransferFailure::new(RunStage::Preparing, message, 0, 0);
+            emit_failed_run(&failure, &run_id, &task_path);
             return false;
         }
     };
@@ -218,7 +182,7 @@ fn run() -> bool {
             true
         }
         Err(failure) => {
-            emit_failed_run(&failure, Some(&run_id), &task_path);
+            emit_failed_run(&failure, &run_id, &task_path);
             false
         }
     }
@@ -342,11 +306,11 @@ fn emit_transfer_event(event: TransferEvent, run_id: &str, task: &Path) {
     }
 }
 
-fn emit_failed_run(failure: &TransferFailure, run_id: Option<&str>, task: &Path) {
+fn emit_failed_run(failure: &TransferFailure, run_id: &str, task: &Path) {
     emit_with_run(
         LogLevel::Error,
         LogEvent::RunFinished,
-        run_id,
+        Some(run_id),
         Some(task),
         [
             ("terminal", json!(RunStage::Failed.as_str())),

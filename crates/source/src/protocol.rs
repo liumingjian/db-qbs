@@ -324,9 +324,8 @@ fn decode_response<T: DeserializeOwned>(
                 .details
                 .get("issues")
                 .cloned()
-                .and_then(|issues| serde_json::from_value::<Vec<SinkPrecheckIssue>>(issues).ok())
-                .unwrap_or_default()
-                .into();
+                .and_then(|issues| serde_json::from_value(issues).ok())
+                .unwrap_or_default();
             let gate = serde_json::from_value(error.details.clone())
                 .ok()
                 .map(Box::new);
@@ -336,7 +335,7 @@ fn decode_response<T: DeserializeOwned>(
                 message: error.message,
                 column,
                 value,
-                precheck_issues,
+                precheck_issues: Box::new(precheck_issues),
                 gate,
             })
         }
