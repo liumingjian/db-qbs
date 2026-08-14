@@ -76,12 +76,38 @@ pub enum LogLevel {
 }
 
 #[derive(Serialize)]
-struct LogLine<'a> {
+struct LogLine<'a, T> {
     ts: String,
     level: LogLevel,
     event: &'a str,
     run_id: Option<&'a str>,
     task: Option<&'a str>,
+    #[serde(flatten)]
+    fields: T,
+}
+
+#[derive(Serialize)]
+struct NoFields {}
+
+pub fn write_log_line_with_fields(
+    writer: &mut impl Write,
+    level: LogLevel,
+    event: &str,
+    run_id: Option<&str>,
+    task: Option<&str>,
+    fields: impl Serialize,
+) -> io::Result<()> {
+    let line = LogLine {
+        ts: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        level,
+        event,
+        run_id,
+        task,
+        fields,
+    };
+
+    serde_json::to_writer(&mut *writer, &line).map_err(io::Error::other)?;
+    writer.write_all(b"\n")
 }
 
 pub fn write_log_line(
@@ -91,14 +117,5 @@ pub fn write_log_line(
     run_id: Option<&str>,
     task: Option<&str>,
 ) -> io::Result<()> {
-    let line = LogLine {
-        ts: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        level,
-        event,
-        run_id,
-        task,
-    };
-
-    serde_json::to_writer(&mut *writer, &line).map_err(io::Error::other)?;
-    writer.write_all(b"\n")
+    write_log_line_with_fields(writer, level, event, run_id, task, NoFields {})
 }
