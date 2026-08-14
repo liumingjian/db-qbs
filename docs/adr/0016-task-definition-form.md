@@ -7,7 +7,8 @@
 [ADR-0008](0008-business-date-predicate-generation.md)（三字段与预检四条，§5 由本 ADR 订正）、
 [ADR-0009](0009-m1-mapping-precheck-rules.md)（按名字对齐、预检时点）、
 [ADR-0010](0010-http-protocol-contract.md)（§3.1 与 §8 由本 ADR 订正/落实）、
-[ADR-0012](0012-run-lifecycle-and-state-authority.md)（状态只在 source 进程内存）
+[ADR-0012](0012-run-lifecycle-and-state-authority.md)（状态只在 source 进程内存）、
+[ADR-0017](0017-run-log-format-and-contract.md)（日志形态；**§9 由它订正**）
 
 ## 背景
 
@@ -189,8 +190,11 @@ SQL 形状问题在 sink 侧不可表示，不存在「本可以合并却分了�
 - **退出码只有 `0`（`SUCCEEDED`）与 `1`（`FAILED`），不按 ADR-0010 的十码闭集分配。**
   分配等于多一张必须两处同步的表，而错误分类的权威表示已经在 `message` 与日志里；
   验收脚本要判「哪种失败」本来就得读日志。
-- **`POST /runs` 成功后立刻把 `run_id` 单独打一行到 stdout**，让验收脚本能无解析地抓到它，
+- **`POST /runs` 成功后立刻把 `run_id` 打到 stdout**，让验收脚本能抓到它，
   拿去 sink 那边查暂存表与墓碑（ADR-0012 §5）。
+  **（由 [ADR-0017](0017-run-log-format-and-contract.md) §1.1 订正：原文是「单独打一行」「无解析地抓到」；
+  stdout 全量 JSON Lines 之后那会是流上唯一的非 JSON 行，改由 JSON 行的 `run_id` 字段承载，
+  抓取方式变成一次 `jq`。退出码仍只有 0 / 1，不变。）**
 
 ## 后果
 
