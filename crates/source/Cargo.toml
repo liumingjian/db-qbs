@@ -7,8 +7,11 @@ rust-version.workspace = true
 [dependencies]
 chrono.workspace = true
 db-qbs-shared = { path = "../shared" }
+oracle.workspace = true
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlparser.workspace = true
 toml.workspace = true
 url.workspace = true
+ureq.workspace = true
