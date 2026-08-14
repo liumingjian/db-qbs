@@ -32,6 +32,12 @@ if ! grep -Fq "data_type = 'DATE' OR NVL(data_scale, 0) = 0" "$generator"; then
   exit 1
 fi
 
+if grep -Fq "data_type LIKE 'TIMESTAMP%'" "$generator" \
+  || ! grep -Fq "data_type LIKE 'TIMESTAMP(%)'" "$generator"; then
+  echo "boundary samples must exclude unsupported time-zone TIMESTAMP variants" >&2
+  exit 1
+fi
+
 if ! grep -Fq "ASCIISTR(' || column_name || ') <> ' || column_name" "$generator" \
   || grep -Fq "LENGTHB(' || column_name || ') > LENGTH(' || column_name" "$generator"; then
   echo "character samples must detect non-ASCII content rather than national-character storage width" >&2

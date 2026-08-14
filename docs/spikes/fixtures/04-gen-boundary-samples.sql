@@ -69,7 +69,9 @@ SELECT 'SELECT ''' || column_name || ''' COLUMN_NAME, ''' || data_type
           FROM all_tab_columns@FA
          WHERE owner = 'HTBR45'
            AND table_name = 'T_R_FR_ASTSTAT'
-           AND (data_type = 'DATE' OR data_type LIKE 'TIMESTAMP%')
+           AND (data_type = 'DATE'
+                OR data_type = 'TIMESTAMP'
+                OR data_type LIKE 'TIMESTAMP(%)')
        ),
        (SELECT 'htbr45.t_r_fr_aststat@FA' tbl FROM dual)
  ORDER BY column_id;
