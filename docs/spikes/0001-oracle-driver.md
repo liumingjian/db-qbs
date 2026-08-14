@@ -92,7 +92,7 @@ amd64 模拟的 Oracle XE 11.2.0.2 + arm64 原生 MySQL 8.0（`utf8mb4`）。
 [#11](https://github.com/liumingjian/db-qbs/issues/11) **已结**：本条的先决输入本是 #2 的真实类型清单，
 但客户环境不可达，故按默认答案收口 —— **ADR-0003 升格为白名单制**，
 只有 `NUMBER` / `DATE` / `TIMESTAMP(n)`（`0 ≤ n ≤ 6`）/ `VARCHAR2` / `NVARCHAR2` / `CHAR` / `NCHAR` / `NULL`
-允许进入搬运链路，上述类型一律在**映射预检阶段报错拒绝**，不静默按某种默认形式搬过去。
+允许进入搬运链路；白名单之外的类型一律在**映射预检阶段报错拒绝**，不静默按某种默认形式搬过去。
 理由是两种错法代价不对称：排错了当场报错，定错了会以「checksum 对不上」的形式在下游远处爆出来。
 详见 ADR-0003「V1 类型白名单」一节。
 
@@ -584,9 +584,9 @@ M0 从"两个候选择优"塌缩成"ODPI-C 单点验证"——所以下面每一
    等于在正确性单点上引入一个环境依赖变量。`DATETIME` 无时区、无 2038 限制，原样存取。
 4. **`TIMESTAMP` 标度上限已定为 6**（[#12](https://github.com/liumingjian/db-qbs/issues/12) / ADR-0003）。
    Oracle 允许 `TIMESTAMP(9)`，但规范形式与 MySQL `DATETIME(6)` 都只能保留 6 位；允许搬运会
-   **静默丢 3 位**，且 V1 的行数校验发现不了。故 `0 ≤ n ≤ 6` 才在白名单内，`n > 6` 必须在
-   映射预检按游标 describe 给出的源端 `scale` 报错拒绝，不做截断或值域扫描。M1 仍按 ADR-0009 拒绝全部
-   `TIMESTAMP`；本分支在 M3 放行该类型时生效。
+   **静默丢 3 位**，且 V1 的行数校验发现不了。故 `0 ≤ n ≤ 6` 才在白名单内，`n > 6` 必须由
+   映射预检根据游标 describe 返回的 `OracleType::Timestamp(n)` 报错拒绝，不做截断或值域扫描。
+   M1 仍按 ADR-0009 拒绝全部 `TIMESTAMP`；该检查在 M3 放行该类型时生效。
 5. **`CHAR(n)` 的目标类型是 `VARCHAR(n)`，不是 `CHAR(n)`。** ADR-0003 要求 `CHAR` 保留尾部空格
    （§2.2 实测驱动确实给出 `"AB        "`），而 **MySQL `CHAR` 在读取时会剥掉尾部空格**
    （非 `PAD_CHAR_TO_FULL_LENGTH` 模式下），目标端 checksum 因此与源端不同。

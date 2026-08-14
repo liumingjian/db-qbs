@@ -98,7 +98,8 @@ Oracle `TIMESTAMP(n)` 允许 `0 ≤ n ≤ 9`，但本 ADR 的规范形式和 MyS
 保留 6 位小数秒。因此白名单里的 `TIMESTAMP` **只指 `0 ≤ n ≤ 6`**；未显式声明标度的
 `TIMESTAMP` 默认 `n = 6`，也在此范围内。
 
-**选择 A：映射预检读取游标 describe 给出的源列标度 `scale`，`n > 6` 时在取数前报错拒绝。**
+**决定：映射预检读取游标 describe 返回的 `OracleType::Timestamp(n)` 小数秒精度，`n > 6` 时
+在取数前报错拒绝。**
 当前 M1 已按 [ADR-0009](0009-m1-mapping-precheck-rules.md) 拒绝全部 `TIMESTAMP`；本条约束的是
 M3 放行 `TIMESTAMP` 时必须增加的分支，不能因 M1 暂时用不到而省略。
 
