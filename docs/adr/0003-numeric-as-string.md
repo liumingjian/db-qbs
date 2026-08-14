@@ -23,7 +23,7 @@
 |---|---|
 | NUMBER | 十进制字符串；去除整数部分的前导零和小数尾零；**`\|x\| < 1` 时保留小数点前的 `0`**（`0.5`，不是 `.5`）；整数不带小数点；负号前置；零一律为 `0` |
 | DATE | `YYYY-MM-DD HH:MM:SS` |
-| TIMESTAMP | `YYYY-MM-DD HH:MM:SS.ffffff`（固定 6 位，不足补零） |
+| `TIMESTAMP(n)`，`0 ≤ n ≤ 6` | `YYYY-MM-DD HH:MM:SS.ffffff`（固定 6 位，不足补零） |
 | VARCHAR2 / NVARCHAR2 / CHAR | 原样 UTF-8；`CHAR` 保留尾部空格 |
 | NULL | 专用标记，与空字符串区分（**线上表示见 [ADR-0011](0011-batch-payload-wire-format.md) §2：JSON `null`**） |
 
@@ -114,7 +114,7 @@ MySQL 目标形状，再要求目标列的 `(p',s')` 与该形状逐位相等：
 
 | V1 白名单 | 规范形式 |
 |---|---|
-| `NUMBER` / `DATE` / `TIMESTAMP` / `VARCHAR2` / `NVARCHAR2` / `CHAR` / `NCHAR` / `NULL` | 见上表 |
+| `NUMBER` / `DATE` / `TIMESTAMP(n)`（`0 ≤ n ≤ 6`）/ `VARCHAR2` / `NVARCHAR2` / `CHAR` / `NCHAR` / `NULL` | 见上表 |
 
 白名单之外的一切类型，**映射预检阶段报错拒绝，不静默按某种默认形式搬过去**。#3 在台架上
 实测读得出、但 V1 明确不支持的有：
@@ -124,6 +124,28 @@ MySQL 目标形状，再要求目标列的 `(p',s')` 与该形状逐位相等：
 | `BINARY_FLOAT` / `BINARY_DOUBLE` | 二进制浮点不是十进制精确值，**「一律走字符串」对它不构成无损往返的保证**。#3 实测 `1.7976931348623157E+308` 取成字符串是 **309 位十进制展开**；这个值落进 MySQL `DECIMAL` 必然溢出，正确的目标类型是 `DOUBLE`，而 `DOUBLE` 上的 checksum 又不能按字符串比。要支持就得引入 shortest-roundtrip 十进制表示或 IEEE-754 位模式，那是**另一条搬运通道**，不是本 ADR 补一行的事 |
 | `RAW` / `LONG RAW` / `BLOB` | 字节本身无损，但表示法（十六进制大小写 / Base64）必须钉死一种两端才可比；且 `BLOB` 是流式大对象，与「行 checksum = 各列规范形式拼接」的内存模型冲突 |
 | `CLOB` / `NCLOB` / `LONG` | 文本规则可与 `VARCHAR2` 同，但超长值同样打破行拼接的 checksum 模型，且目标端要 `TEXT`/`LONGTEXT`，「预检比对 `DECIMAL(p,s)` 精度」那套规则在这里不适用 |
+
+### TIMESTAMP 的标度上限：超过 6 位即拒绝（2026-08-14 补，见 [#12](https://github.com/liumingjian/db-qbs/issues/12)）
+
+Oracle `TIMESTAMP(n)` 允许 `0 ≤ n ≤ 9`，但本 ADR 的规范形式和 MySQL `DATETIME(6)` 都只能
+保留 6 位小数秒。因此白名单里的 `TIMESTAMP` **只指 `0 ≤ n ≤ 6`**；未显式声明标度的
+`TIMESTAMP` 默认 `n = 6`，也在此范围内。
+
+**决定：映射预检读取游标 describe 返回的 `OracleType::Timestamp(n)` 小数秒精度，`n > 6` 时
+在取数前报错拒绝。**
+当前 M1 已按 [ADR-0009](0009-m1-mapping-precheck-rules.md) 拒绝全部 `TIMESTAMP`；本条约束的是
+M3 放行 `TIMESTAMP` 时必须增加的分支，不能因 M1 暂时用不到而省略。
+
+三种方案的代价不对称：
+
+- **预检拒绝（采用）**：代价是该列跑不起来，但失败在开跑前可见，源值与目标表都不受影响。
+- **允许并截断（排除）**：第 7–9 位非零时会静默丢精度，V1 的行数校验仍会通过。先扫值域再决定
+  是否放行，会把结构性门禁变成依赖数据的额外全表扫描，且仍接受了目标类型表达不了的源声明。
+- **规范形式改为 9 位（排除）**：MySQL `DATETIME` 最高只有 6 位，改成 9 位仍存不下；改存字符串
+  又会失去日期类型的比较、日期函数与索引语义，不是本 ADR 的日期搬运通道。
+
+这里宁可承担「跑不起来」的显性代价，也不接受「搬错了且行数仍相等」的静默代价；与白名单制
+及 `NUMBER` 漂移时拒绝而非重写是同一条原则。
 
 ### 为什么现在就排除，而不是等真实类型清单
 

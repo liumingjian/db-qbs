@@ -33,6 +33,16 @@ SELECT column_name, data_type
         OR data_type LIKE 'TIMESTAMP%');
 
 PROMPT
+PROMPT ===== TIMESTAMP 标度超过 6（V1 白名单外，映射预检必须拒绝）=====
+SELECT column_name, data_type, data_scale
+  FROM all_tab_columns@FA
+ WHERE owner = 'HTBR45'
+   AND table_name = 'T_R_FR_ASTSTAT'
+   AND data_type LIKE 'TIMESTAMP%'
+   AND data_scale > 6
+ ORDER BY column_id;
+
+PROMPT
 PROMPT ===== NUMBER 无精度声明的列（NUMBER 而非 NUMBER(p,s)，值域最宽、最危险）=====
 SELECT column_name
   FROM all_tab_columns@FA
