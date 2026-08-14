@@ -42,29 +42,41 @@ wide_columns=$(sed -n '/^SELECT /,/^  FROM /p' acceptance/task-wide.toml | grep 
   echo "wide task must select exactly 70 columns, found $wide_columns" >&2
   exit 1
 }
-[[ $(rg -c 'CONNECT BY LEVEL <= 100000' acceptance/oracle.sql) == 2 ]] || {
+[[ $(grep -c 'CONNECT BY LEVEL <= 100000' acceptance/oracle.sql) == 2 ]] || {
   echo "both M1 source fixtures must contain 100000 rows" >&2
   exit 1
 }
 
-if rg -n 'rows[^\n]*(==|-eq)[^\n]*5000|5000[^\n]*(==|-eq)[^\n]*rows' "$runner"; then
+if grep -En 'rows.*(==|-eq).*5000|5000.*(==|-eq).*rows' "$runner"; then
   echo "acceptance runner must not assume a batch contains 5000 rows" >&2
   exit 1
 fi
 
 source_kill_body=$(sed -n '/^scenario_source_kill()/,/^}/p' "$runner")
-rg -q 'batch_pushed' <<<"$source_kill_body" || {
+grep -q 'batch_pushed' <<<"$source_kill_body" || {
   echo "source-kill scenario must reach STREAMING before killing source" >&2
   exit 1
 }
 
+prepare_body=$(sed -n '/^prepare_rig()/,/^}/p' "$runner")
+grep -q 'drop_orphan_staging' <<<"$prepare_body" || {
+  echo "acceptance setup must remove staging tables left by an interrupted run" >&2
+  exit 1
+}
+
+cleanup_body=$(sed -n '/^cleanup()/,/^}/p' "$runner")
+grep -q 'drop_orphan_staging' <<<"$cleanup_body" || {
+  echo "acceptance cleanup must remove staging tables left by fault injection" >&2
+  exit 1
+}
+
 for measurement in fetch_ms push_ms cursor_ms commit_ms count_ms purged_rows; do
-  rg -q "$measurement" "$runner" || {
+  grep -q "$measurement" "$runner" || {
     echo "acceptance report is missing $measurement" >&2
     exit 1
   }
 done
-rg -q 'batch_pushed.*\.bytes|\.bytes.*batch_pushed' "$runner" || {
+grep -Eq 'batch_pushed.*\.bytes|\.bytes.*batch_pushed' "$runner" || {
   echo "acceptance report is missing the batch byte distribution" >&2
   exit 1
 }

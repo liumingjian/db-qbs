@@ -82,6 +82,7 @@ cleanup() {
     'test ! -f /tmp/m1-source.pid || ! kill -0 "$(cat /tmp/m1-source.pid)" 2>/dev/null || kill -KILL "$(cat /tmp/m1-source.pid)"' \
     >/dev/null 2>&1 || true
   stop_sink
+  drop_orphan_staging >/dev/null 2>&1 || true
   rm -rf "$WORK_ROOT"
 }
 trap cleanup EXIT
@@ -103,13 +104,14 @@ start_sink() {
 }
 
 drop_orphan_staging() {
-  local table
+  local table tables
+  tables=$(mysql_exec "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='qbs' AND TABLE_NAME REGEXP '^M1_(NARROW|WIDE)__stg_'") || return 1
   while IFS= read -r table; do
     [[ -z "$table" ]] && continue
     [[ "$table" =~ ^M1_(NARROW|WIDE)__stg_[0-9]{14}_[0-9a-f]{6}$ ]] ||
       return 1
     mysql_exec "DROP TABLE IF EXISTS \`$table\`" || return 1
-  done < <(mysql_exec "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='qbs' AND TABLE_NAME REGEXP '^M1_(NARROW|WIDE)__stg_'" )
+  done <<< "$tables"
 }
 
 reset_sink_state() {
@@ -136,6 +138,7 @@ prepare_rig() {
     @/workspace/docs/spikes/fixtures/local-rig/acceptance/oracle.sql || return 1
   compose exec -T mysql mysql -uspike -pspike123 qbs \
     < "$ACCEPTANCE_ROOT/mysql.sql" || return 1
+  drop_orphan_staging || return 1
   start_sink
 }
 
