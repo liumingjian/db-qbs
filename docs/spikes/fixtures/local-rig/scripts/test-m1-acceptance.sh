@@ -111,6 +111,29 @@ grep -q 'drop_orphan_staging' <<<"$cleanup_body" || {
   exit 1
 }
 
+stop_body=$(sed -n '/^stop_client_process()/,/^}/p' "$runner")
+grep -Fq 'while kill -0 "$pid"' <<<"$stop_body" || {
+  echo "acceptance runner must wait for old client processes to exit" >&2
+  exit 1
+}
+for process in sink proxy; do
+  process_body=$(sed -n "/^stop_${process}()/,/^}/p" "$runner")
+  grep -Fq 'stop_client_process' <<<"$process_body" || {
+    echo "acceptance runner must stop $process through the bounded wait" >&2
+    exit 1
+  }
+done
+start_sink_body=$(sed -n '/^start_sink()/,/^}/p' "$runner")
+grep -Fq 'stop_sink || return 1' <<<"$start_sink_body" || {
+  echo "acceptance runner must not start a sink after shutdown fails" >&2
+  exit 1
+}
+start_proxy_body=$(sed -n '/^start_commit_drop_proxy()/,/^}/p' "$runner")
+grep -Fq 'stop_proxy || return 1' <<<"$start_proxy_body" || {
+  echo "acceptance runner must not start a proxy after shutdown fails" >&2
+  exit 1
+}
+
 for measurement in fetch_ms push_ms cursor_ms commit_ms count_ms purged_rows; do
   grep -q "$measurement" "$runner" || {
     echo "acceptance report is missing $measurement" >&2

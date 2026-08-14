@@ -75,16 +75,31 @@ scenario_index() {
   return 1
 }
 
+stop_client_process() {
+  local pid_file=$1 label=$2
+  compose exec -T client sh -c '
+    pid_file=$1
+    label=$2
+    test -f "$pid_file" || exit 0
+    pid=$(cat "$pid_file")
+    kill -0 "$pid" 2>/dev/null || { rm -f "$pid_file"; exit 0; }
+    kill "$pid" 2>/dev/null || true
+    attempt=0
+    while kill -0 "$pid" 2>/dev/null; do
+      attempt=$((attempt + 1))
+      test "$attempt" -lt 100 || { echo "timed out stopping $label" >&2; exit 1; }
+      sleep 0.05
+    done
+    rm -f "$pid_file"
+  ' sh "$pid_file" "$label"
+}
+
 stop_proxy() {
-  compose exec -T client sh -c \
-    'test ! -f /tmp/m1-proxy.pid || ! kill -0 "$(cat /tmp/m1-proxy.pid)" 2>/dev/null || kill "$(cat /tmp/m1-proxy.pid)"' \
-    >/dev/null 2>&1 || true
+  stop_client_process /tmp/m1-proxy.pid "commit-drop proxy"
 }
 
 stop_sink() {
-  compose exec -T client sh -c \
-    'test ! -f /tmp/m1-sink.pid || ! kill -0 "$(cat /tmp/m1-sink.pid)" 2>/dev/null || kill "$(cat /tmp/m1-sink.pid)"' \
-    >/dev/null 2>&1 || true
+  stop_client_process /tmp/m1-sink.pid sink
 }
 
 cleanup() {
@@ -99,7 +114,7 @@ cleanup() {
 trap cleanup EXIT
 
 start_sink() {
-  stop_sink
+  stop_sink || return 1
   compose exec -T client rm -f /tmp/m1-sink.pid /tmp/m1-sink.jsonl || return 1
   compose exec -T -d client sh -c \
     "echo \$\$ > /tmp/m1-sink.pid; exec $SINK_BIN --config $SINK_CONFIG > /tmp/m1-sink.jsonl 2>&1" || return 1
@@ -126,8 +141,8 @@ drop_orphan_staging() {
 }
 
 reset_sink_state() {
-  stop_proxy
-  stop_sink
+  stop_proxy || return 1
+  stop_sink || return 1
   drop_orphan_staging || return 1
   start_sink
 }
@@ -268,7 +283,7 @@ scenario_source_kill() {
 }
 
 start_commit_drop_proxy() {
-  stop_proxy
+  stop_proxy || return 1
   compose exec -T -d client sh -c \
     "echo \$\$ > /tmp/m1-proxy.pid; exec python3 /workspace/docs/spikes/fixtures/local-rig/acceptance/commit-drop-proxy.py" || return 1
   local attempt
