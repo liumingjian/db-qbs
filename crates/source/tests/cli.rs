@@ -1,11 +1,8 @@
 use std::fs;
-use std::io::Read;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
-use std::time::Duration;
 
 use serde_json::Value;
 
@@ -53,10 +50,10 @@ fn invalid_shape_reports_all_problems_without_network_access() {
 }
 
 #[test]
-fn valid_shape_reaches_the_sink_endpoint() {
+fn valid_shape_attempts_oracle_describe_before_sink() {
     let directory = temp_directory();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(false).unwrap();
+    listener.set_nonblocking(true).unwrap();
     let config = write_source_config(&directory, listener.local_addr().unwrap().port());
     let task = write_task(
         &directory,
@@ -66,28 +63,21 @@ fn valid_shape_reaches_the_sink_endpoint() {
         "BIZ_DAY",
         "biz_day",
     );
-    let receiver = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        let mut request = String::new();
-        stream.read_to_string(&mut request).unwrap();
-        request
-    });
-
     let output = run_source(&config, &task, "2026-08-14");
 
     assert_eq!(output.status.code(), Some(1));
-    assert!(receiver
-        .join()
-        .unwrap()
-        .starts_with("POST /v1/runs HTTP/1.1"));
+    assert!(
+        listener.accept().is_err(),
+        "source contacted sink before Oracle describe"
+    );
     let lines = json_lines(&output.stdout);
     assert_common_fields(&lines, &fs::canonicalize(&task).unwrap());
     assert!(lines
         .iter()
         .any(|line| line["event"] == "sql_shape_precheck_passed"));
+    assert!(lines
+        .iter()
+        .any(|line| line["event"] == "run_finished" && line["stage"] == "PREPARING"));
 
     fs::remove_dir_all(directory).unwrap();
 }

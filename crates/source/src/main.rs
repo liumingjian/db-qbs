@@ -3,10 +3,13 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Instant;
 
 use db_qbs_shared::{write_log_line_with_fields, LogLevel};
 use db_qbs_source::{
-    load_source_config, load_task_config, parse_biz_date, precheck_sql, probe_sink,
+    generate_run_id, load_source_config, load_task_config, parse_biz_date, precheck_sql,
+    run_transfer, HttpSinkClient, OracleRowSource, RunStage, TransferEvent, TransferFailure,
+    TransferRequest, TransferSummary,
 };
 use serde_json::{json, Map, Value};
 
@@ -112,17 +115,238 @@ fn run() -> bool {
         [("message", json!("source-local SQL shape precheck passed"))],
     );
 
-    let message = match probe_sink(&source_config.sink_base_url) {
-        Ok(()) => "next source stage is not implemented".to_owned(),
-        Err(message) => message,
-    };
     emit(
-        LogLevel::Error,
-        "next_stage_failed",
+        LogLevel::Info,
+        "stage_changed",
         Some(&task_path),
-        [("message", json!(message))],
+        [
+            ("stage", json!(RunStage::Preparing.as_str())),
+            (
+                "message",
+                json!("preparing Oracle cursor and describe metadata"),
+            ),
+        ],
     );
-    false
+    let run_started = Instant::now();
+    let mut source = match OracleRowSource::connect(&source_config, &task, &arguments.biz_date) {
+        Ok(source) => source,
+        Err(error) => {
+            emit(
+                LogLevel::Error,
+                "stage_changed",
+                Some(&task_path),
+                [
+                    ("stage", json!(RunStage::Failed.as_str())),
+                    ("message", json!("Oracle cursor preparation failed")),
+                ],
+            );
+            let failure = TransferFailure {
+                stage: RunStage::Preparing,
+                message: error.user_message(),
+                source_code: error.oracle_code,
+                sink_code: None,
+                column: error.column,
+                value: error.value,
+                commit_diagnostic: None,
+                source_rows: 0,
+                total_batches: 0,
+            };
+            emit_failed_run(
+                &failure,
+                None,
+                &task_path,
+                run_started.elapsed().as_millis(),
+            );
+            return false;
+        }
+    };
+
+    let run_id = generate_run_id();
+    let mut sink = match HttpSinkClient::new(&source_config.sink_base_url) {
+        Ok(sink) => sink,
+        Err(message) => {
+            emit_with_run(
+                LogLevel::Error,
+                "stage_changed",
+                Some(&run_id),
+                Some(&task_path),
+                [
+                    ("stage", json!(RunStage::Failed.as_str())),
+                    ("message", json!("sink client preparation failed")),
+                ],
+            );
+            let failure = TransferFailure {
+                stage: RunStage::Preparing,
+                message,
+                source_code: None,
+                sink_code: None,
+                column: None,
+                value: None,
+                commit_diagnostic: None,
+                source_rows: 0,
+                total_batches: 0,
+            };
+            emit_failed_run(
+                &failure,
+                Some(&run_id),
+                &task_path,
+                run_started.elapsed().as_millis(),
+            );
+            return false;
+        }
+    };
+
+    let request = TransferRequest {
+        run_id: run_id.clone(),
+        target_table: task.target_table,
+        target_date_col: task.target_date_col,
+        biz_date: arguments.biz_date,
+    };
+    let result = run_transfer(&mut source, &mut sink, request, |event| {
+        emit_transfer_event(event, &run_id, &task_path)
+    });
+
+    match result {
+        Ok(summary) => {
+            emit_successful_run(&summary, &run_id, &task_path);
+            true
+        }
+        Err(failure) => {
+            emit_failed_run(
+                &failure,
+                Some(&run_id),
+                &task_path,
+                run_started.elapsed().as_millis(),
+            );
+            false
+        }
+    }
+}
+
+fn emit_successful_run(summary: &TransferSummary, run_id: &str, task: &Path) {
+    emit_with_run(
+        LogLevel::Info,
+        "run_finished",
+        Some(run_id),
+        Some(task),
+        [
+            ("terminal", json!(RunStage::Succeeded.as_str())),
+            ("stage", json!(RunStage::Succeeded.as_str())),
+            ("message", json!("run completed successfully")),
+            ("source_code", Value::Null),
+            ("sink_code", Value::Null),
+            ("column", Value::Null),
+            ("value", Value::Null),
+            ("source_rows", json!(summary.source_rows)),
+            ("total_batches", json!(summary.total_batches)),
+            ("staged_rows", json!(summary.staged_rows)),
+            ("received_batches", json!(summary.total_batches)),
+            ("sink_reported_rows", json!(summary.source_rows)),
+            ("purged_rows", json!(summary.purged_rows)),
+            ("fetch_ms", json!(summary.fetch_ms)),
+            ("push_ms", json!(summary.push_ms)),
+            ("commit_ms", json!(summary.commit_ms)),
+            ("cursor_ms", json!(summary.cursor_ms)),
+        ],
+    );
+}
+
+fn emit_transfer_event(event: TransferEvent, run_id: &str, task: &Path) {
+    match event {
+        TransferEvent::StageChanged(RunStage::Preparing) => {}
+        TransferEvent::StageChanged(stage) => emit_with_run(
+            if stage == RunStage::Failed {
+                LogLevel::Error
+            } else {
+                LogLevel::Info
+            },
+            "stage_changed",
+            Some(run_id),
+            Some(task),
+            [
+                ("stage", json!(stage.as_str())),
+                ("message", json!(format!("run entered {}", stage.as_str()))),
+            ],
+        ),
+        TransferEvent::RunOpened {
+            staging_table,
+            columns_checked,
+        } => emit_with_run(
+            LogLevel::Info,
+            "run_opened",
+            Some(run_id),
+            Some(task),
+            [
+                ("staging_table", json!(staging_table)),
+                ("columns_checked", json!(columns_checked)),
+                ("message", json!("sink accepted run and created staging")),
+            ],
+        ),
+        TransferEvent::BatchPushed {
+            seq,
+            rows,
+            bytes,
+            written,
+            ms,
+        } => emit_with_run(
+            LogLevel::Info,
+            "batch_pushed",
+            Some(run_id),
+            Some(task),
+            [
+                ("seq", json!(seq)),
+                ("rows", json!(rows)),
+                ("bytes", json!(bytes)),
+                ("written", json!(written)),
+                ("ms", json!(ms)),
+            ],
+        ),
+        TransferEvent::CommitDiagnosed { terminal, message } => emit_with_run(
+            LogLevel::Warn,
+            "commit_diagnosed",
+            Some(run_id),
+            Some(task),
+            [
+                ("terminal", json!(terminal.map(|value| value.as_str()))),
+                ("message", json!(message)),
+            ],
+        ),
+        TransferEvent::AbortFailed { message } => emit_with_run(
+            LogLevel::Warn,
+            "abort_failed",
+            Some(run_id),
+            Some(task),
+            [("message", json!(message))],
+        ),
+    }
+}
+
+fn emit_failed_run(failure: &TransferFailure, run_id: Option<&str>, task: &Path, cursor_ms: u128) {
+    emit_with_run(
+        LogLevel::Error,
+        "run_finished",
+        run_id,
+        Some(task),
+        [
+            ("terminal", json!(RunStage::Failed.as_str())),
+            ("stage", json!(failure.stage.as_str())),
+            ("message", json!(failure.message)),
+            ("source_code", json!(failure.source_code)),
+            ("sink_code", json!(failure.sink_code)),
+            ("column", json!(failure.column)),
+            ("value", json!(failure.value)),
+            ("source_rows", json!(failure.source_rows)),
+            ("total_batches", json!(failure.total_batches)),
+            ("staged_rows", Value::Null),
+            ("received_batches", Value::Null),
+            ("sink_reported_rows", Value::Null),
+            ("purged_rows", Value::Null),
+            ("fetch_ms", Value::Null),
+            ("push_ms", Value::Null),
+            ("commit_ms", Value::Null),
+            ("cursor_ms", json!(cursor_ms)),
+        ],
+    );
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -202,6 +426,16 @@ fn emit<const N: usize>(
     task: Option<&Path>,
     fields: [(&str, Value); N],
 ) {
+    emit_with_run(level, event, None, task, fields);
+}
+
+fn emit_with_run<const N: usize>(
+    level: LogLevel,
+    event: &str,
+    run_id: Option<&str>,
+    task: Option<&Path>,
+    fields: [(&str, Value); N],
+) {
     let mut details = Map::new();
     for (name, value) in fields {
         details.insert(name.to_owned(), value);
@@ -210,7 +444,7 @@ fn emit<const N: usize>(
     let stdout = io::stdout();
     let mut writer = stdout.lock();
     let task = task.map(|path| path.to_string_lossy());
-    let _ = write_log_line_with_fields(&mut writer, level, event, None, task.as_deref(), details);
+    let _ = write_log_line_with_fields(&mut writer, level, event, run_id, task.as_deref(), details);
 }
 
 #[cfg(test)]

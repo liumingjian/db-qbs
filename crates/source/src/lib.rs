@@ -1,10 +1,7 @@
 use std::fmt;
 use std::fs;
-use std::io::Write;
-use std::net::{TcpStream, ToSocketAddrs};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use chrono::NaiveDate;
 use serde::de::DeserializeOwned;
@@ -16,7 +13,22 @@ use sqlparser::ast::{
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer};
-use url::Url;
+
+mod oracle_source;
+mod protocol;
+mod transfer;
+
+pub use db_qbs_shared::BatchPayload;
+pub use oracle_source::OracleRowSource;
+pub use protocol::{
+    BatchResponse, CommitResponse, HttpSinkClient, OpenRunRequest, OpenRunResponse, RunResponse,
+    SinkClient, SinkError, SinkErrorKind, SourceColumn, Terminal,
+};
+pub use transfer::{
+    generate_run_id, run_transfer, RowSource, RunStage, SourceReadError, TransferEvent,
+    TransferFailure, TransferRequest, TransferSummary, BATCH_BYTE_BUDGET, BATCH_ROW_LIMIT,
+    FETCH_ARRAY_SIZE,
+};
 
 const RELATIVE_TIME_FUNCTION_NAMES: &[&str] = &[
     "SYSDATE",
@@ -425,34 +437,4 @@ fn strip_nested(mut expr: &Expr) -> &Expr {
         expr = inner;
     }
     expr
-}
-
-pub fn probe_sink(base_url: &str) -> Result<(), String> {
-    let url = Url::parse(base_url).map_err(|error| format!("invalid sink_base_url: {error}"))?;
-    if url.scheme() != "http" {
-        return Err("sink_base_url must use http for the M1 local endpoint".to_owned());
-    }
-    let host = url
-        .host_str()
-        .ok_or_else(|| "sink_base_url must include a host".to_owned())?;
-    let port = url
-        .port_or_known_default()
-        .ok_or_else(|| "sink_base_url must include a port".to_owned())?;
-    let address = (host, port)
-        .to_socket_addrs()
-        .map_err(|error| format!("could not resolve sink endpoint: {error}"))?
-        .next()
-        .ok_or_else(|| "sink endpoint did not resolve to an address".to_owned())?;
-    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
-        .map_err(|error| format!("could not connect to sink endpoint: {error}"))?;
-
-    let base_path = url.path().trim_end_matches('/');
-    let request_path = format!("{base_path}/v1/runs");
-    write!(
-        stream,
-        "POST {request_path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-    )
-    .map_err(|error| format!("could not send request to sink endpoint: {error}"))?;
-
-    Err("SQL shape precheck passed; Oracle describe and POST /v1/runs payload are not implemented yet".to_owned())
 }
