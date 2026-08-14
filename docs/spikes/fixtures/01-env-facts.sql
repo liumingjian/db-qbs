@@ -1,8 +1,8 @@
--- M0-1 / #2 步骤 0：环境事实采集
--- 目的：补齐 #7 遗留的两个待确认项，它们是 #3 的输入。
---   1) 11g 小版本 —— 19c Instant Client 对 11g 的认证下限是 11.2.0.4；
---      若低于此，#3 的客户端版本要往下退（18c / 12.2 / 11.2）。
---   2) 源端字符集 —— #3 的中文往返测试需要知道它。
+-- #2 上线前复验步骤 0：环境事实采集
+-- 目的：一次采齐只能在客户环境确认的服务端事实。
+--   1) 11g 小版本与字符集。
+--   2) @FA 上目标对象的类型与同义词去向。
+--   3) 真正执行远端查询的库的 undo_retention。
 -- 用法：sqlplus user/pass@src @01-env-facts.sql
 -- 产出：把输出整段贴回 issue #2。
 
@@ -28,3 +28,23 @@ SELECT parameter, value
 
 PROMPT ===== 5. 目标表行数量级（给 #5 定基准）=====
 SELECT COUNT(*) AS total_rows FROM htbr45.t_r_fr_aststat@FA;
+
+PROMPT ===== 6. @FA 上目标对象类型 =====
+SELECT owner, object_name, object_type
+  FROM all_objects@FA
+ WHERE owner = 'HTBR45'
+   AND object_name = 'T_R_FR_ASTSTAT'
+ ORDER BY object_type;
+
+PROMPT ===== 7. @FA 上同名同义词去向（无行即不是同义词）=====
+SELECT owner, synonym_name, table_owner, table_name, db_link
+  FROM all_synonyms@FA
+ WHERE owner IN ('HTBR45', 'PUBLIC')
+   AND synonym_name = 'T_R_FR_ASTSTAT'
+ ORDER BY owner;
+
+PROMPT ===== 8. dblink 远端 undo_retention =====
+-- 若远端账号无权查询 V$PARAMETER，请 DBA 执行同一查询并把结果并入产出。
+SELECT name, value
+  FROM v$parameter@FA
+ WHERE name = 'undo_retention';
