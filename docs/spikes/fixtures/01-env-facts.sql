@@ -3,7 +3,7 @@
 --   1) 11g 小版本与字符集。
 --   2) @FA 上目标对象的类型与同义词去向。
 --   3) 真正执行远端查询的库的 undo_retention。
--- 用法：sqlplus -L user/pass@src @01-env-facts.sql
+-- 用法：NLS_LANG=AMERICAN_AMERICA.AL32UTF8 sqlplus -L user/pass@src @01-env-facts.sql
 -- 产出：把输出整段贴回 issue #2。
 
 SET LINESIZE 200

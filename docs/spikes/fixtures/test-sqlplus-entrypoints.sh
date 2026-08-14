@@ -23,6 +23,18 @@ if [[ -n "$non_failing_logins" ]]; then
   exit 1
 fi
 
+non_utf8_clients=$(
+  grep -nH 'sqlplus ' "${command_docs[@]}" \
+    | grep -Fv 'NLS_LANG=AMERICAN_AMERICA.AL32UTF8 sqlplus -L ' \
+    || true
+)
+
+if [[ -n "$non_utf8_clients" ]]; then
+  echo "customer collection commands must make SQL*Plus emit UTF-8:" >&2
+  echo "$non_utf8_clients" >&2
+  exit 1
+fi
+
 for script in \
   01-env-facts.sql \
   02-columns.sql \

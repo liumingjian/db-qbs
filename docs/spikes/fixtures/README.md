@@ -13,13 +13,15 @@
 
 | # | 脚本 | 命令 | 产出 |
 |---|---|---|---|
-| 0 | `01-env-facts.sql` | `sqlplus -L user/pass@src @01-env-facts.sql` | 版本、字符集、对象类型、`undo_retention`，整段贴回 #2 |
-| 1 | `02-columns.sql` | `sqlplus -L -S user/pass@src @02-columns.sql > columns-t_r_fr_aststat.csv` | 提交 CSV |
-| 2 | `03-type-census.sql` | `sqlplus -L user/pass@src @03-type-census.sql` | 贴回 #2 |
-| 3a | `04-gen-boundary-samples.sql` | `sqlplus -L -S user/pass@src @04-gen-boundary-samples.sql > 05-boundary-samples.sql` | 中间脚本，先审再跑 |
-| 3b | `05-boundary-samples.sql` | `sqlplus -L -S user/pass@src @05-boundary-samples.sql > samples-t_r_fr_aststat.csv` | 提交 CSV（**脱敏后**） |
+| 0 | `01-env-facts.sql` | `NLS_LANG=AMERICAN_AMERICA.AL32UTF8 sqlplus -L user/pass@src @01-env-facts.sql` | 版本、字符集、对象类型、`undo_retention`，整段贴回 #2 |
+| 1 | `02-columns.sql` | `NLS_LANG=AMERICAN_AMERICA.AL32UTF8 sqlplus -L -S user/pass@src @02-columns.sql > columns-t_r_fr_aststat.csv` | 提交 CSV |
+| 2 | `03-type-census.sql` | `NLS_LANG=AMERICAN_AMERICA.AL32UTF8 sqlplus -L user/pass@src @03-type-census.sql` | 贴回 #2 |
+| 3a | `04-gen-boundary-samples.sql` | `NLS_LANG=AMERICAN_AMERICA.AL32UTF8 sqlplus -L -S user/pass@src @04-gen-boundary-samples.sql > 05-boundary-samples.sql` | 中间脚本，先审再跑 |
+| 3b | `05-boundary-samples.sql` | `NLS_LANG=AMERICAN_AMERICA.AL32UTF8 sqlplus -L -S user/pass@src @05-boundary-samples.sql > samples-t_r_fr_aststat.csv` | 提交 CSV（**脱敏后**） |
 
 `-L` 让登录失败在第一次尝试后退出，避免在无人值守采集时等待再次输入凭据。
+`NLS_LANG=AMERICAN_AMERICA.AL32UTF8` 固定 SQL*Plus 的客户端字符集，确保中文样本以 UTF-8
+写入采集文件；它只保护采集基线，不能代替第 3 项对待上线 ODPI-C 链路的逐字节复验。
 脚本遇到 SQL 或 OS 错误会以非零状态退出，不得把已有的部分输出或空输出当成完整结论。
 步骤 3a/3b 必须使用待上线的 19c SQL*Plus，不能使用服务器随附的 11g SQL*Plus。生成脚本启用
 19c 的 CSV 模式负责引号与转义；值含逗号、双引号或换行时仍可按五列解析，不得用文本分隔符手工拆列。

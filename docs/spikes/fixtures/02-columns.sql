@@ -1,5 +1,5 @@
 -- M0-1 / #2 步骤 1：导出列元数据为 CSV
--- 用法：sqlplus -L -S user/pass@src @02-columns.sql > columns-t_r_fr_aststat.csv
+-- 用法：NLS_LANG=AMERICAN_AMERICA.AL32UTF8 sqlplus -L -S user/pass@src @02-columns.sql > columns-t_r_fr_aststat.csv
 -- 产出：columns-t_r_fr_aststat.csv 提交到 docs/spikes/fixtures/
 -- 注意：目标表经 dblink，元数据必须走 ALL_TAB_COLUMNS@FA，本地字典里没有它。
 

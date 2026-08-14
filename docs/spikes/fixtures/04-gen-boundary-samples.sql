@@ -1,9 +1,9 @@
 -- M0-1 / #2 步骤 3（第一步）：生成边界值采样脚本
 -- 这是一个「写 SQL 的 SQL」——列名事先未知，所以由字典表生成采样语句。
 -- 用法：
---   sqlplus -L -S user/pass@src @04-gen-boundary-samples.sql > 05-boundary-samples.sql
+--   NLS_LANG=AMERICAN_AMERICA.AL32UTF8 sqlplus -L -S user/pass@src @04-gen-boundary-samples.sql > 05-boundary-samples.sql
 --   审一眼 05-boundary-samples.sql（尤其确认没有被 LINESIZE 截断），再：
---   sqlplus -L -S user/pass@src @05-boundary-samples.sql > samples-t_r_fr_aststat.csv
+--   NLS_LANG=AMERICAN_AMERICA.AL32UTF8 sqlplus -L -S user/pass@src @05-boundary-samples.sql > samples-t_r_fr_aststat.csv
 -- 产出：samples-t_r_fr_aststat.csv 提交到 docs/spikes/fixtures/
 --
 -- 采样口径（对应 ADR-0003 的规范形式表）：
