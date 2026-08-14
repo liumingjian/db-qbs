@@ -6,7 +6,7 @@ use chrono::{NaiveDate, SecondsFormat, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-static CANON_NUMBER: LazyLock<Regex> = LazyLock::new(|| {
+static CANONICAL_NUMBER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(0|-?[1-9][0-9]*(\.[0-9]*[1-9])?|-?0\.[0-9]*[1-9])$")
         .expect("canonical NUMBER grammar must compile")
 });
@@ -31,7 +31,7 @@ impl fmt::Display for CanonError {
 impl std::error::Error for CanonError {}
 
 pub fn canon_number(value: &str) -> Result<&str, CanonError> {
-    CANON_NUMBER
+    CANONICAL_NUMBER_REGEX
         .is_match(value)
         .then_some(value)
         .ok_or(CanonError::NonCanonicalNumber)

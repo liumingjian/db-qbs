@@ -2,7 +2,7 @@ use db_qbs_shared::{canon_date, canon_number, canon_text};
 use serde::Deserialize;
 use serde_json::Value;
 
-const GOLDEN: &str = include_str!("../../../docs/spikes/fixtures/canon-golden.json");
+const CANON_FIXTURE: &str = include_str!("../../../docs/spikes/fixtures/canon-golden.json");
 
 #[derive(Debug, Deserialize)]
 struct Fixture {
@@ -23,17 +23,23 @@ struct Case {
 
 #[derive(Debug, Deserialize)]
 struct DateParts {
-    y: i32,
-    mo: u32,
-    d: u32,
-    h: u32,
-    mi: u32,
-    s: u32,
+    #[serde(rename = "y")]
+    year: i32,
+    #[serde(rename = "mo")]
+    month: u32,
+    #[serde(rename = "d")]
+    day: u32,
+    #[serde(rename = "h")]
+    hour: u32,
+    #[serde(rename = "mi")]
+    minute: u32,
+    #[serde(rename = "s")]
+    second: u32,
 }
 
 #[test]
 fn all_m1_canonical_cases_match_the_authoritative_fixture() {
-    let fixture: Fixture = serde_json::from_str(GOLDEN).unwrap();
+    let fixture: Fixture = serde_json::from_str(CANON_FIXTURE).unwrap();
 
     assert_eq!(fixture.cases.len(), 41);
     assert_eq!(
@@ -77,7 +83,14 @@ fn check_m1_case(case: &Case) {
         }
         ("DATE", "format") => {
             let parts: DateParts = serde_json::from_value(case.input.clone()).unwrap();
-            let result = canon_date(parts.y, parts.mo, parts.d, parts.h, parts.mi, parts.s);
+            let result = canon_date(
+                parts.year,
+                parts.month,
+                parts.day,
+                parts.hour,
+                parts.minute,
+                parts.second,
+            );
             assert_eq!(result.is_err(), should_reject, "{}", case.id);
             if let Ok(actual) = result {
                 assert_eq!(

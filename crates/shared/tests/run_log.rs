@@ -19,7 +19,8 @@ fn emitter_writes_one_json_line_with_all_common_fields() {
     assert!(text.ends_with('\n'));
     assert_eq!(text.lines().count(), 1);
 
-    let line: Value = serde_json::from_str(text.trim_end()).unwrap();
+    let json = text.strip_suffix('\n').unwrap();
+    let line: Value = serde_json::from_str(json).unwrap();
     assert_eq!(line["level"], "info");
     assert_eq!(line["event"], "run_started");
     assert_eq!(line["run_id"], "20260814091530_a3f19c");
@@ -29,7 +30,7 @@ fn emitter_writes_one_json_line_with_all_common_fields() {
 }
 
 #[test]
-fn emitter_serializes_an_absent_run_id_as_json_null() {
+fn emitter_serializes_absent_optional_fields_as_json_null() {
     let mut output = Vec::new();
 
     write_log_line(
