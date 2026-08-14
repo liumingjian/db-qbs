@@ -24,7 +24,7 @@ SELECT column_id
        || ',' || NVL(TO_CHAR(char_length), '')
        || ',' || NVL(char_used, '')
        || ',' || nullable
-       || ',' || CASE WHEN data_default IS NULL THEN 'N' ELSE 'Y' END
+       || ',' || CASE WHEN default_length IS NULL THEN 'N' ELSE 'Y' END
   FROM all_tab_columns@FA
  WHERE owner = 'HTBR45'
    AND table_name = 'T_R_FR_ASTSTAT'

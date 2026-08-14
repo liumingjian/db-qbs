@@ -23,17 +23,16 @@ SELECT data_type,
 
 PROMPT
 PROMPT ===== ADR-0003 白名单外类型点名检查（出现即回炉 #11）=====
--- 普通 TIMESTAMP(n) 在白名单内；带时区的 TIMESTAMP 变体不在白名单内。
--- 命中任何一行，映射预检都必须拒绝，并按命中类型回炉 #11。
+-- 直接取 ADR-0003 白名单的反集，避免新增或罕见类型因未被点名而漏报。
+-- 普通 TIMESTAMP(n) 在白名单内；带时区的 TIMESTAMP 变体不匹配 TIMESTAMP(%)。
 SELECT column_name, data_type
   FROM all_tab_columns@FA
  WHERE owner = 'HTBR45'
    AND table_name = 'T_R_FR_ASTSTAT'
-   AND (data_type IN ('LONG','LONG RAW','XMLTYPE','BFILE','ROWID','UROWID','RAW',
-                      'CLOB','NCLOB','BLOB','BINARY_FLOAT','BINARY_DOUBLE')
-        OR data_type LIKE 'INTERVAL%'
-        OR data_type LIKE 'TIMESTAMP%WITH TIME ZONE'
-        OR data_type LIKE 'TIMESTAMP%WITH LOCAL TIME ZONE');
+   AND NOT (data_type IN ('NUMBER','DATE','VARCHAR2','NVARCHAR2','CHAR','NCHAR')
+            OR data_type = 'TIMESTAMP'
+            OR data_type LIKE 'TIMESTAMP(%)')
+ ORDER BY column_id;
 
 PROMPT
 PROMPT ===== NUMBER 无精度声明的列（NUMBER 而非 NUMBER(p,s)，值域最宽、最危险）=====
