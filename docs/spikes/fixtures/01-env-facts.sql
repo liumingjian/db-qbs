@@ -50,3 +50,5 @@ PROMPT ===== 8. dblink 远端 undo_retention =====
 SELECT name, value
   FROM v$parameter@FA
  WHERE name = 'undo_retention';
+
+EXIT

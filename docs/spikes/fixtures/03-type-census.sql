@@ -43,3 +43,5 @@ SELECT column_name
    AND data_type = 'NUMBER'
    AND data_precision IS NULL
  ORDER BY column_id;
+
+EXIT
