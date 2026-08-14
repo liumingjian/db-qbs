@@ -76,6 +76,7 @@ impl Destination for FakeDestination {
             staged_rows: request.source_rows,
             purged_rows: 0,
             swapped_rows: request.source_rows,
+            count_ms: 0,
         })
     }
 

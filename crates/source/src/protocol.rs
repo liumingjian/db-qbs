@@ -56,6 +56,7 @@ pub struct CommitResponse {
     pub staged_rows: u64,
     pub purged_rows: u64,
     pub swapped_rows: u64,
+    pub count_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -119,6 +120,7 @@ pub struct SinkGateDetails {
     pub source_batches: u64,
     pub received_batches: u64,
     pub sink_reported_rows: u64,
+    pub count_ms: u64,
 }
 
 impl SinkError {

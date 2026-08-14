@@ -1,5 +1,6 @@
 use std::fmt;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use mysql::prelude::Queryable;
 use mysql::{
@@ -165,14 +166,19 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
                     quote_identifier(&self.database),
                     quote_identifier(&request.staging_table)
                 );
+                let count_started = Instant::now();
                 let staged_rows: u64 = transaction
                     .query_first(count_statement)?
                     .expect("SELECT COUNT(*) must return one row");
+                let count_ms = elapsed_ms(count_started);
                 if staged_rows != request.source_rows
                     || request.received_batches != request.source_batches
                 {
                     transaction.rollback()?;
-                    return Ok(AtomicSwapOutcome::VerifyFailed { staged_rows });
+                    return Ok(AtomicSwapOutcome::VerifyFailed {
+                        staged_rows,
+                        count_ms,
+                    });
                 }
 
                 let delete_statement = build_delete_statement(
@@ -205,14 +211,21 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
                     staged_rows,
                     purged_rows,
                     swapped_rows,
+                    count_ms,
                 }))
             })
             .map_err(|error| AtomicSwapError::Other(error.to_string()))?;
 
         match outcome {
             AtomicSwapOutcome::Swapped(result) => Ok(result),
-            AtomicSwapOutcome::VerifyFailed { staged_rows } => {
-                Err(AtomicSwapError::VerifyFailed { staged_rows })
+            AtomicSwapOutcome::VerifyFailed {
+                staged_rows,
+                count_ms,
+            } => {
+                Err(AtomicSwapError::VerifyFailed {
+                    staged_rows,
+                    count_ms,
+                })
             }
             AtomicSwapOutcome::SwapFailed(message) => Err(AtomicSwapError::Other(message)),
         }
@@ -305,8 +318,15 @@ enum BatchWriteOutcome {
 
 enum AtomicSwapOutcome {
     Swapped(AtomicSwapResult),
-    VerifyFailed { staged_rows: u64 },
+    VerifyFailed {
+        staged_rows: u64,
+        count_ms: u64,
+    },
     SwapFailed(String),
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
 }
 
 fn build_insert_statement(

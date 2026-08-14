@@ -15,6 +15,7 @@ cd docs/spikes/fixtures/local-rig
 ./scripts/run-dblink-probe.sh [脚本名]   # 跑 #6 的 dblink 探针（默认 dblink-pushdown.sql）
 ./scripts/run-pagination-boundary-probe.sh # 跑 #21 的分页边界可复现性探针
 ./scripts/run-canon-gate.sh             # 跑 #43 的 M1 规范形式手工门禁
+./scripts/run-m1-acceptance.sh           # 跑 #45 的七类 M1 验收并生成报告
 ./scripts/run-bulk-probe.sh              # 跑 #5 的内存形状探针（19 组配置矩阵）
 REPS=7 ./scripts/run-cpu-probe.sh        # 跑 #5 的客户端每行 CPU 探针（每档取中位数）
 ./scripts/run-mysql-roundtrip-probe.sh   # 跑 #13 的目标端往返实测（只起 MySQL，不用 Oracle）
@@ -58,6 +59,29 @@ probes/mysql-roundtrip.sql  #13 的目标端往返实测（CHAR 尾空格 / DECI
 
 `probes/` 里的脚本不参与建库，通过对应的 `scripts/run-*-probe.sh` 手动跑；
 它们按需自建/自删所需的表与 dblink，可重复执行。
+
+## #45 的 M1 验收编排
+
+在 ADR-0005 指定的 arm64 mac 上通过 `/rexec` 执行一条命令：
+
+```bash
+./scripts/run-m1-acceptance.sh
+```
+
+入口会确保台架就绪，构建 source/sink，重建仅供验收使用的 `t_m1_*` / `M1_*` 表，然后依次运行
+10 万行宽表、10 万行三列窄表、kill source 后重跑、commit 响应中断、空结果集、两类
+`VERIFY_FAILED` 与规范形式手工门禁。破坏性场景只触碰这些 `M1_*` 表；场景间会停止 sink、
+清掉孤儿暂存表并重启内存状态，因此同一入口可重复执行。`--list` 只列场景，不启动台架。
+
+每个场景在终端输出 `PASS` / `FAIL`。最终报告默认写到本目录的
+`m1-acceptance-<UTC>.md`（可用 `M1_REPORT=/path/report.md` 指定），包含 fetch/push/cursor、
+commit 及其 `SELECT COUNT(*)` 子项、`purged_rows`、逐批实际行数和序列化字节分布。报告按
+push/cursor 超过 50%、commit 对 30 分钟读超时、最大批次对 16 MiB 三条口径复审；批次行数
+始终从 JSONL 求和和排序，不假设固定值。
+
+commit 场景由 `acceptance/commit-drop-proxy.py` 在 sink 完成事务后切断第一次 commit 响应，
+随后转发 source 唯一一次诊断 GET，以稳定复现 `COMMITTING` 的不确定窗口。代理只用于本台架。
+入口生成的临时日志权限受 `umask 077` 约束，报告权限为 0600。
 
 `oracle/` 与 `mysql/` 分别挂进两个镜像的 initdb 目录，**只在首次建库时执行一次**。
 改了 SQL 要重新生效，必须 `./scripts/down.sh && ./scripts/up.sh`（卷不删就不会重跑）。

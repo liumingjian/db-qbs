@@ -85,6 +85,7 @@ pub struct TransferSummary {
     pub fetch_ms: u64,
     pub push_ms: u64,
     pub commit_ms: u64,
+    pub count_ms: u64,
     pub cursor_ms: u64,
 }
 
@@ -136,6 +137,7 @@ pub struct TransferFailure {
     pub fetch_ms: u64,
     pub push_ms: u64,
     pub commit_ms: u64,
+    pub count_ms: Option<u64>,
     pub cursor_ms: u64,
 }
 
@@ -171,6 +173,7 @@ impl TransferFailure {
             fetch_ms: 0,
             push_ms: 0,
             commit_ms: 0,
+            count_ms: None,
             cursor_ms: 0,
         }
     }
@@ -463,6 +466,7 @@ pub fn run_transfer(
         fetch_ms: elapsed_ms(fetch_time),
         push_ms: elapsed_ms(push_time),
         commit_ms: elapsed_ms(commit_time),
+        count_ms: committed.count_ms,
         cursor_ms: elapsed_ms(cursor_started.elapsed()),
     })
 }
@@ -612,6 +616,7 @@ fn sink_failure(
         failure.staged_rows = Some(gate.staged_rows);
         failure.received_batches = Some(gate.received_batches);
         failure.sink_reported_rows = Some(gate.sink_reported_rows);
+        failure.count_ms = Some(gate.count_ms);
     }
     failure
 }

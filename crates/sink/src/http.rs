@@ -303,6 +303,7 @@ mod tests {
                 staged_rows: request.source_rows,
                 purged_rows: 0,
                 swapped_rows: request.source_rows,
+                count_ms: 0,
             })
         }
 
@@ -393,6 +394,7 @@ mod tests {
         assert_eq!(status, 200);
         assert_eq!(committed["source_rows"], 1);
         assert_eq!(committed["swapped_rows"], 1);
+        assert_eq!(committed["count_ms"], 0);
 
         let (status, terminal) =
             exchange_method(service.clone(), "GET", &format!("/v1/runs/{run_id}"), "");

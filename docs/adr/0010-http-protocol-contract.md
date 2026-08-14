@@ -324,7 +324,7 @@ ADR-0007 已定 fetch 与推送串行，本来就不存在并发请求。
 ```json
 → { "total_batches": 20, "total_rows": 100000 }
 ← 200 { "source_rows": 100000, "staged_rows": 100000,
-        "purged_rows": 82345, "swapped_rows": 100000 }
+        "purged_rows": 82345, "swapped_rows": 100000, "count_ms": 37 }
 ← 409 VERIFY_FAILED / 500 SWAP_FAILED / 500 INTERNAL_PRECHECK_ESCAPE / 404 RUN_UNKNOWN
 ```
 
@@ -342,6 +342,10 @@ ADR-0007 已定 fetch 与推送串行，本来就不存在并发请求。
 `swapped_rows` 看似冗余于 `staged_rows`，但它是**唯一能证明切换事务真的搬完了**的数字——
 两者不等意味着 `INSERT ... SELECT` 出了 ADR-0002 增补预言过的那类事
 （暂存表无唯一约束，重复键要到切换才炸）。
+
+> **2026-08-14 增补（#45）**：成功响应与 `VERIFY_FAILED.details` 增加 `count_ms`，记录
+> commit 事务内 `SELECT COUNT(*) FROM stg` 的实际耗时。它是验收测量数，不参与门禁；
+> source 原样带进 `run_finished`，用于复核本节的 30 分钟读超时。
 
 **`GET /v1/runs/{run_id}`**
 ```json

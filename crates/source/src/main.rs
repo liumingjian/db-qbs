@@ -211,6 +211,7 @@ fn emit_successful_run(summary: &TransferSummary, run_id: &str, task: &Path) {
             ("fetch_ms", json!(summary.fetch_ms)),
             ("push_ms", json!(summary.push_ms)),
             ("commit_ms", json!(summary.commit_ms)),
+            ("count_ms", json!(summary.count_ms)),
             ("cursor_ms", json!(summary.cursor_ms)),
         ],
     );
@@ -329,6 +330,7 @@ fn emit_failed_run(failure: &TransferFailure, run_id: &str, task: &Path) {
             ("fetch_ms", json!(failure.fetch_ms)),
             ("push_ms", json!(failure.push_ms)),
             ("commit_ms", json!(failure.commit_ms)),
+            ("count_ms", json!(failure.count_ms)),
             ("cursor_ms", json!(failure.cursor_ms)),
         ],
     );

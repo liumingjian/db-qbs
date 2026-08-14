@@ -1,0 +1,27 @@
+source_sql = '''
+SELECT w.row_id AS ROW_ID,
+       w.d_biz AS D_BIZ,
+       w.c01 AS C01, w.c02 AS C02, w.c03 AS C03, w.c04 AS C04,
+       w.c05 AS C05, w.c06 AS C06, w.c07 AS C07, w.c08 AS C08,
+       w.c09 AS C09, w.c10 AS C10, w.c11 AS C11, w.c12 AS C12,
+       w.c13 AS C13, w.c14 AS C14, w.c15 AS C15, w.c16 AS C16,
+       w.c17 AS C17, w.c18 AS C18, w.c19 AS C19, w.c20 AS C20,
+       w.c21 AS C21, w.c22 AS C22, w.c23 AS C23, w.c24 AS C24,
+       w.c25 AS C25, w.c26 AS C26, w.c27 AS C27, w.c28 AS C28,
+       w.c29 AS C29, w.c30 AS C30, w.c31 AS C31, w.c32 AS C32,
+       w.c33 AS C33, w.c34 AS C34, w.c35 AS C35, w.c36 AS C36,
+       w.c37 AS C37, w.c38 AS C38, w.c39 AS C39, w.c40 AS C40,
+       w.c41 AS C41, w.c42 AS C42, w.c43 AS C43, w.c44 AS C44,
+       w.c45 AS C45, w.c46 AS C46, w.c47 AS C47, w.c48 AS C48,
+       w.c49 AS C49, w.c50 AS C50, w.c51 AS C51, w.c52 AS C52,
+       w.c53 AS C53, w.c54 AS C54, w.c55 AS C55, w.c56 AS C56,
+       w.c57 AS C57, w.c58 AS C58, w.c59 AS C59, w.c60 AS C60,
+       w.c61 AS C61, w.c62 AS C62, w.c63 AS C63, w.c64 AS C64,
+       w.c65 AS C65, w.c66 AS C66, w.c67 AS C67, w.c68 AS C68
+  FROM t_m1_wide w
+ WHERE w.d_biz >= TO_DATE(:biz_date,'YYYY-MM-DD')
+   AND w.d_biz <  TO_DATE(:biz_date,'YYYY-MM-DD') + 1
+'''
+source_date_col = "D_BIZ"
+target_table = "M1_WIDE"
+target_date_col = "D_BIZ"

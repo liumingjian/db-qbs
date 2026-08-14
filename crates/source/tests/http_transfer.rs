@@ -27,6 +27,7 @@ fn rows_cross_the_http_protocol_then_commit() {
                 "staged_rows": 2,
                 "purged_rows": 3,
                 "swapped_rows": 2,
+                "count_ms": 4,
             }),
         ]
         .into_iter()
@@ -78,6 +79,7 @@ fn rows_cross_the_http_protocol_then_commit() {
     );
     assert_eq!(summary.source_rows, 2);
     assert_eq!(summary.purged_rows, 3);
+    assert_eq!(summary.count_ms, 4);
 }
 
 #[test]

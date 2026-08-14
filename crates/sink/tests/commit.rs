@@ -69,12 +69,16 @@ impl Destination for FakeDestination {
         let staged_rows = *self.staged_rows.lock().unwrap();
         if staged_rows != request.source_rows || request.received_batches != request.source_batches
         {
-            return Err(AtomicSwapError::VerifyFailed { staged_rows });
+            return Err(AtomicSwapError::VerifyFailed {
+                staged_rows,
+                count_ms: 4,
+            });
         }
         Ok(AtomicSwapResult {
             staged_rows,
             purged_rows: *self.purged_rows.lock().unwrap(),
             swapped_rows: staged_rows,
+            count_ms: 4,
         })
     }
 
@@ -124,6 +128,7 @@ fn commit_atomically_swaps_then_exposes_a_sealed_swapped_tombstone() {
     assert_eq!(committed.staged_rows, 1);
     assert_eq!(committed.purged_rows, 7);
     assert_eq!(committed.swapped_rows, 1);
+    assert_eq!(committed.count_ms, 4);
     let requests = destination.swap_requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].target_table, "T_POSITION");
@@ -175,6 +180,7 @@ fn verification_failure_reports_database_loss_and_discards_staging() {
     assert_eq!(error.details["source_batches"], 1);
     assert_eq!(error.details["received_batches"], 1);
     assert_eq!(error.details["sink_reported_rows"], 1);
+    assert_eq!(error.details["count_ms"], 4);
     assert!(error.message.contains("数据在写入 MySQL 的过程中丢失"));
     assert!(error
         .message
@@ -201,6 +207,7 @@ fn verification_failure_reports_a_missing_batch_and_discards_staging() {
     assert_eq!(error.details["source_batches"], 1);
     assert_eq!(error.details["received_batches"], 0);
     assert_eq!(error.details["sink_reported_rows"], 0);
+    assert_eq!(error.details["count_ms"], 4);
     assert!(error.message.contains("有批次未送达"));
     assert!(error.message.ends_with("目标表未被触碰，可直接重跑。"));
     assert_eq!(destination.dropped.lock().unwrap().len(), 1);

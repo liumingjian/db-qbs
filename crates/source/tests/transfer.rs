@@ -428,6 +428,7 @@ impl SinkClient for RecordingSink {
             staged_rows: total_rows,
             purged_rows: 0,
             swapped_rows: total_rows,
+            count_ms: 4,
         })
     }
 

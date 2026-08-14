@@ -93,6 +93,7 @@ fn valid_shape_attempts_oracle_describe_before_sink() {
         "fetch_ms",
         "push_ms",
         "commit_ms",
+        "count_ms",
         "cursor_ms",
     ] {
         assert!(terminal.get(field).is_some(), "missing {field}");

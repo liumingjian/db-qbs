@@ -119,6 +119,7 @@ pub struct CommitResponse {
     pub staged_rows: u64,
     pub purged_rows: u64,
     pub swapped_rows: u64,
+    pub count_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -161,11 +162,15 @@ pub struct AtomicSwapResult {
     pub staged_rows: u64,
     pub purged_rows: u64,
     pub swapped_rows: u64,
+    pub count_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AtomicSwapError {
-    VerifyFailed { staged_rows: u64 },
+    VerifyFailed {
+        staged_rows: u64,
+        count_ms: u64,
+    },
     Other(String),
 }
 

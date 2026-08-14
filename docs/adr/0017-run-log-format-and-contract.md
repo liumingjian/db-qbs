@@ -166,7 +166,7 @@ jq -c 'select(.run_id == $run_id and (.event == "run_opened" or .event == "run_f
 | `batch_pushed` | source | `seq`, `rows`, `source_rows`, `bytes`, `written`, `ms` |
 | `commit_diagnosed` | source | `terminal`, `message` |
 | `abort_failed` | source | `message` |
-| `run_finished` | source | `terminal`, `stage`, `message`, `source_code`, `sink_code`, `column`, `value`, `source_rows`, `source_batches`, `staged_rows`, `received_batches`, `sink_reported_rows`, `purged_rows`, `fetch_ms`, `push_ms`, `commit_ms`, `cursor_ms` |
+| `run_finished` | source | `terminal`, `stage`, `message`, `source_code`, `sink_code`, `column`, `value`, `source_rows`, `source_batches`, `staged_rows`, `received_batches`, `sink_reported_rows`, `purged_rows`, `fetch_ms`, `push_ms`, `commit_ms`, `count_ms`, `cursor_ms` |
 | `sink_unavailable` | sink | `message` |
 | `http_response_failed` | sink | `message` |
 
@@ -176,7 +176,8 @@ jq -c 'select(.run_id == $run_id and (.event == "run_opened" or .event == "run_f
 
 `run_finished` 每个已发起的 run **恰好一行**。成功时门禁四数、`sink_reported_rows`、
 `purged_rows` 与三个分段耗时都有数值；失败时也保留已经产生的数值，未知项才为 `null`。
-`cursor_ms` 是 Oracle 游标从 describe 完成到 run 终结的寿命，不拿进程启动耗时冒充。
+`count_ms` 是 commit 事务内 `SELECT COUNT(*)` 子项的实际耗时；`cursor_ms` 是 Oracle 游标从
+describe 完成到 run 终结的寿命，不拿进程启动耗时冒充。
 
 #### 6.3 八条日志下界逐条落点
 
@@ -186,7 +187,7 @@ jq -c 'select(.run_id == $run_id and (.event == "run_opened" or .event == "run_f
 | 阶段迁移 | `stage_changed.stage`，取五状态之一 | ADR-0012 |
 | 累计行数 | `batch_pushed.source_rows`，终态再由 `run_finished.source_rows` 封口 | ADR-0013 |
 | 逐批行数、字节、耗时 | `batch_pushed.rows` / `bytes` / `ms`，并带 `seq` / `written` | 第 3 节 / ADR-0015 |
-| 分段耗时 | `run_finished.fetch_ms` / `push_ms` / `commit_ms` / `cursor_ms` | ADR-0007 |
+| 分段耗时 | `run_finished.fetch_ms` / `push_ms` / `commit_ms` / `count_ms` / `cursor_ms` | ADR-0007 / ADR-0013 |
 | 失败列与值 | `run_finished.column` / `value` | 第 4 节 / #35 |
 | `POST /runs` 后的诊断锚点 | `run_opened.run_id` | 第 1.1 节 |
 | 终态取证行 | `run_finished`：终态、门禁四数、诊断数、`purged_rows`、分段耗时一次打齐 | ADR-0010 / ADR-0013 |

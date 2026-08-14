@@ -1,0 +1,11 @@
+source_sql = '''
+SELECT n.row_id AS ROW_ID,
+       n.v_text AS V_TEXT,
+       n.d_biz AS D_BIZ
+  FROM t_m1_narrow n
+ WHERE n.d_biz >= TO_DATE(:biz_date,'YYYY-MM-DD')
+   AND n.d_biz <  TO_DATE(:biz_date,'YYYY-MM-DD') + 1
+'''
+source_date_col = "D_BIZ"
+target_table = "M1_NARROW"
+target_date_col = "D_BIZ"

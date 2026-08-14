@@ -108,8 +108,11 @@ commit 报文已有 `total_batches`（source 自报推了几批），sink 自己
         "source_rows": 100000, "staged_rows": 99995,      // 门禁
         "source_batches": 20,  "received_batches": 20,    // 门禁
         "sink_reported_rows": 100000,                     // 诊断：sink 逐批 rows_written 之和
+        "count_ms": 37,                                   // 测量：事务内 COUNT 耗时
         "message": "…" }
 ```
+
+`count_ms` 是 #45 验收要求的测量数，不是第六个门禁数，也不改变下面的失败分类。
 
 第五个数把失败**自动分成两类**，人不必翻日志：
 
