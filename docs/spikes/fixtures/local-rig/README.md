@@ -14,6 +14,7 @@ cd docs/spikes/fixtures/local-rig
 ./scripts/smoke.sh     # 只跑冒烟
 ./scripts/run-dblink-probe.sh [脚本名]   # 跑 #6 的 dblink 探针（默认 dblink-pushdown.sql）
 ./scripts/run-pagination-boundary-probe.sh # 跑 #21 的分页边界可复现性探针
+./scripts/run-canon-gate.sh             # 跑 #43 的 M1 规范形式手工门禁
 ./scripts/run-bulk-probe.sh              # 跑 #5 的内存形状探针（19 组配置矩阵）
 REPS=7 ./scripts/run-cpu-probe.sh        # 跑 #5 的客户端每行 CPU 探针（每档取中位数）
 ./scripts/run-mysql-roundtrip-probe.sh   # 跑 #13 的目标端往返实测（只起 MySQL，不用 Oracle）
@@ -46,8 +47,8 @@ ARM 版 Oracle 11g **不存在，也不会有**。
 
 ```
 oracle/01-grants.sql        spike schema 的权限（含 CREATE DATABASE LINK、看执行计划）
-oracle/02-schema.sql        等价表 —— ADR-0003 每一种规范形式至少一列
-oracle/03-boundary-rows.sql 边界值 + t_canon_expected（期望规范形式）+ 10 万行
+oracle/02-schema.sql        等价表 —— ADR-0003 每一种规范形式至少一列 + #43 门禁表
+oracle/03-boundary-rows.sql 边界值 + M0 历史期望 + #43 M1 样本 + 10 万行
 oracle/04-dblink.sql        指回自身的 loopback dblink，名字沿用生产的 @FA
 mysql/10-target-schema.sql  目标端等价表，utf8mb4
 probes/dblink-pushdown*.sql #6 的 dblink 列投影探针（**不是** initdb 脚本，起库后按需跑）
@@ -61,10 +62,13 @@ probes/mysql-roundtrip.sql  #13 的目标端往返实测（CHAR 尾空格 / DECI
 `oracle/` 与 `mysql/` 分别挂进两个镜像的 initdb 目录，**只在首次建库时执行一次**。
 改了 SQL 要重新生效，必须 `./scripts/down.sh && ./scripts/up.sh`（卷不删就不会重跑）。
 
-### 期望值是数据，不是代码
+### M0 历史期望值
 
 `t_canon_expected(row_id, column_name, expected, note)` 存每个单元格按 ADR-0003 应有的规范形式。
 **#3 的断言 join 这张表，不要把期望值硬编码进 Rust** —— 期望值是 ADR 的产物，改 ADR 应该只改这张表。
+
+这段只描述 M0 的 `spike-odpi`。ADR-0014 已把 `t_canon_expected` 降级为历史产物；
+#43 的新门禁不读它，权威改为仓库内 `../canon-golden.json`。
 
 覆盖到的边界：38 位满精度（正/负）、无精度声明的 `NUMBER`、高标度、尾零与负零、
 `DATE` 非零时分秒、`TIMESTAMP` 固定 6 位、中文 `VARCHAR2`/`NVARCHAR2`、`CHAR`/`NCHAR` 尾空格、
@@ -75,6 +79,37 @@ probes/mysql-roundtrip.sql  #13 的目标端往返实测（CHAR 尾空格 / DECI
 映射预检遇到即报错拒绝）。它们的 `note` 以 `V1 排除` 开头，探针据此判 **EXCL** 而非 PASS/FAIL：
 不做断言，只回报驱动取到了什么，好在 #2 的真实类型清单命中时知道要回炉补什么。
 判据在数据里——若日后决定纳入某一类，改 `t_canon_expected` 的 `note` 与 `expected` 即可，不必动 Rust。
+
+## #43 的规范形式手工门禁（`spike-canon/`）
+
+`scripts/run-canon-gate.sh` 连接台架 Oracle，从 `t_canon_m1_probe` 读取原生
+`NUMBER` / `DATE` / `VARCHAR2` / NULL，再调用共享库的 `canon_*`，逐条与仓库内
+`canon-golden.json` 比较。程序**不查询 `t_canon_expected`**。
+
+当前 fixture 的 36 条 M1 用例全部逐条输出。Oracle 表只放其中 21 条能由原生类型表示的
+accept/bypass 样本；15 条 reject 见证直接从 fixture 交给共享校验函数。不能把 `1,23`、
+`1E5`、`.5` 或非法年份塞进 `NUMBER` / `DATE` 列冒充源端值：前两种出现表示驱动或
+NLS 漂移，`.5` 出现表示链路绕道 `TO_CHAR`。NULL 组只有 `null-bypass` 一条结构性断言，
+确认它不进 `canon_*` 并保持 JSON `null`；台架不构造 Oracle 空串这个假用例，因为 Oracle
+会把空串存成 NULL，M1 源端不存在空串 `VARCHAR2` 值。
+
+退出码供后续 M1 验收脚本编排：`0` 为总 PASS，`1` 为至少一条断言 FAIL，`2` 为连接、
+fixture 或台架结构等程序运行错误。输出包含每条 `[PASS]` / `[FAIL]` 和末尾
+`TOTAL PASS: PASS n / FAIL 0`（或 `TOTAL FAIL`）。
+
+这是手工门禁，三条触发条件固定如下：
+
+1. M1 验收时必跑一次。
+2. 任何改动 `canon_*`、Oracle 驱动版本、或 NLS / 字符集相关配置的变更，合并前必跑一次。
+3. 每次跑完把实际逐条输出贴进 `docs/spikes/0001-oracle-driver.md`，不能只记「通过」。
+
+本门禁**不进 CI**：它依赖 mac 上 amd64 模拟的 Oracle XE 与 arm64 原生 Instant Client，
+结构上不适合 GitHub runner；硬塞进 CI 只会得到长期红灯或长期跳过。纯函数层仍由根工作区
+CI 的 `cargo test -p db-qbs-shared` 负责。
+
+不要把本程序并进 `spike-odpi`。`spike-odpi` 回答 M0 的「驱动取到了什么」，并继续用
+`t_canon_expected` 得出历史 `FAIL 0`；`spike-canon` 回答 M1 的「驱动出口是否符合当前仓库
+fixture」。两种失败含义不同，混合会破坏 M0 结论的语义。
 
 ## 边界 —— 本台架不能答什么
 
