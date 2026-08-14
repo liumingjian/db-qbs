@@ -187,13 +187,8 @@ assert_run_evidence() {
   local log=$1 run_id=$2
   jq -s -e --arg run_id "$run_id" '
     all(.[];
-      if (.event == "run_opened"
-          or .event == "batch_pushed"
-          or .event == "commit_diagnosed"
-          or .event == "run_finished")
-      then .run_id == $run_id
-      else true
-      end)
+      has("run_id")
+      and (.run_id == null or .run_id == $run_id))
   ' "$log" >/dev/null || fail "log evidence does not belong to opened run_id: $run_id"
 }
 

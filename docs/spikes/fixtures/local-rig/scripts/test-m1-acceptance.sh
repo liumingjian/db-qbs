@@ -63,11 +63,24 @@ printf '%s\n' \
   '{"event":"batch_pushed","run_id":"20260814091530_b4e20d"}' \
   '{"event":"run_finished","run_id":"20260814091530_a3f19c"}' \
   > "$evidence_dir/mismatch.jsonl"
+printf '%s\n' \
+  '{"event":"source_started","run_id":null}' \
+  '{"event":"stage_changed","run_id":"20260814091530_b4e20d"}' \
+  '{"event":"run_opened","run_id":"20260814091530_a3f19c"}' \
+  '{"event":"run_finished","run_id":"20260814091530_a3f19c"}' \
+  > "$evidence_dir/stage-mismatch.jsonl"
+printf '%s\n' \
+  '{"event":"source_started"}' \
+  '{"event":"run_opened","run_id":"20260814091530_a3f19c"}' \
+  '{"event":"run_finished","run_id":"20260814091530_a3f19c"}' \
+  > "$evidence_dir/missing-run-id.jsonl"
 (
   fail() { return 1; }
   eval "$run_evidence_validation_body"
   assert_run_evidence "$evidence_dir/valid.jsonl" 20260814091530_a3f19c || exit 1
   if assert_run_evidence "$evidence_dir/mismatch.jsonl" 20260814091530_a3f19c; then exit 1; fi
+  if assert_run_evidence "$evidence_dir/stage-mismatch.jsonl" 20260814091530_a3f19c; then exit 1; fi
+  if assert_run_evidence "$evidence_dir/missing-run-id.jsonl" 20260814091530_a3f19c; then exit 1; fi
 ) || {
   echo "M1 acceptance runner must associate measured log evidence with the opened run_id" >&2
   exit 1
