@@ -3,6 +3,26 @@ set -euo pipefail
 
 fixture_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
+command_docs=(
+  "$fixture_dir/README.md"
+  "$fixture_dir/01-env-facts.sql"
+  "$fixture_dir/02-columns.sql"
+  "$fixture_dir/03-type-census.sql"
+  "$fixture_dir/04-gen-boundary-samples.sql"
+)
+
+non_failing_logins=$(
+  grep -nH 'sqlplus ' "${command_docs[@]}" \
+    | grep -v 'sqlplus -L ' \
+    || true
+)
+
+if [[ -n "$non_failing_logins" ]]; then
+  echo "customer collection commands must use SQL*Plus -L to fail after one login attempt:" >&2
+  echo "$non_failing_logins" >&2
+  exit 1
+fi
+
 for script in \
   01-env-facts.sql \
   02-columns.sql \

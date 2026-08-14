@@ -13,12 +13,13 @@
 
 | # | 脚本 | 命令 | 产出 |
 |---|---|---|---|
-| 0 | `01-env-facts.sql` | `sqlplus user/pass@src @01-env-facts.sql` | 版本、字符集、对象类型、`undo_retention`，整段贴回 #2 |
-| 1 | `02-columns.sql` | `sqlplus -S user/pass@src @02-columns.sql > columns-t_r_fr_aststat.csv` | 提交 CSV |
-| 2 | `03-type-census.sql` | `sqlplus user/pass@src @03-type-census.sql` | 贴回 #2 |
-| 3a | `04-gen-boundary-samples.sql` | `sqlplus -S user/pass@src @04-gen-boundary-samples.sql > 05-boundary-samples.sql` | 中间脚本，先审再跑 |
-| 3b | `05-boundary-samples.sql` | `sqlplus -S user/pass@src @05-boundary-samples.sql > samples-t_r_fr_aststat.csv` | 提交 CSV（**脱敏后**） |
+| 0 | `01-env-facts.sql` | `sqlplus -L user/pass@src @01-env-facts.sql` | 版本、字符集、对象类型、`undo_retention`，整段贴回 #2 |
+| 1 | `02-columns.sql` | `sqlplus -L -S user/pass@src @02-columns.sql > columns-t_r_fr_aststat.csv` | 提交 CSV |
+| 2 | `03-type-census.sql` | `sqlplus -L user/pass@src @03-type-census.sql` | 贴回 #2 |
+| 3a | `04-gen-boundary-samples.sql` | `sqlplus -L -S user/pass@src @04-gen-boundary-samples.sql > 05-boundary-samples.sql` | 中间脚本，先审再跑 |
+| 3b | `05-boundary-samples.sql` | `sqlplus -L -S user/pass@src @05-boundary-samples.sql > samples-t_r_fr_aststat.csv` | 提交 CSV（**脱敏后**） |
 
+`-L` 让登录失败在第一次尝试后退出，避免在无人值守采集时等待再次输入凭据。
 脚本遇到 SQL 或 OS 错误会以非零状态退出，不得把已有的部分输出或空输出当成完整结论。
 若步骤 0 查询远端 `V$PARAMETER` 报权限错误，请 DBA 在 `@FA` 指向的库执行
 `SELECT name, value FROM v$parameter WHERE name = 'undo_retention'`，把结果并入同一份记录后再判定。
