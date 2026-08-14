@@ -404,14 +404,18 @@ write_report() {
       name=$(basename "$log")
       rows=$(jq -r '.source_rows // 0' <<<"$terminal")
       batches=$(jq -r '.source_batches // 0' <<<"$terminal")
-      fetch=$(jq -r '.fetch_ms // 0' <<<"$terminal")
-      push=$(jq -r '.push_ms // 0' <<<"$terminal")
-      cursor=$(jq -r '.cursor_ms // 0' <<<"$terminal")
-      commit=$(jq -r '.commit_ms // 0' <<<"$terminal")
+      fetch=$(jq -r '.fetch_ms // "n/a"' <<<"$terminal")
+      push=$(jq -r '.push_ms // "n/a"' <<<"$terminal")
+      cursor=$(jq -r '.cursor_ms // "n/a"' <<<"$terminal")
+      commit=$(jq -r '.commit_ms // "n/a"' <<<"$terminal")
       count=$(jq -r '.count_ms // "n/a"' <<<"$terminal")
       purged=$(jq -r '.purged_rows // "n/a"' <<<"$terminal")
-      ratio=$(jq -nr --argjson push "$push" --argjson cursor "$cursor" \
-        'if $cursor == 0 then "n/a" else (($push * 10000 / $cursor | floor) / 100 | tostring) + "%" end')
+      ratio=$(jq -r '
+        if ((.push_ms | type) != "number") or ((.cursor_ms | type) != "number") or .cursor_ms == 0
+        then "n/a"
+        else (((.push_ms * 10000 / .cursor_ms | floor) / 100 | tostring) + "%")
+        end
+      ' <<<"$terminal")
       row_dist=$(jq -sr '[.[] | select(.event == "batch_pushed") | .rows] | if length == 0 then "n/a" else ((min|tostring)+"/"+(max|tostring)) end' "$log")
       byte_dist=$(jq -sr '[.[] | select(.event == "batch_pushed") | .bytes] | sort | if length == 0 then "n/a" else ((.[0]|tostring)+"/"+(.[length/2|floor]|tostring)+"/"+(.[-1]|tostring)) end' "$log")
       echo "| $name | $rows | $batches | $fetch | $push | $ratio | $cursor | $commit | $count | $purged | $row_dist | $byte_dist |"

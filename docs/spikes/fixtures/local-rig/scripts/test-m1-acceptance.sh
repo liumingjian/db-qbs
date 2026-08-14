@@ -134,11 +134,11 @@ done
   echo "successful-run measurements must be numeric" >&2
   exit 1
 }
-if grep -Eq '(count_ms|purged_rows) // 0' "$runner"; then
-  echo "acceptance report must not turn unavailable commit measurements into zero" >&2
+if grep -Eq '(fetch_ms|push_ms|cursor_ms|commit_ms|count_ms|purged_rows) // 0' "$runner"; then
+  echo "acceptance report must not turn unavailable terminal measurements into zero" >&2
   exit 1
 fi
-for measurement in count_ms purged_rows; do
+for measurement in fetch_ms push_ms cursor_ms commit_ms count_ms purged_rows; do
   grep -Fq ".$measurement // \"n/a\"" "$runner" || {
     echo "acceptance report must identify unavailable $measurement as n/a" >&2
     exit 1
