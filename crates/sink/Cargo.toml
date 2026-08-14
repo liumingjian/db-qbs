@@ -5,4 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+chrono.workspace = true
 db-qbs-shared = { path = "../shared" }
+mysql = { version = "25.0.1", default-features = false, features = ["minimal-rust"] }
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tiny_http = "0.12.0"
+toml = "0.8.19"
