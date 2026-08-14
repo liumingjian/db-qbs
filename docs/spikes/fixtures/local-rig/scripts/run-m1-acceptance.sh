@@ -184,6 +184,10 @@ assert_source_success() {
     fail "successful run is missing a numeric source_batches total" || return 1
   batch_events=$(jq -s '[.[] | select(.event == "batch_pushed")] | length' "$log") || return 1
   assert_eq "source batch event count" "$source_batches" "$batch_events" || return 1
+  jq -s -e --argjson source_batches "$source_batches" '
+    [.[] | select(.event == "batch_pushed") | .seq]
+    == [range(1; $source_batches + 1)]
+  ' "$log" >/dev/null || fail "batch event sequence is not exactly 1..source_batches" || return 1
   local batch_sum
   batch_sum=$(jq -s '[.[] | select(.event == "batch_pushed") | .rows] | add // 0' "$log") || return 1
   assert_eq "sum(batch rows)" "$expected_rows" "$batch_sum" || return 1

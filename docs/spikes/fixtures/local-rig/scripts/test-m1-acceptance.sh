@@ -128,6 +128,10 @@ grep -Fq 'source batch event count' <<<"$success_body" || {
   echo "successful runs must match source_batches to completed batch evidence" >&2
   exit 1
 }
+grep -Fq 'batch event sequence' <<<"$success_body" || {
+  echo "successful runs must prove batch evidence covers every sequence exactly once" >&2
+  exit 1
+}
 for measurement in fetch_ms push_ms cursor_ms commit_ms count_ms purged_rows; do
   grep -q "$measurement" <<<"$success_body" || {
     echo "successful runs must require a numeric $measurement measurement" >&2
