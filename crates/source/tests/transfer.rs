@@ -239,6 +239,39 @@ fn rows_written_mismatch_aborts_before_commit() {
     );
 }
 
+#[test]
+fn abort_failure_is_reported_before_the_failed_stage() {
+    let mut source = FakeSource::new(vec![Vec::new()]);
+    let mut sink = RecordingSink {
+        abort_error: true,
+        ..RecordingSink::default()
+    };
+    let mut events = Vec::new();
+
+    run_transfer(
+        &mut source,
+        &mut sink,
+        TransferRequest {
+            run_id: RUN_ID.to_owned(),
+            target_table: "ORDERS".to_owned(),
+            target_date_col: "BIZ_DAY".to_owned(),
+            biz_date: "2026-08-14".to_owned(),
+        },
+        |event| events.push(event),
+    )
+    .unwrap_err();
+
+    assert_eq!(sink.calls, vec!["open", "abort"]);
+    assert!(matches!(
+        events.as_slice(),
+        [
+            ..,
+            TransferEvent::AbortFailed { message },
+            TransferEvent::StageChanged(db_qbs_source::RunStage::Failed),
+        ] if message == "abort failed"
+    ));
+}
+
 struct FakeSource {
     columns: Vec<SourceColumn>,
     rows: std::vec::IntoIter<Vec<Option<String>>>,
@@ -297,6 +330,7 @@ struct RecordingSink {
     batch_rows: Vec<usize>,
     commit_counts: Option<(u64, u64)>,
     wrong_batch_count: bool,
+    abort_error: bool,
 }
 
 impl SinkClient for RecordingSink {
@@ -354,7 +388,11 @@ impl SinkClient for RecordingSink {
 
     fn abort(&mut self, _run_id: &str) -> Result<bool, SinkError> {
         self.calls.push("abort");
-        Ok(true)
+        if self.abort_error {
+            Err(SinkError::response(None, "abort failed"))
+        } else {
+            Ok(true)
+        }
     }
 }
 

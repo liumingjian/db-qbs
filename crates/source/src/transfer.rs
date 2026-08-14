@@ -5,7 +5,8 @@ use chrono::Utc;
 use rand::RngCore;
 
 use crate::{
-    BatchPayload, OpenRunRequest, SinkClient, SinkError, SinkErrorKind, SourceColumn, Terminal,
+    BatchPayload, OpenRunRequest, RunResponse, SinkClient, SinkError, SinkErrorKind, SourceColumn,
+    Terminal,
 };
 
 pub const FETCH_ARRAY_SIZE: u32 = 100;
@@ -173,14 +174,17 @@ pub fn run_transfer(
         }
     };
     if opened.run_id != request.run_id {
-        abort_best_effort(sink, &request.run_id, &mut observe);
-        observe(TransferEvent::StageChanged(RunStage::Failed));
-        return Err(Box::new(failure(
-            RunStage::Preparing,
-            "目标端开任务响应的 run_id 与请求不一致".to_owned(),
-            0,
-            0,
-        )));
+        return Err(fail_before_commit(
+            sink,
+            &request.run_id,
+            &mut observe,
+            transfer_failure(
+                RunStage::Preparing,
+                "目标端开任务响应的 run_id 与请求不一致".to_owned(),
+                0,
+                0,
+            ),
+        ));
     }
     observe(TransferEvent::RunOpened {
         staging_table: opened.staging_table,
@@ -204,34 +208,40 @@ pub fn run_transfer(
             Ok(Some(row)) => row,
             Ok(None) => break,
             Err(error) => {
-                abort_best_effort(sink, &request.run_id, &mut observe);
-                observe(TransferEvent::StageChanged(RunStage::Failed));
-                return Err(Box::new(TransferFailure {
-                    stage: RunStage::Streaming,
-                    message: error.user_message(),
-                    source_code: error.oracle_code,
-                    sink_code: None,
-                    column: error.column,
-                    value: error.value,
-                    commit_diagnostic: None,
-                    source_rows,
-                    total_batches,
-                }));
+                return Err(fail_before_commit(
+                    sink,
+                    &request.run_id,
+                    &mut observe,
+                    TransferFailure {
+                        stage: RunStage::Streaming,
+                        message: error.user_message(),
+                        source_code: error.oracle_code,
+                        sink_code: None,
+                        column: error.column,
+                        value: error.value,
+                        commit_diagnostic: None,
+                        source_rows,
+                        total_batches,
+                    },
+                ));
             }
         };
 
         if row.len() != expected_columns {
-            abort_best_effort(sink, &request.run_id, &mut observe);
-            observe(TransferEvent::StageChanged(RunStage::Failed));
-            return Err(Box::new(failure(
-                RunStage::Streaming,
-                format!(
-                    "源端行宽断言失败：describe 有 {expected_columns} 列，当前行有 {} 个值",
-                    row.len()
+            return Err(fail_before_commit(
+                sink,
+                &request.run_id,
+                &mut observe,
+                transfer_failure(
+                    RunStage::Streaming,
+                    format!(
+                        "源端行宽断言失败：describe 有 {expected_columns} 列，当前行有 {} 个值",
+                        row.len()
+                    ),
+                    source_rows,
+                    total_batches,
                 ),
-                source_rows,
-                total_batches,
-            )));
+            ));
         }
 
         let row_bytes = serde_json::to_vec(&row)
@@ -252,15 +262,12 @@ pub fn run_transfer(
                 &mut observe,
             )
             .map_err(|error| {
-                abort_best_effort(sink, &request.run_id, &mut observe);
-                observe(TransferEvent::StageChanged(RunStage::Failed));
-                Box::new(sink_failure(
-                    error,
-                    RunStage::Streaming,
-                    source_rows,
-                    total_batches,
-                    None,
-                ))
+                fail_before_commit(
+                    sink,
+                    &request.run_id,
+                    &mut observe,
+                    sink_failure(error, RunStage::Streaming, source_rows, total_batches, None),
+                )
             })?;
             serialized_row_bytes = 0;
         }
@@ -280,15 +287,12 @@ pub fn run_transfer(
             &mut observe,
         )
         .map_err(|error| {
-            abort_best_effort(sink, &request.run_id, &mut observe);
-            observe(TransferEvent::StageChanged(RunStage::Failed));
-            Box::new(sink_failure(
-                error,
-                RunStage::Streaming,
-                source_rows,
-                total_batches,
-                None,
-            ))
+            fail_before_commit(
+                sink,
+                &request.run_id,
+                &mut observe,
+                sink_failure(error, RunStage::Streaming, source_rows, total_batches, None),
+            )
         })?;
     }
 
@@ -320,7 +324,7 @@ pub fn run_transfer(
         || committed.swapped_rows != committed.staged_rows
     {
         observe(TransferEvent::StageChanged(RunStage::Failed));
-        return Err(Box::new(failure(
+        return Err(Box::new(transfer_failure(
             RunStage::Committing,
             format!(
                 "目标端 commit 响应行数断言失败：source_rows={} staged_rows={} swapped_rows={}",
@@ -406,27 +410,26 @@ fn diagnose_commit(
     observe: &mut impl FnMut(TransferEvent),
 ) -> String {
     let (terminal, message) = match sink.get(run_id) {
-        Ok(response)
-            if response.run_id == run_id
-                && response.terminal == Some(Terminal::Swapped)
-                && response.swapped_rows.is_some() =>
-        {
-            (
-                Some(Terminal::Swapped),
-                format!(
-                    "目标端报告该 run 已切换成功（swapped_rows={}），目标表已是新数据，重跑前请先确认",
-                    response.swapped_rows.expect("guarded above")
-                ),
-            )
-        }
-        Ok(response)
-            if response.run_id == run_id && response.terminal == Some(Terminal::Discarded) =>
-        {
-            (
-                Some(Terminal::Discarded),
-                "目标端报告暂存表已丢弃，目标表未被触碰，可直接重跑".to_owned(),
-            )
-        }
+        Ok(RunResponse {
+            run_id: response_run_id,
+            terminal: Some(Terminal::Swapped),
+            swapped_rows: Some(swapped_rows),
+            ..
+        }) if response_run_id == run_id => (
+            Some(Terminal::Swapped),
+            format!(
+                "目标端报告该 run 已切换成功（swapped_rows={}），目标表已是新数据，重跑前请先确认",
+                swapped_rows
+            ),
+        ),
+        Ok(RunResponse {
+            run_id: response_run_id,
+            terminal: Some(Terminal::Discarded),
+            ..
+        }) if response_run_id == run_id => (
+            Some(Terminal::Discarded),
+            "目标端报告暂存表已丢弃，目标表未被触碰，可直接重跑".to_owned(),
+        ),
         _ => (None, "无法确定目标表是否已被切换".to_owned()),
     };
     observe(TransferEvent::CommitDiagnosed {
@@ -434,6 +437,17 @@ fn diagnose_commit(
         message: message.clone(),
     });
     message
+}
+
+fn fail_before_commit(
+    sink: &mut impl SinkClient,
+    run_id: &str,
+    observe: &mut impl FnMut(TransferEvent),
+    failure: TransferFailure,
+) -> Box<TransferFailure> {
+    abort_best_effort(sink, run_id, observe);
+    observe(TransferEvent::StageChanged(RunStage::Failed));
+    Box::new(failure)
 }
 
 fn abort_best_effort(
@@ -468,7 +482,7 @@ fn sink_failure(
     }
 }
 
-fn failure(
+fn transfer_failure(
     stage: RunStage,
     message: String,
     source_rows: u64,

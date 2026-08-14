@@ -183,7 +183,7 @@ impl HttpSinkClient {
         if let Some(timeout) = timeout {
             request = request.timeout(timeout);
         }
-        decode(request.send_json(body))
+        decode_response(request.send_json(body))
     }
 }
 
@@ -223,7 +223,7 @@ impl SinkClient for HttpSinkClient {
 
     fn get(&mut self, run_id: &str) -> Result<RunResponse, SinkError> {
         // A fresh agent prevents ureq's stale pooled-connection retry. This call must happen once.
-        decode(
+        decode_response(
             normal_agent()
                 .get(&self.endpoint(&format!("/v1/runs/{run_id}")))
                 .call(),
@@ -273,7 +273,7 @@ struct ErrorBody {
     details: Value,
 }
 
-fn decode<T: DeserializeOwned>(
+fn decode_response<T: DeserializeOwned>(
     result: Result<ureq::Response, ureq::Error>,
 ) -> Result<T, SinkError> {
     match result {
@@ -281,27 +281,28 @@ fn decode<T: DeserializeOwned>(
             SinkError::response(None, format!("目标端成功响应不是有效 JSON：{error}"))
         }),
         Err(ureq::Error::Status(_, response)) => {
-            let envelope: ErrorEnvelope = response.into_json().map_err(|error| {
-                SinkError::response(None, format!("目标端错误响应不是有效 JSON：{error}"))
-            })?;
-            Ok::<_, SinkError>(envelope.error).and_then(|error| {
-                let column = error
-                    .details
-                    .get("column")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                let value = error
-                    .details
-                    .get("value")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                Err(SinkError {
-                    kind: SinkErrorKind::Response,
-                    code: Some(error.code),
-                    message: error.message,
-                    column,
-                    value,
-                })
+            let error = response
+                .into_json::<ErrorEnvelope>()
+                .map_err(|error| {
+                    SinkError::response(None, format!("目标端错误响应不是有效 JSON：{error}"))
+                })?
+                .error;
+            let column = error
+                .details
+                .get("column")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let value = error
+                .details
+                .get("value")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            Err(SinkError {
+                kind: SinkErrorKind::Response,
+                code: Some(error.code),
+                message: error.message,
+                column,
+                value,
             })
         }
         Err(ureq::Error::Transport(error)) => Err(SinkError::transport(format!(

@@ -3,7 +3,8 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 
 use db_qbs_source::{
-    run_transfer, HttpSinkClient, RowSource, SourceColumn, SourceReadError, TransferRequest,
+    run_transfer, HttpSinkClient, OpenRunRequest, RowSource, SinkClient, SinkErrorKind,
+    SourceColumn, SourceReadError, TransferRequest,
 };
 use serde_json::{json, Value};
 
@@ -79,6 +80,44 @@ fn rows_cross_the_http_protocol_then_commit() {
     assert_eq!(summary.purged_rows, 3);
 }
 
+#[test]
+fn error_response_preserves_sink_diagnostics() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        serve_one_with_status(
+            &listener,
+            "422 Unprocessable Entity",
+            json!({
+                "error": {
+                    "code": "PRECHECK_FAILED",
+                    "message": "mapping rejected",
+                    "details": { "column": "AMOUNT", "value": "invalid" },
+                }
+            }),
+        )
+    });
+
+    let mut sink = HttpSinkClient::new(&base_url).unwrap();
+    let error = sink
+        .open(&OpenRunRequest {
+            run_id: RUN_ID.to_owned(),
+            target_table: "ORDERS".to_owned(),
+            target_date_col: "BIZ_DAY".to_owned(),
+            biz_date: "2026-08-14".to_owned(),
+            source_columns: Vec::new(),
+        })
+        .unwrap_err();
+
+    let request = server.join().unwrap();
+    assert_eq!(request.path, "/v1/runs");
+    assert_eq!(error.kind, SinkErrorKind::Response);
+    assert_eq!(error.code.as_deref(), Some("PRECHECK_FAILED"));
+    assert_eq!(error.message, "mapping rejected");
+    assert_eq!(error.column.as_deref(), Some("AMOUNT"));
+    assert_eq!(error.value.as_deref(), Some("invalid"));
+}
+
 struct FakeSource {
     rows: std::vec::IntoIter<Vec<Option<String>>>,
 }
@@ -109,6 +148,10 @@ struct Request {
 }
 
 fn serve_one(listener: &TcpListener, response: Value) -> Request {
+    serve_one_with_status(listener, "200 OK", response)
+}
+
+fn serve_one_with_status(listener: &TcpListener, status: &str, response: Value) -> Request {
     let (stream, _) = listener.accept().unwrap();
     let mut reader = BufReader::new(stream);
     let mut request_line = String::new();
@@ -135,7 +178,7 @@ fn serve_one(listener: &TcpListener, response: Value) -> Request {
 
     let mut body = vec![0; content_length];
     reader.read_exact(&mut body).unwrap();
-    write_response(reader.into_inner(), response);
+    write_response(reader.into_inner(), status, response);
     Request {
         path,
         content_type,
@@ -143,11 +186,11 @@ fn serve_one(listener: &TcpListener, response: Value) -> Request {
     }
 }
 
-fn write_response(mut stream: TcpStream, response: Value) {
+fn write_response(mut stream: TcpStream, status: &str, response: Value) {
     let body = serde_json::to_vec(&response).unwrap();
     write!(
         stream,
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     )
     .unwrap();

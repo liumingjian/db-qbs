@@ -76,60 +76,62 @@ impl RowSource for OracleRowSource {
         for (index, kind) in self.value_kinds.iter().enumerate() {
             let column = &self.columns[index].name;
             let value = match kind {
-                ValueKind::Number => {
-                    let raw = row
-                        .get::<usize, Option<String>>(index)
-                        .map_err(oracle_error)?;
-                    match raw {
-                        Some(raw) => match canon_number(&raw) {
-                            Ok(value) => Some(value.to_owned()),
-                            Err(error) => {
-                                return Err(SourceReadError {
-                                    message: error.to_string(),
-                                    oracle_code: None,
-                                    column: Some(column.clone()),
-                                    value: Some(raw),
-                                });
-                            }
-                        },
-                        None => None,
-                    }
-                }
-                ValueKind::Date => {
-                    let timestamp = row
-                        .get::<usize, Option<Timestamp>>(index)
-                        .map_err(oracle_error)?;
-                    match timestamp {
-                        Some(timestamp) => match canon_date(
-                            timestamp.year(),
-                            timestamp.month(),
-                            timestamp.day(),
-                            timestamp.hour(),
-                            timestamp.minute(),
-                            timestamp.second(),
-                        ) {
-                            Ok(value) => Some(value),
-                            Err(error) => {
-                                return Err(SourceReadError {
-                                    message: error.to_string(),
-                                    oracle_code: None,
-                                    column: Some(column.clone()),
-                                    value: Some(timestamp.to_string()),
-                                });
-                            }
-                        },
-                        None => None,
-                    }
-                }
-                ValueKind::Text => row
-                    .get::<usize, Option<String>>(index)
-                    .map_err(oracle_error)?
-                    .map(|value| canon_text(&value).to_owned()),
+                ValueKind::Number => read_number(&row, index, column)?,
+                ValueKind::Date => read_date(&row, index, column)?,
+                ValueKind::Text => read_text(&row, index)?,
             };
             values.push(value);
         }
 
         Ok(Some(values))
+    }
+}
+
+fn read_number(row: &Row, index: usize, column: &str) -> Result<Option<String>, SourceReadError> {
+    let Some(raw) = row
+        .get::<usize, Option<String>>(index)
+        .map_err(oracle_error)?
+    else {
+        return Ok(None);
+    };
+
+    canon_number(&raw)
+        .map(|value| Some(value.to_owned()))
+        .map_err(|error| invalid_value(error.to_string(), column, raw))
+}
+
+fn read_date(row: &Row, index: usize, column: &str) -> Result<Option<String>, SourceReadError> {
+    let Some(timestamp) = row
+        .get::<usize, Option<Timestamp>>(index)
+        .map_err(oracle_error)?
+    else {
+        return Ok(None);
+    };
+
+    canon_date(
+        timestamp.year(),
+        timestamp.month(),
+        timestamp.day(),
+        timestamp.hour(),
+        timestamp.minute(),
+        timestamp.second(),
+    )
+    .map(Some)
+    .map_err(|error| invalid_value(error.to_string(), column, timestamp.to_string()))
+}
+
+fn read_text(row: &Row, index: usize) -> Result<Option<String>, SourceReadError> {
+    row.get::<usize, Option<String>>(index)
+        .map(|value| value.map(|value| canon_text(&value).to_owned()))
+        .map_err(oracle_error)
+}
+
+fn invalid_value(message: String, column: &str, value: String) -> SourceReadError {
+    SourceReadError {
+        message,
+        oracle_code: None,
+        column: Some(column.to_owned()),
+        value: Some(value),
     }
 }
 

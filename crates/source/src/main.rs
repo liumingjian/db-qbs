@@ -9,7 +9,7 @@ use db_qbs_shared::{write_log_line_with_fields, LogLevel};
 use db_qbs_source::{
     generate_run_id, load_source_config, load_task_config, parse_biz_date, precheck_sql,
     run_transfer, HttpSinkClient, OracleRowSource, RunStage, TransferEvent, TransferFailure,
-    TransferRequest,
+    TransferRequest, TransferSummary,
 };
 use serde_json::{json, Map, Value};
 
@@ -208,31 +208,7 @@ fn run() -> bool {
 
     match result {
         Ok(summary) => {
-            emit_with_run(
-                LogLevel::Info,
-                "run_finished",
-                Some(&run_id),
-                Some(&task_path),
-                [
-                    ("terminal", json!(RunStage::Succeeded.as_str())),
-                    ("stage", json!(RunStage::Succeeded.as_str())),
-                    ("message", json!("run completed successfully")),
-                    ("source_code", Value::Null),
-                    ("sink_code", Value::Null),
-                    ("column", Value::Null),
-                    ("value", Value::Null),
-                    ("source_rows", json!(summary.source_rows)),
-                    ("total_batches", json!(summary.total_batches)),
-                    ("staged_rows", json!(summary.staged_rows)),
-                    ("received_batches", json!(summary.total_batches)),
-                    ("sink_reported_rows", json!(summary.source_rows)),
-                    ("purged_rows", json!(summary.purged_rows)),
-                    ("fetch_ms", json!(summary.fetch_ms)),
-                    ("push_ms", json!(summary.push_ms)),
-                    ("commit_ms", json!(summary.commit_ms)),
-                    ("cursor_ms", json!(summary.cursor_ms)),
-                ],
-            );
+            emit_successful_run(&summary, &run_id, &task_path);
             true
         }
         Err(failure) => {
@@ -245,6 +221,34 @@ fn run() -> bool {
             false
         }
     }
+}
+
+fn emit_successful_run(summary: &TransferSummary, run_id: &str, task: &Path) {
+    emit_with_run(
+        LogLevel::Info,
+        "run_finished",
+        Some(run_id),
+        Some(task),
+        [
+            ("terminal", json!(RunStage::Succeeded.as_str())),
+            ("stage", json!(RunStage::Succeeded.as_str())),
+            ("message", json!("run completed successfully")),
+            ("source_code", Value::Null),
+            ("sink_code", Value::Null),
+            ("column", Value::Null),
+            ("value", Value::Null),
+            ("source_rows", json!(summary.source_rows)),
+            ("total_batches", json!(summary.total_batches)),
+            ("staged_rows", json!(summary.staged_rows)),
+            ("received_batches", json!(summary.total_batches)),
+            ("sink_reported_rows", json!(summary.source_rows)),
+            ("purged_rows", json!(summary.purged_rows)),
+            ("fetch_ms", json!(summary.fetch_ms)),
+            ("push_ms", json!(summary.push_ms)),
+            ("commit_ms", json!(summary.commit_ms)),
+            ("cursor_ms", json!(summary.cursor_ms)),
+        ],
+    );
 }
 
 fn emit_transfer_event(event: TransferEvent, run_id: &str, task: &Path) {
