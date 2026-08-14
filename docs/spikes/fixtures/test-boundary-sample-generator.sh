@@ -4,6 +4,14 @@ set -euo pipefail
 fixture_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 generator="$fixture_dir/04-gen-boundary-samples.sql"
 
+if ! grep -Fq "PROMPT SET LINESIZE 32767" "$generator" \
+  || ! grep -Fq "PROMPT SET MARKUP CSV ON QUOTE ON" "$generator" \
+  || ! grep -Fq "kind KIND, NVL(v,''<NULL>'') VALUE, NVL(LENGTH(v),0) VALUE_LEN" "$generator" \
+  || grep -Fq "||NVL(v,''<NULL>'')" "$generator"; then
+  echo "generated sample output must use SQL*Plus CSV quoting instead of concatenating raw values" >&2
+  exit 1
+fi
+
 if ! grep -Fq "MAX(TO_CHAR(' || column_name || ')) KEEP (DENSE_RANK LAST ORDER BY LENGTH(TO_CHAR(' || column_name || ')))" "$generator"; then
   echo "NUMBER max-length samples must contain the actual value, not only its length" >&2
   exit 1

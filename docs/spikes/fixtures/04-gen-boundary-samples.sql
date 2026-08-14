@@ -26,17 +26,19 @@ WHENEVER OSERROR EXIT 1
 WHENEVER SQLERROR EXIT SQL.SQLCODE
 
 PROMPT SET PAGESIZE 0
-PROMPT SET LINESIZE 4000
+PROMPT SET LINESIZE 32767
 PROMPT SET FEEDBACK OFF
 PROMPT SET HEADING OFF
 PROMPT SET TRIMSPOOL ON
+PROMPT SET MARKUP CSV ON QUOTE ON
 PROMPT WHENEVER OSERROR EXIT 1
 PROMPT WHENEVER SQLERROR EXIT SQL.SQLCODE
 PROMPT ALTER SESSION SET NLS_NUMERIC_CHARACTERS = '.,';
 PROMPT PROMPT COLUMN_NAME,DATA_TYPE,KIND,VALUE,VALUE_LEN
 
 -- ---- NUMBER 列 ----
-SELECT 'SELECT ''' || column_name || ',' || data_type || ',''||kind||'',''||NVL(v,''<NULL>'')||'',''||NVL(LENGTH(v),0) FROM ('
+SELECT 'SELECT ''' || column_name || ''' COLUMN_NAME, ''' || data_type
+       || ''' DATA_TYPE, kind KIND, NVL(v,''<NULL>'') VALUE, NVL(LENGTH(v),0) VALUE_LEN FROM ('
        || ' SELECT ''max_len_val'' kind, MAX(TO_CHAR(' || column_name || ')) KEEP (DENSE_RANK LAST ORDER BY LENGTH(TO_CHAR(' || column_name || '))) v FROM ' || tbl
        || ' UNION ALL SELECT ''min_val'', TO_CHAR(MIN(' || column_name || ')) FROM ' || tbl
        || ' UNION ALL SELECT ''max_val'', TO_CHAR(MAX(' || column_name || ')) FROM ' || tbl
@@ -49,7 +51,8 @@ SELECT 'SELECT ''' || column_name || ',' || data_type || ',''||kind||'',''||NVL(
  ORDER BY column_id;
 
 -- ---- DATE / TIMESTAMP 列 ----
-SELECT 'SELECT ''' || column_name || ',' || data_type || ',''||kind||'',''||NVL(v,''<NULL>'')||'',''||NVL(LENGTH(v),0) FROM ('
+SELECT 'SELECT ''' || column_name || ''' COLUMN_NAME, ''' || data_type
+       || ''' DATA_TYPE, kind KIND, NVL(v,''<NULL>'') VALUE, NVL(LENGTH(v),0) VALUE_LEN FROM ('
        || ' SELECT ''min_val'' kind, TO_CHAR(MIN(' || column_name || '), ''' || format_mask || ''') v FROM ' || tbl
        || ' UNION ALL SELECT ''max_val'', TO_CHAR(MAX(' || column_name || '), ''' || format_mask || ''') FROM ' || tbl
        || ' UNION ALL SELECT ''with_time_cnt'', TO_CHAR(COUNT(CASE WHEN ' || column_name || ' <> TRUNC(' || column_name || ') THEN 1 END)) FROM ' || tbl
@@ -72,7 +75,8 @@ SELECT 'SELECT ''' || column_name || ',' || data_type || ',''||kind||'',''||NVL(
  ORDER BY column_id;
 
 -- ---- 字符类列 ----
-SELECT 'SELECT ''' || column_name || ',' || data_type || ',''||kind||'',''||NVL(v,''<NULL>'')||'',''||NVL(LENGTH(v),0) FROM ('
+SELECT 'SELECT ''' || column_name || ''' COLUMN_NAME, ''' || data_type
+       || ''' DATA_TYPE, kind KIND, NVL(v,''<NULL>'') VALUE, NVL(LENGTH(v),0) VALUE_LEN FROM ('
        || ' SELECT ''max_len_val'' kind, MAX(' || column_name || ') KEEP (DENSE_RANK LAST ORDER BY LENGTH(' || column_name || ')) v FROM ' || tbl
        || ' UNION ALL SELECT ''multibyte_val'', MAX(CASE WHEN LENGTHB(' || column_name || ') > LENGTH(' || column_name || ') THEN ' || column_name || ' END) FROM ' || tbl
        || ' UNION ALL SELECT ''null_cnt'', TO_CHAR(COUNT(CASE WHEN ' || column_name || ' IS NULL THEN 1 END)) FROM ' || tbl
