@@ -78,14 +78,28 @@ SELECT 'SELECT ''' || column_name || ''' COLUMN_NAME, ''' || data_type
 
 -- ---- 字符类列 ----
 SELECT 'SELECT ''' || column_name || ''' COLUMN_NAME, ''' || data_type
-       || ''' DATA_TYPE, kind KIND, NVL(v,''<NULL>'') VALUE, NVL(LENGTH(v),0) VALUE_LEN FROM ('
+       || ''' DATA_TYPE, kind KIND, NVL(v,' || null_marker || ') VALUE, NVL(LENGTH(v),0) VALUE_LEN FROM ('
        || ' SELECT ''max_len_val'' kind, MAX(' || column_name || ') KEEP (DENSE_RANK LAST ORDER BY LENGTH(' || column_name || ')) v FROM ' || tbl
-       || ' UNION ALL SELECT ''multibyte_val'', MAX(CASE WHEN ASCIISTR(' || column_name || ') <> ' || column_name || ' THEN ' || column_name || ' END) FROM ' || tbl
-       || ' UNION ALL SELECT ''null_cnt'', TO_CHAR(COUNT(CASE WHEN ' || column_name || ' IS NULL THEN 1 END)) FROM ' || tbl
+       || ' UNION ALL SELECT ''multibyte_val'', MAX(CASE WHEN LENGTH(ASCIISTR(' || column_name || ')) > LENGTH(' || column_name || ') THEN ' || column_name || ' END) FROM ' || tbl
+       || ' UNION ALL SELECT ''null_cnt'', ' || text_cast || '(COUNT(CASE WHEN ' || column_name || ' IS NULL THEN 1 END)) FROM ' || tbl
        || ' );'
-  FROM all_tab_columns@FA, (SELECT 'htbr45.t_r_fr_aststat@FA' tbl FROM dual)
- WHERE owner = 'HTBR45' AND table_name = 'T_R_FR_ASTSTAT'
-   AND data_type IN ('VARCHAR2','NVARCHAR2','CHAR','NCHAR')
+  FROM (
+        SELECT column_id,
+               column_name,
+               data_type,
+               CASE WHEN data_type IN ('NVARCHAR2','NCHAR') THEN 'TO_NCHAR'
+                    ELSE 'TO_CHAR'
+                END AS text_cast,
+               CASE WHEN data_type IN ('NVARCHAR2','NCHAR')
+                    THEN 'TO_NCHAR(''<NULL>'')'
+                    ELSE '''<NULL>'''
+                END AS null_marker
+          FROM all_tab_columns@FA
+         WHERE owner = 'HTBR45'
+           AND table_name = 'T_R_FR_ASTSTAT'
+           AND data_type IN ('VARCHAR2','NVARCHAR2','CHAR','NCHAR')
+       ),
+       (SELECT 'htbr45.t_r_fr_aststat@FA' tbl FROM dual)
  ORDER BY column_id;
 
 PROMPT EXIT

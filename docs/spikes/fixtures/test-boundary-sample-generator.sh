@@ -6,7 +6,7 @@ generator="$fixture_dir/04-gen-boundary-samples.sql"
 
 if ! grep -Fq "PROMPT SET LINESIZE 32767" "$generator" \
   || ! grep -Fq "PROMPT SET MARKUP CSV ON QUOTE ON" "$generator" \
-  || ! grep -Fq "kind KIND, NVL(v,''<NULL>'') VALUE, NVL(LENGTH(v),0) VALUE_LEN" "$generator" \
+  || ! grep -Fq "kind KIND, NVL(v,' || null_marker || ') VALUE, NVL(LENGTH(v),0) VALUE_LEN" "$generator" \
   || grep -Fq "||NVL(v,''<NULL>'')" "$generator"; then
   echo "generated sample output must use SQL*Plus CSV quoting instead of concatenating raw values" >&2
   exit 1
@@ -38,9 +38,17 @@ if grep -Fq "data_type LIKE 'TIMESTAMP%'" "$generator" \
   exit 1
 fi
 
-if ! grep -Fq "ASCIISTR(' || column_name || ') <> ' || column_name" "$generator" \
+if ! grep -Fq "LENGTH(ASCIISTR(' || column_name || ')) > LENGTH(' || column_name" "$generator" \
+  || grep -Fq "ASCIISTR(' || column_name || ') <> ' || column_name" "$generator" \
   || grep -Fq "LENGTHB(' || column_name || ') > LENGTH(' || column_name" "$generator"; then
   echo "character samples must detect non-ASCII content rather than national-character storage width" >&2
+  exit 1
+fi
+
+if ! grep -Fq "CASE WHEN data_type IN ('NVARCHAR2','NCHAR') THEN 'TO_NCHAR'" "$generator" \
+  || ! grep -Fq "|| text_cast || '(COUNT(CASE WHEN '" "$generator" \
+  || ! grep -Fq "THEN 'TO_NCHAR(''<NULL>'')'" "$generator"; then
+  echo "national-character samples must keep counts and null markers in the national character set" >&2
   exit 1
 fi
 
