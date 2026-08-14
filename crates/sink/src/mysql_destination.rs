@@ -123,13 +123,25 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
                             None => MysqlValue::NULL,
                         })
                         .collect();
-                    transaction.exec_drop(statement, Params::Positional(values))?;
+                    if let Err(error) = transaction.exec_drop(statement, Params::Positional(values))
+                    {
+                        return Ok(Err(classify_write_error(error, columns, row_chunk)));
+                    }
                     affected_rows += transaction.affected_rows();
+                    let warnings: Vec<(String, u16, String)> =
+                        transaction.query("SHOW WARNINGS")?;
+                    if let Some((_, code, message)) =
+                        warnings.into_iter().find(|(_, code, _)| *code == 1265)
+                    {
+                        return Ok(Err(classify_mysql_diagnostic(
+                            code, &message, columns, row_chunk,
+                        )));
+                    }
                 }
                 transaction.commit()?;
-                Ok(affected_rows)
+                Ok(Ok(affected_rows))
             })
-            .map_err(|error| WriteBatchError::Other(error.to_string()))
+            .map_err(|error| WriteBatchError::Other(error.to_string()))?
     }
 
     fn atomic_swap(
@@ -208,6 +220,75 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
             .with_conn(|connection| connection.query_drop(statement))
             .map_err(classify_drop_error)
     }
+}
+
+fn classify_write_error(
+    error: MysqlError,
+    columns: &[String],
+    rows: &[Vec<Option<String>>],
+) -> WriteBatchError {
+    let raw = error.to_string();
+    match error {
+        MysqlError::MySqlError(error) if matches!(error.code, 1153 | 1264 | 1292 | 1366) => {
+            classify_mysql_diagnostic(error.code, &error.message, columns, rows)
+        }
+        _ => WriteBatchError::Other(raw),
+    }
+}
+
+fn classify_mysql_diagnostic(
+    code: u16,
+    message: &str,
+    columns: &[String],
+    rows: &[Vec<Option<String>>],
+) -> WriteBatchError {
+    if code == 1153 {
+        return WriteBatchError::Environment { mysql_code: code };
+    }
+
+    let (column, value) = mysql_error_location(message, columns, rows)
+        .map(|(column, value)| (Some(column), value))
+        .unwrap_or((None, None));
+    if code == 1265 {
+        return WriteBatchError::PrecheckEscape {
+            mysql_code: code,
+            column,
+            value,
+        };
+    }
+
+    WriteBatchError::DataValue {
+        mysql_code: code,
+        column: column.unwrap_or_else(|| "<无法从 MySQL 错误定位列>".to_owned()),
+        value,
+    }
+}
+
+fn mysql_error_location(
+    message: &str,
+    columns: &[String],
+    rows: &[Vec<Option<String>>],
+) -> Option<(String, Option<String>)> {
+    let (_, location) = message.rsplit_once(" for column '")?;
+    let (reported_column, row) = location.split_once("' at row ")?;
+    let row = row
+        .trim_end_matches(|character: char| !character.is_ascii_digit())
+        .parse::<usize>()
+        .ok()?;
+    let short_column = reported_column
+        .rsplit('.')
+        .next()
+        .unwrap_or(reported_column)
+        .trim_matches('`');
+    let column_index = columns
+        .iter()
+        .position(|column| column.eq_ignore_ascii_case(short_column))?;
+    let value = rows
+        .get(row.checked_sub(1)?)
+        .and_then(|values| values.get(column_index))
+        .cloned()
+        .flatten();
+    Some((columns[column_index].clone(), value))
 }
 
 enum AtomicSwapOutcome {
@@ -430,7 +511,36 @@ pub fn check_connection_settings(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_delete_statement, build_insert_statement, build_swap_insert_statement};
+    use super::{
+        build_delete_statement, build_insert_statement, build_swap_insert_statement,
+        classify_mysql_diagnostic,
+    };
+    use crate::WriteBatchError;
+
+    #[test]
+    fn mysql_diagnostics_recover_the_original_column_and_value() {
+        let columns = vec!["N_AMOUNT".to_owned(), "D_BIZ".to_owned()];
+        let rows = vec![vec![
+            Some("999999".to_owned()),
+            Some("10000-01-01 00:00:00".to_owned()),
+        ]];
+
+        let error = classify_mysql_diagnostic(
+            1292,
+            "Incorrect datetime value for column 'D_BIZ' at row 1",
+            &columns,
+            &rows,
+        );
+
+        assert_eq!(
+            error,
+            WriteBatchError::DataValue {
+                mysql_code: 1292,
+                column: "D_BIZ".to_owned(),
+                value: Some("10000-01-01 00:00:00".to_owned()),
+            }
+        );
+    }
 
     #[test]
     fn insert_statement_has_explicit_source_order_and_one_placeholder_per_value() {

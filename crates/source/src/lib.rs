@@ -22,7 +22,8 @@ pub use db_qbs_shared::BatchPayload;
 pub use oracle_source::OracleRowSource;
 pub use protocol::{
     BatchResponse, CommitResponse, HttpSinkClient, OpenRunRequest, OpenRunResponse, RunResponse,
-    SinkClient, SinkError, SinkErrorKind, SourceColumn, Terminal,
+    SinkClient, SinkError, SinkErrorKind, SinkGateDetails, SinkPrecheckIssue, SourceColumn,
+    Terminal,
 };
 pub use transfer::{
     generate_run_id, run_transfer, RowSource, RunStage, SourceReadError, TransferEvent,

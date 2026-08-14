@@ -1,7 +1,8 @@
 use db_qbs_source::{
     generate_run_id, run_transfer, BatchPayload, BatchResponse, CommitResponse, OpenRunRequest,
-    OpenRunResponse, RowSource, RunResponse, SinkClient, SinkError, SinkErrorKind, SourceColumn,
-    SourceReadError, Terminal, TransferEvent, TransferRequest, BATCH_BYTE_BUDGET,
+    OpenRunResponse, RowSource, RunResponse, SinkClient, SinkError, SinkErrorKind,
+    SinkPrecheckIssue, SourceColumn, SourceReadError, Terminal, TransferEvent, TransferRequest,
+    BATCH_BYTE_BUDGET,
 };
 
 const RUN_ID: &str = "20260814153000_a3f19c";
@@ -35,6 +36,49 @@ fn streams_rows_in_order_then_commits_the_fetch_accumulator() {
 }
 
 #[test]
+fn batch_events_include_the_cumulative_source_row_count() {
+    let rows = (0..5_001)
+        .map(|value| vec![Some(value.to_string())])
+        .collect();
+    let mut source = FakeSource::new(rows);
+    let mut sink = RecordingSink::default();
+    let mut events = Vec::new();
+
+    run_transfer(
+        &mut source,
+        &mut sink,
+        TransferRequest {
+            run_id: RUN_ID.to_owned(),
+            target_table: "ORDERS".to_owned(),
+            target_date_col: "BIZ_DAY".to_owned(),
+            biz_date: "2026-08-14".to_owned(),
+        },
+        |event| events.push(event),
+    )
+    .unwrap();
+
+    let cumulative_rows: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            TransferEvent::BatchPushed { source_rows, .. } => Some(*source_rows),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cumulative_rows, [5_000, 5_001]);
+}
+
+#[test]
+fn ora_1555_is_translated_without_losing_the_source_code() {
+    let error = SourceReadError::new("ORA-01555: snapshot too old", Some(1555));
+
+    assert_eq!(
+        error.user_message(),
+        "源端结果集在读取过程中失效，通常是运行时间过长且源表有大量并发写入，请缩小业务日期范围或联系 DBA 调大 undo 保留"
+    );
+    assert_eq!(error.oracle_code, Some(1555));
+}
+
+#[test]
 fn open_failure_does_not_abort_before_staging_exists() {
     let mut source = FakeSource::new(vec![]);
     let mut sink = RejectingOpenSink::default();
@@ -55,6 +99,11 @@ fn open_failure_does_not_abort_before_staging_exists() {
 
     assert_eq!(failure.stage, db_qbs_source::RunStage::Preparing);
     assert_eq!(sink.calls, vec!["open"]);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        TransferEvent::MappingPrecheckFailed { column, rule, .. }
+            if column == "AMOUNT" && rule == "precision differs"
+    )));
     assert!(matches!(
         events.last(),
         Some(TransferEvent::StageChanged(db_qbs_source::RunStage::Failed))
@@ -404,10 +453,14 @@ struct RejectingOpenSink {
 impl SinkClient for RejectingOpenSink {
     fn open(&mut self, _request: &OpenRunRequest) -> Result<OpenRunResponse, SinkError> {
         self.calls.push("open");
-        Err(SinkError::response(
-            Some("PRECHECK_FAILED".to_owned()),
-            "mapping rejected",
-        ))
+        let mut error = SinkError::response(Some("PRECHECK_FAILED".to_owned()), "mapping rejected");
+        error.precheck_issues = Box::new(vec![SinkPrecheckIssue {
+            column: "AMOUNT".to_owned(),
+            source: "NUMBER(8,0)".to_owned(),
+            target: "decimal(7,0)".to_owned(),
+            rule: "precision differs".to_owned(),
+        }]);
+        Err(error)
     }
 
     fn push_batch(
@@ -495,6 +548,8 @@ impl SinkClient for CommitDisconnectSink {
             message: "connection closed".to_owned(),
             column: None,
             value: None,
+            precheck_issues: Box::new(Vec::new()),
+            gate: None,
         })
     }
 

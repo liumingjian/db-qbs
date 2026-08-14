@@ -3,9 +3,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Instant;
 
-use db_qbs_shared::{write_log_line_with_fields, LogLevel};
+use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
 use db_qbs_source::{
     generate_run_id, load_source_config, load_task_config, parse_biz_date, precheck_sql,
     run_transfer, HttpSinkClient, OracleRowSource, RunStage, TransferEvent, TransferFailure,
@@ -29,7 +28,7 @@ fn run() -> bool {
         Err(message) => {
             emit(
                 LogLevel::Error,
-                "cli_failed",
+                LogEvent::CliFailed,
                 task_hint.as_deref(),
                 [("message", json!(message))],
             );
@@ -40,7 +39,7 @@ fn run() -> bool {
     let task_path = absolute_path(&arguments.task);
     emit(
         LogLevel::Info,
-        "source_started",
+        LogEvent::SourceStarted,
         Some(&task_path),
         [
             ("biz_date", json!(arguments.biz_date)),
@@ -54,7 +53,7 @@ fn run() -> bool {
     if let Err(message) = parse_biz_date(&arguments.biz_date) {
         emit(
             LogLevel::Error,
-            "business_date_invalid",
+            LogEvent::BusinessDateInvalid,
             Some(&task_path),
             [
                 ("message", json!(message)),
@@ -69,7 +68,7 @@ fn run() -> bool {
         Err(error) => {
             emit(
                 LogLevel::Error,
-                "source_config_failed",
+                LogEvent::SourceConfigFailed,
                 Some(&task_path),
                 [("message", json!(error.to_string()))],
             );
@@ -81,7 +80,7 @@ fn run() -> bool {
         Err(error) => {
             emit(
                 LogLevel::Error,
-                "task_config_failed",
+                LogEvent::TaskConfigFailed,
                 Some(&task_path),
                 [("message", json!(error.to_string()))],
             );
@@ -92,7 +91,7 @@ fn run() -> bool {
     if let Err(problems) = precheck_sql(&task) {
         emit(
             LogLevel::Error,
-            "sql_shape_precheck_failed",
+            LogEvent::SqlShapePrecheckFailed,
             Some(&task_path),
             [
                 (
@@ -110,14 +109,16 @@ fn run() -> bool {
 
     emit(
         LogLevel::Info,
-        "sql_shape_precheck_passed",
+        LogEvent::SqlShapePrecheckPassed,
         Some(&task_path),
         [("message", json!("source-local SQL shape precheck passed"))],
     );
 
-    emit(
+    let run_id = generate_run_id();
+    emit_with_run(
         LogLevel::Info,
-        "stage_changed",
+        LogEvent::StageChanged,
+        Some(&run_id),
         Some(&task_path),
         [
             ("stage", json!(RunStage::Preparing.as_str())),
@@ -127,13 +128,13 @@ fn run() -> bool {
             ),
         ],
     );
-    let run_started = Instant::now();
     let mut source = match OracleRowSource::connect(&source_config, &task, &arguments.biz_date) {
         Ok(source) => source,
         Err(error) => {
-            emit(
+            emit_with_run(
                 LogLevel::Error,
-                "stage_changed",
+                LogEvent::StageChanged,
+                Some(&run_id),
                 Some(&task_path),
                 [
                     ("stage", json!(RunStage::Failed.as_str())),
@@ -150,24 +151,26 @@ fn run() -> bool {
                 commit_diagnostic: None,
                 source_rows: 0,
                 total_batches: 0,
+                staged_rows: None,
+                received_batches: None,
+                sink_reported_rows: None,
+                purged_rows: None,
+                fetch_ms: 0,
+                push_ms: 0,
+                commit_ms: 0,
+                cursor_ms: 0,
             };
-            emit_failed_run(
-                &failure,
-                None,
-                &task_path,
-                run_started.elapsed().as_millis(),
-            );
+            emit_failed_run(&failure, Some(&run_id), &task_path);
             return false;
         }
     };
 
-    let run_id = generate_run_id();
     let mut sink = match HttpSinkClient::new(&source_config.sink_base_url) {
         Ok(sink) => sink,
         Err(message) => {
             emit_with_run(
                 LogLevel::Error,
-                "stage_changed",
+                LogEvent::StageChanged,
                 Some(&run_id),
                 Some(&task_path),
                 [
@@ -185,13 +188,16 @@ fn run() -> bool {
                 commit_diagnostic: None,
                 source_rows: 0,
                 total_batches: 0,
+                staged_rows: None,
+                received_batches: None,
+                sink_reported_rows: None,
+                purged_rows: None,
+                fetch_ms: 0,
+                push_ms: 0,
+                commit_ms: 0,
+                cursor_ms: 0,
             };
-            emit_failed_run(
-                &failure,
-                Some(&run_id),
-                &task_path,
-                run_started.elapsed().as_millis(),
-            );
+            emit_failed_run(&failure, Some(&run_id), &task_path);
             return false;
         }
     };
@@ -212,12 +218,7 @@ fn run() -> bool {
             true
         }
         Err(failure) => {
-            emit_failed_run(
-                &failure,
-                Some(&run_id),
-                &task_path,
-                run_started.elapsed().as_millis(),
-            );
+            emit_failed_run(&failure, Some(&run_id), &task_path);
             false
         }
     }
@@ -226,7 +227,7 @@ fn run() -> bool {
 fn emit_successful_run(summary: &TransferSummary, run_id: &str, task: &Path) {
     emit_with_run(
         LogLevel::Info,
-        "run_finished",
+        LogEvent::RunFinished,
         Some(run_id),
         Some(task),
         [
@@ -238,7 +239,7 @@ fn emit_successful_run(summary: &TransferSummary, run_id: &str, task: &Path) {
             ("column", Value::Null),
             ("value", Value::Null),
             ("source_rows", json!(summary.source_rows)),
-            ("total_batches", json!(summary.total_batches)),
+            ("source_batches", json!(summary.total_batches)),
             ("staged_rows", json!(summary.staged_rows)),
             ("received_batches", json!(summary.total_batches)),
             ("sink_reported_rows", json!(summary.source_rows)),
@@ -260,7 +261,7 @@ fn emit_transfer_event(event: TransferEvent, run_id: &str, task: &Path) {
             } else {
                 LogLevel::Info
             },
-            "stage_changed",
+            LogEvent::StageChanged,
             Some(run_id),
             Some(task),
             [
@@ -273,7 +274,7 @@ fn emit_transfer_event(event: TransferEvent, run_id: &str, task: &Path) {
             columns_checked,
         } => emit_with_run(
             LogLevel::Info,
-            "run_opened",
+            LogEvent::RunOpened,
             Some(run_id),
             Some(task),
             [
@@ -285,25 +286,45 @@ fn emit_transfer_event(event: TransferEvent, run_id: &str, task: &Path) {
         TransferEvent::BatchPushed {
             seq,
             rows,
+            source_rows,
             bytes,
             written,
             ms,
         } => emit_with_run(
             LogLevel::Info,
-            "batch_pushed",
+            LogEvent::BatchPushed,
             Some(run_id),
             Some(task),
             [
                 ("seq", json!(seq)),
                 ("rows", json!(rows)),
+                ("source_rows", json!(source_rows)),
                 ("bytes", json!(bytes)),
                 ("written", json!(written)),
                 ("ms", json!(ms)),
             ],
         ),
+        TransferEvent::MappingPrecheckFailed {
+            column,
+            source,
+            target,
+            rule,
+        } => emit_with_run(
+            LogLevel::Error,
+            LogEvent::MappingPrecheckFailed,
+            Some(run_id),
+            Some(task),
+            [
+                ("column", json!(column)),
+                ("source", json!(source)),
+                ("target", json!(target)),
+                ("message", json!(format!("目标端：{rule}"))),
+                ("rule", json!(rule)),
+            ],
+        ),
         TransferEvent::CommitDiagnosed { terminal, message } => emit_with_run(
             LogLevel::Warn,
-            "commit_diagnosed",
+            LogEvent::CommitDiagnosed,
             Some(run_id),
             Some(task),
             [
@@ -313,7 +334,7 @@ fn emit_transfer_event(event: TransferEvent, run_id: &str, task: &Path) {
         ),
         TransferEvent::AbortFailed { message } => emit_with_run(
             LogLevel::Warn,
-            "abort_failed",
+            LogEvent::AbortFailed,
             Some(run_id),
             Some(task),
             [("message", json!(message))],
@@ -321,10 +342,10 @@ fn emit_transfer_event(event: TransferEvent, run_id: &str, task: &Path) {
     }
 }
 
-fn emit_failed_run(failure: &TransferFailure, run_id: Option<&str>, task: &Path, cursor_ms: u128) {
+fn emit_failed_run(failure: &TransferFailure, run_id: Option<&str>, task: &Path) {
     emit_with_run(
         LogLevel::Error,
-        "run_finished",
+        LogEvent::RunFinished,
         run_id,
         Some(task),
         [
@@ -336,15 +357,15 @@ fn emit_failed_run(failure: &TransferFailure, run_id: Option<&str>, task: &Path,
             ("column", json!(failure.column)),
             ("value", json!(failure.value)),
             ("source_rows", json!(failure.source_rows)),
-            ("total_batches", json!(failure.total_batches)),
-            ("staged_rows", Value::Null),
-            ("received_batches", Value::Null),
-            ("sink_reported_rows", Value::Null),
-            ("purged_rows", Value::Null),
-            ("fetch_ms", Value::Null),
-            ("push_ms", Value::Null),
-            ("commit_ms", Value::Null),
-            ("cursor_ms", json!(cursor_ms)),
+            ("source_batches", json!(failure.total_batches)),
+            ("staged_rows", json!(failure.staged_rows)),
+            ("received_batches", json!(failure.received_batches)),
+            ("sink_reported_rows", json!(failure.sink_reported_rows)),
+            ("purged_rows", json!(failure.purged_rows)),
+            ("fetch_ms", json!(failure.fetch_ms)),
+            ("push_ms", json!(failure.push_ms)),
+            ("commit_ms", json!(failure.commit_ms)),
+            ("cursor_ms", json!(failure.cursor_ms)),
         ],
     );
 }
@@ -422,7 +443,7 @@ fn absolute_path(path: impl AsRef<Path>) -> PathBuf {
 
 fn emit<const N: usize>(
     level: LogLevel,
-    event: &str,
+    event: LogEvent,
     task: Option<&Path>,
     fields: [(&str, Value); N],
 ) {
@@ -431,7 +452,7 @@ fn emit<const N: usize>(
 
 fn emit_with_run<const N: usize>(
     level: LogLevel,
-    event: &str,
+    event: LogEvent,
     run_id: Option<&str>,
     task: Option<&Path>,
     fields: [(&str, Value); N],

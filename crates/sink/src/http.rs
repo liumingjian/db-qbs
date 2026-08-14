@@ -1,6 +1,7 @@
-use std::io::{Cursor, Read};
+use std::io::{self, Cursor, Read};
 use std::sync::Arc;
 
+use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -52,7 +53,17 @@ fn handle_request<D: Destination>(mut request: Request, service: &SinkService<D>
     };
 
     if let Err(error) = request.respond(response) {
-        eprintln!("HTTP 响应写入失败：{error}");
+        let run_id = run_resource(&path).or_else(|| run_action(&path).map(|(run_id, _)| run_id));
+        let stdout = io::stdout();
+        let mut writer = stdout.lock();
+        let _ = write_log_line_with_fields(
+            &mut writer,
+            LogLevel::Error,
+            LogEvent::HttpResponseFailed,
+            run_id,
+            None,
+            json!({ "message": format!("HTTP 响应写入失败：{error}") }),
+        );
     }
 }
 

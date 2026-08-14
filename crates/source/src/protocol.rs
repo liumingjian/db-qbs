@@ -100,6 +100,25 @@ pub struct SinkError {
     pub message: String,
     pub column: Option<String>,
     pub value: Option<String>,
+    pub precheck_issues: Box<Vec<SinkPrecheckIssue>>,
+    pub gate: Option<Box<SinkGateDetails>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SinkPrecheckIssue {
+    pub column: String,
+    pub source: String,
+    pub target: String,
+    pub rule: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SinkGateDetails {
+    pub source_rows: u64,
+    pub staged_rows: u64,
+    pub source_batches: u64,
+    pub received_batches: u64,
+    pub sink_reported_rows: u64,
 }
 
 impl SinkError {
@@ -110,6 +129,8 @@ impl SinkError {
             message: message.into(),
             column: None,
             value: None,
+            precheck_issues: Box::new(Vec::new()),
+            gate: None,
         }
     }
 
@@ -120,6 +141,8 @@ impl SinkError {
             message: message.into(),
             column: None,
             value: None,
+            precheck_issues: Box::new(Vec::new()),
+            gate: None,
         }
     }
 }
@@ -297,12 +320,24 @@ fn decode_response<T: DeserializeOwned>(
                 .get("value")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
+            let precheck_issues = error
+                .details
+                .get("issues")
+                .cloned()
+                .and_then(|issues| serde_json::from_value::<Vec<SinkPrecheckIssue>>(issues).ok())
+                .unwrap_or_default()
+                .into();
+            let gate = serde_json::from_value(error.details.clone())
+                .ok()
+                .map(Box::new);
             Err(SinkError {
                 kind: SinkErrorKind::Response,
                 code: Some(error.code),
                 message: error.message,
                 column,
                 value,
+                precheck_issues,
+                gate,
             })
         }
         Err(ureq::Error::Transport(error)) => Err(SinkError::transport(format!(

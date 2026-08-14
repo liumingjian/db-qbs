@@ -1,5 +1,5 @@
 use chrono::DateTime;
-use db_qbs_shared::{write_log_line, LogLevel};
+use db_qbs_shared::{write_log_line, LogEvent, LogLevel};
 use serde_json::Value;
 
 #[test]
@@ -9,7 +9,7 @@ fn emitter_writes_one_json_line_with_all_common_fields() {
     write_log_line(
         &mut output,
         LogLevel::Info,
-        "run_started",
+        LogEvent::SourceStarted,
         Some("20260814091530_a3f19c"),
         Some("/etc/db-qbs/tasks/nav.toml"),
     )
@@ -22,7 +22,7 @@ fn emitter_writes_one_json_line_with_all_common_fields() {
     let json = text.strip_suffix('\n').unwrap();
     let line: Value = serde_json::from_str(json).unwrap();
     assert_eq!(line["level"], "info");
-    assert_eq!(line["event"], "run_started");
+    assert_eq!(line["event"], "source_started");
     assert_eq!(line["run_id"], "20260814091530_a3f19c");
     assert_eq!(line["task"], "/etc/db-qbs/tasks/nav.toml");
     assert_eq!(line.as_object().unwrap().len(), 5);
@@ -36,7 +36,7 @@ fn emitter_serializes_absent_optional_fields_as_json_null() {
     write_log_line(
         &mut output,
         LogLevel::Error,
-        "connection_check_failed",
+        LogEvent::SinkUnavailable,
         None,
         None,
     )
@@ -45,4 +45,29 @@ fn emitter_serializes_absent_optional_fields_as_json_null() {
     let line: Value = serde_json::from_slice(&output).unwrap();
     assert!(line["run_id"].is_null());
     assert!(line["task"].is_null());
+}
+
+#[test]
+fn event_vocabulary_is_closed_and_stable() {
+    assert_eq!(
+        LogEvent::ALL.map(LogEvent::as_str),
+        [
+            "cli_failed",
+            "source_started",
+            "business_date_invalid",
+            "source_config_failed",
+            "task_config_failed",
+            "sql_shape_precheck_failed",
+            "sql_shape_precheck_passed",
+            "stage_changed",
+            "mapping_precheck_failed",
+            "run_opened",
+            "batch_pushed",
+            "commit_diagnosed",
+            "abort_failed",
+            "run_finished",
+            "sink_unavailable",
+            "http_response_failed",
+        ]
+    );
 }

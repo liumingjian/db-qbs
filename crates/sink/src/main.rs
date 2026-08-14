@@ -1,7 +1,8 @@
 use std::env;
+use std::io;
 use std::process::ExitCode;
 
-use chrono::{SecondsFormat, Utc};
+use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
 use db_qbs_sink::{serve, SinkConfig};
 use serde_json::json;
 
@@ -9,16 +10,15 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            println!(
-                "{}",
-                json!({
-                    "ts": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-                    "level": "error",
-                    "event": "sink_unavailable",
-                    "run_id": null,
-                    "task": null,
-                    "message": message,
-                })
+            let stdout = io::stdout();
+            let mut writer = stdout.lock();
+            let _ = write_log_line_with_fields(
+                &mut writer,
+                LogLevel::Error,
+                LogEvent::SinkUnavailable,
+                None,
+                None,
+                json!({ "message": message }),
             );
             ExitCode::FAILURE
         }

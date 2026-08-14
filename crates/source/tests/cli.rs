@@ -30,6 +30,7 @@ fn invalid_shape_reports_all_problems_without_network_access() {
     );
     let lines = json_lines(&output.stdout);
     assert_common_fields(&lines, &fs::canonicalize(&task).unwrap());
+    assert!(lines.iter().all(|line| line["run_id"].is_null()));
     let failure = lines
         .iter()
         .find(|line| line["event"] == "sql_shape_precheck_failed")
@@ -78,6 +79,25 @@ fn valid_shape_attempts_oracle_describe_before_sink() {
     assert!(lines
         .iter()
         .any(|line| line["event"] == "run_finished" && line["stage"] == "PREPARING"));
+    let terminal = lines
+        .iter()
+        .find(|line| line["event"] == "run_finished")
+        .unwrap();
+    for field in [
+        "source_rows",
+        "source_batches",
+        "staged_rows",
+        "received_batches",
+        "sink_reported_rows",
+        "purged_rows",
+        "fetch_ms",
+        "push_ms",
+        "commit_ms",
+        "cursor_ms",
+    ] {
+        assert!(terminal.get(field).is_some(), "missing {field}");
+    }
+    assert!(terminal["run_id"].is_string());
 
     fs::remove_dir_all(directory).unwrap();
 }
@@ -143,7 +163,7 @@ fn assert_common_fields(lines: &[Value], task: &Path) {
         assert!(line.get("ts").unwrap().is_string());
         assert!(line.get("level").unwrap().is_string());
         assert!(line.get("event").unwrap().is_string());
-        assert!(line.get("run_id").unwrap().is_null());
+        assert!(line.get("run_id").is_some());
         assert_eq!(line["task"], task.to_string_lossy().as_ref());
     }
     assert_eq!(lines[0]["event"], "source_started");

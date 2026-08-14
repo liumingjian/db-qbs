@@ -28,8 +28,8 @@
 M1 日志的读者不是坐在终端前的人，是**排障时的 Agent 与 M2 的采集侧**。
 本 ADR 把取样定下的五条约束落成规格。
 
-**本 ADR 不定 `event` 的闭集，也不定日志写到哪里**（文件、轮转、采集）——那两件仍在雾里。
-它定的是**形态与契约规则**，以及由已有 ADR 反推出的**必须存在的日志行下界**。
+本 ADR 的第 1～5 节先定形态与契约规则；**第 6 节随 M1 实现定稿 `event` 闭集、必带字段与
+日志去向**，并把已有 ADR 反推出的八条日志行下界逐条落到事件上。
 
 ## 决策
 
@@ -65,7 +65,7 @@ ADR-0016 §9 定的是「`POST /runs` 成功后立刻把 `run_id` **单独打一
 |---|---|---|
 | `ts` | string | UTC、RFC3339。与业务日期无关（业务日期是无时区日历日，ADR-0008） |
 | `level` | string | `info` / `warn` / `error` |
-| `event` | string | 事件名。**闭集不在本 ADR 定**，见第 6 节 |
+| `event` | string | 事件名。闭集与逐事件必带字段见第 6 节 |
 | `run_id` | string \| **null** | ADR-0002 增补钉死的单一形态；**可为 `null`** |
 | `task` | string \| null | 任务定义的**绝对路径**。sink 侧恒为 `null`（它对任务定义一无所知，ADR-0016 §5） |
 
@@ -130,27 +130,87 @@ ADR-0016 §9 定的是「`POST /runs` 成功后立刻把 `run_id` **单独打一
 **M2 能不能靠采集 M1 的日志把「运行历史」拼出来**（见第 7 节 C1）。
 没有这条承诺，那条路线在技术上可行、在工程上不可依赖。
 
-### 6. 本 ADR 不定的两件事，与它给出的下界
+### 6. M1 定稿：stdout、`event` 闭集、必带字段与措辞归属
 
-**不定**：`event` 的**闭集**（到底几个、各叫什么）、日志**写到哪里**（文件路径、轮转、采集）。
-这两件仍在「日志与可观测性的最小形态」那块雾里，随实现走。
+#### 6.1 日志只写 stdout
 
-**给出的下界**——由已有 ADR 反推，**这些行必须存在**：
+`source` 与 `sink` 都只向 **stdout** 写 JSON Lines；程序自身不创建日志文件、不轮转、不外采，
+stderr 也不另开一套排版。是否把 stdout 重定向到文件由部署者决定。一旦落盘，文件就含失败值：
+创建前须 `umask 077`，最终权限必须为 **0600**，且不得采集到目标端之外。
 
-| 时机 | 必须能答出 | 出处 |
+一次 `jq` 即可取证，不依赖字段顺序或空白：
+
+```sh
+jq -c 'select(.run_id == $run_id and (.event == "run_opened" or .event == "run_finished"))' \
+  --arg run_id "$run_id" run.jsonl
+```
+
+#### 6.2 `event` 闭集与每个事件的必带字段
+
+下表是 **M1 完整闭集**。每行都先带第 2 节公共五字段；「必带字段」是在公共字段之外追加的字段。
+字段存在不等于值一定非空：`run_finished` 的门禁数在失败发生于门禁之前时为 JSON `null`；
+错误不适用于某一列或无法从数据库错误定位时，`column` / `value` 同样显式为 `null`。
+
+| `event` | 产生端 | 必带字段 |
 |---|---|---|
-| run 开始 | `task` 绝对路径、业务日期 | ADR-0016 §7 / ADR-0008 |
-| 每个阶段迁移 | 五状态之一 | ADR-0012（M1 无外部查询者，日志是唯一可见处） |
-| 每批推送后 | `seq`/`rows`/`bytes`/`written`/`ms` | 第 3 节 |
-| `POST /runs` 成功后 | `run_id` | 第 1.1 节（订正后的 ADR-0016 §9） |
-| 预检失败 | **每列一行**，一次报全部 | ADR-0009 §8 / ADR-0016 §4（两段各自「一次报全部」） |
-| run 结束 | 终态、门禁四数 + `sink_reported_rows`、`purged_rows`、分段耗时 | ADR-0013 §7 / ADR-0010 |
-| commit 断连后自动 `GET` | 两种结果的定稿人话，查不到时照实说「无法确定」 | ADR-0012 §7 |
-| 开连接仪式失败 | 变量名、期望值、实际值（**sink 级、不属任何 run**，`run_id` 为 `null`） | ADR-0015 §5 |
+| `cli_failed` | source | `message` |
+| `source_started` | source | `biz_date`, `message` |
+| `business_date_invalid` | source | `value`, `message` |
+| `source_config_failed` | source | `message` |
+| `task_config_failed` | source | `message` |
+| `sql_shape_precheck_failed` | source | `problems`, `message` |
+| `sql_shape_precheck_passed` | source | `message` |
+| `stage_changed` | source | `stage`, `message` |
+| `mapping_precheck_failed` | source（sink 成文后透传） | `column`, `source`, `target`, `rule`, `message` |
+| `run_opened` | source（`POST /runs` 成功后） | `staging_table`, `columns_checked`, `message` |
+| `batch_pushed` | source | `seq`, `rows`, `source_rows`, `bytes`, `written`, `ms` |
+| `commit_diagnosed` | source | `terminal`, `message` |
+| `abort_failed` | source | `message` |
+| `run_finished` | source | `terminal`, `stage`, `message`, `source_code`, `sink_code`, `column`, `value`, `source_rows`, `source_batches`, `staged_rows`, `received_batches`, `sink_reported_rows`, `purged_rows`, `fetch_ms`, `push_ms`, `commit_ms`, `cursor_ms` |
+| `sink_unavailable` | sink | `message` |
+| `http_response_failed` | sink | `message` |
 
-**「run 结束」那一行是本 ADR 唯一新增的取证要求**：ADR-0012 §2 之后 M1 没有运行历史，
-而分段耗时（fetch / 推送 / commit）与终态若不在结束时一次性打出来，
-就只能靠把整段日志读完再累加——这正是「日志是唯一事后取证手段」在实践中会卡住的地方。
+`mapping_precheck_failed` **每个不合格列一行**，sink 仍在一次响应里返回全部列，source 再逐项写行；
+不会退回「改一列、重跑、再发现下一列」。`batch_pushed.source_rows` 是 fetch 累加器到本批为止的
+累计值，`rows` 仍只表示本批。逐批全字段常态写，不挂开关。
+
+`run_finished` 每个已发起的 run **恰好一行**。成功时门禁四数、`sink_reported_rows`、
+`purged_rows` 与三个分段耗时都有数值；失败时也保留已经产生的数值，未知项才为 `null`。
+`cursor_ms` 是 Oracle 游标从 describe 完成到 run 终结的寿命，不拿进程启动耗时冒充。
+
+#### 6.3 八条日志下界逐条落点
+
+| 下界 | 事件与字段 | 出处 |
+|---|---|---|
+| run 起点与业务日期 | `source_started.task` / `biz_date` | ADR-0016 §7 / ADR-0008 |
+| 阶段迁移 | `stage_changed.stage`，取五状态之一 | ADR-0012 |
+| 累计行数 | `batch_pushed.source_rows`，终态再由 `run_finished.source_rows` 封口 | ADR-0013 |
+| 逐批行数、字节、耗时 | `batch_pushed.rows` / `bytes` / `ms`，并带 `seq` / `written` | 第 3 节 / ADR-0015 |
+| 分段耗时 | `run_finished.fetch_ms` / `push_ms` / `commit_ms` / `cursor_ms` | ADR-0007 |
+| 失败列与值 | `run_finished.column` / `value` | 第 4 节 / #35 |
+| `POST /runs` 后的诊断锚点 | `run_opened.run_id` | 第 1.1 节 |
+| 终态取证行 | `run_finished`：终态、门禁四数、诊断数、`purged_rows`、分段耗时一次打齐 | ADR-0010 / ADR-0013 |
+
+commit 断连后的唯一一次 `GET` 另落 `commit_diagnosed`：`SWAPPED` 明说目标表已是新数据，
+`DISCARDED` 明说目标表未动；其余结果原样说「无法确定目标表是否已被切换」。开连接仪式失败落
+`sink_unavailable`，`run_id = null`；人话必须逐项含变量名、期望值、实际值。
+
+#### 6.4 错误码人话与成文归属
+
+| 诊断 | 定稿人话要点 | 归属 |
+|---|---|---|
+| `ORA-01555` | 「源端结果集在读取过程中失效……请缩小业务日期范围或联系 DBA 调大 undo 保留」 | source（唯一的运行时数据库措辞例外） |
+| `ERROR 1118` | 「**目标表建表失败**：列宽合计超出 MySQL 单行上限，需缩窄字符列或拆表」；不得说成暂存表失败 | 生成目标表建表 SQL 的 sink 侧能力；M1 暂存表路径不可能触发 |
+| `ERROR 1264` | 数据问题；点名列和值，说明值超出目标数值范围 | sink 成文，source 只加「目标端：」 |
+| `ERROR 1292` | 数据问题；点名列和值，说明不是目标日期列可接受的日期时间 | 同上 |
+| `ERROR 1366` | 点名列和值，说明该值无法按目标列字符集写入 | 同上 |
+| `Note 1265` | `INTERNAL_PRECHECK_ESCAPE`；明写「P0 程序缺陷，不是运行故障，请报 issue」 | 同上 |
+
+sink 通过 MySQL 报出的列名与行号回指原批次，取出**恰好一个失败值**放入 `column` / `value`，
+不 dump 整行。`ERROR 1153` 只让人修 `max_allowed_packet` 环境配置，明确「不要排查业务数据」；
+`PAYLOAD_TOO_LARGE` 与 `INTERNAL_PRECHECK_ESCAPE` 都是缺陷口吻。开连接仪式的字符集、`sql_mode`、
+`max_allowed_packet` 三类失败都是环境口吻。SQL 形状预检仍是唯一由 source 本地成文的预检错误；
+其余 MySQL 人话一律 sink 成文，source 只加前缀透传，不二次改写。
 
 ### 7. 四条冲突不在本 ADR 解，留给 M2
 
@@ -166,9 +226,8 @@ ADR-0016 §9 定的是「`POST /runs` 成功后立刻把 `run_id` **单独打一
 
 ## 后果
 
-- **这块雾从「记什么」降级为「`event` 闭集与落盘位置」。** 十来条散在各 ADR 里的措辞要求
-  第一次有了统一的承载形态：它们都是某个 `event` 的 `message` 加若干字段，
-  而不是各自一种排版。
+- **「记什么、叫什么、写到哪里」已经收口。** 十来条散在各 ADR 里的措辞要求第一次有了统一的
+  承载形态：它们都是闭集内某个 `event` 的 `message` 加定稿字段，而不是各自一种排版。
 - **M1 的日志成了一个对外接口。** 第 5 节的契约是 M1 第一次对进程外的消费者做出稳定性承诺
   （此前只有 HTTP 协议）。代价：改日志字段从此不是纯内部改动。
 - **日志文件的敏感级别被抬到与凭据同档**（第 4 节），部署口径随之变化。
@@ -186,4 +245,4 @@ ADR-0016 §9 定的是「`POST /runs` 成功后立刻把 `run_id` **单独打一
   stdout 不再是唯一观察面，JSON Lines 是否仍是主载体要重新判。
 - **第 4 节的「值可打」绑在「日志文件权限 0600 且不外采」上**。一旦日志要采集到目标端之外
   或接入集中式日志系统，这条必须先重开——那时它就不再是文件权限能兜住的事。
-- **第 6 节的下界会随实现补齐为 `event` 闭集**；补齐时本 ADR 不作废，第 1、2、4、5 节仍有效。
+- **第 6 节闭集若要新增事件或字段**，须同时更新实现、契约测试与 M2 消费者；已有字段仍只增不删不改义。

@@ -16,6 +16,19 @@
 
 待补充（依赖安装、配置数据源连接、启动服务）。
 
+## 运行日志
+
+`db-qbs-source` 与 `db-qbs-sink` 只向 stdout 输出 JSON Lines。失败记录可能包含业务列值；
+需要重定向到文件时，须在创建文件前收紧权限：
+
+```sh
+umask 077
+db-qbs-source --config source.toml --task task.toml --biz-date 2026-08-14 > run.jsonl
+chmod 0600 run.jsonl
+```
+
+日志文件不得放宽为 0644，也不得采集或转发到目标端之外。完整字段契约见 ADR-0017 §6。
+
 ## 开发
 
 待补充（构建、测试、本地运行）。

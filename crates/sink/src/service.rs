@@ -484,14 +484,78 @@ fn verify_failed_error(
 }
 
 fn write_batch_api_error(run_id: &str, seq: u64, error: WriteBatchError) -> ApiError {
-    let WriteBatchError::Other(message) = error;
-    ApiError {
-        status: 500,
-        code: "INTERNAL_PRECHECK_ESCAPE",
-        message: format!("第 {seq} 批写入暂存表失败，整批事务已回滚：{message}；目标表未被改动"),
-        run_id: Some(run_id.to_owned()),
-        details: json!({ "seq": seq }),
+    match error {
+        WriteBatchError::DataValue {
+            mysql_code,
+            column,
+            value,
+        } => ApiError {
+            status: 400,
+            code: "BAD_REQUEST",
+            message: mysql_data_value_message(seq, mysql_code, &column, value.as_deref()),
+            run_id: Some(run_id.to_owned()),
+            details: json!({
+                "seq": seq,
+                "mysql_code": mysql_code,
+                "column": column,
+                "value": value,
+            }),
+        },
+        WriteBatchError::PrecheckEscape {
+            mysql_code,
+            column,
+            value,
+        } => ApiError {
+            status: 500,
+            code: "INTERNAL_PRECHECK_ESCAPE",
+            message: format!(
+                "第 {seq} 批出现 MySQL Note {mysql_code}：预检本应阻止的静默改值路径逃逸；这是 P0 程序缺陷，不是运行故障，请报 issue"
+            ),
+            run_id: Some(run_id.to_owned()),
+            details: json!({
+                "seq": seq,
+                "mysql_code": mysql_code,
+                "column": column,
+                "value": value,
+            }),
+        },
+        WriteBatchError::Environment { mysql_code } => ApiError {
+            status: 500,
+            code: "SWAP_FAILED",
+            message: format!(
+                "第 {seq} 批写入被 MySQL ERROR {mysql_code} 拒绝：max_allowed_packet 低于开连接仪式要求或运行期被改小；这是目标端环境配置错误，请恢复到至少 64 MiB，不要排查业务数据"
+            ),
+            run_id: Some(run_id.to_owned()),
+            details: json!({ "seq": seq, "mysql_code": mysql_code }),
+        },
+        WriteBatchError::Other(message) => ApiError {
+            status: 500,
+            code: "SWAP_FAILED",
+            message: format!(
+                "第 {seq} 批写入暂存表失败，整批事务已回滚：{message}；这是目标端故障，目标表未被改动"
+            ),
+            run_id: Some(run_id.to_owned()),
+            details: json!({ "seq": seq }),
+        },
     }
+}
+
+fn mysql_data_value_message(
+    seq: u64,
+    mysql_code: u16,
+    column: &str,
+    value: Option<&str>,
+) -> String {
+    let value = value.unwrap_or("<无法从 MySQL 错误定位原值>");
+    let reason = match mysql_code {
+        1264 => "超出目标数值范围，请修正该列数据",
+        1292 => "不是目标日期列可接受的日期时间，请修正该列数据",
+        1366 => "无法按目标列字符集写入，请检查该列字符集与这个值",
+        _ => "未被目标列接受，请修正该列数据",
+    };
+    format!(
+        "第 {seq} 批数据问题：列 {column} 的值 {value} {reason}；整批事务已回滚，目标表未被改动"
+    )
 }
 
 fn validate_open_request(request: &OpenRunRequest) -> Result<(), ApiError> {

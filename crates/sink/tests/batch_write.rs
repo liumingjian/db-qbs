@@ -24,6 +24,7 @@ struct FakeDestination {
     committed_rows: Mutex<Vec<Vec<Option<String>>>>,
     fail_chunk: Mutex<Option<usize>>,
     affected_rows: Mutex<Option<u64>>,
+    write_error: Mutex<Option<WriteBatchError>>,
 }
 
 impl Destination for FakeDestination {
@@ -42,6 +43,9 @@ impl Destination for FakeDestination {
         rows: &[Vec<Option<String>>],
         max_rows_per_insert: usize,
     ) -> Result<u64, WriteBatchError> {
+        if let Some(error) = self.write_error.lock().unwrap().take() {
+            return Err(error);
+        }
         self.calls.lock().unwrap().push(BatchCall {
             columns: columns.to_vec(),
             rows: rows.to_vec(),
@@ -78,6 +82,93 @@ impl Destination for FakeDestination {
     fn drop_staging(&self, _staging_table: &str) -> Result<(), DropStagingError> {
         Ok(())
     }
+}
+
+#[test]
+fn value_errors_name_the_column_and_value_as_data_problems() {
+    for (mysql_code, expected) in [
+        (1264, "超出目标数值范围"),
+        (1292, "不是目标日期列可接受的日期时间"),
+        (1366, "无法按目标列字符集写入"),
+    ] {
+        let (sources, targets) = columns(3);
+        let destination = Arc::new(FakeDestination {
+            columns: targets,
+            write_error: Mutex::new(Some(WriteBatchError::DataValue {
+                mysql_code,
+                column: "C_1".to_owned(),
+                value: Some("bad-value".to_owned()),
+            })),
+            ..FakeDestination::default()
+        });
+        let service = SinkService::new("qbs", destination);
+        service.open(open_request(sources)).unwrap();
+
+        let error = service.write_batch(RUN_ID, payload(1, 1, 3)).unwrap_err();
+
+        assert_eq!((error.status, error.code), (400, "BAD_REQUEST"));
+        assert_eq!(error.details["mysql_code"], mysql_code);
+        assert_eq!(error.details["column"], "C_1");
+        assert_eq!(error.details["value"], "bad-value");
+        assert!(error.message.contains("列 C_1"), "{}", error.message);
+        assert!(error.message.contains("值 bad-value"), "{}", error.message);
+        assert!(error.message.contains(expected), "{}", error.message);
+        assert!(!error.message.contains("程序缺陷"), "{}", error.message);
+    }
+}
+
+#[test]
+fn note_1265_is_a_distinct_p0_precheck_escape() {
+    let (sources, targets) = columns(3);
+    let destination = Arc::new(FakeDestination {
+        columns: targets,
+        write_error: Mutex::new(Some(WriteBatchError::PrecheckEscape {
+            mysql_code: 1265,
+            column: Some("C_1".to_owned()),
+            value: Some("rounded".to_owned()),
+        })),
+        ..FakeDestination::default()
+    });
+    let service = SinkService::new("qbs", destination);
+    service.open(open_request(sources)).unwrap();
+
+    let error = service.write_batch(RUN_ID, payload(1, 1, 3)).unwrap_err();
+
+    assert_eq!(
+        (error.status, error.code),
+        (500, "INTERNAL_PRECHECK_ESCAPE")
+    );
+    assert_eq!(error.details["column"], "C_1");
+    assert_eq!(error.details["value"], "rounded");
+    assert!(error.message.contains("P0"), "{}", error.message);
+    assert!(error.message.contains("程序缺陷"), "{}", error.message);
+}
+
+#[test]
+fn error_1153_points_to_environment_configuration_not_data() {
+    let (sources, targets) = columns(3);
+    let destination = Arc::new(FakeDestination {
+        columns: targets,
+        write_error: Mutex::new(Some(WriteBatchError::Environment { mysql_code: 1153 })),
+        ..FakeDestination::default()
+    });
+    let service = SinkService::new("qbs", destination);
+    service.open(open_request(sources)).unwrap();
+
+    let error = service.write_batch(RUN_ID, payload(1, 1, 3)).unwrap_err();
+
+    assert_eq!((error.status, error.code), (500, "SWAP_FAILED"));
+    assert!(
+        error.message.contains("max_allowed_packet"),
+        "{}",
+        error.message
+    );
+    assert!(error.message.contains("环境配置"), "{}", error.message);
+    assert!(
+        error.message.contains("不要排查业务数据"),
+        "{}",
+        error.message
+    );
 }
 
 #[test]

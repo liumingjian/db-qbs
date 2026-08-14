@@ -75,11 +75,74 @@ pub enum LogLevel {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogEvent {
+    CliFailed,
+    SourceStarted,
+    BusinessDateInvalid,
+    SourceConfigFailed,
+    TaskConfigFailed,
+    SqlShapePrecheckFailed,
+    SqlShapePrecheckPassed,
+    StageChanged,
+    MappingPrecheckFailed,
+    RunOpened,
+    BatchPushed,
+    CommitDiagnosed,
+    AbortFailed,
+    RunFinished,
+    SinkUnavailable,
+    HttpResponseFailed,
+}
+
+impl LogEvent {
+    pub const ALL: [Self; 16] = [
+        Self::CliFailed,
+        Self::SourceStarted,
+        Self::BusinessDateInvalid,
+        Self::SourceConfigFailed,
+        Self::TaskConfigFailed,
+        Self::SqlShapePrecheckFailed,
+        Self::SqlShapePrecheckPassed,
+        Self::StageChanged,
+        Self::MappingPrecheckFailed,
+        Self::RunOpened,
+        Self::BatchPushed,
+        Self::CommitDiagnosed,
+        Self::AbortFailed,
+        Self::RunFinished,
+        Self::SinkUnavailable,
+        Self::HttpResponseFailed,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CliFailed => "cli_failed",
+            Self::SourceStarted => "source_started",
+            Self::BusinessDateInvalid => "business_date_invalid",
+            Self::SourceConfigFailed => "source_config_failed",
+            Self::TaskConfigFailed => "task_config_failed",
+            Self::SqlShapePrecheckFailed => "sql_shape_precheck_failed",
+            Self::SqlShapePrecheckPassed => "sql_shape_precheck_passed",
+            Self::StageChanged => "stage_changed",
+            Self::MappingPrecheckFailed => "mapping_precheck_failed",
+            Self::RunOpened => "run_opened",
+            Self::BatchPushed => "batch_pushed",
+            Self::CommitDiagnosed => "commit_diagnosed",
+            Self::AbortFailed => "abort_failed",
+            Self::RunFinished => "run_finished",
+            Self::SinkUnavailable => "sink_unavailable",
+            Self::HttpResponseFailed => "http_response_failed",
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct LogLine<'a, T> {
     ts: String,
     level: LogLevel,
-    event: &'a str,
+    event: LogEvent,
     run_id: Option<&'a str>,
     task: Option<&'a str>,
     #[serde(flatten)]
@@ -92,7 +155,7 @@ struct NoFields {}
 pub fn write_log_line_with_fields(
     writer: &mut impl Write,
     level: LogLevel,
-    event: &str,
+    event: LogEvent,
     run_id: Option<&str>,
     task: Option<&str>,
     fields: impl Serialize,
@@ -113,7 +176,7 @@ pub fn write_log_line_with_fields(
 pub fn write_log_line(
     writer: &mut impl Write,
     level: LogLevel,
-    event: &str,
+    event: LogEvent,
     run_id: Option<&str>,
     task: Option<&str>,
 ) -> io::Result<()> {

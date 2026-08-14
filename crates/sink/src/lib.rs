@@ -184,6 +184,19 @@ pub enum DropStagingError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteBatchError {
+    DataValue {
+        mysql_code: u16,
+        column: String,
+        value: Option<String>,
+    },
+    PrecheckEscape {
+        mysql_code: u16,
+        column: Option<String>,
+        value: Option<String>,
+    },
+    Environment {
+        mysql_code: u16,
+    },
     Other(String),
 }
 
