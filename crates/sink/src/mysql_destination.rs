@@ -2,10 +2,14 @@ use std::fmt;
 use std::sync::Mutex;
 
 use mysql::prelude::Queryable;
-use mysql::{params, Conn, Error as MysqlError, Opts, OptsBuilder};
+use mysql::{
+    params, Conn, Error as MysqlError, Opts, OptsBuilder, Params, TxOpts, Value as MysqlValue,
+};
 
 use crate::service::quote_identifier;
-use crate::{CreateStagingError, Destination, DropStagingError, SinkConfig, TargetColumn};
+use crate::{
+    CreateStagingError, Destination, DropStagingError, SinkConfig, TargetColumn, WriteBatchError,
+};
 
 type MetadataRow = (
     String,
@@ -92,6 +96,37 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
             .map_err(classify_create_error)
     }
 
+    fn write_batch(
+        &self,
+        staging_table: &str,
+        columns: &[String],
+        rows: &[Vec<Option<String>>],
+        chunk_rows: usize,
+    ) -> Result<u64, WriteBatchError> {
+        self.pool
+            .with_conn(|connection| {
+                let mut transaction = connection.start_transaction(TxOpts::default())?;
+                let mut affected_rows = 0;
+                for chunk in rows.chunks(chunk_rows) {
+                    let statement =
+                        build_insert_statement(&self.database, staging_table, columns, chunk.len());
+                    let values = chunk
+                        .iter()
+                        .flat_map(|row| row.iter())
+                        .map(|value| match value {
+                            Some(value) => MysqlValue::Bytes(value.as_bytes().to_vec()),
+                            None => MysqlValue::NULL,
+                        })
+                        .collect();
+                    transaction.exec_drop(statement, Params::Positional(values))?;
+                    affected_rows += transaction.affected_rows();
+                }
+                transaction.commit()?;
+                Ok(affected_rows)
+            })
+            .map_err(|error| WriteBatchError::Other(error.to_string()))
+    }
+
     fn drop_staging(&self, staging_table: &str) -> Result<(), DropStagingError> {
         let statement = format!(
             "DROP TABLE IF EXISTS {}.{}",
@@ -102,6 +137,27 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
             .with_conn(|connection| connection.query_drop(statement))
             .map_err(classify_drop_error)
     }
+}
+
+fn build_insert_statement(
+    database: &str,
+    staging_table: &str,
+    columns: &[String],
+    row_count: usize,
+) -> String {
+    let column_count = columns.len();
+    let columns = columns
+        .iter()
+        .map(|column| quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let row = format!("({})", vec!["?"; column_count].join(","));
+    format!(
+        "INSERT INTO {}.{} ({columns}) VALUES {}",
+        quote_identifier(database),
+        quote_identifier(staging_table),
+        vec![row; row_count].join(",")
+    )
 }
 
 // Connections enter this pool only after the creation hook has completed.
@@ -261,5 +317,26 @@ pub fn check_connection_settings(
         Ok(())
     } else {
         Err(problems.join("；"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_insert_statement;
+
+    #[test]
+    fn insert_statement_has_explicit_source_order_and_one_placeholder_per_value() {
+        let statement = build_insert_statement(
+            "qbs",
+            "T_POSITION__stg_run",
+            &["C_SECOND".to_owned(), "C_FIRST".to_owned()],
+            3,
+        );
+
+        assert_eq!(
+            statement,
+            "INSERT INTO `qbs`.`T_POSITION__stg_run` (`C_SECOND`, `C_FIRST`) VALUES (?,?),(?,?),(?,?)"
+        );
+        assert_eq!(statement.matches('?').count(), 6);
     }
 }

@@ -12,10 +12,13 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use db_qbs_shared::BatchPayload;
 pub use http::serve;
 pub use mysql_destination::{check_connection_settings, MysqlDestination};
 pub use precheck::precheck;
 pub use service::build_staging_ddl;
+
+const MAX_STATEMENT_PLACEHOLDERS: usize = 65_535;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -95,6 +98,13 @@ pub struct AbortResponse {
     pub staging_dropped: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BatchResponse {
+    pub seq: u64,
+    pub rows_written: u64,
+    pub next_seq: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateStagingError {
     TableExists,
@@ -108,16 +118,35 @@ pub enum DropStagingError {
     Other(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteBatchError {
+    Other(String),
+}
+
 pub trait Destination: Send + Sync {
     fn target_columns(&self, target_table: &str) -> Result<Vec<TargetColumn>, String>;
     fn create_staging(&self, staging_table: &str, ddl: &str) -> Result<(), CreateStagingError>;
+    fn write_batch(
+        &self,
+        staging_table: &str,
+        columns: &[String],
+        rows: &[Vec<Option<String>>],
+        chunk_rows: usize,
+    ) -> Result<u64, WriteBatchError>;
     fn drop_staging(&self, staging_table: &str) -> Result<(), DropStagingError>;
+}
+
+struct ActiveRun {
+    staging_table: String,
+    source_columns: Vec<String>,
+    chunk_rows: usize,
+    next_seq: u64,
 }
 
 pub struct SinkService<D: Destination> {
     database: String,
     destination: Arc<D>,
-    active_runs: Mutex<HashMap<String, String>>,
+    active_runs: Mutex<HashMap<String, ActiveRun>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

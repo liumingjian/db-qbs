@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
-use crate::{ApiError, Destination, MysqlDestination, OpenRunRequest, SinkConfig, SinkService};
+use crate::{
+    ApiError, BatchPayload, Destination, MysqlDestination, OpenRunRequest, SinkConfig, SinkService,
+};
 
 const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -33,13 +35,10 @@ fn handle_request<D: Destination>(mut request: Request, service: &SinkService<D>
     let response = if method == Method::Post && path == "/v1/runs" {
         handle_open(&mut request, service)
     } else if method == Method::Post {
-        match path
-            .strip_prefix("/v1/runs/")
-            .and_then(|path| path.strip_suffix("/abort"))
-            .filter(|run_id| !run_id.is_empty() && !run_id.contains('/'))
-        {
-            Some(run_id) => handle_abort(&mut request, service, run_id),
-            None => error_response(not_found()),
+        match run_action(&path) {
+            Some((run_id, "batches")) => handle_batch(&mut request, service, run_id),
+            Some((run_id, "abort")) => handle_abort(&mut request, service, run_id),
+            _ => error_response(not_found()),
         }
     } else {
         error_response(not_found())
@@ -48,6 +47,12 @@ fn handle_request<D: Destination>(mut request: Request, service: &SinkService<D>
     if let Err(error) = request.respond(response) {
         eprintln!("HTTP 响应写入失败：{error}");
     }
+}
+
+fn run_action(path: &str) -> Option<(&str, &str)> {
+    let path = path.strip_prefix("/v1/runs/")?;
+    let (run_id, action) = path.split_once('/')?;
+    (!run_id.is_empty() && !action.is_empty() && !action.contains('/')).then_some((run_id, action))
 }
 
 fn handle_open(request: &mut Request, service: &SinkService<impl Destination>) -> HttpResponse {
@@ -65,6 +70,33 @@ fn handle_open(request: &mut Request, service: &SinkService<impl Destination>) -
         Err(error) => return error_response(error),
     };
     match service.open(request) {
+        Ok(response) => json_response(200, &response),
+        Err(error) => error_response(error),
+    }
+}
+
+fn handle_batch(
+    request: &mut Request,
+    service: &SinkService<impl Destination>,
+    run_id: &str,
+) -> HttpResponse {
+    if !has_json_content_type(request) {
+        return error_response(ApiError {
+            status: 415,
+            code: "BAD_REQUEST",
+            message: "Content-Type 必须是 application/json".to_owned(),
+            run_id: Some(run_id.to_owned()),
+            details: json!({}),
+        });
+    }
+    let payload: BatchPayload = match read_json(request) {
+        Ok(payload) => payload,
+        Err(mut error) => {
+            error.run_id = Some(run_id.to_owned());
+            return error_response(error);
+        }
+    };
+    match service.write_batch(run_id, payload) {
         Ok(response) => json_response(200, &response),
         Err(error) => error_response(error),
     }
@@ -172,7 +204,7 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::{CreateStagingError, DropStagingError, TargetColumn};
+    use crate::{CreateStagingError, DropStagingError, TargetColumn, WriteBatchError};
 
     #[derive(Default)]
     struct FakeDestination {
@@ -203,6 +235,16 @@ mod tests {
             Ok(())
         }
 
+        fn write_batch(
+            &self,
+            _staging_table: &str,
+            _columns: &[String],
+            rows: &[Vec<Option<String>>],
+            _chunk_rows: usize,
+        ) -> Result<u64, WriteBatchError> {
+            Ok(rows.len() as u64)
+        }
+
         fn drop_staging(&self, staging_table: &str) -> Result<(), DropStagingError> {
             self.dropped.lock().unwrap().push(staging_table.to_owned());
             Ok(())
@@ -223,6 +265,14 @@ mod tests {
         let (status, opened) = exchange(service.clone(), "/v1/runs", &open_body);
         assert_eq!(status, 200);
         assert_eq!(opened["run_id"], run_id);
+
+        let batch_path = format!("/v1/runs/{run_id}/batches");
+        let (status, batch) =
+            exchange(service.clone(), &batch_path, r#"{"seq":1,"rows":[[null]]}"#);
+        assert_eq!(status, 200);
+        assert_eq!(batch["seq"], 1);
+        assert_eq!(batch["rows_written"], 1);
+        assert_eq!(batch["next_seq"], 2);
 
         let abort_path = format!("/v1/runs/{run_id}/abort");
         let (status, aborted) = exchange(service.clone(), &abort_path, "{}");

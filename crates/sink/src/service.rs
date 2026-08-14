@@ -7,8 +7,9 @@ use serde_json::json;
 
 use crate::precheck::precheck_with_date_column;
 use crate::{
-    AbortResponse, ApiError, CreateStagingError, Destination, DropStagingError, OpenRunRequest,
-    OpenRunResponse, SinkService, TargetColumn,
+    AbortResponse, ActiveRun, ApiError, BatchPayload, BatchResponse, CreateStagingError,
+    Destination, DropStagingError, OpenRunRequest, OpenRunResponse, SinkService, TargetColumn,
+    MAX_STATEMENT_PLACEHOLDERS,
 };
 
 static RUN_ID_RE: LazyLock<Regex> =
@@ -64,12 +65,112 @@ impl<D: Destination> SinkService<D> {
         self.active_runs
             .lock()
             .expect("active run mutex poisoned")
-            .insert(request.run_id.clone(), staging_table.clone());
+            .insert(
+                request.run_id.clone(),
+                ActiveRun {
+                    staging_table: staging_table.clone(),
+                    source_columns: request
+                        .source_columns
+                        .iter()
+                        .map(|column| column.name.clone())
+                        .collect(),
+                    chunk_rows: MAX_STATEMENT_PLACEHOLDERS / request.source_columns.len(),
+                    next_seq: 1,
+                },
+            );
 
         Ok(OpenRunResponse {
             run_id: request.run_id,
             staging_table,
             columns_checked: target_columns.len(),
+        })
+    }
+
+    pub fn write_batch(
+        &self,
+        run_id: &str,
+        payload: BatchPayload,
+    ) -> Result<BatchResponse, ApiError> {
+        let mut active_runs = self.active_runs.lock().expect("active run mutex poisoned");
+        let run = active_runs.get_mut(run_id).ok_or_else(|| ApiError {
+            status: 404,
+            code: "RUN_UNKNOWN",
+            message: format!("未知 run {run_id}，不能接收批次，也不会重建暂存表"),
+            run_id: Some(run_id.to_owned()),
+            details: json!({}),
+        })?;
+
+        if payload.seq != run.next_seq {
+            return Err(ApiError {
+                status: 409,
+                code: "SEQ_MISMATCH",
+                message: format!(
+                    "run {run_id} 批次顺序不符：期望第 {} 批，实际第 {} 批",
+                    run.next_seq, payload.seq
+                ),
+                run_id: Some(run_id.to_owned()),
+                details: json!({ "expected": run.next_seq, "got": payload.seq }),
+            });
+        }
+
+        let column_count = run.source_columns.len();
+        if let Some((row_index, row)) = payload
+            .rows
+            .iter()
+            .enumerate()
+            .find(|(_, row)| row.len() != column_count)
+        {
+            return Err(ApiError {
+                status: 400,
+                code: "BAD_REQUEST",
+                message: format!(
+                    "第 {} 批第 {} 行有 {} 个值，source_columns 要求 {column_count} 个",
+                    payload.seq,
+                    row_index + 1,
+                    row.len()
+                ),
+                run_id: Some(run_id.to_owned()),
+                details: json!({
+                    "seq": payload.seq,
+                    "row": row_index + 1,
+                    "expected": column_count,
+                    "got": row.len(),
+                }),
+            });
+        }
+
+        let rows_written = self
+            .destination
+            .write_batch(
+                &run.staging_table,
+                &run.source_columns,
+                &payload.rows,
+                run.chunk_rows,
+            )
+            .map_err(|error| batch_write_api_error(run_id, payload.seq, error))?;
+        if rows_written != payload.rows.len() as u64 {
+            return Err(ApiError {
+                status: 500,
+                code: "INTERNAL_PRECHECK_ESCAPE",
+                message: format!(
+                    "第 {} 批写入行数断言失败：发送 {} 行，MySQL affected_rows 合计为 {rows_written}；这是程序缺陷，不是数据或环境问题，请报 issue",
+                    payload.seq,
+                    payload.rows.len()
+                ),
+                run_id: Some(run_id.to_owned()),
+                details: json!({
+                    "seq": payload.seq,
+                    "expected": payload.rows.len(),
+                    "written": rows_written,
+                }),
+            });
+        }
+
+        run.next_seq += 1;
+        Ok(BatchResponse {
+            seq: payload.seq,
+            rows_written,
+            next_seq: run.next_seq,
         })
     }
 
@@ -79,7 +180,7 @@ impl<D: Destination> SinkService<D> {
             .lock()
             .expect("active run mutex poisoned")
             .get(run_id)
-            .cloned();
+            .map(|run| run.staging_table.clone());
 
         let Some(staging_table) = staging_table else {
             return Ok(AbortResponse {
@@ -100,6 +201,17 @@ impl<D: Destination> SinkService<D> {
             run_id: run_id.to_owned(),
             staging_dropped: true,
         })
+    }
+}
+
+fn batch_write_api_error(run_id: &str, seq: u64, error: crate::WriteBatchError) -> ApiError {
+    let crate::WriteBatchError::Other(message) = error;
+    ApiError {
+        status: 500,
+        code: "INTERNAL_PRECHECK_ESCAPE",
+        message: format!("第 {seq} 批写入暂存表失败，整批事务已回滚：{message}；目标表未被改动"),
+        run_id: Some(run_id.to_owned()),
+        details: json!({ "seq": seq }),
     }
 }
 

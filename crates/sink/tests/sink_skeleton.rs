@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use db_qbs_sink::{
     build_staging_ddl, check_connection_settings, precheck, CreateStagingError, Destination,
     DropStagingError, OpenRunRequest, SinkConfig, SinkService, SourceColumn, TargetColumn,
+    WriteBatchError,
 };
 
 const RUN_ID: &str = "20260814091530_a3f19c";
@@ -245,6 +246,16 @@ impl Destination for FakeDestination {
             .unwrap()
             .push((staging_table.to_owned(), ddl.to_owned()));
         Ok(())
+    }
+
+    fn write_batch(
+        &self,
+        _staging_table: &str,
+        _columns: &[String],
+        rows: &[Vec<Option<String>>],
+        _chunk_rows: usize,
+    ) -> Result<u64, WriteBatchError> {
+        Ok(rows.len() as u64)
     }
 
     fn drop_staging(&self, staging_table: &str) -> Result<(), DropStagingError> {
