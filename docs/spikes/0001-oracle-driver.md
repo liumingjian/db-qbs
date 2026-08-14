@@ -91,7 +91,7 @@ amd64 模拟的 Oracle XE 11.2.0.2 + arm64 原生 MySQL 8.0（`utf8mb4`）。
 
 [#11](https://github.com/liumingjian/db-qbs/issues/11) **已结**：本条的先决输入本是 #2 的真实类型清单，
 但客户环境不可达，故按默认答案收口 —— **ADR-0003 升格为白名单制**，
-只有 `NUMBER` / `DATE` / `TIMESTAMP` / `VARCHAR2` / `NVARCHAR2` / `CHAR` / `NCHAR` / `NULL`
+只有 `NUMBER` / `DATE` / `TIMESTAMP(n)`（`0 ≤ n ≤ 6`）/ `VARCHAR2` / `NVARCHAR2` / `CHAR` / `NCHAR` / `NULL`
 允许进入搬运链路，上述类型一律在**映射预检阶段报错拒绝**，不静默按某种默认形式搬过去。
 理由是两种错法代价不对称：排错了当场报错，定错了会以「checksum 对不上」的形式在下游远处爆出来。
 详见 ADR-0003「V1 类型白名单」一节。
@@ -527,7 +527,7 @@ M0 从"两个候选择优"塌缩成"ODPI-C 单点验证"——所以下面每一
 | `NUMBER(p,s)`，`s < 0`（负标度） | 同上（整数，无小数点） | `DECIMAL(p+\|s\|, 0)` | M3 | `NUMBER(8,-2)` 存的是百位对齐的整数，最大 10 位 |
 | `NUMBER`（无精度声明） | 同上 | **必须人工指定 `DECIMAL(p,s)`** | M3 | 元数据里 `p`/`s` 皆为 `NULL`，推不出目标精度。预检**不猜**，未指定即拒绝，见 7.4 第 2 条 |
 | `DATE` | `YYYY-MM-DD HH:MM:SS` | **`DATETIME`**（即 `DATETIME(0)`） | **M1 生效** | **不能用 `TIMESTAMP`**，见 7.4 第 3 条；往返已实测（§7.8 组 3） |
-| `TIMESTAMP(n)`，`n ≤ 6` | `YYYY-MM-DD HH:MM:SS.ffffff`（定长 6 位） | `DATETIME(6)` | M3 | `n > 6` 是 ADR-0003 的缺口，见 7.4 第 4 条；**写进 `DATETIME(0)` 会静默舍掉小数秒**（§7.8 组 3） |
+| `TIMESTAMP(n)`，`0 ≤ n ≤ 6` | `YYYY-MM-DD HH:MM:SS.ffffff`（定长 6 位） | `DATETIME(6)` | M3 | `n > 6` **映射预检拒绝**（[#12](https://github.com/liumingjian/db-qbs/issues/12) 已定案），见 7.4 第 4 条；**写进 `DATETIME(0)` 会静默舍掉小数秒**（§7.8 组 3） |
 | `VARCHAR2(n CHAR)` / `NVARCHAR2(n)` | 原样 UTF-8 | `VARCHAR(n)` | **M1 生效** | `n` 已是字符数，直接对齐 |
 | `VARCHAR2(n BYTE)` | 原样 UTF-8 | `VARCHAR(n)` | **M1 生效** | 字节语义：`ZHS16GBK` 下 `n` 字节至多 `n` 个字符，故 `VARCHAR(n)` **必然够**（偏松，不会截断） |
 | `CHAR(n)` / `NCHAR(n)` | 原样 UTF-8，**保留尾部空格** | **`VARCHAR(n)`** | M3 | **不能用 `CHAR(n)`**——已实测（§7.8 组 1），见 7.4 第 5 条 |
@@ -582,9 +582,11 @@ M0 从"两个候选择优"塌缩成"ODPI-C 单点验证"——所以下面每一
 3. **`DATE` 的目标类型是 `DATETIME`，不是 `TIMESTAMP`。** MySQL `TIMESTAMP` 有两处会静默改值：
    值域只到 2038（Oracle `DATE` 到 9999），且**按会话时区做转换**——搬运链路里出现时区转换，
    等于在正确性单点上引入一个环境依赖变量。`DATETIME` 无时区、无 2038 限制，原样存取。
-4. **ADR-0003 的 `TIMESTAMP` 白名单行没有标度上限——这是缺口。** 规范形式定死 6 位小数，
-   而 Oracle `TIMESTAMP` 最高 `(9)`。`TIMESTAMP(9)` 搬过来会**静默丢 3 位**，
-   正是白名单制要消灭的那种错法。已开 [#12](https://github.com/liumingjian/db-qbs/issues/12) 单独决策（拒绝 vs 截断），**M1 实现前必须有结论**。
+4. **`TIMESTAMP` 标度上限已定为 6**（[#12](https://github.com/liumingjian/db-qbs/issues/12) / ADR-0003）。
+   Oracle 允许 `TIMESTAMP(9)`，但规范形式与 MySQL `DATETIME(6)` 都只能保留 6 位；允许搬运会
+   **静默丢 3 位**，且 V1 的行数校验发现不了。故 `0 ≤ n ≤ 6` 才在白名单内，`n > 6` 必须在
+   映射预检按游标 describe 给出的源端 `scale` 报错拒绝，不做截断或值域扫描。M1 仍按 ADR-0009 拒绝全部
+   `TIMESTAMP`；本分支在 M3 放行该类型时生效。
 5. **`CHAR(n)` 的目标类型是 `VARCHAR(n)`，不是 `CHAR(n)`。** ADR-0003 要求 `CHAR` 保留尾部空格
    （§2.2 实测驱动确实给出 `"AB        "`），而 **MySQL `CHAR` 在读取时会剥掉尾部空格**
    （非 `PAD_CHAR_TO_FULL_LENGTH` 模式下），目标端 checksum 因此与源端不同。
@@ -721,7 +723,7 @@ V1 不受影响（V1 不比 checksum）——但不能让它以「已解决」�
 | `2026-08-13 14:35:09`（DATE） | `2026-08-13 14:35:09` | PASS | `2026-08-13 14:35:09.000000` | FAIL |
 | `2026-08-13 14:35:09.120000`（TIMESTAMP） | **`2026-08-13 14:35:09`** ⚠ | FAIL | `2026-08-13 14:35:09.120000` | PASS |
 
-§7.3 的映射**双向都验上了**：`DATE` → `DATETIME(0)`、`TIMESTAMP` → `DATETIME(6)`，
+§7.3 的映射**双向都验上了**：`DATE` → `DATETIME(0)`、`TIMESTAMP(6)` → `DATETIME(6)`，
 **错配任一方向都不成立**。注意第二行：小数秒写进 `DATETIME(0)` 被**静默舍掉，一条 Note 都没有**——
 与组 2 第 2 条同一类失效模式（静默改值），预检必须把标度对齐当硬约束。
 
@@ -757,7 +759,7 @@ ADR-0003「NULL 专用标记与空串区分」在目标端成立。
   没有任何运行期机制能发现，**只能在预检拦**。默认仍取「逐位相等」（最简单、也最严），
   但要知道它的作用是**保值**，不是保字节。
 - **`CHAR(n)` / `NCHAR(n)` 一律映射到 `VARCHAR(n)`**；生成建表 SQL 时目标端**不得出现 `CHAR`**。
-- **`DATE` → `DATETIME(0)`，`TIMESTAMP(n)` → `DATETIME(6)`，不得交叉**。
+- **`DATE` → `DATETIME(0)`，`TIMESTAMP(n)`（`0 ≤ n ≤ 6`）→ `DATETIME(6)`，不得交叉；`n > 6` 预检拒绝**。
 - 目标列**必须可空**，预检不得自动加 `NOT NULL`（否则 NULL 与空串在目标端塌成一个）。
 
 探针与脚本：`docs/spikes/fixtures/local-rig/probes/mysql-roundtrip.sql`、
