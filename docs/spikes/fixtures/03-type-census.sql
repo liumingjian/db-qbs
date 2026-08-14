@@ -1,10 +1,12 @@
--- M0-1 / #2 步骤 2：实际出现的类型集合（#3 的覆盖清单）
--- 用法：sqlplus user/pass@src @03-type-census.sql
+-- #2 上线前复验步骤 2：实际出现的类型集合（#3 的覆盖清单）
+-- 用法：NLS_LANG=AMERICAN_AMERICA.AL32UTF8 sqlplus -L user/pass@src @03-type-census.sql
 -- 产出：把输出贴回 issue #2，并写进 docs/spikes/0001-oracle-driver.md 第 1 节。
 
 SET LINESIZE 200
 SET PAGESIZE 100
 SET FEEDBACK OFF
+WHENEVER OSERROR EXIT 1
+WHENEVER SQLERROR EXIT FAILURE
 
 PROMPT ===== 类型 x 精度组合去重（每一行都是 #3 必须覆盖的一个用例）=====
 SELECT data_type,
@@ -20,17 +22,17 @@ SELECT data_type,
  ORDER BY data_type, data_precision, data_scale;
 
 PROMPT
-PROMPT ===== 11g 遗留类型点名检查（出现即为 #3 的高风险项）=====
--- LONG / LONG RAW: ODPI-C 支持有限且不能与 LOB 混取；XMLType/BFILE 需专门处理。
--- 命中任何一行，都要在 #3 里单独立一个用例。
+PROMPT ===== ADR-0003 白名单外类型点名检查（出现即回炉 #11）=====
+-- 直接取 ADR-0003 白名单的反集，避免新增或罕见类型因未被点名而漏报。
+-- 普通 TIMESTAMP(n) 在白名单内；带时区的 TIMESTAMP 变体不匹配 TIMESTAMP(%)。
 SELECT column_name, data_type
   FROM all_tab_columns@FA
  WHERE owner = 'HTBR45'
    AND table_name = 'T_R_FR_ASTSTAT'
-   AND (data_type IN ('LONG','LONG RAW','XMLTYPE','BFILE','ROWID','UROWID','RAW',
-                      'CLOB','NCLOB','BLOB','BINARY_FLOAT','BINARY_DOUBLE')
-        OR data_type LIKE 'INTERVAL%'
-        OR data_type LIKE 'TIMESTAMP%');
+   AND NOT (data_type IN ('NUMBER','DATE','VARCHAR2','NVARCHAR2','CHAR','NCHAR')
+            OR data_type = 'TIMESTAMP'
+            OR data_type LIKE 'TIMESTAMP(%)')
+ ORDER BY column_id;
 
 PROMPT
 PROMPT ===== TIMESTAMP 标度超过 6（V1 白名单外，映射预检必须拒绝）=====
@@ -51,3 +53,5 @@ SELECT column_name
    AND data_type = 'NUMBER'
    AND data_precision IS NULL
  ORDER BY column_id;
+
+EXIT
