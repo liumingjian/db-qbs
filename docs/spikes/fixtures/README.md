@@ -19,8 +19,9 @@
 | 3a | `04-gen-boundary-samples.sql` | `sqlplus -S user/pass@src @04-gen-boundary-samples.sql > 05-boundary-samples.sql` | 中间脚本，先审再跑 |
 | 3b | `05-boundary-samples.sql` | `sqlplus -S user/pass@src @05-boundary-samples.sql > samples-t_r_fr_aststat.csv` | 提交 CSV（**脱敏后**） |
 
-若步骤 0 查询远端 `V$PARAMETER` 报权限错误，不得把空输出当结论；请 DBA 在 `@FA` 指向的库执行
-`SELECT name, value FROM v$parameter WHERE name = 'undo_retention'`，把结果并入同一份记录。
+脚本遇到 SQL 或 OS 错误会以非零状态退出，不得把已有的部分输出或空输出当成完整结论。
+若步骤 0 查询远端 `V$PARAMETER` 报权限错误，请 DBA 在 `@FA` 指向的库执行
+`SELECT name, value FROM v$parameter WHERE name = 'undo_retention'`，把结果并入同一份记录后再判定。
 
 ## 七项复验与判定
 
@@ -31,7 +32,7 @@
 | 3 | 选步骤 3b 中含中文的真实行，走待上线同版本的完整 Oracle → MySQL 链路 | source 在序列化前的 UTF-8 字节与目标端 `HEX()` 读回值；必须逐值逐字节相同 | 乱码或截断即复审 ADR-0011 字符集边界，不能只凭行数通过 |
 | 4 | 在真实服务端和网络上跑 10 万行完整链路 | fetch / 推送 / commit 分段耗时与总时长 | 总时长远超“几十秒”即复审 ADR-0001；先按分段耗时定位服务端或网络 |
 | 5 | 读步骤 0 的远端版本 | 完整 11g 小版本 | `< 11.2.0.4` 时下调 Instant Client 版本 |
-| 6 | 读步骤 0 的 `ALL_OBJECTS@FA` / `ALL_SYNONYMS@FA` | `TABLE` / `VIEW` / `SYNONYM` 及最终去向 | 非表时按 spike §5.1 复验 `Remote SQL Information` 的投影下推 |
+| 6 | 读步骤 0 的 `ALL_OBJECTS@FA` / `ALL_SYNONYMS@FA`；若去向仍是同义词，按返回的 owner/name 逐级查询直至表或视图 | `TABLE` / `VIEW` / `SYNONYM` 的完整解析链与最终对象 | 非表时按 spike §5.1 复验 `Remote SQL Information` 的投影下推 |
 | 7 | 在并发写入压力下跑真实 run，并与步骤 0 的远端 `undo_retention` 对照 | 全程游标寿命、fetch / 推送累计耗时、`undo_retention`、是否出现 `ORA-01555` | run 时长逼近或超过保留时间时，把 DBA 保证提升为 M4 硬前置；推送过半则另开流水线复审票 |
 
 第 2、4、7 项使用待上线版本的 JSON Lines 日志：逐批行提供 `rows` / `bytes` / `ms`，`run_end`
