@@ -198,12 +198,14 @@ scenario_narrow() {
 
 scenario_source_kill() {
   local direct="$WORK_ROOT/kill-direct.jsonl" killed="$WORK_ROOT/kill.jsonl"
-  local rerun="$WORK_ROOT/kill-rerun.jsonl" baseline before after old_run new_run pid attempt
+  local rerun="$WORK_ROOT/kill-rerun.jsonl" baseline target_with_sentinel after old_run new_run pid attempt
   mysql_exec "DELETE FROM M1_NARROW" >/dev/null || return 1
   run_source "$NARROW_TASK" "$BIZ_DATE" "$direct" || return 1
   assert_source_success "$direct" 100000 || return 1
   baseline=$(narrow_hash) || return 1
-  before=$baseline
+  mysql_exec "INSERT INTO M1_NARROW (ROW_ID,V_TEXT,D_BIZ) VALUES (99999999,'kill-sentinel','$BIZ_DATE')" >/dev/null || return 1
+  target_with_sentinel=$(narrow_hash) || return 1
+  [[ "$target_with_sentinel" != "$baseline" ]] || fail "target sentinel did not change the direct-run baseline" || return 1
 
   compose exec -T client rm -f /tmp/m1-source.pid /tmp/m1-kill.jsonl || return 1
   compose exec -T -d client sh -c \
@@ -226,7 +228,7 @@ scenario_source_kill() {
   old_run=$(source_run_id "$killed")
   [[ -n "$old_run" ]] || fail "killed source never opened a run" || return 1
   after=$(narrow_hash) || return 1
-  assert_eq "target hash after source kill" "$before" "$after" || return 1
+  assert_eq "target hash after source kill" "$target_with_sentinel" "$after" || return 1
 
   reset_sink_state || return 1
   run_source "$NARROW_TASK" "$BIZ_DATE" "$rerun" || return 1
