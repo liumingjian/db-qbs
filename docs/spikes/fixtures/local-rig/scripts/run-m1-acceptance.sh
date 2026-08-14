@@ -380,8 +380,8 @@ write_report() {
       push=$(jq -r '.push_ms // 0' <<<"$terminal")
       cursor=$(jq -r '.cursor_ms // 0' <<<"$terminal")
       commit=$(jq -r '.commit_ms // 0' <<<"$terminal")
-      count=$(jq -r '.count_ms // 0' <<<"$terminal")
-      purged=$(jq -r '.purged_rows // 0' <<<"$terminal")
+      count=$(jq -r '.count_ms // "n/a"' <<<"$terminal")
+      purged=$(jq -r '.purged_rows // "n/a"' <<<"$terminal")
       ratio=$(jq -nr --argjson push "$push" --argjson cursor "$cursor" \
         'if $cursor == 0 then "n/a" else (($push * 10000 / $cursor | floor) / 100 | tostring) + "%" end')
       row_dist=$(jq -sr '[.[] | select(.event == "batch_pushed") | .rows] | if length == 0 then "n/a" else ((min|tostring)+"/"+(max|tostring)) end' "$log")

@@ -76,6 +76,16 @@ for measurement in fetch_ms push_ms cursor_ms commit_ms count_ms purged_rows; do
     exit 1
   }
 done
+if grep -Eq '(count_ms|purged_rows) // 0' "$runner"; then
+  echo "acceptance report must not turn unavailable commit measurements into zero" >&2
+  exit 1
+fi
+for measurement in count_ms purged_rows; do
+  grep -Fq ".$measurement // \"n/a\"" "$runner" || {
+    echo "acceptance report must identify unavailable $measurement as n/a" >&2
+    exit 1
+  }
+done
 grep -Eq 'batch_pushed.*\.bytes|\.bytes.*batch_pushed' "$runner" || {
   echo "acceptance report is missing the batch byte distribution" >&2
   exit 1
