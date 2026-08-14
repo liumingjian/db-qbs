@@ -171,12 +171,15 @@ narrow_hash() {
 }
 
 scenario_wide() {
-  local log="$WORK_ROOT/wide.jsonl"
+  local log="$WORK_ROOT/wide.jsonl" max_bytes max_rows max_rows_per_insert
   mysql_exec "DELETE FROM M1_WIDE" >/dev/null || return 1
   run_source "$WIDE_TASK" "$BIZ_DATE" "$log" || return 1
   assert_source_success "$log" 100000 || return 1
   assert_eq "wide target rows" 100000 "$(mysql_exec "SELECT COUNT(*) FROM M1_WIDE")" || return 1
-  local max_bytes
+  max_rows=$(jq -s '[.[] | select(.event == "batch_pushed") | .rows] | max' "$log") || return 1
+  max_rows_per_insert=$(( 65535 / 70 ))
+  (( max_rows > max_rows_per_insert )) ||
+    fail "70-column batches did not exercise placeholder sub-statement splitting" || return 1
   max_bytes=$(jq -s '[.[] | select(.event == "batch_pushed") | .bytes] | max' "$log") || return 1
   (( max_bytes <= 16 * 1024 * 1024 )) || fail "wide batch exceeded 16 MiB: $max_bytes"
 }

@@ -42,6 +42,13 @@ wide_columns=$(sed -n '/^SELECT /,/^  FROM /p' acceptance/task-wide.toml | grep 
   echo "wide task must select exactly 70 columns, found $wide_columns" >&2
   exit 1
 }
+wide_body=$(sed -n '/^scenario_wide()/,/^}/p' "$runner")
+for assertion in '65535 / 70' 'max_rows > max_rows_per_insert'; do
+  grep -Fq "$assertion" <<<"$wide_body" || {
+    echo "wide scenario must prove placeholder sub-statement splitting was exercised" >&2
+    exit 1
+  }
+done
 [[ $(grep -c 'CONNECT BY LEVEL <= 100000' acceptance/oracle.sql) == 2 ]] || {
   echo "both M1 source fixtures must contain 100000 rows" >&2
   exit 1
