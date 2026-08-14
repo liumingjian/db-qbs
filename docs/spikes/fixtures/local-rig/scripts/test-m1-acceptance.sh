@@ -97,6 +97,23 @@ for measurement in fetch_ms push_ms cursor_ms commit_ms count_ms purged_rows; do
     exit 1
   }
 done
+success_body=$(sed -n '/^assert_source_success()/,/^}/p' "$runner")
+for measurement in fetch_ms push_ms cursor_ms commit_ms count_ms purged_rows; do
+  grep -q "$measurement" <<<"$success_body" || {
+    echo "successful runs must require a numeric $measurement measurement" >&2
+    exit 1
+  }
+done
+for measurement in rows bytes; do
+  grep -Fq ".$measurement" <<<"$success_body" || {
+    echo "successful runs must require numeric per-batch $measurement measurements" >&2
+    exit 1
+  }
+done
+[[ $(grep -c 'type.*number' <<<"$success_body") -ge 2 ]] || {
+  echo "successful-run measurements must be numeric" >&2
+  exit 1
+}
 if grep -Eq '(count_ms|purged_rows) // 0' "$runner"; then
   echo "acceptance report must not turn unavailable commit measurements into zero" >&2
   exit 1

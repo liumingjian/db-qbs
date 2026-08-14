@@ -159,6 +159,15 @@ assert_source_success() {
     'select(.event == "run_finished") | .terminal' SUCCEEDED "terminal" || return 1
   assert_json_eq "$log" \
     'select(.event == "run_finished") | .source_rows' "$expected_rows" "source rows" || return 1
+  jq -e '
+    select(.event == "run_finished")
+    | [.fetch_ms, .push_ms, .cursor_ms, .commit_ms, .count_ms, .purged_rows]
+    | all(.[]; type == "number")
+  ' "$log" >/dev/null || fail "successful run is missing numeric terminal measurements" || return 1
+  jq -s -e '
+    [.[] | select(.event == "batch_pushed")]
+    | all(.[]; ((.rows | type) == "number" and (.bytes | type) == "number"))
+  ' "$log" >/dev/null || fail "successful run is missing numeric per-batch measurements" || return 1
   local batch_sum
   batch_sum=$(jq -s '[.[] | select(.event == "batch_pushed") | .rows] | add // 0' "$log") || return 1
   assert_eq "sum(batch rows)" "$expected_rows" "$batch_sum" || return 1
