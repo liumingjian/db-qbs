@@ -71,6 +71,14 @@ for assertion in 'kill-sentinel' 'target_with_sentinel' 'target hash after sourc
   }
 done
 
+commit_disconnect_body=$(sed -n '/^scenario_commit_disconnect()/,/^}/p' "$runner")
+for assertion in 'commit-sentinel' 'commit disconnect target rows.*0'; do
+  grep -Eq "$assertion" <<<"$commit_disconnect_body" || {
+    echo "commit-disconnect scenario must prove the diagnosed swap reached the target" >&2
+    exit 1
+  }
+done
+
 prepare_body=$(sed -n '/^prepare_rig()/,/^}/p' "$runner")
 grep -q 'drop_orphan_staging' <<<"$prepare_body" || {
   echo "acceptance setup must remove staging tables left by an interrupted run" >&2

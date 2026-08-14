@@ -255,6 +255,7 @@ start_commit_drop_proxy() {
 scenario_commit_disconnect() {
   local log="$WORK_ROOT/commit-disconnect.jsonl"
   reset_sink_state || return 1
+  mysql_exec "DELETE FROM M1_NARROW WHERE D_BIZ >= '$EMPTY_DATE' AND D_BIZ < '$EMPTY_DATE' + INTERVAL 1 DAY; INSERT INTO M1_NARROW (ROW_ID,V_TEXT,D_BIZ) VALUES (99999999,'commit-sentinel','$EMPTY_DATE')" >/dev/null || return 1
   start_commit_drop_proxy || return 1
   if run_source "$NARROW_TASK" "$EMPTY_DATE" "$log" "$DROP_CONFIG"; then
     fail "source unexpectedly succeeded after commit response disconnect"
@@ -266,7 +267,9 @@ scenario_commit_disconnect() {
   jq -e 'select(.event == "commit_diagnosed" and (.message | contains("目标表已是新数据")))' \
     "$log" >/dev/null || fail "commit diagnostic did not explain that target was swapped" || return 1
   assert_json_eq "$log" \
-    'select(.event == "run_finished") | .stage' COMMITTING "failed stage"
+    'select(.event == "run_finished") | .stage' COMMITTING "failed stage" || return 1
+  assert_eq "commit disconnect target rows" 0 \
+    "$(mysql_exec "SELECT COUNT(*) FROM M1_NARROW WHERE D_BIZ >= '$EMPTY_DATE' AND D_BIZ < '$EMPTY_DATE' + INTERVAL 1 DAY")"
 }
 
 scenario_empty() {
