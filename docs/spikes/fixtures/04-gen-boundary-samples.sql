@@ -9,7 +9,7 @@
 -- 采样口径（对应 ADR-0003 的规范形式表）：
 --   NUMBER      → 字符串最长的实际值（最大精度）/ 最小值（负数）/ 最大值 / 最高标度小数 / 零的条数 / NULL 条数
 --   DATE/TS     → 最早 / 最晚（TIMESTAMP 保留声明的小数秒精度）/ 含非零时分秒的条数 / NULL 条数
---   字符类       → 最长的一条 / 含多字节（中文）的一条 / NULL 条数
+--   字符类       → 最长的一条 / 含非 ASCII（中文）的一条 / NULL 条数
 -- 每种类型由这几路共同保证 ≥3 个边界样本。
 --
 -- 注意：LONG / LONG RAW / LOB / XMLType 不能用聚合函数，本脚本不覆盖；
@@ -78,7 +78,7 @@ SELECT 'SELECT ''' || column_name || ''' COLUMN_NAME, ''' || data_type
 SELECT 'SELECT ''' || column_name || ''' COLUMN_NAME, ''' || data_type
        || ''' DATA_TYPE, kind KIND, NVL(v,''<NULL>'') VALUE, NVL(LENGTH(v),0) VALUE_LEN FROM ('
        || ' SELECT ''max_len_val'' kind, MAX(' || column_name || ') KEEP (DENSE_RANK LAST ORDER BY LENGTH(' || column_name || ')) v FROM ' || tbl
-       || ' UNION ALL SELECT ''multibyte_val'', MAX(CASE WHEN LENGTHB(' || column_name || ') > LENGTH(' || column_name || ') THEN ' || column_name || ' END) FROM ' || tbl
+       || ' UNION ALL SELECT ''multibyte_val'', MAX(CASE WHEN ASCIISTR(' || column_name || ') <> ' || column_name || ' THEN ' || column_name || ' END) FROM ' || tbl
        || ' UNION ALL SELECT ''null_cnt'', TO_CHAR(COUNT(CASE WHEN ' || column_name || ' IS NULL THEN 1 END)) FROM ' || tbl
        || ' );'
   FROM all_tab_columns@FA, (SELECT 'htbr45.t_r_fr_aststat@FA' tbl FROM dual)
