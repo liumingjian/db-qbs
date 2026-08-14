@@ -5,4 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+chrono.workspace = true
 db-qbs-shared = { path = "../shared" }
+serde.workspace = true
+serde_json.workspace = true
+sqlparser.workspace = true
+toml.workspace = true
+url.workspace = true

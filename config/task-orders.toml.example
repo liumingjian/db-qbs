@@ -1,0 +1,9 @@
+source_sql = '''
+SELECT a.id AS ID, a.biz_day AS BIZ_DAY
+  FROM orders a
+ WHERE a.biz_day >= TO_DATE(:biz_date,'YYYY-MM-DD')
+   AND a.biz_day <  TO_DATE(:biz_date,'YYYY-MM-DD') + 1
+'''
+source_date_col = "BIZ_DAY"
+target_table = "ORDERS"
+target_date_col = "BIZ_DAY"

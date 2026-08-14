@@ -1,0 +1,5 @@
+oracle_connect_string = "//oracle:1521/XE"
+oracle_username = "source_user"
+oracle_password = "replace-me"
+oracle_client_lib_dir = "/opt/oracle/instantclient"
+sink_base_url = "http://127.0.0.1:8080"
