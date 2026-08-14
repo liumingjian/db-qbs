@@ -1,0 +1,8 @@
+[package]
+name = "db-qbs-source"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+db-qbs-shared = { path = "../shared" }

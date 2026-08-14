@@ -1,0 +1,11 @@
+name: CI
+
+on: push
+
+jobs:
+  pure-functions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test shared pure-function layer
+        run: cargo test -p db-qbs-shared
