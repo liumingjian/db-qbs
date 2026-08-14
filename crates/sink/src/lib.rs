@@ -167,10 +167,7 @@ pub struct AtomicSwapResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AtomicSwapError {
-    VerifyFailed {
-        staged_rows: u64,
-        count_ms: u64,
-    },
+    VerifyFailed { staged_rows: u64, count_ms: u64 },
     Other(String),
 }
 

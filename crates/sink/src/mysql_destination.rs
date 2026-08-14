@@ -221,12 +221,10 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
             AtomicSwapOutcome::VerifyFailed {
                 staged_rows,
                 count_ms,
-            } => {
-                Err(AtomicSwapError::VerifyFailed {
-                    staged_rows,
-                    count_ms,
-                })
-            }
+            } => Err(AtomicSwapError::VerifyFailed {
+                staged_rows,
+                count_ms,
+            }),
             AtomicSwapOutcome::SwapFailed(message) => Err(AtomicSwapError::Other(message)),
         }
     }
@@ -318,10 +316,7 @@ enum BatchWriteOutcome {
 
 enum AtomicSwapOutcome {
     Swapped(AtomicSwapResult),
-    VerifyFailed {
-        staged_rows: u64,
-        count_ms: u64,
-    },
+    VerifyFailed { staged_rows: u64, count_ms: u64 },
     SwapFailed(String),
 }
 
