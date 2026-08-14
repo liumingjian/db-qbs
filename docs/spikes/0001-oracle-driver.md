@@ -819,3 +819,45 @@ ADR-0009 的 `DATE` 规则只判 `fsp == 0`，**没判值域**——因为值域
 
 探针与脚本：`docs/spikes/fixtures/local-rig/probes/mysql-datetime-domain.sql`、
 `scripts/run-mysql-datetime-domain-probe.sh`（一次性，可重复执行）。
+
+### 7.10 Oracle 11g 分页批次边界实测（[#21](https://github.com/liumingjian/db-qbs/issues/21)，2026-08-14）
+
+**问的是什么**：[#15](https://github.com/liumingjian/db-qbs/issues/15) 的重试若只记住分页边界，
+失败后重新查询 Oracle，能不能拿回与首次读取完全相同的一批行？这里分别测本地表与 dblink，
+并对比非全排序键 `d_biz` 和全排序键 `d_biz, row_id`。
+
+**怎么跑**：在 Oracle Database 11g Express Edition 11.2.0.2.0 64-bit 上执行仓库内
+`pagination-boundary.sql`。服务端运行在全系统 x86 QEMU TCG 虚拟机中；本次只取服务端 SQL
+的集合结果，不据此推断性能。样本为 30000 行，原始行的 `d_biz` 全部相同；每组保存
+第 10001–15000 行共 5000 行作为基线。四组各静态重读 10 次后，再由自治事务提交一行
+排序在测量页之前的数据并重读。每次重读先物化一次，再计算相对各自基线的
+`missing / added / symmetric difference`，避免三个指标落在不同读一致性视图。
+
+#### 实测结果
+
+| 路径 | 排序键 | 静态重读 10 次 | 提交前置行后重读 |
+|---|---|---|---|
+| 本地 | `d_biz`（非全排序） | 每次 `0 / 0 / 0` | `0 / 0 / 0` |
+| 本地 | `d_biz, row_id`（全排序） | 每次 `0 / 0 / 0` | **`1 / 1 / 2`** |
+| dblink | `d_biz`（非全排序） | 每次 `0 / 0 / 0` | `0 / 0 / 0` |
+| dblink | `d_biz, row_id`（全排序） | 每次 `0 / 0 / 0` | **`1 / 1 / 2`** |
+
+四组基线都恰为 5000 行，探针以 `startup_status=0 probe_status=0` 结束。
+
+非全排序两组的零差异只是这一次数据形状与执行计划下的**观察值**，不是保证：`d_biz`
+相同的 30000 行之间没有规定顺序，Oracle 可以合法地返回另一组并列行。静态十轮为零只能说明
+本次未触发重排，不能把非全排序升级为可重试契约。
+
+全排序消除了并列行的任意顺序，静态十轮也确实稳定；但它只决定**单个读一致性视图内**的顺序。
+前置行提交后，重试查询取得新的读一致性视图，offset 之前多出一行，页边界随之移动。
+本地与 dblink 都实际少一行、增一行，证明**全排序键不足以保证同一批重读**。
+
+#### 落回 #15
+
+[#15](https://github.com/liumingjian/db-qbs/issues/15) 的方案 A（只记边界，失败后重查 Oracle）
+在源表允许两次读取之间发生提交时不能满足「重试仍是同一批」；给 SQL 补全排序键也救不了。
+因此选择 **方案 B：首次读取时在本地持久化该批原始字节，重试只重放这份物化结果**。
+分页边界不得作为批次身份或重试数据源。
+
+探针：`docs/spikes/fixtures/local-rig/probes/pagination-boundary.sql`；复跑入口：
+`docs/spikes/fixtures/local-rig/scripts/run-pagination-boundary-probe.sh`。
