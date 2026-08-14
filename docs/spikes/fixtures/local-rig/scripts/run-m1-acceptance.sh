@@ -164,12 +164,12 @@ source_run_id() {
 }
 
 assert_source_success() {
-  local log=$1 expected_rows=$2
+  local log=$1 expected_rows=$2 batch_events source_batches
   jq -e . "$log" >/dev/null || return 1
   assert_json_eq "$log" \
     'select(.event == "run_finished") | .terminal' SUCCEEDED "terminal" || return 1
   assert_json_eq "$log" \
-    'select(.event == "run_finished") | .source_rows' "$expected_rows" "source rows" || return 1
+    'select(.event == "run_finished") | .source_rows | numbers' "$expected_rows" "source rows" || return 1
   jq -e '
     select(.event == "run_finished")
     | [.fetch_ms, .push_ms, .cursor_ms, .commit_ms, .count_ms, .purged_rows]
@@ -179,6 +179,11 @@ assert_source_success() {
     [.[] | select(.event == "batch_pushed")]
     | all(.[]; ((.rows | type) == "number" and (.bytes | type) == "number"))
   ' "$log" >/dev/null || fail "successful run is missing numeric per-batch measurements" || return 1
+  source_batches=$(jq -er \
+    'select(.event == "run_finished") | .source_batches | numbers' "$log") ||
+    fail "successful run is missing a numeric source_batches total" || return 1
+  batch_events=$(jq -s '[.[] | select(.event == "batch_pushed")] | length' "$log") || return 1
+  assert_eq "source batch event count" "$source_batches" "$batch_events" || return 1
   local batch_sum
   batch_sum=$(jq -s '[.[] | select(.event == "batch_pushed") | .rows] | add // 0' "$log") || return 1
   assert_eq "sum(batch rows)" "$expected_rows" "$batch_sum" || return 1

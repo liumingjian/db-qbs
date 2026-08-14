@@ -118,6 +118,16 @@ for measurement in fetch_ms push_ms cursor_ms commit_ms count_ms purged_rows; do
   }
 done
 success_body=$(sed -n '/^assert_source_success()/,/^}/p' "$runner")
+for total in source_rows source_batches; do
+  grep -Fq ".$total | numbers" <<<"$success_body" || {
+    echo "successful runs must require a numeric $total terminal total" >&2
+    exit 1
+  }
+done
+grep -Fq 'source batch event count' <<<"$success_body" || {
+  echo "successful runs must match source_batches to completed batch evidence" >&2
+  exit 1
+}
 for measurement in fetch_ms push_ms cursor_ms commit_ms count_ms purged_rows; do
   grep -q "$measurement" <<<"$success_body" || {
     echo "successful runs must require a numeric $measurement measurement" >&2
