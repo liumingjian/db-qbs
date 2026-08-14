@@ -14,7 +14,7 @@ const GOLDEN_PAYLOAD: &str =
 struct BatchCall {
     columns: Vec<String>,
     rows: Vec<Vec<Option<String>>>,
-    chunk_rows: usize,
+    max_rows_per_insert: usize,
 }
 
 #[derive(Default)]
@@ -40,23 +40,23 @@ impl Destination for FakeDestination {
         _staging_table: &str,
         columns: &[String],
         rows: &[Vec<Option<String>>],
-        chunk_rows: usize,
+        max_rows_per_insert: usize,
     ) -> Result<u64, WriteBatchError> {
         self.calls.lock().unwrap().push(BatchCall {
             columns: columns.to_vec(),
             rows: rows.to_vec(),
-            chunk_rows,
+            max_rows_per_insert,
         });
 
-        let pending = rows.to_vec();
-        for (chunk_index, _) in rows.chunks(chunk_rows).enumerate() {
-            if *self.fail_chunk.lock().unwrap() == Some(chunk_index) {
+        let fail_chunk = *self.fail_chunk.lock().unwrap();
+        for (chunk_index, _) in rows.chunks(max_rows_per_insert).enumerate() {
+            if fail_chunk == Some(chunk_index) {
                 return Err(WriteBatchError::Other(format!(
                     "sub-statement {chunk_index} failed"
                 )));
             }
         }
-        self.committed_rows.lock().unwrap().extend(pending);
+        self.committed_rows.lock().unwrap().extend_from_slice(rows);
         Ok(self
             .affected_rows
             .lock()
@@ -94,7 +94,7 @@ fn golden_payload_keeps_source_order_null_and_empty_string() {
     assert_eq!(calls[0].rows, payload.rows);
     assert_eq!(calls[0].rows[0][3].as_deref(), Some(""));
     assert!(calls[0].rows[0][5].is_none());
-    assert_eq!(calls[0].chunk_rows, 65_535 / 6);
+    assert_eq!(calls[0].max_rows_per_insert, 65_535 / 6);
 }
 
 #[test]
@@ -111,7 +111,13 @@ fn narrow_batch_uses_one_statement_and_wide_batch_is_split_at_placeholder_limit(
         .unwrap();
     let narrow_calls = narrow_destination.calls.lock().unwrap();
     let narrow_call = &narrow_calls[0];
-    assert_eq!(narrow_call.rows.chunks(narrow_call.chunk_rows).count(), 1);
+    assert_eq!(
+        narrow_call
+            .rows
+            .chunks(narrow_call.max_rows_per_insert)
+            .count(),
+        1
+    );
 
     let (wide_sources, wide_targets) = columns(70);
     let wide_destination = Arc::new(FakeDestination {
@@ -125,8 +131,11 @@ fn narrow_batch_uses_one_statement_and_wide_batch_is_split_at_placeholder_limit(
         .unwrap();
     let wide_calls = wide_destination.calls.lock().unwrap();
     let wide_call = &wide_calls[0];
-    assert_eq!(wide_call.chunk_rows, 65_535 / 70);
-    assert_eq!(wide_call.rows.chunks(wide_call.chunk_rows).count(), 2);
+    assert_eq!(wide_call.max_rows_per_insert, 65_535 / 70);
+    assert_eq!(
+        wide_call.rows.chunks(wide_call.max_rows_per_insert).count(),
+        2
+    );
 }
 
 #[test]

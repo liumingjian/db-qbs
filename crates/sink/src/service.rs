@@ -9,7 +9,7 @@ use crate::precheck::precheck_with_date_column;
 use crate::{
     AbortResponse, ActiveRun, ApiError, BatchPayload, BatchResponse, CreateStagingError,
     Destination, DropStagingError, OpenRunRequest, OpenRunResponse, SinkService, TargetColumn,
-    MAX_STATEMENT_PLACEHOLDERS,
+    WriteBatchError, MAX_PREPARED_STATEMENT_PLACEHOLDERS,
 };
 
 static RUN_ID_RE: LazyLock<Regex> =
@@ -62,22 +62,21 @@ impl<D: Destination> SinkService<D> {
             .create_staging(&staging_table, &ddl)
             .map_err(|error| create_staging_api_error(&request.run_id, &staging_table, error))?;
 
+        let source_columns = request
+            .source_columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        let active_run = ActiveRun {
+            staging_table: staging_table.clone(),
+            max_rows_per_insert: MAX_PREPARED_STATEMENT_PLACEHOLDERS / source_columns.len(),
+            source_columns,
+            next_seq: 1,
+        };
         self.active_runs
             .lock()
             .expect("active run mutex poisoned")
-            .insert(
-                request.run_id.clone(),
-                ActiveRun {
-                    staging_table: staging_table.clone(),
-                    source_columns: request
-                        .source_columns
-                        .iter()
-                        .map(|column| column.name.clone())
-                        .collect(),
-                    chunk_rows: MAX_STATEMENT_PLACEHOLDERS / request.source_columns.len(),
-                    next_seq: 1,
-                },
-            );
+            .insert(request.run_id.clone(), active_run);
 
         Ok(OpenRunResponse {
             run_id: request.run_id,
@@ -145,22 +144,23 @@ impl<D: Destination> SinkService<D> {
                 &run.staging_table,
                 &run.source_columns,
                 &payload.rows,
-                run.chunk_rows,
+                run.max_rows_per_insert,
             )
-            .map_err(|error| batch_write_api_error(run_id, payload.seq, error))?;
-        if rows_written != payload.rows.len() as u64 {
+            .map_err(|error| write_batch_api_error(run_id, payload.seq, error))?;
+        let row_count = payload.rows.len();
+        if rows_written != row_count as u64 {
             return Err(ApiError {
                 status: 500,
                 code: "INTERNAL_PRECHECK_ESCAPE",
                 message: format!(
                     "第 {} 批写入行数断言失败：发送 {} 行，MySQL affected_rows 合计为 {rows_written}；这是程序缺陷，不是数据或环境问题，请报 issue",
                     payload.seq,
-                    payload.rows.len()
+                    row_count
                 ),
                 run_id: Some(run_id.to_owned()),
                 details: json!({
                     "seq": payload.seq,
-                    "expected": payload.rows.len(),
+                    "expected": row_count,
                     "written": rows_written,
                 }),
             });
@@ -204,8 +204,8 @@ impl<D: Destination> SinkService<D> {
     }
 }
 
-fn batch_write_api_error(run_id: &str, seq: u64, error: crate::WriteBatchError) -> ApiError {
-    let crate::WriteBatchError::Other(message) = error;
+fn write_batch_api_error(run_id: &str, seq: u64, error: WriteBatchError) -> ApiError {
+    let WriteBatchError::Other(message) = error;
     ApiError {
         status: 500,
         code: "INTERNAL_PRECHECK_ESCAPE",

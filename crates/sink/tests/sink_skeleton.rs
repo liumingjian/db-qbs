@@ -253,7 +253,7 @@ impl Destination for FakeDestination {
         _staging_table: &str,
         _columns: &[String],
         rows: &[Vec<Option<String>>],
-        _chunk_rows: usize,
+        _max_rows_per_insert: usize,
     ) -> Result<u64, WriteBatchError> {
         Ok(rows.len() as u64)
     }

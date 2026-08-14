@@ -101,16 +101,20 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
         staging_table: &str,
         columns: &[String],
         rows: &[Vec<Option<String>>],
-        chunk_rows: usize,
+        max_rows_per_insert: usize,
     ) -> Result<u64, WriteBatchError> {
         self.pool
             .with_conn(|connection| {
                 let mut transaction = connection.start_transaction(TxOpts::default())?;
                 let mut affected_rows = 0;
-                for chunk in rows.chunks(chunk_rows) {
-                    let statement =
-                        build_insert_statement(&self.database, staging_table, columns, chunk.len());
-                    let values = chunk
+                for row_chunk in rows.chunks(max_rows_per_insert) {
+                    let statement = build_insert_statement(
+                        &self.database,
+                        staging_table,
+                        columns,
+                        row_chunk.len(),
+                    );
+                    let values = row_chunk
                         .iter()
                         .flat_map(|row| row.iter())
                         .map(|value| match value {
@@ -146,17 +150,17 @@ fn build_insert_statement(
     row_count: usize,
 ) -> String {
     let column_count = columns.len();
-    let columns = columns
+    let quoted_columns = columns
         .iter()
         .map(|column| quote_identifier(column))
         .collect::<Vec<_>>()
         .join(", ");
-    let row = format!("({})", vec!["?"; column_count].join(","));
+    let row_placeholders = format!("({})", vec!["?"; column_count].join(","));
+    let value_placeholders = vec![row_placeholders; row_count].join(",");
     format!(
-        "INSERT INTO {}.{} ({columns}) VALUES {}",
+        "INSERT INTO {}.{} ({quoted_columns}) VALUES {value_placeholders}",
         quote_identifier(database),
-        quote_identifier(staging_table),
-        vec![row; row_count].join(",")
+        quote_identifier(staging_table)
     )
 }
 

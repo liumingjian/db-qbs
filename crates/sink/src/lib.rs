@@ -18,7 +18,7 @@ pub use mysql_destination::{check_connection_settings, MysqlDestination};
 pub use precheck::precheck;
 pub use service::build_staging_ddl;
 
-const MAX_STATEMENT_PLACEHOLDERS: usize = 65_535;
+const MAX_PREPARED_STATEMENT_PLACEHOLDERS: usize = 65_535;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -131,7 +131,7 @@ pub trait Destination: Send + Sync {
         staging_table: &str,
         columns: &[String],
         rows: &[Vec<Option<String>>],
-        chunk_rows: usize,
+        max_rows_per_insert: usize,
     ) -> Result<u64, WriteBatchError>;
     fn drop_staging(&self, staging_table: &str) -> Result<(), DropStagingError>;
 }
@@ -139,7 +139,7 @@ pub trait Destination: Send + Sync {
 struct ActiveRun {
     staging_table: String,
     source_columns: Vec<String>,
-    chunk_rows: usize,
+    max_rows_per_insert: usize,
     next_seq: u64,
 }
 

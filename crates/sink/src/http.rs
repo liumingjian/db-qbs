@@ -52,18 +52,15 @@ fn handle_request<D: Destination>(mut request: Request, service: &SinkService<D>
 fn run_action(path: &str) -> Option<(&str, &str)> {
     let path = path.strip_prefix("/v1/runs/")?;
     let (run_id, action) = path.split_once('/')?;
-    (!run_id.is_empty() && !action.is_empty() && !action.contains('/')).then_some((run_id, action))
+    if run_id.is_empty() || action.is_empty() || action.contains('/') {
+        return None;
+    }
+    Some((run_id, action))
 }
 
 fn handle_open(request: &mut Request, service: &SinkService<impl Destination>) -> HttpResponse {
     if !has_json_content_type(request) {
-        return error_response(ApiError {
-            status: 415,
-            code: "BAD_REQUEST",
-            message: "Content-Type 必须是 application/json".to_owned(),
-            run_id: None,
-            details: json!({}),
-        });
+        return error_response(unsupported_media_type(None));
     }
     let request: OpenRunRequest = match read_json(request) {
         Ok(request) => request,
@@ -81,13 +78,7 @@ fn handle_batch(
     run_id: &str,
 ) -> HttpResponse {
     if !has_json_content_type(request) {
-        return error_response(ApiError {
-            status: 415,
-            code: "BAD_REQUEST",
-            message: "Content-Type 必须是 application/json".to_owned(),
-            run_id: Some(run_id.to_owned()),
-            details: json!({}),
-        });
+        return error_response(unsupported_media_type(Some(run_id)));
     }
     let payload: BatchPayload = match read_json(request) {
         Ok(payload) => payload,
@@ -108,13 +99,7 @@ fn handle_abort(
     run_id: &str,
 ) -> HttpResponse {
     if !has_json_content_type(request) {
-        return error_response(ApiError {
-            status: 415,
-            code: "BAD_REQUEST",
-            message: "Content-Type 必须是 application/json".to_owned(),
-            run_id: Some(run_id.to_owned()),
-            details: json!({}),
-        });
+        return error_response(unsupported_media_type(Some(run_id)));
     }
     if let Err(error) = read_json::<EmptyBody>(request) {
         return error_response(error);
@@ -158,6 +143,16 @@ fn has_json_content_type(request: &Request) -> bool {
                 .as_str()
                 .eq_ignore_ascii_case("application/json")
     })
+}
+
+fn unsupported_media_type(run_id: Option<&str>) -> ApiError {
+    ApiError {
+        status: 415,
+        code: "BAD_REQUEST",
+        message: "Content-Type 必须是 application/json".to_owned(),
+        run_id: run_id.map(str::to_owned),
+        details: json!({}),
+    }
 }
 
 fn bad_request(message: String) -> ApiError {
@@ -240,7 +235,7 @@ mod tests {
             _staging_table: &str,
             _columns: &[String],
             rows: &[Vec<Option<String>>],
-            _chunk_rows: usize,
+            _max_rows_per_insert: usize,
         ) -> Result<u64, WriteBatchError> {
             Ok(rows.len() as u64)
         }
@@ -252,7 +247,17 @@ mod tests {
     }
 
     #[test]
-    fn http_open_and_abort_lifecycle_uses_contract_statuses_and_bodies() {
+    fn run_action_requires_exactly_one_run_and_action_segment() {
+        assert_eq!(run_action("/v1/runs/run/batches"), Some(("run", "batches")));
+        assert_eq!(run_action("/v1/runs/run/abort"), Some(("run", "abort")));
+        assert_eq!(run_action("/v1/runs//batches"), None);
+        assert_eq!(run_action("/v1/runs/run/"), None);
+        assert_eq!(run_action("/v1/runs/run/batches/extra"), None);
+        assert_eq!(run_action("/runs/run/batches"), None);
+    }
+
+    #[test]
+    fn http_open_batch_and_abort_lifecycle_uses_contract_statuses_and_bodies() {
         let service = Arc::new(SinkService::new(
             "qbs",
             Arc::new(FakeDestination::default()),
