@@ -40,7 +40,7 @@ SELECT 'SELECT ''' || column_name || ',' || data_type || ',''||kind||'',''||NVL(
        || ' SELECT ''max_len_val'' kind, MAX(TO_CHAR(' || column_name || ')) KEEP (DENSE_RANK LAST ORDER BY LENGTH(TO_CHAR(' || column_name || '))) v FROM ' || tbl
        || ' UNION ALL SELECT ''min_val'', TO_CHAR(MIN(' || column_name || ')) FROM ' || tbl
        || ' UNION ALL SELECT ''max_val'', TO_CHAR(MAX(' || column_name || ')) FROM ' || tbl
-       || ' UNION ALL SELECT ''max_scale_val'', TO_CHAR(MAX(CASE WHEN ' || column_name || ' <> TRUNC(' || column_name || ') THEN ' || column_name || ' END)) FROM ' || tbl
+       || ' UNION ALL SELECT ''max_scale_val'', MAX(TO_CHAR(CASE WHEN ' || column_name || ' <> TRUNC(' || column_name || ') THEN ' || column_name || ' END)) KEEP (DENSE_RANK LAST ORDER BY NVL(LENGTH(TO_CHAR(CASE WHEN ' || column_name || ' <> TRUNC(' || column_name || ') THEN ABS(' || column_name || ') - TRUNC(ABS(' || column_name || ')) END)), 0)) FROM ' || tbl
        || ' UNION ALL SELECT ''zero_cnt'', TO_CHAR(COUNT(CASE WHEN ' || column_name || ' = 0 THEN 1 END)) FROM ' || tbl
        || ' UNION ALL SELECT ''null_cnt'', TO_CHAR(COUNT(CASE WHEN ' || column_name || ' IS NULL THEN 1 END)) FROM ' || tbl
        || ' );'
