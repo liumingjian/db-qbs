@@ -55,8 +55,8 @@ probes/pagination-boundary.sql #21 的本地/dblink × 非全序/全序分页边
 probes/mysql-roundtrip.sql  #13 的目标端往返实测（CHAR 尾空格 / DECIMAL 标度 / DATETIME / NULL）
 ```
 
-`probes/` 里的脚本不参与建库，靠 `scripts/run-dblink-probe.sh` 手动跑；
-它们自建/自删所需的表与 dblink，可重复执行。
+`probes/` 里的脚本不参与建库，通过对应的 `scripts/run-*-probe.sh` 手动跑；
+它们按需自建/自删所需的表与 dblink，可重复执行。
 
 `oracle/` 与 `mysql/` 分别挂进两个镜像的 initdb 目录，**只在首次建库时执行一次**。
 改了 SQL 要重新生效，必须 `./scripts/down.sh && ./scripts/up.sh`（卷不删就不会重跑）。

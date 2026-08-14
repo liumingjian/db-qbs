@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the #21 Oracle 11g pagination-boundary probe. The rig must already be up.
+# 跑 #21 的 Oracle 11g 分页边界探针。台架需已 up。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

@@ -68,54 +68,57 @@ CREATE TABLE t_page_probe_result (
 );
 
 DECLARE
-  c_page_lo CONSTANT PLS_INTEGER := 10001;
-  c_page_hi CONSTANT PLS_INTEGER := 15000;
+  c_page_first_row CONSTANT PLS_INTEGER := 10001;
+  c_page_last_row  CONSTANT PLS_INTEGER := 15000;
 
-  FUNCTION page_sql(p_suffix VARCHAR2, p_order_by VARCHAR2) RETURN VARCHAR2 IS
+  FUNCTION build_page_query(
+    p_table_suffix     VARCHAR2,
+    p_order_expression VARCHAR2
+  ) RETURN VARCHAR2 IS
   BEGIN
     RETURN 'SELECT row_id FROM (' ||
-           'SELECT row_id, ROW_NUMBER() OVER (ORDER BY ' || p_order_by || ') rn ' ||
-           'FROM t_page_probe' || p_suffix ||
-           ') WHERE rn BETWEEN ' || c_page_lo || ' AND ' || c_page_hi;
+           'SELECT row_id, ROW_NUMBER() OVER (ORDER BY ' || p_order_expression || ') rn ' ||
+           'FROM t_page_probe' || p_table_suffix ||
+           ') WHERE rn BETWEEN ' || c_page_first_row || ' AND ' || c_page_last_row;
   END;
 
-  PROCEDURE save_baseline(
-    p_case_name VARCHAR2,
-    p_suffix    VARCHAR2,
-    p_order_by  VARCHAR2
+  PROCEDURE capture_baseline(
+    p_case_name        VARCHAR2,
+    p_table_suffix     VARCHAR2,
+    p_order_expression VARCHAR2
   ) IS
-    q VARCHAR2(32767);
+    page_query VARCHAR2(32767);
   BEGIN
-    q := page_sql(p_suffix, p_order_by);
+    page_query := build_page_query(p_table_suffix, p_order_expression);
     EXECUTE IMMEDIATE
       'INSERT INTO t_page_probe_baseline (case_name, row_id) ' ||
-      'SELECT :case_name, row_id FROM (' || q || ')'
+      'SELECT :case_name, row_id FROM (' || page_query || ')'
       USING p_case_name;
   END;
 
-  PROCEDURE measure(
-    p_phase      VARCHAR2,
-    p_round_no   PLS_INTEGER,
-    p_path       VARCHAR2,
-    p_order_key  VARCHAR2,
-    p_case_name  VARCHAR2,
-    p_suffix     VARCHAR2,
-    p_order_by   VARCHAR2
+  PROCEDURE measure_attempt(
+    p_phase            VARCHAR2,
+    p_round_no         PLS_INTEGER,
+    p_path             VARCHAR2,
+    p_order_key        VARCHAR2,
+    p_case_name        VARCHAR2,
+    p_table_suffix     VARCHAR2,
+    p_order_expression VARCHAR2
   ) IS
-    q        VARCHAR2(32767);
-    missing  NUMBER;
-    added    NUMBER;
+    page_query    VARCHAR2(32767);
+    missing_count NUMBER;
+    added_count   NUMBER;
   BEGIN
-    q := page_sql(p_suffix, p_order_by);
+    page_query := build_page_query(p_table_suffix, p_order_expression);
 
     DELETE FROM t_page_probe_attempt WHERE case_name = p_case_name;
     EXECUTE IMMEDIATE
       'INSERT INTO t_page_probe_attempt (case_name, row_id) ' ||
-      'SELECT :case_name, row_id FROM (' || q || ')'
+      'SELECT :case_name, row_id FROM (' || page_query || ')'
       USING p_case_name;
 
     SELECT COUNT(*)
-      INTO missing
+      INTO missing_count
       FROM (
         SELECT row_id FROM t_page_probe_baseline WHERE case_name = p_case_name
         MINUS
@@ -123,7 +126,7 @@ DECLARE
       );
 
     SELECT COUNT(*)
-      INTO added
+      INTO added_count
       FROM (
         SELECT row_id FROM t_page_probe_attempt WHERE case_name = p_case_name
         MINUS
@@ -133,10 +136,19 @@ DECLARE
     INSERT INTO t_page_probe_result
       (phase, round_no, path, order_key, missing_rows, added_rows, symmetric_diff)
     VALUES
-      (p_phase, p_round_no, p_path, p_order_key, missing, added, missing + added);
+      (p_phase, p_round_no, p_path, p_order_key,
+       missing_count, added_count, missing_count + added_count);
   END;
 
-  PROCEDURE concurrent_write IS
+  PROCEDURE measure_all_cases(p_phase VARCHAR2, p_round_no PLS_INTEGER) IS
+  BEGIN
+    measure_attempt(p_phase, p_round_no, 'LOCAL',  'NON_TOTAL', 'LOCAL_NON_TOTAL',  '',    'd_biz');
+    measure_attempt(p_phase, p_round_no, 'LOCAL',  'TOTAL',     'LOCAL_TOTAL',      '',    'd_biz, row_id');
+    measure_attempt(p_phase, p_round_no, 'DBLINK', 'NON_TOTAL', 'DBLINK_NON_TOTAL', '@fa', 'd_biz');
+    measure_attempt(p_phase, p_round_no, 'DBLINK', 'TOTAL',     'DBLINK_TOTAL',     '@fa', 'd_biz, row_id');
+  END;
+
+  PROCEDURE commit_preceding_row IS
     PRAGMA AUTONOMOUS_TRANSACTION;
   BEGIN
     INSERT INTO t_page_probe (row_id, d_biz, payload)
@@ -145,27 +157,21 @@ DECLARE
   END;
 
 BEGIN
-  save_baseline('LOCAL_NON_TOTAL',  '',    'd_biz');
-  save_baseline('LOCAL_TOTAL',      '',    'd_biz, row_id');
-  save_baseline('DBLINK_NON_TOTAL', '@fa', 'd_biz');
-  save_baseline('DBLINK_TOTAL',     '@fa', 'd_biz, row_id');
+  capture_baseline('LOCAL_NON_TOTAL',  '',    'd_biz');
+  capture_baseline('LOCAL_TOTAL',      '',    'd_biz, row_id');
+  capture_baseline('DBLINK_NON_TOTAL', '@fa', 'd_biz');
+  capture_baseline('DBLINK_TOTAL',     '@fa', 'd_biz, row_id');
   COMMIT;
 
   FOR i IN 1 .. 10 LOOP
-    measure('STATIC_REPEAT', i, 'LOCAL',  'NON_TOTAL', 'LOCAL_NON_TOTAL',  '',    'd_biz');
-    measure('STATIC_REPEAT', i, 'LOCAL',  'TOTAL',     'LOCAL_TOTAL',      '',    'd_biz, row_id');
-    measure('STATIC_REPEAT', i, 'DBLINK', 'NON_TOTAL', 'DBLINK_NON_TOTAL', '@fa', 'd_biz');
-    measure('STATIC_REPEAT', i, 'DBLINK', 'TOTAL',     'DBLINK_TOTAL',     '@fa', 'd_biz, row_id');
+    measure_all_cases('STATIC_REPEAT', i);
   END LOOP;
   COMMIT;
 
   -- A separately committed transaction writes a row before the measured page.
   -- It models the production source changing between the original read and retry.
-  concurrent_write;
-  measure('AFTER_WRITE', 1, 'LOCAL',  'NON_TOTAL', 'LOCAL_NON_TOTAL',  '',    'd_biz');
-  measure('AFTER_WRITE', 1, 'LOCAL',  'TOTAL',     'LOCAL_TOTAL',      '',    'd_biz, row_id');
-  measure('AFTER_WRITE', 1, 'DBLINK', 'NON_TOTAL', 'DBLINK_NON_TOTAL', '@fa', 'd_biz');
-  measure('AFTER_WRITE', 1, 'DBLINK', 'TOTAL',     'DBLINK_TOTAL',     '@fa', 'd_biz, row_id');
+  commit_preceding_row;
+  measure_all_cases('AFTER_WRITE', 1);
   COMMIT;
 END;
 /
