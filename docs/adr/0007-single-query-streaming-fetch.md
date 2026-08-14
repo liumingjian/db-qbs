@@ -95,8 +95,8 @@ sink 维护 `expected_seq`，不匹配即硬错误、整 run 失败。源端封�
 ## 对既有决策的影响
 
 - **ADR-0002 的「批次带序号，断线可重推」在 V1 不适用。** 原文不改（已接受的 ADR 是历史记录），
-  由本 ADR 声明适用范围：V1 的序号只做顺序断言与诊断，重推语义随
-  [#15](https://github.com/liumingjian/db-qbs/issues/15) 一起推到 M2 之后。
+  由本 ADR 声明适用范围：V1 的序号只做顺序断言与诊断；M4 的重推语义由
+  [ADR-0018](0018-delayed-batch-retry-model.md) 定义。
   **commit 作为暂存表封口点照旧。**
 - **`CONTEXT.md` 部署图的「分页拉取」措辞与「批次」词条按本 ADR 订正。**
 - **[#21](https://github.com/liumingjian/db-qbs/issues/21)（分页边界可复现实测）与

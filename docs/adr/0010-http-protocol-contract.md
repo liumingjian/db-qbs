@@ -157,7 +157,7 @@ sink 侧对 `seq` 的**双向断言**保留（`seq < expected` 与 `seq > expect
 但它的定位是**防御性断言**：一旦触发说明本节的前提被违反了，那是缺陷不是故障。
 
 不取「sink 认出重复、回放上次 `rows_written` 并放行」那条路：它要求 sink 记住上一批的结果，
-且直接滑向重试模型（[#15](https://github.com/liumingjian/db-qbs/issues/15)，M2 之后）。
+且直接滑向 M4 的延迟重推模型（[ADR-0018](0018-delayed-batch-retry-model.md)）。
 
 **代价说清楚**：一次瞬时网络抖动废掉整个 run，重跑 = 一条新 `run_id` 从头。
 这与 M1 的失败语义完全一致，不新增任何机制。
@@ -267,7 +267,7 @@ M1 分类码闭集：
 >    （5000 行或 16 MiB 先到先切），M1 里触发 413 等同于**预算逻辑有 bug**——
 >    **缺陷不是故障**，与 `INTERNAL_PRECHECK_ESCAPE` 同类，`PAYLOAD_TOO_LARGE` 的 message 按此措辞。
 > 3. **压缩的复审线关闭**：`Content-Encoding` 连口子都不留，理由正是本节自己给的排障价值。
->    要压是 M2 的事，届时连同重试模型一起改。
+>    要压是 M2 的事；M4 的延迟重推由 ADR-0018 单独升级协议。
 
 | 参数 | 值 |
 |---|---|
