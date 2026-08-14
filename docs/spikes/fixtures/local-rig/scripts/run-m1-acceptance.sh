@@ -273,14 +273,13 @@ start_commit_drop_proxy() {
 }
 
 scenario_commit_disconnect() {
-  local log="$WORK_ROOT/commit-disconnect.jsonl"
+  local log="$WORK_ROOT/commit-disconnect.jsonl" status
   reset_sink_state || return 1
   mysql_exec "DELETE FROM M1_NARROW WHERE D_BIZ >= '$EMPTY_DATE' AND D_BIZ < '$EMPTY_DATE' + INTERVAL 1 DAY; INSERT INTO M1_NARROW (ROW_ID,V_TEXT,D_BIZ) VALUES (99999999,'commit-sentinel','$EMPTY_DATE')" >/dev/null || return 1
   start_commit_drop_proxy || return 1
-  if run_source "$NARROW_TASK" "$EMPTY_DATE" "$log" "$DROP_CONFIG"; then
-    fail "source unexpectedly succeeded after commit response disconnect"
-    return 1
-  fi
+  run_source "$NARROW_TASK" "$EMPTY_DATE" "$log" "$DROP_CONFIG"
+  status=$?
+  assert_eq "commit disconnect source exit" 1 "$status" || return 1
   jq -e . "$log" >/dev/null || return 1
   assert_json_eq "$log" \
     'select(.event == "commit_diagnosed") | .terminal' SWAPPED "commit diagnostic terminal" || return 1

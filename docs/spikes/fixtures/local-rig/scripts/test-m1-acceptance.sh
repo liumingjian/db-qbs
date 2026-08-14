@@ -94,6 +94,10 @@ for assertion in 'commit-sentinel' 'commit disconnect target rows.*0'; do
     exit 1
   }
 done
+grep -Fq 'assert_eq "commit disconnect source exit" 1 "$status"' <<<"$commit_disconnect_body" || {
+  echo "commit-disconnect scenario must enforce the source 0/1 exit contract" >&2
+  exit 1
+}
 
 prepare_body=$(sed -n '/^prepare_rig()/,/^}/p' "$runner")
 grep -q 'drop_orphan_staging' <<<"$prepare_body" || {
