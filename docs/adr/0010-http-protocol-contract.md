@@ -402,3 +402,7 @@ M1 报文定稿，**`/v1` 前缀就是它的时效声明**。最可能触发复�
 台架测回的 commit 实际耗时（→ 30 分钟超时）、
 [#27](https://github.com/liumingjian/db-qbs/issues/27) 定下的载荷形状（→ 要不要开压缩、64 MiB 上限是否够）、
 [#28](https://github.com/liumingjian/db-qbs/issues/28) 的状态机（→ `GET` 的返回是否要扩）。
+
+[#15](https://github.com/liumingjian/db-qbs/issues/15) 的延迟重推由
+[ADR-0018](0018-delayed-batch-retry-model.md) 另行定义；它需要幂等替换与重挂接语义，
+不得把本 ADR `/v1` 的 `retry = 0` 原地改义。
