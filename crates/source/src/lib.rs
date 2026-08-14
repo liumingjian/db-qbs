@@ -1,5 +1,6 @@
 use std::fmt;
 use std::fs;
+use std::io::Write;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,14 @@ use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer};
 use url::Url;
+
+const RELATIVE_TIME_FUNCTION_NAMES: &[&str] = &[
+    "SYSDATE",
+    "CURRENT_DATE",
+    "SYSTIMESTAMP",
+    "CURRENT_TIMESTAMP",
+    "LOCALTIMESTAMP",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -141,31 +150,21 @@ pub fn precheck_sql(task: &TaskConfig) -> Result<(), Vec<ShapeProblem>> {
         }
     };
 
-    let query = match statements.as_slice() {
-        [Statement::Query(query)] => Some(query.as_ref()),
-        _ => None,
-    };
-
-    let Some(query) = query else {
-        problems.push(ShapeProblem::new(
-            "unsupported_statement",
-            "source SQL must contain exactly one SELECT statement",
-        ));
+    let [Statement::Query(query)] = statements.as_slice() else {
+        problems.push(unsupported_statement_problem());
         return Err(problems);
     };
+    let query = query.as_ref();
     let SetExpr::Select(select) = query.body.as_ref() else {
-        problems.push(ShapeProblem::new(
-            "unsupported_statement",
-            "source SQL must contain exactly one SELECT statement",
-        ));
+        problems.push(unsupported_statement_problem());
         return Err(problems);
     };
 
     check_projection(select, &mut problems);
-    let mut selections = SelectionCollector::default();
-    let _: ControlFlow<()> = query.visit(&mut selections);
-    check_predicates(
-        &selections.values,
+    let mut where_clauses = WhereClauseCollector::default();
+    let _: ControlFlow<()> = query.visit(&mut where_clauses);
+    check_where_predicates(
+        &where_clauses.expressions,
         count_biz_date_placeholders(query),
         &task.source_date_col,
         &mut problems,
@@ -178,47 +177,53 @@ pub fn precheck_sql(task: &TaskConfig) -> Result<(), Vec<ShapeProblem>> {
     }
 }
 
+fn unsupported_statement_problem() -> ShapeProblem {
+    ShapeProblem::new(
+        "unsupported_statement",
+        "source SQL must contain exactly one SELECT statement",
+    )
+}
+
 fn has_relative_time_function(sql: &str) -> bool {
     let Ok(tokens) = Tokenizer::new(&GenericDialect, sql).tokenize() else {
         return false;
     };
 
     tokens.into_iter().any(|token| match token {
-        Token::Word(word) => matches!(
-            word.value.to_ascii_uppercase().as_str(),
-            "SYSDATE" | "CURRENT_DATE" | "SYSTIMESTAMP" | "CURRENT_TIMESTAMP" | "LOCALTIMESTAMP"
-        ),
+        Token::Word(word) => RELATIVE_TIME_FUNCTION_NAMES
+            .iter()
+            .any(|name| word.value.eq_ignore_ascii_case(name)),
         _ => false,
     })
 }
 
 fn check_projection(select: &Select, problems: &mut Vec<ShapeProblem>) {
-    let mut unnamed = false;
-    let mut indeterminate = false;
+    let mut has_unnamed_projection = false;
+    let mut has_indeterminate_projection = false;
 
     for item in &select.projection {
         match item {
             SelectItem::UnnamedExpr(expr) if is_column(expr) => {}
             SelectItem::ExprWithAlias { expr, .. } if is_column(expr) => {}
             SelectItem::UnnamedExpr(_) => {
-                unnamed = true;
-                indeterminate = true;
+                has_unnamed_projection = true;
+                has_indeterminate_projection = true;
             }
-            SelectItem::ExprWithAlias { .. } => indeterminate = true,
+            SelectItem::ExprWithAlias { .. } => has_indeterminate_projection = true,
             SelectItem::QualifiedWildcard(_, _) | SelectItem::Wildcard(_) => {
-                unnamed = true;
-                indeterminate = true;
+                has_unnamed_projection = true;
+                has_indeterminate_projection = true;
             }
         }
     }
 
-    if unnamed {
+    if has_unnamed_projection {
         problems.push(ShapeProblem::new(
             "unnamed_projection",
             "every selected column must be explicitly named; wildcards and unaliased expressions are not allowed",
         ));
     }
-    if indeterminate {
+    if has_indeterminate_projection {
         problems.push(ShapeProblem::new(
             "indeterminate_projection",
             "selected expressions must have statically determinate precision",
@@ -234,41 +239,38 @@ fn is_column(expr: &Expr) -> bool {
 }
 
 #[derive(Default)]
-struct SelectionCollector {
-    values: Vec<Expr>,
+struct WhereClauseCollector {
+    expressions: Vec<Expr>,
 }
 
-impl Visitor for SelectionCollector {
+impl Visitor for WhereClauseCollector {
     type Break = ();
 
     fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
         if let SetExpr::Select(select) = query.body.as_ref() {
-            if let Some(selection) = &select.selection {
-                self.values.push(selection.clone());
+            if let Some(where_clause) = &select.selection {
+                self.expressions.push(where_clause.clone());
             }
         }
         ControlFlow::Continue(())
     }
 }
 
-fn check_predicates(
-    selections: &[Expr],
+fn check_where_predicates(
+    where_clauses: &[Expr],
     placeholder_count: usize,
     source_date_col: &str,
     problems: &mut Vec<ShapeProblem>,
 ) {
-    let [selection] = selections else {
-        problems.push(invalid_date_predicate());
-        if selections.len() > 1 {
-            problems.push(ShapeProblem::new(
-                "additional_where_predicate",
-                "WHERE must not contain predicates other than the business-date range",
-            ));
+    let [where_clause] = where_clauses else {
+        problems.push(invalid_date_predicate_problem());
+        if where_clauses.len() > 1 {
+            problems.push(additional_where_predicate_problem());
         }
         return;
     };
     let mut predicates = Vec::new();
-    flatten_and(selection, &mut predicates);
+    flatten_and(where_clause, &mut predicates);
     let valid_range = predicates.len() == 2
         && placeholder_count == 2
         && predicates
@@ -279,25 +281,28 @@ fn check_predicates(
             .any(|expr| is_upper_bound(expr, source_date_col));
 
     if !valid_range {
-        problems.push(invalid_date_predicate());
+        problems.push(invalid_date_predicate_problem());
     }
 
-    let date_related = predicates
+    let has_unrelated_predicate = predicates
         .iter()
-        .filter(|predicate| predicate_mentions_column(predicate, source_date_col))
-        .count();
-    if predicates.len().saturating_sub(date_related) > 0 {
-        problems.push(ShapeProblem::new(
-            "additional_where_predicate",
-            "WHERE must not contain predicates other than the business-date range",
-        ));
+        .any(|predicate| !predicate_mentions_column(predicate, source_date_col));
+    if has_unrelated_predicate {
+        problems.push(additional_where_predicate_problem());
     }
 }
 
-fn invalid_date_predicate() -> ShapeProblem {
+fn invalid_date_predicate_problem() -> ShapeProblem {
     ShapeProblem::new(
         "invalid_date_predicate",
         "WHERE must contain exactly source_date_col >= TO_DATE(:biz_date,'YYYY-MM-DD') AND source_date_col < TO_DATE(:biz_date,'YYYY-MM-DD') + 1",
+    )
+}
+
+fn additional_where_predicate_problem() -> ShapeProblem {
+    ShapeProblem::new(
+        "additional_where_predicate",
+        "WHERE must not contain predicates other than the business-date range",
     )
 }
 
@@ -342,10 +347,10 @@ fn matches_binary(
     let Expr::BinaryOp { left, op, right } = strip_nested(expr) else {
         return false;
     };
-    *op == expected_operator && column_name(left, source_date_col) && matches_right(right)
+    *op == expected_operator && matches_column_name(left, source_date_col) && matches_right(right)
 }
 
-fn column_name(expr: &Expr, expected: &str) -> bool {
+fn matches_column_name(expr: &Expr, expected: &str) -> bool {
     match strip_nested(expr) {
         Expr::Identifier(identifier) => identifier.value.eq_ignore_ascii_case(expected),
         Expr::CompoundIdentifier(identifiers) => identifiers
@@ -359,41 +364,44 @@ fn is_to_date(expr: &Expr) -> bool {
     let Expr::Function(function) = strip_nested(expr) else {
         return false;
     };
-    if function.name.0.len() != 1 || !function.name.0[0].value.eq_ignore_ascii_case("TO_DATE") {
+    let [function_name] = function.name.0.as_slice() else {
+        return false;
+    };
+    if !function_name.value.eq_ignore_ascii_case("TO_DATE") {
         return false;
     }
     let FunctionArguments::List(arguments) = &function.args else {
         return false;
     };
-    if arguments.args.len() != 2 {
+    let [biz_date_argument, format_argument] = arguments.args.as_slice() else {
         return false;
-    }
+    };
+    let FunctionArg::Unnamed(FunctionArgExpr::Expr(biz_date)) = biz_date_argument else {
+        return false;
+    };
+    let FunctionArg::Unnamed(FunctionArgExpr::Expr(format)) = format_argument else {
+        return false;
+    };
 
-    matches_function_expr(
-        &arguments.args[0],
-        |expr| matches!(strip_nested(expr), Expr::Value(Value::Placeholder(value)) if value.eq_ignore_ascii_case(":biz_date")),
-    ) && matches_function_expr(
-        &arguments.args[1],
-        |expr| matches!(strip_nested(expr), Expr::Value(Value::SingleQuotedString(value)) if value == "YYYY-MM-DD"),
-    )
+    is_biz_date_placeholder(biz_date) && is_date_format(format)
 }
 
-fn matches_function_expr(argument: &FunctionArg, predicate: impl FnOnce(&Expr) -> bool) -> bool {
-    match argument {
-        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => predicate(expr),
-        _ => false,
-    }
+fn is_biz_date_placeholder(expr: &Expr) -> bool {
+    matches!(strip_nested(expr), Expr::Value(Value::Placeholder(value)) if value.eq_ignore_ascii_case(":biz_date"))
+}
+
+fn is_date_format(expr: &Expr) -> bool {
+    matches!(strip_nested(expr), Expr::Value(Value::SingleQuotedString(value)) if value == "YYYY-MM-DD")
 }
 
 fn is_number_one(expr: &Expr) -> bool {
     matches!(strip_nested(expr), Expr::Value(Value::Number(value, _)) if value == "1")
 }
 
-fn count_biz_date_placeholders(node: &impl Visit) -> usize {
+fn count_biz_date_placeholders(query: &Query) -> usize {
     let mut count = 0;
-    let _: ControlFlow<()> = visit_expressions(node, |candidate| {
-        if matches!(candidate, Expr::Value(Value::Placeholder(value)) if value.eq_ignore_ascii_case(":biz_date"))
-        {
+    let _: ControlFlow<()> = visit_expressions(query, |candidate| {
+        if is_biz_date_placeholder(candidate) {
             count += 1;
         }
         ControlFlow::Continue(())
@@ -404,7 +412,7 @@ fn count_biz_date_placeholders(node: &impl Visit) -> usize {
 fn predicate_mentions_column(expr: &Expr, source_date_col: &str) -> bool {
     let mut found = false;
     let _: ControlFlow<()> = visit_expressions(expr, |candidate| {
-        if column_name(candidate, source_date_col) {
+        if matches_column_name(candidate, source_date_col) {
             found = true;
         }
         ControlFlow::Continue(())
@@ -438,7 +446,6 @@ pub fn probe_sink(base_url: &str) -> Result<(), String> {
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
         .map_err(|error| format!("could not connect to sink endpoint: {error}"))?;
 
-    use std::io::Write;
     let base_path = url.path().trim_end_matches('/');
     let request_path = format!("{base_path}/v1/runs");
     write!(

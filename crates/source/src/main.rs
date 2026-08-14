@@ -141,11 +141,16 @@ impl Arguments {
 
         while index < arguments.len() {
             let flag = arguments[index].as_str();
-            if !matches!(flag, "--config" | "--task" | "--biz-date") {
-                return Err(format!(
-                    "unknown argument {flag}; only --config, --task, and --biz-date are accepted"
-                ));
-            }
+            let slot = match flag {
+                "--config" => &mut config,
+                "--task" => &mut task,
+                "--biz-date" => &mut biz_date,
+                _ => {
+                    return Err(format!(
+                        "unknown argument {flag}; only --config, --task, and --biz-date are accepted"
+                    ));
+                }
+            };
             let value = arguments
                 .get(index + 1)
                 .ok_or_else(|| format!("{flag} requires a value"))?;
@@ -153,12 +158,6 @@ impl Arguments {
                 return Err(format!("{flag} requires a value"));
             }
 
-            let slot = match flag {
-                "--config" => &mut config,
-                "--task" => &mut task,
-                "--biz-date" => &mut biz_date,
-                _ => unreachable!(),
-            };
             if slot.replace(value.clone()).is_some() {
                 return Err(format!("{flag} may be provided only once"));
             }
