@@ -7,7 +7,7 @@
 -- 产出：samples-t_r_fr_aststat.csv 提交到 docs/spikes/fixtures/
 --
 -- 采样口径（对应 ADR-0003 的规范形式表）：
---   NUMBER      → 最长字符串长度（最大精度）/ 最小值（负数）/ 最大值 / 最高标度小数 / 零的条数 / NULL 条数
+--   NUMBER      → 字符串最长的实际值（最大精度）/ 最小值（负数）/ 最大值 / 最高标度小数 / 零的条数 / NULL 条数
 --   DATE/TS     → 最早 / 最晚（TIMESTAMP 保留声明的小数秒精度）/ 含非零时分秒的条数 / NULL 条数
 --   字符类       → 最长的一条 / 含多字节（中文）的一条 / NULL 条数
 -- 每种类型由这几路共同保证 ≥3 个边界样本。
@@ -37,7 +37,7 @@ PROMPT PROMPT COLUMN_NAME,DATA_TYPE,KIND,VALUE,VALUE_LEN
 
 -- ---- NUMBER 列 ----
 SELECT 'SELECT ''' || column_name || ',' || data_type || ',''||kind||'',''||NVL(v,''<NULL>'')||'',''||NVL(LENGTH(v),0) FROM ('
-       || ' SELECT ''max_len'' kind, TO_CHAR(MAX(LENGTH(TO_CHAR(' || column_name || ')))) v FROM ' || tbl
+       || ' SELECT ''max_len_val'' kind, MAX(TO_CHAR(' || column_name || ')) KEEP (DENSE_RANK LAST ORDER BY LENGTH(TO_CHAR(' || column_name || '))) v FROM ' || tbl
        || ' UNION ALL SELECT ''min_val'', TO_CHAR(MIN(' || column_name || ')) FROM ' || tbl
        || ' UNION ALL SELECT ''max_val'', TO_CHAR(MAX(' || column_name || ')) FROM ' || tbl
        || ' UNION ALL SELECT ''max_scale_val'', TO_CHAR(MAX(CASE WHEN ' || column_name || ' <> TRUNC(' || column_name || ') THEN ' || column_name || ' END)) FROM ' || tbl

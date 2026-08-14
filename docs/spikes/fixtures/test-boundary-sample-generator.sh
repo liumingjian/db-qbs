@@ -4,6 +4,11 @@ set -euo pipefail
 fixture_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 generator="$fixture_dir/04-gen-boundary-samples.sql"
 
+if ! grep -Fq "MAX(TO_CHAR(' || column_name || ')) KEEP (DENSE_RANK LAST ORDER BY LENGTH(TO_CHAR(' || column_name || ')))" "$generator"; then
+  echo "NUMBER max-length samples must contain the actual value, not only its length" >&2
+  exit 1
+fi
+
 if ! grep -Fq "'YYYY-MM-DD HH24:MI:SS.FF' || NVL(data_scale, 6)" "$generator"; then
   echo "TIMESTAMP samples must retain the source column's declared fractional precision" >&2
   exit 1
