@@ -8,7 +8,7 @@
 --
 -- 采样口径（对应 ADR-0003 的规范形式表）：
 --   NUMBER      → 最长字符串长度（最大精度）/ 最小值（负数）/ 最大值 / 最高标度小数 / 零的条数 / NULL 条数
---   DATE/TS     → 最早 / 最晚 / 含非零时分秒的条数 / NULL 条数
+--   DATE/TS     → 最早 / 最晚（TIMESTAMP 保留声明的小数秒精度）/ 含非零时分秒的条数 / NULL 条数
 --   字符类       → 最长的一条 / 含多字节（中文）的一条 / NULL 条数
 -- 每种类型由这几路共同保证 ≥3 个边界样本。
 --
@@ -50,14 +50,25 @@ SELECT 'SELECT ''' || column_name || ',' || data_type || ',''||kind||'',''||NVL(
 
 -- ---- DATE / TIMESTAMP 列 ----
 SELECT 'SELECT ''' || column_name || ',' || data_type || ',''||kind||'',''||NVL(v,''<NULL>'')||'',''||NVL(LENGTH(v),0) FROM ('
-       || ' SELECT ''min_val'' kind, TO_CHAR(MIN(' || column_name || '), ''YYYY-MM-DD HH24:MI:SS'') v FROM ' || tbl
-       || ' UNION ALL SELECT ''max_val'', TO_CHAR(MAX(' || column_name || '), ''YYYY-MM-DD HH24:MI:SS'') FROM ' || tbl
+       || ' SELECT ''min_val'' kind, TO_CHAR(MIN(' || column_name || '), ''' || format_mask || ''') v FROM ' || tbl
+       || ' UNION ALL SELECT ''max_val'', TO_CHAR(MAX(' || column_name || '), ''' || format_mask || ''') FROM ' || tbl
        || ' UNION ALL SELECT ''with_time_cnt'', TO_CHAR(COUNT(CASE WHEN ' || column_name || ' <> TRUNC(' || column_name || ') THEN 1 END)) FROM ' || tbl
        || ' UNION ALL SELECT ''null_cnt'', TO_CHAR(COUNT(CASE WHEN ' || column_name || ' IS NULL THEN 1 END)) FROM ' || tbl
        || ' );'
-  FROM all_tab_columns@FA, (SELECT 'htbr45.t_r_fr_aststat@FA' tbl FROM dual)
- WHERE owner = 'HTBR45' AND table_name = 'T_R_FR_ASTSTAT'
-   AND (data_type = 'DATE' OR data_type LIKE 'TIMESTAMP%')
+  FROM (
+        SELECT column_id,
+               column_name,
+               data_type,
+               CASE WHEN data_type = 'DATE' OR NVL(data_scale, 0) = 0
+                    THEN 'YYYY-MM-DD HH24:MI:SS'
+                    ELSE 'YYYY-MM-DD HH24:MI:SS.FF' || NVL(data_scale, 6)
+                END AS format_mask
+          FROM all_tab_columns@FA
+         WHERE owner = 'HTBR45'
+           AND table_name = 'T_R_FR_ASTSTAT'
+           AND (data_type = 'DATE' OR data_type LIKE 'TIMESTAMP%')
+       ),
+       (SELECT 'htbr45.t_r_fr_aststat@FA' tbl FROM dual)
  ORDER BY column_id;
 
 -- ---- 字符类列 ----
