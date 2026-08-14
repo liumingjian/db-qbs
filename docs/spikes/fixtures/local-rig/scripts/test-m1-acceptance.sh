@@ -91,4 +91,10 @@ grep -Eq 'batch_pushed.*\.bytes|\.bytes.*batch_pushed' "$runner" || {
   exit 1
 }
 
+report_body=$(sed -n '/^write_report()/,/^}/p' "$runner")
+grep -q 'canonical-form\.out' <<<"$report_body" || {
+  echo "acceptance report must retain the canonical-form gate output" >&2
+  exit 1
+}
+
 echo "M1 acceptance script contract: PASS"

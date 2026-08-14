@@ -403,6 +403,16 @@ write_report() {
       ' "$evidence"
     done
     echo
+    echo "## Canonical-form evidence"
+    echo
+    if [[ -f "$WORK_ROOT/canonical-form.out" ]]; then
+      echo '```text'
+      cat "$WORK_ROOT/canonical-form.out"
+      echo '```'
+    else
+      echo "No canonical-form output was captured."
+    fi
+    echo
     echo "## Review gates"
     echo
     echo "- Review ADR-0007 serial push when Push/cursor exceeds 50%."
