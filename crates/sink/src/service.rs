@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use chrono::NaiveDate;
@@ -22,7 +22,7 @@ impl<D: Destination> SinkService<D> {
             database: database.into(),
             destination,
             active_runs: Mutex::new(HashMap::new()),
-            tombstones: Mutex::new(Default::default()),
+            tombstones: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -69,26 +69,28 @@ impl<D: Destination> SinkService<D> {
             .iter()
             .map(|column| column.name.clone())
             .collect::<Vec<_>>();
-        let mut swap_columns = target_columns.iter().collect::<Vec<_>>();
-        swap_columns.sort_by_key(|column| column.ordinal);
+        let mut ordered_target_columns = target_columns.iter().collect::<Vec<_>>();
+        ordered_target_columns.sort_by_key(|column| column.ordinal);
+        let swap_columns = ordered_target_columns
+            .into_iter()
+            .map(|column| column.name.clone())
+            .collect();
         let biz_date = NaiveDate::parse_from_str(&request.biz_date, "%Y-%m-%d")
             .expect("open request date was validated");
+        let biz_date_end = biz_date
+            .succ_opt()
+            .expect("open request date has a following day")
+            .format("%Y-%m-%d")
+            .to_string();
         let active_run = ActiveRun {
             staging_table: staging_table.clone(),
             max_rows_per_insert: MAX_PREPARED_STATEMENT_PLACEHOLDERS / source_columns.len(),
             source_columns,
-            swap_columns: swap_columns
-                .into_iter()
-                .map(|column| column.name.clone())
-                .collect(),
+            swap_columns,
             target_table: request.target_table,
             target_date_col: request.target_date_col,
             biz_date_start: request.biz_date,
-            biz_date_end: biz_date
-                .succ_opt()
-                .expect("open request date has a following day")
-                .format("%Y-%m-%d")
-                .to_string(),
+            biz_date_end,
             next_seq: 1,
             rows_written: 0,
             sealed: false,
@@ -115,7 +117,7 @@ impl<D: Destination> SinkService<D> {
             Some(run) => run,
             None => {
                 drop(active_runs);
-                return Err(self.unknown_or_sealed(run_id));
+                return Err(self.inactive_run_error(run_id));
             }
         };
 
@@ -209,7 +211,7 @@ impl<D: Destination> SinkService<D> {
             let mut active_runs = self.active_runs.lock().expect("active run mutex poisoned");
             let Some(run) = active_runs.get_mut(run_id) else {
                 drop(active_runs);
-                return Err(self.unknown_or_sealed(run_id));
+                return Err(self.inactive_run_error(run_id));
             };
             if run.sealed {
                 return Err(run_sealed_error(run_id, active_run_response(run_id, run)));
@@ -319,7 +321,7 @@ impl<D: Destination> SinkService<D> {
         })
     }
 
-    fn unknown_or_sealed(&self, run_id: &str) -> ApiError {
+    fn inactive_run_error(&self, run_id: &str) -> ApiError {
         let tombstone = self
             .tombstones
             .lock()

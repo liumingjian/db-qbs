@@ -141,6 +141,10 @@ fn commit_atomically_swaps_then_exposes_a_sealed_swapped_tombstone() {
     assert_eq!(value["purged_rows"], 7);
     assert_eq!(value["swapped_rows"], 1);
 
+    let commit_error = service.commit(RUN_ID, 1, 1).unwrap_err();
+    assert_eq!(commit_error.status, 409);
+    assert_eq!(commit_error.code, "RUN_SEALED");
+
     let error = service
         .write_batch(
             RUN_ID,

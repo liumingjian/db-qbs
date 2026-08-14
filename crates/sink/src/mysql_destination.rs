@@ -176,7 +176,7 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
                 let swapped_rows = transaction.affected_rows();
                 if swapped_rows != staged_rows {
                     transaction.rollback()?;
-                    return Ok(AtomicSwapOutcome::Failed(format!(
+                    return Ok(AtomicSwapOutcome::SwapFailed(format!(
                         "暂存表有 {staged_rows} 行，切换 INSERT 只写入 {swapped_rows} 行"
                     )));
                 }
@@ -194,7 +194,7 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
             AtomicSwapOutcome::VerifyFailed { staged_rows } => {
                 Err(AtomicSwapError::VerifyFailed { staged_rows })
             }
-            AtomicSwapOutcome::Failed(message) => Err(AtomicSwapError::Other(message)),
+            AtomicSwapOutcome::SwapFailed(message) => Err(AtomicSwapError::Other(message)),
         }
     }
 
@@ -213,7 +213,7 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
 enum AtomicSwapOutcome {
     Swapped(AtomicSwapResult),
     VerifyFailed { staged_rows: u64 },
-    Failed(String),
+    SwapFailed(String),
 }
 
 fn build_insert_statement(
@@ -238,12 +238,13 @@ fn build_insert_statement(
 }
 
 fn build_delete_statement(database: &str, target_table: &str, target_date_col: &str) -> String {
+    let quoted_date_column = quote_identifier(target_date_col);
     format!(
         "DELETE FROM {}.{} WHERE {} >= ? AND {} < ?",
         quote_identifier(database),
         quote_identifier(target_table),
-        quote_identifier(target_date_col),
-        quote_identifier(target_date_col)
+        quoted_date_column,
+        quoted_date_column
     )
 }
 
@@ -253,13 +254,13 @@ fn build_swap_insert_statement(
     staging_table: &str,
     columns: &[String],
 ) -> String {
-    let columns = columns
+    let quoted_columns = columns
         .iter()
         .map(|column| quote_identifier(column))
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "INSERT INTO {}.{} ({columns}) SELECT {columns} FROM {}.{}",
+        "INSERT INTO {}.{} ({quoted_columns}) SELECT {quoted_columns} FROM {}.{}",
         quote_identifier(database),
         quote_identifier(target_table),
         quote_identifier(database),

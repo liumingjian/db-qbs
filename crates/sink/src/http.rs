@@ -92,15 +92,9 @@ fn handle_batch(
     service: &SinkService<impl Destination>,
     run_id: &str,
 ) -> HttpResponse {
-    if !has_json_content_type(request) {
-        return error_response(unsupported_media_type(Some(run_id)));
-    }
-    let payload: BatchPayload = match read_json(request) {
+    let payload: BatchPayload = match read_run_json(request, run_id) {
         Ok(payload) => payload,
-        Err(mut error) => {
-            error.run_id = Some(run_id.to_owned());
-            return error_response(error);
-        }
+        Err(error) => return error_response(error),
     };
     match service.write_batch(run_id, payload) {
         Ok(response) => json_response(200, &response),
@@ -130,15 +124,9 @@ fn handle_commit(
     service: &SinkService<impl Destination>,
     run_id: &str,
 ) -> HttpResponse {
-    if !has_json_content_type(request) {
-        return error_response(unsupported_media_type(Some(run_id)));
-    }
-    let payload: CommitRequest = match read_json(request) {
+    let payload: CommitRequest = match read_run_json(request, run_id) {
         Ok(payload) => payload,
-        Err(mut error) => {
-            error.run_id = Some(run_id.to_owned());
-            return error_response(error);
-        }
+        Err(error) => return error_response(error),
     };
     match service.commit(run_id, payload.total_batches, payload.total_rows) {
         Ok(response) => json_response(200, &response),
@@ -156,6 +144,16 @@ fn handle_get(service: &SinkService<impl Destination>, run_id: &str) -> HttpResp
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EmptyBody {}
+
+fn read_run_json<T: DeserializeOwned>(request: &mut Request, run_id: &str) -> Result<T, ApiError> {
+    if !has_json_content_type(request) {
+        return Err(unsupported_media_type(Some(run_id)));
+    }
+    read_json(request).map_err(|mut error| {
+        error.run_id = Some(run_id.to_owned());
+        error
+    })
+}
 
 fn read_json<T: DeserializeOwned>(request: &mut Request) -> Result<T, ApiError> {
     let mut body = Vec::new();
@@ -312,8 +310,14 @@ mod tests {
         assert_eq!(run_action("/v1/runs/run/"), None);
         assert_eq!(run_action("/v1/runs/run/batches/extra"), None);
         assert_eq!(run_action("/runs/run/batches"), None);
+    }
+
+    #[test]
+    fn run_resource_requires_exactly_one_run_segment() {
         assert_eq!(run_resource("/v1/runs/run"), Some("run"));
+        assert_eq!(run_resource("/v1/runs/"), None);
         assert_eq!(run_resource("/v1/runs/run/extra"), None);
+        assert_eq!(run_resource("/runs/run"), None);
     }
 
     #[test]
