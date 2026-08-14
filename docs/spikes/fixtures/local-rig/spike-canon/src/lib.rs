@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use db_qbs_shared::{canon_date, canon_number, canon_text};
+use db_qbs_shared::{canon_date, canon_number, canon_text, CanonError};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -48,6 +48,17 @@ impl DateParts {
             second,
         }
     }
+
+    fn to_canonical_string(&self) -> Result<String, CanonError> {
+        canon_date(
+            self.year,
+            self.month,
+            self.day,
+            self.hour,
+            self.minute,
+            self.second,
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,15 +98,15 @@ impl Gate {
             .map(|case| evaluate_case(case, samples.get(&case.id)))
             .collect();
 
-        let required: HashSet<&str> = self.required_sample_ids().into_iter().collect();
-        let mut extra_ids: Vec<&str> = samples
+        let required_sample_ids: HashSet<&str> = self.required_sample_ids().into_iter().collect();
+        let mut extra_sample_ids: Vec<&str> = samples
             .keys()
             .map(String::as_str)
-            .filter(|id| !required.contains(id))
+            .filter(|id| !required_sample_ids.contains(id))
             .collect();
-        extra_ids.sort_unstable();
+        extra_sample_ids.sort_unstable();
         results.extend(
-            extra_ids
+            extra_sample_ids
                 .into_iter()
                 .map(|id| CaseResult::fail(id, "Oracle sample has no non-reject M1 fixture case")),
         );
@@ -125,14 +136,7 @@ fn evaluate_case(case: &Case, sample: Option<&Sample>) -> CaseResult {
                 format!("driver NUMBER {actual:?} rejected: {error}"),
             ),
         },
-        ("DATE", "format", Sample::Date(parts)) => match canon_date(
-            parts.year,
-            parts.month,
-            parts.day,
-            parts.hour,
-            parts.minute,
-            parts.second,
-        ) {
+        ("DATE", "format", Sample::Date(parts)) => match parts.to_canonical_string() {
             Ok(canonical) => compare_string(case, &canonical, "driver DATE"),
             Err(error) => CaseResult::fail(&case.id, format!("driver DATE rejected: {error}")),
         },
@@ -154,29 +158,7 @@ fn evaluate_case(case: &Case, sample: Option<&Sample>) -> CaseResult {
 }
 
 fn evaluate_reject_witness(case: &Case) -> CaseResult {
-    let rejected = match (case.data_type.as_str(), case.kind.as_str()) {
-        ("NUMBER", "validate") => case
-            .input
-            .as_str()
-            .map(canon_number)
-            .map(|result| result.is_err()),
-        ("DATE", "format") => serde_json::from_value::<DateParts>(case.input.clone())
-            .ok()
-            .map(|parts| {
-                canon_date(
-                    parts.year,
-                    parts.month,
-                    parts.day,
-                    parts.hour,
-                    parts.minute,
-                    parts.second,
-                )
-                .is_err()
-            }),
-        _ => None,
-    };
-
-    match rejected {
+    match reject_witness_is_rejected(case) {
         Some(true) => CaseResult::pass(
             &case.id,
             "repository reject witness was rejected by the shared canonical function",
@@ -186,6 +168,20 @@ fn evaluate_reject_witness(case: &Case) -> CaseResult {
             "repository reject witness was unexpectedly accepted",
         ),
         None => CaseResult::fail(&case.id, "unsupported reject witness shape in fixture"),
+    }
+}
+
+fn reject_witness_is_rejected(case: &Case) -> Option<bool> {
+    match (case.data_type.as_str(), case.kind.as_str()) {
+        ("NUMBER", "validate") => {
+            let input = case.input.as_str()?;
+            Some(canon_number(input).is_err())
+        }
+        ("DATE", "format") => {
+            let parts = serde_json::from_value::<DateParts>(case.input.clone()).ok()?;
+            Some(parts.to_canonical_string().is_err())
+        }
+        _ => None,
     }
 }
 

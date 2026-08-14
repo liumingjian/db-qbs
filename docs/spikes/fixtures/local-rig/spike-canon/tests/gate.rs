@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use serde_json::Value;
-use spike_canon::{DateParts, Gate, Sample};
+use spike_canon::{Gate, Sample};
 
 const CANON_FIXTURE: &str = include_str!("../../../canon-golden.json");
 
@@ -34,17 +34,7 @@ fn all_current_m1_cases_are_evaluated() {
         let id = case["id"].as_str().unwrap().to_string();
         let sample = match case["type"].as_str().unwrap() {
             "NUMBER" => Sample::Number(case["input"].as_str().unwrap().to_string()),
-            "DATE" => {
-                let input = &case["input"];
-                Sample::Date(DateParts::new(
-                    input["y"].as_i64().unwrap() as i32,
-                    input["mo"].as_u64().unwrap() as u32,
-                    input["d"].as_u64().unwrap() as u32,
-                    input["h"].as_u64().unwrap() as u32,
-                    input["mi"].as_u64().unwrap() as u32,
-                    input["s"].as_u64().unwrap() as u32,
-                ))
-            }
+            "DATE" => Sample::Date(serde_json::from_value(case["input"].clone()).unwrap()),
             "VARCHAR2" => Sample::Text(case["input"].as_str().unwrap().to_string()),
             "*" => Sample::Null,
             data_type => panic!("unexpected M1 fixture type {data_type}"),

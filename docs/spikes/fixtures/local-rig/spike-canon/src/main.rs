@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::error::Error;
-use std::io::{Error as IoError, ErrorKind};
+use std::io;
 
 use oracle::sql_type::Timestamp;
 use oracle::Connection;
@@ -76,9 +76,7 @@ fn load_samples(connection: &Connection) -> Result<HashMap<String, Sample>, Box<
 
         let sample = sample_from_row(&case_id, &sample_type, number, date, text)?;
         if samples.insert(case_id.clone(), sample).is_some() {
-            return Err(invalid_data(format!(
-                "duplicate Oracle sample id {case_id:?}"
-            )));
+            return Err(invalid_data(format!("duplicate Oracle sample id {case_id:?}")).into());
         }
     }
 
@@ -91,7 +89,7 @@ fn sample_from_row(
     number: Option<String>,
     date: Option<Timestamp>,
     text: Option<String>,
-) -> Result<Sample, Box<dyn Error>> {
+) -> io::Result<Sample> {
     match (sample_type, number, date, text) {
         ("NUMBER", Some(value), None, None) => Ok(Sample::Number(value)),
         ("DATE", None, Some(value), None) => Ok(Sample::Date(DateParts::new(
@@ -110,8 +108,8 @@ fn sample_from_row(
     }
 }
 
-fn invalid_data(message: String) -> Box<dyn Error> {
-    Box::new(IoError::new(ErrorKind::InvalidData, message))
+fn invalid_data(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
 fn print_report(report: &GateReport) {
