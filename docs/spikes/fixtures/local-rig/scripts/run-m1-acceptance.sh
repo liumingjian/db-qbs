@@ -269,6 +269,11 @@ scenario_source_kill() {
   compose exec -T client cat /tmp/m1-kill.jsonl > "$killed" || return 1
   jq -e 'select(.event == "batch_pushed")' "$killed" >/dev/null ||
     fail "killed source log has no completed batch" || return 1
+  if jq -s -e 'any(.[]; .event == "stage_changed" and .stage == "COMMITTING")' \
+    "$killed" >/dev/null; then
+    fail "source reached COMMITTING before the STREAMING kill was injected"
+    return 1
+  fi
   old_run=$(source_run_id "$killed")
   [[ -n "$old_run" ]] || fail "killed source never opened a run" || return 1
   after=$(narrow_hash) || return 1

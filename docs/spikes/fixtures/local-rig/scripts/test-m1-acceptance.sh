@@ -80,6 +80,10 @@ grep -q 'batch_pushed' <<<"$source_kill_body" || {
   echo "source-kill scenario must reach STREAMING before killing source" >&2
   exit 1
 }
+grep -Fq 'stage == "COMMITTING"' <<<"$source_kill_body" || {
+  echo "source-kill scenario must reject a kill that raced into COMMITTING" >&2
+  exit 1
+}
 for assertion in 'kill-sentinel' 'target_with_sentinel' 'target hash after source kill.*target_with_sentinel'; do
   grep -Eq "$assertion" <<<"$source_kill_body" || {
     echo "source-kill scenario must prove the target was not replaced with identical data" >&2
