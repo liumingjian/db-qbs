@@ -22,9 +22,9 @@ SELECT data_type,
  ORDER BY data_type, data_precision, data_scale;
 
 PROMPT
-PROMPT ===== 11g 遗留类型点名检查（出现即为 #3 的高风险项）=====
--- LONG / LONG RAW: ODPI-C 支持有限且不能与 LOB 混取；XMLType/BFILE 需专门处理。
--- 命中任何一行，都要在 #3 里单独立一个用例。
+PROMPT ===== ADR-0003 白名单外类型点名检查（出现即回炉 #11）=====
+-- 普通 TIMESTAMP(n) 在白名单内；带时区的 TIMESTAMP 变体不在白名单内。
+-- 命中任何一行，映射预检都必须拒绝，并按命中类型回炉 #11。
 SELECT column_name, data_type
   FROM all_tab_columns@FA
  WHERE owner = 'HTBR45'
@@ -32,7 +32,8 @@ SELECT column_name, data_type
    AND (data_type IN ('LONG','LONG RAW','XMLTYPE','BFILE','ROWID','UROWID','RAW',
                       'CLOB','NCLOB','BLOB','BINARY_FLOAT','BINARY_DOUBLE')
         OR data_type LIKE 'INTERVAL%'
-        OR data_type LIKE 'TIMESTAMP%');
+        OR data_type LIKE 'TIMESTAMP%WITH TIME ZONE'
+        OR data_type LIKE 'TIMESTAMP%WITH LOCAL TIME ZONE');
 
 PROMPT
 PROMPT ===== NUMBER 无精度声明的列（NUMBER 而非 NUMBER(p,s)，值域最宽、最危险）=====
