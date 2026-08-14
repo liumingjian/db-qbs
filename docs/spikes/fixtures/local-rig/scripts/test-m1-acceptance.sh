@@ -50,6 +50,29 @@ run_id_validation_body=$(sed -n '/^assert_run_id()/,/^}/p' "$runner")
   exit 1
 }
 
+run_evidence_validation_body=$(sed -n '/^assert_run_evidence()/,/^}/p' "$runner")
+evidence_dir=$(mktemp -d)
+trap 'rm -rf "$evidence_dir"' EXIT
+printf '%s\n' \
+  '{"event":"run_opened","run_id":"20260814091530_a3f19c"}' \
+  '{"event":"batch_pushed","run_id":"20260814091530_a3f19c"}' \
+  '{"event":"run_finished","run_id":"20260814091530_a3f19c"}' \
+  > "$evidence_dir/valid.jsonl"
+printf '%s\n' \
+  '{"event":"run_opened","run_id":"20260814091530_a3f19c"}' \
+  '{"event":"batch_pushed","run_id":"20260814091530_b4e20d"}' \
+  '{"event":"run_finished","run_id":"20260814091530_a3f19c"}' \
+  > "$evidence_dir/mismatch.jsonl"
+(
+  fail() { return 1; }
+  eval "$run_evidence_validation_body"
+  assert_run_evidence "$evidence_dir/valid.jsonl" 20260814091530_a3f19c || exit 1
+  if assert_run_evidence "$evidence_dir/mismatch.jsonl" 20260814091530_a3f19c; then exit 1; fi
+) || {
+  echo "M1 acceptance runner must associate measured log evidence with the opened run_id" >&2
+  exit 1
+}
+
 for file in \
   acceptance/oracle.sql \
   acceptance/mysql.sql \
@@ -96,6 +119,10 @@ grep -Fq 'stage == "COMMITTING"' <<<"$source_kill_body" || {
   echo "source-kill scenario must reject a kill that raced into COMMITTING" >&2
   exit 1
 }
+grep -Fq 'assert_run_evidence "$killed" "$old_run"' <<<"$source_kill_body" || {
+  echo "source-kill scenario must associate interrupted measurements with its run_id" >&2
+  exit 1
+}
 for assertion in 'kill-sentinel' 'target_with_sentinel' 'target hash after source kill.*target_with_sentinel'; do
   grep -Eq "$assertion" <<<"$source_kill_body" || {
     echo "source-kill scenario must prove the target was not replaced with identical data" >&2
@@ -112,6 +139,10 @@ for assertion in 'commit-sentinel' 'commit disconnect target rows.*0'; do
 done
 grep -Fq 'assert_eq "commit disconnect source exit" 1 "$status"' <<<"$commit_disconnect_body" || {
   echo "commit-disconnect scenario must enforce the source 0/1 exit contract" >&2
+  exit 1
+}
+grep -Fq 'assert_run_evidence "$log" "$run_id"' <<<"$commit_disconnect_body" || {
+  echo "commit-disconnect scenario must associate diagnostic evidence with its run_id" >&2
   exit 1
 }
 
@@ -157,6 +188,10 @@ for measurement in fetch_ms push_ms cursor_ms commit_ms count_ms purged_rows; do
   }
 done
 success_body=$(sed -n '/^assert_source_success()/,/^}/p' "$runner")
+grep -Fq 'assert_run_evidence "$log" "$run_id"' <<<"$success_body" || {
+  echo "successful-run measurements must be associated with their opened run_id" >&2
+  exit 1
+}
 for total in source_rows source_batches; do
   grep -Fq ".$total | numbers" <<<"$success_body" || {
     echo "successful runs must require a numeric $total terminal total" >&2

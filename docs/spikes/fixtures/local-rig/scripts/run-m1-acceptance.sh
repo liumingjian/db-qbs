@@ -183,6 +183,20 @@ assert_run_id() {
   [[ "$run_id" =~ ^[0-9]{14}_[0-9a-f]{6}$ ]] || fail "$label is not an ADR-0016 run_id: $run_id"
 }
 
+assert_run_evidence() {
+  local log=$1 run_id=$2
+  jq -s -e --arg run_id "$run_id" '
+    all(.[];
+      if (.event == "run_opened"
+          or .event == "batch_pushed"
+          or .event == "commit_diagnosed"
+          or .event == "run_finished")
+      then .run_id == $run_id
+      else true
+      end)
+  ' "$log" >/dev/null || fail "log evidence does not belong to opened run_id: $run_id"
+}
+
 assert_source_success() {
   local log=$1 expected_rows=$2 batch_events source_batches run_id
   jq -e . "$log" >/dev/null || return 1
@@ -212,7 +226,8 @@ assert_source_success() {
   batch_sum=$(jq -s '[.[] | select(.event == "batch_pushed") | .rows] | add // 0' "$log") || return 1
   assert_eq "sum(batch rows)" "$expected_rows" "$batch_sum" || return 1
   run_id=$(source_run_id "$log") || return 1
-  assert_run_id "run_id from run_opened" "$run_id"
+  assert_run_id "run_id from run_opened" "$run_id" || return 1
+  assert_run_evidence "$log" "$run_id"
 }
 
 narrow_hash() {
@@ -282,6 +297,7 @@ scenario_source_kill() {
   fi
   old_run=$(source_run_id "$killed") || return 1
   assert_run_id "killed source run_id" "$old_run" || return 1
+  assert_run_evidence "$killed" "$old_run" || return 1
   after=$(narrow_hash) || return 1
   assert_eq "target hash after source kill" "$target_with_sentinel" "$after" || return 1
 
@@ -308,7 +324,7 @@ start_commit_drop_proxy() {
 }
 
 scenario_commit_disconnect() {
-  local log="$WORK_ROOT/commit-disconnect.jsonl" status
+  local log="$WORK_ROOT/commit-disconnect.jsonl" run_id status
   reset_sink_state || return 1
   mysql_exec "DELETE FROM M1_NARROW WHERE D_BIZ >= '$EMPTY_DATE' AND D_BIZ < '$EMPTY_DATE' + INTERVAL 1 DAY; INSERT INTO M1_NARROW (ROW_ID,V_TEXT,D_BIZ) VALUES (99999999,'commit-sentinel','$EMPTY_DATE')" >/dev/null || return 1
   start_commit_drop_proxy || return 1
@@ -316,6 +332,9 @@ scenario_commit_disconnect() {
   status=$?
   assert_eq "commit disconnect source exit" 1 "$status" || return 1
   jq -e . "$log" >/dev/null || return 1
+  run_id=$(source_run_id "$log") || return 1
+  assert_run_id "commit disconnect run_id" "$run_id" || return 1
+  assert_run_evidence "$log" "$run_id" || return 1
   assert_json_eq "$log" \
     'select(.event == "commit_diagnosed") | .terminal' SWAPPED "commit diagnostic terminal" || return 1
   jq -e 'select(.event == "commit_diagnosed" and (.message | contains("目标表已是新数据")))' \
