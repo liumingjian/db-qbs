@@ -41,6 +41,12 @@ for script in \
   03-type-census.sql \
   04-gen-boundary-samples.sql
 do
+  if grep -Fq 'WHENEVER SQLERROR EXIT SQL.SQLCODE' "$fixture_dir/$script" \
+    || ! grep -Fq 'WHENEVER SQLERROR EXIT FAILURE' "$fixture_dir/$script"; then
+    echo "$script must use a fixed nonzero exit status for SQL errors" >&2
+    exit 1
+  fi
+
   last_command=$(
     sed 's/--.*$//' "$fixture_dir/$script" \
       | sed '/^[[:space:]]*$/d' \
@@ -52,5 +58,10 @@ do
     exit 1
   fi
 done
+
+if ! grep -Fq 'PROMPT WHENEVER SQLERROR EXIT FAILURE' "$fixture_dir/04-gen-boundary-samples.sql"; then
+  echo "generated boundary sample script must use a fixed nonzero exit status for SQL errors" >&2
+  exit 1
+fi
 
 echo "SQL*Plus entrypoint checks passed"
