@@ -1,9 +1,9 @@
 use std::sync::{Arc, Mutex};
 
 use db_qbs_sink::{
-    build_staging_ddl, check_connection_settings, precheck, CreateStagingError, Destination,
-    DropStagingError, OpenRunRequest, SinkConfig, SinkService, SourceColumn, TargetColumn,
-    WriteBatchError,
+    build_staging_ddl, check_connection_settings, precheck, AtomicSwapError, AtomicSwapRequest,
+    AtomicSwapResult, CreateStagingError, Destination, DropStagingError, OpenRunRequest,
+    SinkConfig, SinkService, SourceColumn, TargetColumn, WriteBatchError,
 };
 
 const RUN_ID: &str = "20260814091530_a3f19c";
@@ -256,6 +256,17 @@ impl Destination for FakeDestination {
         _max_rows_per_insert: usize,
     ) -> Result<u64, WriteBatchError> {
         Ok(rows.len() as u64)
+    }
+
+    fn atomic_swap(
+        &self,
+        request: &AtomicSwapRequest,
+    ) -> Result<AtomicSwapResult, AtomicSwapError> {
+        Ok(AtomicSwapResult {
+            staged_rows: request.source_rows,
+            purged_rows: 0,
+            swapped_rows: request.source_rows,
+        })
     }
 
     fn drop_staging(&self, staging_table: &str) -> Result<(), DropStagingError> {

@@ -8,7 +8,8 @@ use mysql::{
 
 use crate::service::quote_identifier;
 use crate::{
-    CreateStagingError, Destination, DropStagingError, SinkConfig, TargetColumn, WriteBatchError,
+    AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, CreateStagingError, Destination,
+    DropStagingError, SinkConfig, TargetColumn, WriteBatchError,
 };
 
 type MetadataRow = (
@@ -131,6 +132,72 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
             .map_err(|error| WriteBatchError::Other(error.to_string()))
     }
 
+    fn atomic_swap(
+        &self,
+        request: &AtomicSwapRequest,
+    ) -> Result<AtomicSwapResult, AtomicSwapError> {
+        let outcome = self
+            .pool
+            .with_conn(|connection| {
+                let mut transaction = connection.start_transaction(TxOpts::default())?;
+                let count_statement = format!(
+                    "SELECT COUNT(*) FROM {}.{}",
+                    quote_identifier(&self.database),
+                    quote_identifier(&request.staging_table)
+                );
+                let staged_rows: u64 = transaction
+                    .query_first(count_statement)?
+                    .expect("SELECT COUNT(*) must return one row");
+                if staged_rows != request.source_rows
+                    || request.received_batches != request.source_batches
+                {
+                    transaction.rollback()?;
+                    return Ok(AtomicSwapOutcome::VerifyFailed { staged_rows });
+                }
+
+                let delete_statement = build_delete_statement(
+                    &self.database,
+                    &request.target_table,
+                    &request.target_date_col,
+                );
+                transaction.exec_drop(
+                    delete_statement,
+                    (&request.biz_date_start, &request.biz_date_end),
+                )?;
+                let purged_rows = transaction.affected_rows();
+
+                let insert_statement = build_swap_insert_statement(
+                    &self.database,
+                    &request.target_table,
+                    &request.staging_table,
+                    &request.columns,
+                );
+                transaction.query_drop(insert_statement)?;
+                let swapped_rows = transaction.affected_rows();
+                if swapped_rows != staged_rows {
+                    transaction.rollback()?;
+                    return Ok(AtomicSwapOutcome::Failed(format!(
+                        "暂存表有 {staged_rows} 行，切换 INSERT 只写入 {swapped_rows} 行"
+                    )));
+                }
+                transaction.commit()?;
+                Ok(AtomicSwapOutcome::Swapped(AtomicSwapResult {
+                    staged_rows,
+                    purged_rows,
+                    swapped_rows,
+                }))
+            })
+            .map_err(|error| AtomicSwapError::Other(error.to_string()))?;
+
+        match outcome {
+            AtomicSwapOutcome::Swapped(result) => Ok(result),
+            AtomicSwapOutcome::VerifyFailed { staged_rows } => {
+                Err(AtomicSwapError::VerifyFailed { staged_rows })
+            }
+            AtomicSwapOutcome::Failed(message) => Err(AtomicSwapError::Other(message)),
+        }
+    }
+
     fn drop_staging(&self, staging_table: &str) -> Result<(), DropStagingError> {
         let statement = format!(
             "DROP TABLE IF EXISTS {}.{}",
@@ -141,6 +208,12 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
             .with_conn(|connection| connection.query_drop(statement))
             .map_err(classify_drop_error)
     }
+}
+
+enum AtomicSwapOutcome {
+    Swapped(AtomicSwapResult),
+    VerifyFailed { staged_rows: u64 },
+    Failed(String),
 }
 
 fn build_insert_statement(
@@ -159,6 +232,36 @@ fn build_insert_statement(
     let value_placeholders = vec![row_placeholders; row_count].join(",");
     format!(
         "INSERT INTO {}.{} ({quoted_columns}) VALUES {value_placeholders}",
+        quote_identifier(database),
+        quote_identifier(staging_table)
+    )
+}
+
+fn build_delete_statement(database: &str, target_table: &str, target_date_col: &str) -> String {
+    format!(
+        "DELETE FROM {}.{} WHERE {} >= ? AND {} < ?",
+        quote_identifier(database),
+        quote_identifier(target_table),
+        quote_identifier(target_date_col),
+        quote_identifier(target_date_col)
+    )
+}
+
+fn build_swap_insert_statement(
+    database: &str,
+    target_table: &str,
+    staging_table: &str,
+    columns: &[String],
+) -> String {
+    let columns = columns
+        .iter()
+        .map(|column| quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "INSERT INTO {}.{} ({columns}) SELECT {columns} FROM {}.{}",
+        quote_identifier(database),
+        quote_identifier(target_table),
         quote_identifier(database),
         quote_identifier(staging_table)
     )
@@ -326,7 +429,7 @@ pub fn check_connection_settings(
 
 #[cfg(test)]
 mod tests {
-    use super::build_insert_statement;
+    use super::{build_delete_statement, build_insert_statement, build_swap_insert_statement};
 
     #[test]
     fn insert_statement_has_explicit_source_order_and_one_placeholder_per_value() {
@@ -342,5 +445,22 @@ mod tests {
             "INSERT INTO `qbs`.`T_POSITION__stg_run` (`C_SECOND`, `C_FIRST`) VALUES (?,?),(?,?),(?,?)"
         );
         assert_eq!(statement.matches('?').count(), 6);
+    }
+
+    #[test]
+    fn swap_statements_use_a_half_open_date_range_and_explicit_columns() {
+        assert_eq!(
+            build_delete_statement("qbs", "T_POSITION", "D_BIZ"),
+            "DELETE FROM `qbs`.`T_POSITION` WHERE `D_BIZ` >= ? AND `D_BIZ` < ?"
+        );
+        assert_eq!(
+            build_swap_insert_statement(
+                "qbs",
+                "T_POSITION",
+                "T_POSITION__stg_run",
+                &["C_SECOND".to_owned(), "C_FIRST".to_owned()],
+            ),
+            "INSERT INTO `qbs`.`T_POSITION` (`C_SECOND`, `C_FIRST`) SELECT `C_SECOND`, `C_FIRST` FROM `qbs`.`T_POSITION__stg_run`"
+        );
     }
 }

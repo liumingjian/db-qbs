@@ -7,9 +7,10 @@ use serde_json::json;
 
 use crate::precheck::precheck_with_date_column;
 use crate::{
-    AbortResponse, ActiveRun, ApiError, BatchPayload, BatchResponse, CreateStagingError,
-    Destination, DropStagingError, OpenRunRequest, OpenRunResponse, SinkService, TargetColumn,
-    WriteBatchError, MAX_PREPARED_STATEMENT_PLACEHOLDERS,
+    AbortResponse, ActiveRun, ApiError, AtomicSwapError, AtomicSwapRequest, BatchPayload,
+    BatchResponse, CommitResponse, CreateStagingError, Destination, DropStagingError,
+    OpenRunRequest, OpenRunResponse, RunResponse, SinkService, TargetColumn, Terminal,
+    WriteBatchError, MAX_PREPARED_STATEMENT_PLACEHOLDERS, TOMBSTONE_LIMIT,
 };
 
 static RUN_ID_RE: LazyLock<Regex> =
@@ -21,6 +22,7 @@ impl<D: Destination> SinkService<D> {
             database: database.into(),
             destination,
             active_runs: Mutex::new(HashMap::new()),
+            tombstones: Mutex::new(Default::default()),
         }
     }
 
@@ -67,11 +69,29 @@ impl<D: Destination> SinkService<D> {
             .iter()
             .map(|column| column.name.clone())
             .collect::<Vec<_>>();
+        let mut swap_columns = target_columns.iter().collect::<Vec<_>>();
+        swap_columns.sort_by_key(|column| column.ordinal);
+        let biz_date = NaiveDate::parse_from_str(&request.biz_date, "%Y-%m-%d")
+            .expect("open request date was validated");
         let active_run = ActiveRun {
             staging_table: staging_table.clone(),
             max_rows_per_insert: MAX_PREPARED_STATEMENT_PLACEHOLDERS / source_columns.len(),
             source_columns,
+            swap_columns: swap_columns
+                .into_iter()
+                .map(|column| column.name.clone())
+                .collect(),
+            target_table: request.target_table,
+            target_date_col: request.target_date_col,
+            biz_date_start: request.biz_date,
+            biz_date_end: biz_date
+                .succ_opt()
+                .expect("open request date has a following day")
+                .format("%Y-%m-%d")
+                .to_string(),
             next_seq: 1,
+            rows_written: 0,
+            sealed: false,
         };
         self.active_runs
             .lock()
@@ -91,13 +111,17 @@ impl<D: Destination> SinkService<D> {
         payload: BatchPayload,
     ) -> Result<BatchResponse, ApiError> {
         let mut active_runs = self.active_runs.lock().expect("active run mutex poisoned");
-        let run = active_runs.get_mut(run_id).ok_or_else(|| ApiError {
-            status: 404,
-            code: "RUN_UNKNOWN",
-            message: format!("未知 run {run_id}，不能接收批次，也不会重建暂存表"),
-            run_id: Some(run_id.to_owned()),
-            details: json!({}),
-        })?;
+        let run = match active_runs.get_mut(run_id) {
+            Some(run) => run,
+            None => {
+                drop(active_runs);
+                return Err(self.unknown_or_sealed(run_id));
+            }
+        };
+
+        if run.sealed {
+            return Err(run_sealed_error(run_id, active_run_response(run_id, run)));
+        }
 
         if payload.seq != run.next_seq {
             return Err(ApiError {
@@ -167,6 +191,7 @@ impl<D: Destination> SinkService<D> {
         }
 
         run.next_seq += 1;
+        run.rows_written += rows_written;
         Ok(BatchResponse {
             seq: payload.seq,
             rows_written,
@@ -174,33 +199,285 @@ impl<D: Destination> SinkService<D> {
         })
     }
 
-    pub fn abort(&self, run_id: &str) -> Result<AbortResponse, ApiError> {
-        let staging_table = self
+    pub fn commit(
+        &self,
+        run_id: &str,
+        total_batches: u64,
+        total_rows: u64,
+    ) -> Result<CommitResponse, ApiError> {
+        let run = {
+            let mut active_runs = self.active_runs.lock().expect("active run mutex poisoned");
+            let Some(run) = active_runs.get_mut(run_id) else {
+                drop(active_runs);
+                return Err(self.unknown_or_sealed(run_id));
+            };
+            if run.sealed {
+                return Err(run_sealed_error(run_id, active_run_response(run_id, run)));
+            }
+            run.sealed = true;
+            run.clone()
+        };
+
+        let received_batches = run.next_seq - 1;
+        let swap_request = AtomicSwapRequest {
+            staging_table: run.staging_table.clone(),
+            target_table: run.target_table.clone(),
+            target_date_col: run.target_date_col.clone(),
+            biz_date_start: run.biz_date_start.clone(),
+            biz_date_end: run.biz_date_end.clone(),
+            columns: run.swap_columns.clone(),
+            source_rows: total_rows,
+            source_batches: total_batches,
+            received_batches,
+        };
+
+        match self.destination.atomic_swap(&swap_request) {
+            Ok(result) => {
+                self.drop_after_commit(run_id, &run.staging_table, true)?;
+                self.finish_run(
+                    run_id,
+                    &run,
+                    Terminal::Swapped,
+                    result.purged_rows,
+                    result.swapped_rows,
+                );
+                Ok(CommitResponse {
+                    source_rows: total_rows,
+                    staged_rows: result.staged_rows,
+                    purged_rows: result.purged_rows,
+                    swapped_rows: result.swapped_rows,
+                })
+            }
+            Err(AtomicSwapError::VerifyFailed { staged_rows }) => {
+                self.drop_after_commit(run_id, &run.staging_table, false)?;
+                self.finish_run(run_id, &run, Terminal::Discarded, 0, 0);
+                Err(verify_failed_error(
+                    run_id,
+                    total_rows,
+                    staged_rows,
+                    total_batches,
+                    received_batches,
+                    run.rows_written,
+                ))
+            }
+            Err(AtomicSwapError::Other(message)) => {
+                self.drop_after_commit(run_id, &run.staging_table, false)?;
+                self.finish_run(run_id, &run, Terminal::Discarded, 0, 0);
+                Err(ApiError {
+                    status: 500,
+                    code: "SWAP_FAILED",
+                    message: format!(
+                        "切换目标表失败，事务已回滚：{message}。目标表未被触碰，可直接重跑"
+                    ),
+                    run_id: Some(run_id.to_owned()),
+                    details: json!({}),
+                })
+            }
+        }
+    }
+
+    pub fn get(&self, run_id: &str) -> Result<RunResponse, ApiError> {
+        if let Some(run) = self
             .active_runs
             .lock()
             .expect("active run mutex poisoned")
             .get(run_id)
-            .map(|run| run.staging_table.clone());
+        {
+            return Ok(active_run_response(run_id, run));
+        }
+        self.tombstones
+            .lock()
+            .expect("tombstone mutex poisoned")
+            .iter()
+            .find(|tombstone| tombstone.run_id == run_id)
+            .cloned()
+            .ok_or_else(|| run_unknown_error(run_id))
+    }
 
-        let Some(staging_table) = staging_table else {
+    pub fn abort(&self, run_id: &str) -> Result<AbortResponse, ApiError> {
+        let mut active_runs = self.active_runs.lock().expect("active run mutex poisoned");
+        let Some(run) = active_runs.get(run_id).cloned() else {
             return Ok(AbortResponse {
                 run_id: run_id.to_owned(),
                 staging_dropped: false,
             });
         };
+        if run.sealed {
+            return Err(run_sealed_error(run_id, active_run_response(run_id, &run)));
+        }
 
         self.destination
-            .drop_staging(&staging_table)
-            .map_err(|error| drop_staging_api_error(run_id, &staging_table, error))?;
-        self.active_runs
-            .lock()
-            .expect("active run mutex poisoned")
-            .remove(run_id);
+            .drop_staging(&run.staging_table)
+            .map_err(|error| drop_staging_api_error(run_id, &run.staging_table, error))?;
+        self.push_tombstone(terminal_response(run_id, &run, Terminal::Discarded, 0, 0));
+        active_runs.remove(run_id);
+        drop(active_runs);
 
         Ok(AbortResponse {
             run_id: run_id.to_owned(),
             staging_dropped: true,
         })
+    }
+
+    fn unknown_or_sealed(&self, run_id: &str) -> ApiError {
+        let tombstone = self
+            .tombstones
+            .lock()
+            .expect("tombstone mutex poisoned")
+            .iter()
+            .find(|tombstone| tombstone.run_id == run_id && tombstone.sealed)
+            .cloned();
+        match tombstone {
+            Some(tombstone) => run_sealed_error(run_id, tombstone),
+            None => run_unknown_error(run_id),
+        }
+    }
+
+    fn drop_after_commit(
+        &self,
+        run_id: &str,
+        staging_table: &str,
+        target_swapped: bool,
+    ) -> Result<(), ApiError> {
+        self.destination.drop_staging(staging_table).map_err(|error| {
+            if target_swapped {
+                let (message, details) = match error {
+                    DropStagingError::PermissionDenied => (
+                        format!(
+                            "目标表已完成切换，但暂存表 {staging_table} 清理失败：sink 的 MySQL 账号缺少 DROP 权限"
+                        ),
+                        json!({ "kind": "PERMISSION_DENIED", "operation": "DROP" }),
+                    ),
+                    DropStagingError::Other(message) => (
+                        format!(
+                            "目标表已完成切换，但暂存表 {staging_table} 清理失败：{message}"
+                        ),
+                        json!({ "kind": "OTHER" }),
+                    ),
+                };
+                ApiError {
+                    status: 500,
+                    code: "SWAP_FAILED",
+                    message,
+                    run_id: Some(run_id.to_owned()),
+                    details,
+                }
+            } else {
+                let mut api_error = drop_staging_api_error(run_id, staging_table, error);
+                api_error.code = "SWAP_FAILED";
+                api_error
+            }
+        })
+    }
+
+    fn finish_run(
+        &self,
+        run_id: &str,
+        run: &ActiveRun,
+        terminal: Terminal,
+        purged_rows: u64,
+        swapped_rows: u64,
+    ) {
+        let mut active_runs = self.active_runs.lock().expect("active run mutex poisoned");
+        self.push_tombstone(terminal_response(
+            run_id,
+            run,
+            terminal,
+            purged_rows,
+            swapped_rows,
+        ));
+        active_runs.remove(run_id);
+    }
+
+    fn push_tombstone(&self, tombstone: RunResponse) {
+        let mut tombstones = self.tombstones.lock().expect("tombstone mutex poisoned");
+        if tombstones.len() == TOMBSTONE_LIMIT {
+            tombstones.pop_front();
+        }
+        tombstones.push_back(tombstone);
+    }
+}
+
+fn active_run_response(run_id: &str, run: &ActiveRun) -> RunResponse {
+    RunResponse {
+        run_id: run_id.to_owned(),
+        staging_table: run.staging_table.clone(),
+        batches_received: run.next_seq - 1,
+        rows_written: run.rows_written,
+        sealed: run.sealed,
+        terminal: None,
+        purged_rows: None,
+        swapped_rows: None,
+    }
+}
+
+fn terminal_response(
+    run_id: &str,
+    run: &ActiveRun,
+    terminal: Terminal,
+    purged_rows: u64,
+    swapped_rows: u64,
+) -> RunResponse {
+    RunResponse {
+        terminal: Some(terminal),
+        purged_rows: Some(purged_rows),
+        swapped_rows: Some(swapped_rows),
+        ..active_run_response(run_id, run)
+    }
+}
+
+fn run_unknown_error(run_id: &str) -> ApiError {
+    ApiError {
+        status: 404,
+        code: "RUN_UNKNOWN",
+        message: format!("未知 run {run_id}"),
+        run_id: Some(run_id.to_owned()),
+        details: json!({}),
+    }
+}
+
+fn run_sealed_error(run_id: &str, status: RunResponse) -> ApiError {
+    ApiError {
+        status: 409,
+        code: "RUN_SEALED",
+        message: format!("run {run_id} 已封口，不能再接收批次或重复 commit"),
+        run_id: Some(run_id.to_owned()),
+        details: serde_json::to_value(status).expect("run response must serialize"),
+    }
+}
+
+fn verify_failed_error(
+    run_id: &str,
+    source_rows: u64,
+    staged_rows: u64,
+    source_batches: u64,
+    received_batches: u64,
+    sink_reported_rows: u64,
+) -> ApiError {
+    let message = if source_batches == received_batches
+        && sink_reported_rows == source_rows
+        && staged_rows < sink_reported_rows
+    {
+        format!(
+            "校验未通过：源端读出 {source_rows} 行，sink 逐批报告已写入 {sink_reported_rows} 行，但暂存表实际只有 {staged_rows} 行——数据在写入 MySQL 的过程中丢失。目标表未被触碰，可直接重跑；重跑仍失败请报 issue。"
+        )
+    } else {
+        format!(
+            "校验未通过：源端读出 {source_rows} 行 / {source_batches} 批，sink 只收到 {sink_reported_rows} 行 / {received_batches} 批——有批次未送达。目标表未被触碰，可直接重跑。"
+        )
+    };
+    ApiError {
+        status: 409,
+        code: "VERIFY_FAILED",
+        message,
+        run_id: Some(run_id.to_owned()),
+        details: json!({
+            "source_rows": source_rows,
+            "staged_rows": staged_rows,
+            "source_batches": source_batches,
+            "received_batches": received_batches,
+            "sink_reported_rows": sink_reported_rows,
+        }),
     }
 }
 
@@ -226,8 +503,12 @@ fn validate_open_request(request: &OpenRunRequest) -> Result<(), ApiError> {
     if request.target_date_col.is_empty() {
         problems.push("target_date_col 不能为空");
     }
-    if NaiveDate::parse_from_str(&request.biz_date, "%Y-%m-%d").is_err() {
-        problems.push("biz_date 必须是有效的 YYYY-MM-DD 日历日");
+    match NaiveDate::parse_from_str(&request.biz_date, "%Y-%m-%d") {
+        Ok(date) if date.succ_opt().is_none() => {
+            problems.push("biz_date 必须存在可表示的下一日，以生成半开区间");
+        }
+        Err(_) => problems.push("biz_date 必须是有效的 YYYY-MM-DD 日历日"),
+        Ok(_) => {}
     }
     if request.source_columns.is_empty() {
         problems.push("source_columns 不能为空");

@@ -7,7 +7,8 @@ use serde_json::json;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::{
-    ApiError, BatchPayload, Destination, MysqlDestination, OpenRunRequest, SinkConfig, SinkService,
+    ApiError, BatchPayload, CommitRequest, Destination, MysqlDestination, OpenRunRequest,
+    SinkConfig, SinkService,
 };
 
 const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
@@ -37,8 +38,14 @@ fn handle_request<D: Destination>(mut request: Request, service: &SinkService<D>
     } else if method == Method::Post {
         match run_action(&path) {
             Some((run_id, "batches")) => handle_batch(&mut request, service, run_id),
+            Some((run_id, "commit")) => handle_commit(&mut request, service, run_id),
             Some((run_id, "abort")) => handle_abort(&mut request, service, run_id),
             _ => error_response(not_found()),
+        }
+    } else if method == Method::Get {
+        match run_resource(&path) {
+            Some(run_id) => handle_get(service, run_id),
+            None => error_response(not_found()),
         }
     } else {
         error_response(not_found())
@@ -47,6 +54,14 @@ fn handle_request<D: Destination>(mut request: Request, service: &SinkService<D>
     if let Err(error) = request.respond(response) {
         eprintln!("HTTP 响应写入失败：{error}");
     }
+}
+
+fn run_resource(path: &str) -> Option<&str> {
+    let run_id = path.strip_prefix("/v1/runs/")?;
+    if run_id.is_empty() || run_id.contains('/') {
+        return None;
+    }
+    Some(run_id)
 }
 
 fn run_action(path: &str) -> Option<(&str, &str)> {
@@ -105,6 +120,34 @@ fn handle_abort(
         return error_response(error);
     }
     match service.abort(run_id) {
+        Ok(response) => json_response(200, &response),
+        Err(error) => error_response(error),
+    }
+}
+
+fn handle_commit(
+    request: &mut Request,
+    service: &SinkService<impl Destination>,
+    run_id: &str,
+) -> HttpResponse {
+    if !has_json_content_type(request) {
+        return error_response(unsupported_media_type(Some(run_id)));
+    }
+    let payload: CommitRequest = match read_json(request) {
+        Ok(payload) => payload,
+        Err(mut error) => {
+            error.run_id = Some(run_id.to_owned());
+            return error_response(error);
+        }
+    };
+    match service.commit(run_id, payload.total_batches, payload.total_rows) {
+        Ok(response) => json_response(200, &response),
+        Err(error) => error_response(error),
+    }
+}
+
+fn handle_get(service: &SinkService<impl Destination>, run_id: &str) -> HttpResponse {
+    match service.get(run_id) {
         Ok(response) => json_response(200, &response),
         Err(error) => error_response(error),
     }
@@ -199,7 +242,10 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::{CreateStagingError, DropStagingError, TargetColumn, WriteBatchError};
+    use crate::{
+        AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, CreateStagingError, DropStagingError,
+        TargetColumn, WriteBatchError,
+    };
 
     #[derive(Default)]
     struct FakeDestination {
@@ -240,6 +286,17 @@ mod tests {
             Ok(rows.len() as u64)
         }
 
+        fn atomic_swap(
+            &self,
+            request: &AtomicSwapRequest,
+        ) -> Result<AtomicSwapResult, AtomicSwapError> {
+            Ok(AtomicSwapResult {
+                staged_rows: request.source_rows,
+                purged_rows: 0,
+                swapped_rows: request.source_rows,
+            })
+        }
+
         fn drop_staging(&self, staging_table: &str) -> Result<(), DropStagingError> {
             self.dropped.lock().unwrap().push(staging_table.to_owned());
             Ok(())
@@ -250,10 +307,13 @@ mod tests {
     fn run_action_requires_exactly_one_run_and_action_segment() {
         assert_eq!(run_action("/v1/runs/run/batches"), Some(("run", "batches")));
         assert_eq!(run_action("/v1/runs/run/abort"), Some(("run", "abort")));
+        assert_eq!(run_action("/v1/runs/run/commit"), Some(("run", "commit")));
         assert_eq!(run_action("/v1/runs//batches"), None);
         assert_eq!(run_action("/v1/runs/run/"), None);
         assert_eq!(run_action("/v1/runs/run/batches/extra"), None);
         assert_eq!(run_action("/runs/run/batches"), None);
+        assert_eq!(run_resource("/v1/runs/run"), Some("run"));
+        assert_eq!(run_resource("/v1/runs/run/extra"), None);
     }
 
     #[test]
@@ -293,8 +353,54 @@ mod tests {
         assert_eq!(unknown["staging_dropped"], false);
     }
 
+    #[test]
+    fn http_commit_and_get_expose_the_terminal_resource() {
+        let service = Arc::new(SinkService::new(
+            "qbs",
+            Arc::new(FakeDestination::default()),
+        ));
+        let run_id = "20260814091530_a3f19c";
+        let open_body = format!(
+            r#"{{"run_id":"{run_id}","target_table":"T_POSITION","target_date_col":"D_BIZ","biz_date":"2026-08-14","source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
+        );
+        exchange(service.clone(), "/v1/runs", &open_body);
+        exchange(
+            service.clone(),
+            &format!("/v1/runs/{run_id}/batches"),
+            r#"{"seq":1,"rows":[["2026-08-14 12:00:00"]]}"#,
+        );
+
+        let (status, committed) = exchange(
+            service.clone(),
+            &format!("/v1/runs/{run_id}/commit"),
+            r#"{"total_batches":1,"total_rows":1}"#,
+        );
+        assert_eq!(status, 200);
+        assert_eq!(committed["source_rows"], 1);
+        assert_eq!(committed["swapped_rows"], 1);
+
+        let (status, terminal) =
+            exchange_method(service.clone(), "GET", &format!("/v1/runs/{run_id}"), "");
+        assert_eq!(status, 200);
+        assert_eq!(terminal["terminal"], "SWAPPED");
+
+        let (status, unknown) =
+            exchange_method(service, "GET", "/v1/runs/20260814091531_b4e20d", "");
+        assert_eq!(status, 404);
+        assert_eq!(unknown["error"]["code"], "RUN_UNKNOWN");
+    }
+
     fn exchange(
         service: Arc<SinkService<FakeDestination>>,
+        path: &str,
+        body: &str,
+    ) -> (u16, Value) {
+        exchange_method(service, "POST", path, body)
+    }
+
+    fn exchange_method(
+        service: Arc<SinkService<FakeDestination>>,
+        method: &str,
         path: &str,
         body: &str,
     ) -> (u16, Value) {
@@ -308,7 +414,7 @@ mod tests {
         let mut stream = TcpStream::connect(address).unwrap();
         write!(
             stream,
-            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
         .unwrap();

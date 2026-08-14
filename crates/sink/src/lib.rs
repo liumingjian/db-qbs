@@ -3,7 +3,7 @@ mod mysql_destination;
 mod precheck;
 mod service;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs;
 use std::path::Path;
@@ -19,6 +19,7 @@ pub use precheck::precheck;
 pub use service::build_staging_ddl;
 
 const MAX_PREPARED_STATEMENT_PLACEHOLDERS: usize = 65_535;
+const TOMBSTONE_LIMIT: usize = 32;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -105,6 +106,69 @@ pub struct BatchResponse {
     pub next_seq: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitRequest {
+    pub total_batches: u64,
+    pub total_rows: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommitResponse {
+    pub source_rows: u64,
+    pub staged_rows: u64,
+    pub purged_rows: u64,
+    pub swapped_rows: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Terminal {
+    Swapped,
+    Discarded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RunResponse {
+    pub run_id: String,
+    pub staging_table: String,
+    pub batches_received: u64,
+    pub rows_written: u64,
+    pub sealed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<Terminal>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub purged_rows: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swapped_rows: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AtomicSwapRequest {
+    pub staging_table: String,
+    pub target_table: String,
+    pub target_date_col: String,
+    pub biz_date_start: String,
+    pub biz_date_end: String,
+    pub columns: Vec<String>,
+    pub source_rows: u64,
+    pub source_batches: u64,
+    pub received_batches: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AtomicSwapResult {
+    pub staged_rows: u64,
+    pub purged_rows: u64,
+    pub swapped_rows: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AtomicSwapError {
+    VerifyFailed { staged_rows: u64 },
+    Other(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateStagingError {
     TableExists,
@@ -133,20 +197,31 @@ pub trait Destination: Send + Sync {
         rows: &[Vec<Option<String>>],
         max_rows_per_insert: usize,
     ) -> Result<u64, WriteBatchError>;
+    fn atomic_swap(&self, request: &AtomicSwapRequest)
+        -> Result<AtomicSwapResult, AtomicSwapError>;
     fn drop_staging(&self, staging_table: &str) -> Result<(), DropStagingError>;
 }
 
+#[derive(Clone)]
 struct ActiveRun {
     staging_table: String,
     source_columns: Vec<String>,
+    swap_columns: Vec<String>,
+    target_table: String,
+    target_date_col: String,
+    biz_date_start: String,
+    biz_date_end: String,
     max_rows_per_insert: usize,
     next_seq: u64,
+    rows_written: u64,
+    sealed: bool,
 }
 
 pub struct SinkService<D: Destination> {
     database: String,
     destination: Arc<D>,
     active_runs: Mutex<HashMap<String, ActiveRun>>,
+    tombstones: Mutex<VecDeque<RunResponse>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
