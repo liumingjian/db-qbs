@@ -36,7 +36,7 @@ NARROW_TASK=/workspace/docs/spikes/fixtures/local-rig/acceptance/task-narrow.tom
 WIDE_TASK=/workspace/docs/spikes/fixtures/local-rig/acceptance/task-wide.toml
 BIZ_DATE=2026-08-14
 EMPTY_DATE=2026-08-15
-declare -A RESULTS=()
+RESULTS=()
 
 cd "$RIG_ROOT"
 
@@ -62,6 +62,17 @@ assert_json_eq() {
   local file=$1 filter=$2 expected=$3 label=$4 actual
   actual=$(jq -r "$filter" "$file") || return 1
   assert_eq "$label" "$expected" "$actual"
+}
+
+scenario_index() {
+  local wanted=$1 index
+  for (( index = 0; index < ${#SCENARIOS[@]}; index++ )); do
+    if [[ "${SCENARIOS[$index]}" == "$wanted" ]]; then
+      printf '%s' "$index"
+      return 0
+    fi
+  done
+  return 1
 }
 
 stop_proxy() {
@@ -377,9 +388,10 @@ write_report() {
     echo
     echo "| Scenario | Result |"
     echo "|---|---|"
-    local scenario
-    for scenario in "${SCENARIOS[@]}"; do
-      echo "| $scenario | ${RESULTS[$scenario]:-FAIL} |"
+    local scenario index
+    for (( index = 0; index < ${#SCENARIOS[@]}; index++ )); do
+      scenario=${SCENARIOS[$index]}
+      echo "| $scenario | ${RESULTS[$index]:-FAIL} |"
     done
     echo
     echo "## Measurements"
@@ -440,13 +452,14 @@ write_report() {
 }
 
 run_scenario() {
-  local name=$1 function=$2 output="$WORK_ROOT/$name.out"
+  local name=$1 function=$2 output="$WORK_ROOT/$name.out" index
+  index=$(scenario_index "$name") || { fail "unknown scenario: $name"; return 1; }
   echo "==> $name"
   if "$function" > "$output" 2>&1; then
-    RESULTS[$name]=PASS
+    RESULTS[$index]=PASS
     echo "    PASS"
   else
-    RESULTS[$name]=FAIL
+    RESULTS[$index]=FAIL
     echo "    FAIL"
     sed 's/^/    /' "$output"
   fi
@@ -470,8 +483,8 @@ write_report || { echo "failed to write report" >&2; exit 1; }
 echo "report: $REPORT"
 
 failed=0
-for scenario in "${SCENARIOS[@]}"; do
-  [[ "${RESULTS[$scenario]}" == PASS ]] || failed=$((failed + 1))
+for (( index = 0; index < ${#SCENARIOS[@]}; index++ )); do
+  [[ "${RESULTS[$index]:-FAIL}" == PASS ]] || failed=$((failed + 1))
 done
 if (( failed > 0 )); then
   echo "M1 acceptance: FAIL ($failed/${#SCENARIOS[@]} scenarios)"
