@@ -178,8 +178,13 @@ source_run_id() {
   jq -r 'select(.event == "run_opened") | .run_id' "$1" | head -1
 }
 
+assert_run_id() {
+  local label=$1 run_id=$2
+  [[ "$run_id" =~ ^[0-9]{14}_[0-9a-f]{6}$ ]] || fail "$label is not an ADR-0016 run_id: $run_id"
+}
+
 assert_source_success() {
-  local log=$1 expected_rows=$2 batch_events source_batches
+  local log=$1 expected_rows=$2 batch_events source_batches run_id
   jq -e . "$log" >/dev/null || return 1
   assert_json_eq "$log" \
     'select(.event == "run_finished") | .terminal' SUCCEEDED "terminal" || return 1
@@ -206,7 +211,8 @@ assert_source_success() {
   local batch_sum
   batch_sum=$(jq -s '[.[] | select(.event == "batch_pushed") | .rows] | add // 0' "$log") || return 1
   assert_eq "sum(batch rows)" "$expected_rows" "$batch_sum" || return 1
-  [[ -n "$(source_run_id "$log")" ]] || fail "run_id was not captured from run_opened"
+  run_id=$(source_run_id "$log") || return 1
+  assert_run_id "run_id from run_opened" "$run_id"
 }
 
 narrow_hash() {
@@ -274,8 +280,8 @@ scenario_source_kill() {
     fail "source reached COMMITTING before the STREAMING kill was injected"
     return 1
   fi
-  old_run=$(source_run_id "$killed")
-  [[ -n "$old_run" ]] || fail "killed source never opened a run" || return 1
+  old_run=$(source_run_id "$killed") || return 1
+  assert_run_id "killed source run_id" "$old_run" || return 1
   after=$(narrow_hash) || return 1
   assert_eq "target hash after source kill" "$target_with_sentinel" "$after" || return 1
 

@@ -38,6 +38,18 @@ actual=$($runner --list)
   exit 1
 }
 
+run_id_validation_body=$(sed -n '/^assert_run_id()/,/^}/p' "$runner")
+(
+  fail() { return 1; }
+  eval "$run_id_validation_body"
+  assert_run_id "valid run_id" 20260814091530_a3f19c || exit 1
+  if assert_run_id "null run_id" null; then exit 1; fi
+  if assert_run_id "malformed run_id" 20260814091530_A3F19C; then exit 1; fi
+) || {
+  echo "M1 acceptance runner must validate JSON-log run_id values against ADR-0016" >&2
+  exit 1
+}
+
 for file in \
   acceptance/oracle.sql \
   acceptance/mysql.sql \
