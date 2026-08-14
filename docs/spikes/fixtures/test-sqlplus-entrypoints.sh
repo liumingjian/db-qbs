@@ -3,7 +3,7 @@ set -euo pipefail
 
 fixture_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-command_docs=(
+command_sources=(
   "$fixture_dir/README.md"
   "$fixture_dir/01-env-facts.sql"
   "$fixture_dir/02-columns.sql"
@@ -11,27 +11,27 @@ command_docs=(
   "$fixture_dir/04-gen-boundary-samples.sql"
 )
 
-non_failing_logins=$(
-  grep -nH 'sqlplus ' "${command_docs[@]}" \
+commands_without_fail_fast=$(
+  grep -nH 'sqlplus ' "${command_sources[@]}" \
     | grep -v 'sqlplus -L ' \
     || true
 )
 
-if [[ -n "$non_failing_logins" ]]; then
+if [[ -n "$commands_without_fail_fast" ]]; then
   echo "customer collection commands must use SQL*Plus -L to fail after one login attempt:" >&2
-  echo "$non_failing_logins" >&2
+  echo "$commands_without_fail_fast" >&2
   exit 1
 fi
 
-non_utf8_clients=$(
-  grep -nH 'sqlplus ' "${command_docs[@]}" \
+commands_without_utf8=$(
+  grep -nH 'sqlplus ' "${command_sources[@]}" \
     | grep -Fv 'NLS_LANG=AMERICAN_AMERICA.AL32UTF8 sqlplus -L ' \
     || true
 )
 
-if [[ -n "$non_utf8_clients" ]]; then
+if [[ -n "$commands_without_utf8" ]]; then
   echo "customer collection commands must make SQL*Plus emit UTF-8:" >&2
-  echo "$non_utf8_clients" >&2
+  echo "$commands_without_utf8" >&2
   exit 1
 fi
 

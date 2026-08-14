@@ -1,4 +1,4 @@
--- M0-1 / #2 步骤 2：实际出现的类型集合（#3 的覆盖清单）
+-- #2 上线前复验步骤 2：实际出现的类型集合（#3 的覆盖清单）
 -- 用法：NLS_LANG=AMERICAN_AMERICA.AL32UTF8 sqlplus -L user/pass@src @03-type-census.sql
 -- 产出：把输出贴回 issue #2，并写进 docs/spikes/0001-oracle-driver.md 第 1 节。
 

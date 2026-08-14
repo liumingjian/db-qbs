@@ -1,4 +1,4 @@
--- M0-1 / #2 步骤 3（第一步）：生成边界值采样脚本
+-- #2 上线前复验步骤 3（第一步）：生成边界值采样脚本
 -- 这是一个「写 SQL 的 SQL」——列名事先未知，所以由字典表生成采样语句。
 -- 用法：
 --   NLS_LANG=AMERICAN_AMERICA.AL32UTF8 sqlplus -L -S user/pass@src @04-gen-boundary-samples.sql > 05-boundary-samples.sql
@@ -39,33 +39,47 @@ PROMPT PROMPT COLUMN_NAME,DATA_TYPE,KIND,VALUE,VALUE_LEN
 -- ---- NUMBER 列 ----
 SELECT 'SELECT ''' || column_name || ''' COLUMN_NAME, ''' || data_type
        || ''' DATA_TYPE, kind KIND, NVL(v,''<NULL>'') VALUE, NVL(LENGTH(v),0) VALUE_LEN FROM ('
-       || ' SELECT ''max_len_val'' kind, MAX(TO_CHAR(' || column_name || ')) KEEP (DENSE_RANK LAST ORDER BY LENGTH(TO_CHAR(' || column_name || '))) v FROM ' || tbl
-       || ' UNION ALL SELECT ''min_val'', TO_CHAR(MIN(' || column_name || ')) FROM ' || tbl
-       || ' UNION ALL SELECT ''max_val'', TO_CHAR(MAX(' || column_name || ')) FROM ' || tbl
-       || ' UNION ALL SELECT ''max_scale_val'', MAX(TO_CHAR(CASE WHEN ' || column_name || ' <> TRUNC(' || column_name || ') THEN ' || column_name || ' END)) KEEP (DENSE_RANK LAST ORDER BY NVL(LENGTH(TO_CHAR(CASE WHEN ' || column_name || ' <> TRUNC(' || column_name || ') THEN ABS(' || column_name || ') - TRUNC(ABS(' || column_name || ')) END)), 0)) FROM ' || tbl
-       || ' UNION ALL SELECT ''zero_cnt'', TO_CHAR(COUNT(CASE WHEN ' || column_name || ' = 0 THEN 1 END)) FROM ' || tbl
-       || ' UNION ALL SELECT ''null_cnt'', TO_CHAR(COUNT(CASE WHEN ' || column_name || ' IS NULL THEN 1 END)) FROM ' || tbl
+       || ' SELECT ''max_len_val'' kind, MAX(TO_CHAR(' || column_name
+       || ')) KEEP (DENSE_RANK LAST ORDER BY LENGTH(TO_CHAR(' || column_name
+       || '))) v FROM ' || target_table
+       || ' UNION ALL SELECT ''min_val'', TO_CHAR(MIN(' || column_name || ')) FROM ' || target_table
+       || ' UNION ALL SELECT ''max_val'', TO_CHAR(MAX(' || column_name || ')) FROM ' || target_table
+       || ' UNION ALL SELECT ''max_scale_val'', MAX(TO_CHAR(CASE WHEN ' || column_name
+       || ' <> TRUNC(' || column_name || ') THEN ' || column_name
+       || ' END)) KEEP (DENSE_RANK LAST ORDER BY NVL(LENGTH(TO_CHAR(CASE WHEN ' || column_name
+       || ' <> TRUNC(' || column_name || ') THEN ABS(' || column_name
+       || ') - TRUNC(ABS(' || column_name || ')) END)), 0)) FROM ' || target_table
+       || ' UNION ALL SELECT ''zero_cnt'', TO_CHAR(COUNT(CASE WHEN ' || column_name
+       || ' = 0 THEN 1 END)) FROM ' || target_table
+       || ' UNION ALL SELECT ''null_cnt'', TO_CHAR(COUNT(CASE WHEN ' || column_name
+       || ' IS NULL THEN 1 END)) FROM ' || target_table
        || ' );'
-  FROM all_tab_columns@FA, (SELECT 'htbr45.t_r_fr_aststat@FA' tbl FROM dual)
+  FROM all_tab_columns@FA,
+       (SELECT 'htbr45.t_r_fr_aststat@FA' AS target_table FROM dual)
  WHERE owner = 'HTBR45' AND table_name = 'T_R_FR_ASTSTAT' AND data_type = 'NUMBER'
  ORDER BY column_id;
 
 -- ---- DATE / TIMESTAMP 列 ----
 SELECT 'SELECT ''' || column_name || ''' COLUMN_NAME, ''' || data_type
        || ''' DATA_TYPE, kind KIND, NVL(v,''<NULL>'') VALUE, NVL(LENGTH(v),0) VALUE_LEN FROM ('
-       || ' SELECT ''min_val'' kind, TO_CHAR(MIN(' || column_name || '), ''' || format_mask || ''') v FROM ' || tbl
-       || ' UNION ALL SELECT ''max_val'', TO_CHAR(MAX(' || column_name || '), ''' || format_mask || ''') FROM ' || tbl
-       || ' UNION ALL SELECT ''with_time_cnt'', TO_CHAR(COUNT(CASE WHEN ' || column_name || ' <> TRUNC(' || column_name || ') THEN 1 END)) FROM ' || tbl
-       || ' UNION ALL SELECT ''null_cnt'', TO_CHAR(COUNT(CASE WHEN ' || column_name || ' IS NULL THEN 1 END)) FROM ' || tbl
+       || ' SELECT ''min_val'' kind, TO_CHAR(MIN(' || column_name || '), ''' || format_mask
+       || ''') v FROM ' || target_table
+       || ' UNION ALL SELECT ''max_val'', TO_CHAR(MAX(' || column_name || '), ''' || format_mask
+       || ''') FROM ' || target_table
+       || ' UNION ALL SELECT ''with_time_cnt'', TO_CHAR(COUNT(CASE WHEN ' || column_name
+       || ' <> TRUNC(' || column_name || ') THEN 1 END)) FROM ' || target_table
+       || ' UNION ALL SELECT ''null_cnt'', TO_CHAR(COUNT(CASE WHEN ' || column_name
+       || ' IS NULL THEN 1 END)) FROM ' || target_table
        || ' );'
   FROM (
         SELECT column_id,
                column_name,
                data_type,
-               CASE WHEN data_type = 'DATE' OR NVL(data_scale, 0) = 0
-                    THEN 'YYYY-MM-DD HH24:MI:SS'
-                    ELSE 'YYYY-MM-DD HH24:MI:SS.FF' || NVL(data_scale, 6)
-                END AS format_mask
+               CASE
+                 WHEN data_type = 'DATE' OR NVL(data_scale, 0) = 0
+                   THEN 'YYYY-MM-DD HH24:MI:SS'
+                 ELSE 'YYYY-MM-DD HH24:MI:SS.FF' || NVL(data_scale, 6)
+               END AS format_mask
           FROM all_tab_columns@FA
          WHERE owner = 'HTBR45'
            AND table_name = 'T_R_FR_ASTSTAT'
@@ -73,33 +87,37 @@ SELECT 'SELECT ''' || column_name || ''' COLUMN_NAME, ''' || data_type
                 OR data_type = 'TIMESTAMP'
                 OR data_type LIKE 'TIMESTAMP(%)')
        ),
-       (SELECT 'htbr45.t_r_fr_aststat@FA' tbl FROM dual)
+       (SELECT 'htbr45.t_r_fr_aststat@FA' AS target_table FROM dual)
  ORDER BY column_id;
 
 -- ---- 字符类列 ----
 SELECT 'SELECT ''' || column_name || ''' COLUMN_NAME, ''' || data_type
        || ''' DATA_TYPE, kind KIND, NVL(v,' || null_marker || ') VALUE, NVL(LENGTH(v),0) VALUE_LEN FROM ('
-       || ' SELECT ''max_len_val'' kind, MAX(' || column_name || ') KEEP (DENSE_RANK LAST ORDER BY LENGTH(' || column_name || ')) v FROM ' || tbl
-       || ' UNION ALL SELECT ''multibyte_val'', MAX(CASE WHEN LENGTH(ASCIISTR(' || column_name || ')) > LENGTH(' || column_name || ') THEN ' || column_name || ' END) FROM ' || tbl
-       || ' UNION ALL SELECT ''null_cnt'', ' || text_cast || '(COUNT(CASE WHEN ' || column_name || ' IS NULL THEN 1 END)) FROM ' || tbl
+       || ' SELECT ''max_len_val'' kind, MAX(' || column_name
+       || ') KEEP (DENSE_RANK LAST ORDER BY LENGTH(' || column_name || ')) v FROM ' || target_table
+       || ' UNION ALL SELECT ''multibyte_val'', MAX(CASE WHEN LENGTH(ASCIISTR(' || column_name
+       || ')) > LENGTH(' || column_name || ') THEN ' || column_name || ' END) FROM ' || target_table
+       || ' UNION ALL SELECT ''null_cnt'', ' || text_cast || '(COUNT(CASE WHEN ' || column_name
+       || ' IS NULL THEN 1 END)) FROM ' || target_table
        || ' );'
   FROM (
         SELECT column_id,
                column_name,
                data_type,
-               CASE WHEN data_type IN ('NVARCHAR2','NCHAR') THEN 'TO_NCHAR'
-                    ELSE 'TO_CHAR'
-                END AS text_cast,
-               CASE WHEN data_type IN ('NVARCHAR2','NCHAR')
-                    THEN 'TO_NCHAR(''<NULL>'')'
-                    ELSE '''<NULL>'''
-                END AS null_marker
+               CASE
+                 WHEN data_type IN ('NVARCHAR2','NCHAR') THEN 'TO_NCHAR'
+                 ELSE 'TO_CHAR'
+               END AS text_cast,
+               CASE
+                 WHEN data_type IN ('NVARCHAR2','NCHAR') THEN 'TO_NCHAR(''<NULL>'')'
+                 ELSE '''<NULL>'''
+               END AS null_marker
           FROM all_tab_columns@FA
          WHERE owner = 'HTBR45'
            AND table_name = 'T_R_FR_ASTSTAT'
            AND data_type IN ('VARCHAR2','NVARCHAR2','CHAR','NCHAR')
        ),
-       (SELECT 'htbr45.t_r_fr_aststat@FA' tbl FROM dual)
+       (SELECT 'htbr45.t_r_fr_aststat@FA' AS target_table FROM dual)
  ORDER BY column_id;
 
 PROMPT EXIT
