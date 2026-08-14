@@ -150,6 +150,20 @@ grep -Eq 'batch_pushed.*\.bytes|\.bytes.*batch_pushed' "$runner" || {
 }
 
 report_body=$(sed -n '/^write_report()/,/^}/p' "$runner")
+if grep -Fq '[[ -n "$terminal" ]] || continue' <<<"$report_body"; then
+  echo "acceptance report must retain batch evidence from an interrupted run" >&2
+  exit 1
+fi
+grep -Fq 'last // {}' <<<"$report_body" || {
+  echo "acceptance report must handle an interrupted run without a terminal event" >&2
+  exit 1
+}
+for total in source_rows source_batches; do
+  grep -Fq ".$total // \"n/a\"" <<<"$report_body" || {
+    echo "acceptance report must identify unavailable $total as n/a" >&2
+    exit 1
+  }
+done
 grep -q 'canonical-form\.out' <<<"$report_body" || {
   echo "acceptance report must retain the canonical-form gate output" >&2
   exit 1

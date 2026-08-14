@@ -399,11 +399,10 @@ write_report() {
     echo "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
     local log terminal name rows batches fetch push cursor commit count purged row_dist byte_dist ratio
     while IFS= read -r log; do
-      terminal=$(jq -c 'select(.event == "run_finished")' "$log" | tail -1)
-      [[ -n "$terminal" ]] || continue
+      terminal=$(jq -sc '[.[] | select(.event == "run_finished")] | last // {}' "$log") || return 1
       name=$(basename "$log")
-      rows=$(jq -r '.source_rows // 0' <<<"$terminal")
-      batches=$(jq -r '.source_batches // 0' <<<"$terminal")
+      rows=$(jq -r '.source_rows // "n/a"' <<<"$terminal")
+      batches=$(jq -r '.source_batches // "n/a"' <<<"$terminal")
       fetch=$(jq -r '.fetch_ms // "n/a"' <<<"$terminal")
       push=$(jq -r '.push_ms // "n/a"' <<<"$terminal")
       cursor=$(jq -r '.cursor_ms // "n/a"' <<<"$terminal")
