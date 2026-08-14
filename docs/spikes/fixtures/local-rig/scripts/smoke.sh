@@ -32,13 +32,15 @@ assert_eq() {  # $1=说明 $2=期望 $3=实测
 counts=$(run_sql "SET PAGESIZE 0 FEEDBACK OFF HEADING OFF
 SELECT (SELECT COUNT(*) FROM t_types_probe)    || ' ' ||
        (SELECT COUNT(*) FROM t_canon_expected) || ' ' ||
+       (SELECT COUNT(*) FROM t_canon_m1_probe) || ' ' ||
        (SELECT COUNT(*) FROM t_bulk_probe)     || ' ' ||
        (SELECT COUNT(*) FROM t_long_probe)     || ' ' ||
        (SELECT COUNT(*) FROM t_longraw_probe)
-  FROM dual;" | tr '\t\r' '  ' | tr -s ' ' | grep -oE '[0-9]+( [0-9]+){4}')
-read -r probe expected bulk lng lngraw <<<"$counts"
+  FROM dual;" | tr '\t\r' '  ' | tr -s ' ' | grep -oE '[0-9]+( [0-9]+){5}')
+read -r probe expected canon_m1 bulk lng lngraw <<<"$counts"
 assert_eq "t_types_probe 行数"    7      "$probe"
 assert_eq "t_canon_expected 单元格" 28     "$expected"
+assert_eq "t_canon_m1_probe 行数" 21     "$canon_m1"
 assert_eq "t_bulk_probe 行数"      100000 "$bulk"
 assert_eq "t_long_probe 行数"      1      "$lng"
 assert_eq "t_longraw_probe 行数"   1      "$lngraw"

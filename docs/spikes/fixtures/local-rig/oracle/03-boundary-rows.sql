@@ -99,6 +99,40 @@ INSERT ALL
   INTO t_canon_expected VALUES (1,'L_BIN',     NULL,  'V1 排除：LONG RAW（11g 遗留）—— 同 RAW；本行属 t_longraw_probe')
 SELECT * FROM dual;
 
+-- ---- M1 规范形式手工门禁（#43）-----------------------------------------
+-- 这里只存 Oracle 原生类型中可表示的 accept/bypass 样本。reject 用例是
+-- 驱动漂移的见证（如 1,23 / 1E5 / .5）或非法日期分量，不能伪装成 Oracle
+-- NUMBER/DATE 值；spike-canon 直接从仓库 fixture 逐条验证它们。
+INSERT ALL
+  INTO t_canon_m1_probe (case_id, sample_type, n_value) VALUES ('num-zero',        'NUMBER', 0)
+  INTO t_canon_m1_probe (case_id, sample_type, n_value) VALUES ('num-int-plain',   'NUMBER', 100)
+  INTO t_canon_m1_probe (case_id, sample_type, n_value) VALUES ('num-lt-one',      'NUMBER', 0.5)
+  INTO t_canon_m1_probe (case_id, sample_type, n_value) VALUES ('num-neg-lt-one',  'NUMBER', -0.01)
+  INTO t_canon_m1_probe (case_id, sample_type, n_value) VALUES ('num-frac',        'NUMBER', 1.23)
+  INTO t_canon_m1_probe (case_id, sample_type, n_value) VALUES ('num-38-positive', 'NUMBER', 12345678901234567890123456789012345678)
+  INTO t_canon_m1_probe (case_id, sample_type, n_value) VALUES ('num-38-negative', 'NUMBER', -12345678901234567890123456789012345678)
+  INTO t_canon_m1_probe (case_id, sample_type, n_value) VALUES ('num-38-split',    'NUMBER', 1234567890123456789012345678.0123456789)
+SELECT * FROM dual;
+
+INSERT ALL
+  INTO t_canon_m1_probe (case_id, sample_type, d_value) VALUES ('date-plain',        'DATE', TO_DATE('2026-08-13 14:35:09', 'YYYY-MM-DD HH24:MI:SS'))
+  INTO t_canon_m1_probe (case_id, sample_type, d_value) VALUES ('date-midnight',     'DATE', TO_DATE('2026-08-13 00:00:00', 'YYYY-MM-DD HH24:MI:SS'))
+  INTO t_canon_m1_probe (case_id, sample_type, d_value) VALUES ('date-century-last', 'DATE', TO_DATE('1999-12-31 23:59:59', 'YYYY-MM-DD HH24:MI:SS'))
+  INTO t_canon_m1_probe (case_id, sample_type, d_value) VALUES ('date-century-first','DATE', TO_DATE('2000-01-01 00:00:00', 'YYYY-MM-DD HH24:MI:SS'))
+  INTO t_canon_m1_probe (case_id, sample_type, d_value) VALUES ('date-leap-day',     'DATE', TO_DATE('2024-02-29 12:00:00', 'YYYY-MM-DD HH24:MI:SS'))
+  INTO t_canon_m1_probe (case_id, sample_type, d_value) VALUES ('date-leap-century','DATE', TO_DATE('2000-02-29 00:00:00', 'YYYY-MM-DD HH24:MI:SS'))
+  INTO t_canon_m1_probe (case_id, sample_type, d_value) VALUES ('date-min',          'DATE', TO_DATE('0001-01-01 00:00:00', 'YYYY-MM-DD HH24:MI:SS'))
+  INTO t_canon_m1_probe (case_id, sample_type, d_value) VALUES ('date-max',          'DATE', TO_DATE('9999-12-31 23:59:59', 'YYYY-MM-DD HH24:MI:SS'))
+SELECT * FROM dual;
+
+INSERT ALL
+  INTO t_canon_m1_probe (case_id, sample_type, v_value) VALUES ('vc-cn',              'VARCHAR2', '资产净值合计')
+  INTO t_canon_m1_probe (case_id, sample_type, v_value) VALUES ('vc-trailing-space',  'VARCHAR2', 'AB        ')
+  INTO t_canon_m1_probe (case_id, sample_type, v_value) VALUES ('vc-escape-chars',    'VARCHAR2', 'a"b\c' || CHR(9) || 'd' || CHR(10) || 'e')
+  INTO t_canon_m1_probe (case_id, sample_type, v_value) VALUES ('vc-length-boundary', 'VARCHAR2', '甲乙丙丁戊己庚辛壬癸')
+  INTO t_canon_m1_probe (case_id, sample_type)          VALUES ('null-bypass',        'NULL')
+SELECT * FROM dual;
+
 -- ---- 10 万行：只用来看流式 fetch 的内存形状，不看吞吐 --------------------
 INSERT INTO t_bulk_probe (row_id, n_amount, v_text, d_biz)
 SELECT LEVEL,

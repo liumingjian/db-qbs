@@ -64,6 +64,20 @@ CREATE TABLE t_canon_expected (
   CONSTRAINT pk_t_canon_expected PRIMARY KEY (row_id, column_name)
 );
 
+-- ---- M1 规范形式手工门禁样本 -------------------------------------------
+-- #43 的新探针只读本表的原生 Oracle 值；期望值只读仓库内 canon-golden.json。
+-- t_canon_expected 继续只服务 M0 的 spike-odpi，二者不能混用。
+CREATE TABLE t_canon_m1_probe (
+  case_id      VARCHAR2(40)  NOT NULL,
+  sample_type  VARCHAR2(10)  NOT NULL,
+  n_value      NUMBER,
+  d_value      DATE,
+  v_value      VARCHAR2(400),
+  CONSTRAINT pk_t_canon_m1_probe PRIMARY KEY (case_id),
+  CONSTRAINT ck_t_canon_m1_probe_type
+    CHECK (sample_type IN ('NUMBER', 'DATE', 'VARCHAR2', 'NULL'))
+);
+
 -- ---- 10 万行表：给 #5 看形状用（绝对数字作废，见 README）----------------
 CREATE TABLE t_bulk_probe (
   row_id    NUMBER(8)      NOT NULL,
