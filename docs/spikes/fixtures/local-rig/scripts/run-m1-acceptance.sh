@@ -204,15 +204,19 @@ scenario_source_kill() {
     "echo \$\$ > /tmp/m1-source.pid; exec $SOURCE_BIN --config $SOURCE_CONFIG --task $NARROW_TASK --biz-date $BIZ_DATE > /tmp/m1-kill.jsonl" || return 1
   for attempt in $(seq 1 400); do
     if compose exec -T client sh -c \
-      "test -f /tmp/m1-kill.jsonl && grep -q '\"event\":\"run_opened\"' /tmp/m1-kill.jsonl"; then
+      "test -f /tmp/m1-kill.jsonl && grep -q '\"event\":\"batch_pushed\"' /tmp/m1-kill.jsonl"; then
       break
     fi
     sleep 0.05
   done
+  compose exec -T client grep -q '"event":"batch_pushed"' /tmp/m1-kill.jsonl ||
+    fail "source did not reach STREAMING before the kill deadline" || return 1
   pid=$(compose exec -T client cat /tmp/m1-source.pid | tr -d '\r') || return 1
   compose exec -T client kill -KILL "$pid" ||
     fail "source completed before the STREAMING kill could be injected" || return 1
   compose exec -T client cat /tmp/m1-kill.jsonl > "$killed" || return 1
+  jq -e 'select(.event == "batch_pushed")' "$killed" >/dev/null ||
+    fail "killed source log has no completed batch" || return 1
   old_run=$(source_run_id "$killed")
   [[ -n "$old_run" ]] || fail "killed source never opened a run" || return 1
   after=$(narrow_hash) || return 1

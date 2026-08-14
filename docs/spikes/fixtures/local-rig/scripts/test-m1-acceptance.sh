@@ -52,6 +52,12 @@ if rg -n 'rows[^\n]*(==|-eq)[^\n]*5000|5000[^\n]*(==|-eq)[^\n]*rows' "$runner"; 
   exit 1
 fi
 
+source_kill_body=$(sed -n '/^scenario_source_kill()/,/^}/p' "$runner")
+rg -q 'batch_pushed' <<<"$source_kill_body" || {
+  echo "source-kill scenario must reach STREAMING before killing source" >&2
+  exit 1
+}
+
 for measurement in fetch_ms push_ms cursor_ms commit_ms count_ms purged_rows; do
   rg -q "$measurement" "$runner" || {
     echo "acceptance report is missing $measurement" >&2
