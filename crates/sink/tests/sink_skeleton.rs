@@ -297,6 +297,30 @@ fn open_creates_staging_then_abort_is_idempotent() {
 }
 
 #[test]
+fn open_rejects_a_target_date_column_mapped_from_a_non_date_source() {
+    let (sources, targets) = valid_columns();
+    let destination = Arc::new(FakeDestination {
+        columns: targets,
+        ..FakeDestination::default()
+    });
+    let service = SinkService::new("qbs", destination);
+    let mut request = open_request(sources);
+    request.target_date_col = "C_NAME".to_owned();
+
+    let error = service.open(request).unwrap_err();
+
+    assert_eq!(error.status, 422);
+    assert!(error.details["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|issue| {
+            issue["column"] == "C_NAME"
+                && issue["rule"] == "target_date_col 必须对应同名的 Oracle DATE 源列"
+        }));
+}
+
+#[test]
 fn existing_staging_table_is_never_dropped_and_message_names_its_time() {
     let (sources, targets) = valid_columns();
     let destination = Arc::new(FakeDestination {

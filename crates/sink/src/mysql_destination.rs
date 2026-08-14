@@ -4,10 +4,8 @@ use std::sync::Mutex;
 use mysql::prelude::Queryable;
 use mysql::{params, Conn, Error as MysqlError, Opts, OptsBuilder};
 
-use crate::{
-    check_connection_settings, quote_identifier, CreateStagingError, Destination, DropStagingError,
-    SinkConfig, TargetColumn,
-};
+use crate::service::quote_identifier;
+use crate::{CreateStagingError, Destination, DropStagingError, SinkConfig, TargetColumn};
 
 type MetadataRow = (
     String,
@@ -223,4 +221,45 @@ fn classify_drop_error(error: PoolError) -> DropStagingError {
 
 fn is_permission_error(code: u16) -> bool {
     matches!(code, 1044 | 1045 | 1142 | 1143 | 1227)
+}
+
+pub fn check_connection_settings(
+    character_set_client: &str,
+    character_set_connection: &str,
+    character_set_results: &str,
+    sql_mode: &str,
+    max_allowed_packet: u64,
+) -> Result<(), String> {
+    const EXPECTED_CHARSET: &str = "utf8mb4";
+    const EXPECTED_SQL_MODE: &str = "STRICT_ALL_TABLES";
+    const MIN_PACKET: u64 = 64 * 1024 * 1024;
+
+    let mut problems = Vec::new();
+    for (name, actual) in [
+        ("character_set_client", character_set_client),
+        ("character_set_connection", character_set_connection),
+        ("character_set_results", character_set_results),
+    ] {
+        if actual != EXPECTED_CHARSET {
+            problems.push(format!(
+                "环境配置错误：{name} 期望 {EXPECTED_CHARSET}，实际 {actual}"
+            ));
+        }
+    }
+    if sql_mode != EXPECTED_SQL_MODE {
+        problems.push(format!(
+            "环境配置错误：sql_mode 期望完整值 {EXPECTED_SQL_MODE}，实际 {sql_mode}"
+        ));
+    }
+    if max_allowed_packet < MIN_PACKET {
+        problems.push(format!(
+            "环境配置错误：max_allowed_packet 期望至少 {MIN_PACKET} 字节，实际 {max_allowed_packet} 字节；请调整 MySQL 配置，不要排查业务数据"
+        ));
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("；"))
+    }
 }

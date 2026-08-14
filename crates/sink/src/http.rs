@@ -1,13 +1,16 @@
-use std::io::Read;
+use std::io::{Cursor, Read};
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::{ApiError, Destination, MysqlDestination, OpenRunRequest, SinkConfig, SinkService};
 
 const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
+
+type HttpResponse = Response<Cursor<Vec<u8>>>;
 
 pub fn serve(config: SinkConfig) -> Result<(), String> {
     if config.listen.is_empty() {
@@ -47,10 +50,7 @@ fn handle_request<D: Destination>(mut request: Request, service: &SinkService<D>
     }
 }
 
-fn handle_open(
-    request: &mut Request,
-    service: &SinkService<impl Destination>,
-) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_open(request: &mut Request, service: &SinkService<impl Destination>) -> HttpResponse {
     if !has_json_content_type(request) {
         return error_response(ApiError {
             status: 415,
@@ -74,7 +74,7 @@ fn handle_abort(
     request: &mut Request,
     service: &SinkService<impl Destination>,
     run_id: &str,
-) -> Response<std::io::Cursor<Vec<u8>>> {
+) -> HttpResponse {
     if !has_json_content_type(request) {
         return error_response(ApiError {
             status: 415,
@@ -97,7 +97,7 @@ fn handle_abort(
 #[serde(deny_unknown_fields)]
 struct EmptyBody {}
 
-fn read_json<T: for<'de> Deserialize<'de>>(request: &mut Request) -> Result<T, ApiError> {
+fn read_json<T: DeserializeOwned>(request: &mut Request) -> Result<T, ApiError> {
     let mut body = Vec::new();
     request
         .as_reader()
@@ -148,12 +148,12 @@ fn not_found() -> ApiError {
     }
 }
 
-fn error_response(error: ApiError) -> Response<std::io::Cursor<Vec<u8>>> {
+fn error_response(error: ApiError) -> HttpResponse {
     let status = error.status;
     json_response(status, &json!({ "error": error }))
 }
 
-fn json_response(status: u16, value: &impl serde::Serialize) -> Response<std::io::Cursor<Vec<u8>>> {
+fn json_response(status: u16, value: &impl Serialize) -> HttpResponse {
     let body = serde_json::to_vec(value).expect("serializing an HTTP response must succeed");
     let content_type = Header::from_bytes("Content-Type", "application/json")
         .expect("static response header must be valid");
