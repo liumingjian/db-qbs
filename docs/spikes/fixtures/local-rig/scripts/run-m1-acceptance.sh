@@ -30,10 +30,12 @@ REPORT=${M1_REPORT:-"$RIG_ROOT/m1-acceptance-$(date -u +%Y%m%dT%H%M%SZ).md"}
 SOURCE_BIN=/usr/local/bin/db-qbs-source
 SINK_BIN=/usr/local/bin/db-qbs-sink
 SOURCE_CONFIG=/workspace/docs/spikes/fixtures/local-rig/acceptance/source.toml
-DROP_CONFIG=/workspace/docs/spikes/fixtures/local-rig/acceptance/source-commit-drop.toml
+COMMIT_DROP_CONFIG=/workspace/docs/spikes/fixtures/local-rig/acceptance/source-commit-drop.toml
 SINK_CONFIG=/workspace/docs/spikes/fixtures/local-rig/acceptance/sink.toml
 NARROW_TASK=/workspace/docs/spikes/fixtures/local-rig/acceptance/task-narrow.toml
 WIDE_TASK=/workspace/docs/spikes/fixtures/local-rig/acceptance/task-wide.toml
+SINK_URL=http://127.0.0.1:18080
+COMMIT_DROP_PROXY_URL=http://127.0.0.1:18081
 BIZ_DATE=2026-08-14
 EMPTY_DATE=2026-08-15
 RESULTS=()
@@ -113,18 +115,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
+wait_for_endpoint() {
+  local url=$1 attempt
+  for (( attempt = 1; attempt <= 100; attempt++ )); do
+    if compose exec -T client curl -sS -o /dev/null "$url"; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 start_sink() {
   stop_sink || return 1
   compose exec -T client rm -f /tmp/m1-sink.pid /tmp/m1-sink.jsonl || return 1
   compose exec -T -d client sh -c \
     "echo \$\$ > /tmp/m1-sink.pid; exec $SINK_BIN --config $SINK_CONFIG > /tmp/m1-sink.jsonl 2>&1" || return 1
-  local attempt
-  for (( attempt = 1; attempt <= 100; attempt++ )); do
-    if compose exec -T client curl -sS -o /dev/null http://127.0.0.1:18080/v1/runs/not-a-run; then
-      return 0
-    fi
-    sleep 0.1
-  done
+  wait_for_endpoint "$SINK_URL/v1/runs/not-a-run" && return 0
   compose exec -T client cat /tmp/m1-sink.jsonl >&2 || true
   fail "sink did not become ready"
 }
@@ -175,7 +182,7 @@ run_source() {
 }
 
 source_run_id() {
-  jq -r 'select(.event == "run_opened") | .run_id' "$1" | head -1
+  jq -sr 'first(.[] | select(.event == "run_opened") | .run_id)' "$1"
 }
 
 assert_run_id() {
@@ -258,7 +265,8 @@ scenario_narrow() {
 
 scenario_source_kill() {
   local direct="$WORK_ROOT/kill-direct.jsonl" killed="$WORK_ROOT/kill.jsonl"
-  local rerun="$WORK_ROOT/kill-rerun.jsonl" baseline target_with_sentinel after old_run new_run pid attempt
+  local rerun="$WORK_ROOT/kill-rerun.jsonl" baseline target_with_sentinel target_after_kill
+  local old_run new_run pid attempt
   mysql_exec "DELETE FROM M1_NARROW" >/dev/null || return 1
   run_source "$NARROW_TASK" "$BIZ_DATE" "$direct" || return 1
   assert_source_success "$direct" 100000 || return 1
@@ -293,8 +301,8 @@ scenario_source_kill() {
   old_run=$(source_run_id "$killed") || return 1
   assert_run_id "killed source run_id" "$old_run" || return 1
   assert_run_evidence "$killed" "$old_run" || return 1
-  after=$(narrow_hash) || return 1
-  assert_eq "target hash after source kill" "$target_with_sentinel" "$after" || return 1
+  target_after_kill=$(narrow_hash) || return 1
+  assert_eq "target hash after source kill" "$target_with_sentinel" "$target_after_kill" || return 1
 
   reset_sink_state || return 1
   run_source "$NARROW_TASK" "$BIZ_DATE" "$rerun" || return 1
@@ -308,14 +316,8 @@ start_commit_drop_proxy() {
   stop_proxy || return 1
   compose exec -T -d client sh -c \
     "echo \$\$ > /tmp/m1-proxy.pid; exec python3 /workspace/docs/spikes/fixtures/local-rig/acceptance/commit-drop-proxy.py" || return 1
-  local attempt
-  for (( attempt = 1; attempt <= 100; attempt++ )); do
-    if compose exec -T client curl -sS -o /dev/null http://127.0.0.1:18081/v1/runs/not-a-run; then
-      return 0
-    fi
-    sleep 0.1
-  done
-  fail "commit-drop proxy did not become ready"
+  wait_for_endpoint "$COMMIT_DROP_PROXY_URL/v1/runs/not-a-run" ||
+    fail "commit-drop proxy did not become ready"
 }
 
 scenario_commit_disconnect() {
@@ -323,7 +325,7 @@ scenario_commit_disconnect() {
   reset_sink_state || return 1
   mysql_exec "DELETE FROM M1_NARROW WHERE D_BIZ >= '$EMPTY_DATE' AND D_BIZ < '$EMPTY_DATE' + INTERVAL 1 DAY; INSERT INTO M1_NARROW (ROW_ID,V_TEXT,D_BIZ) VALUES (99999999,'commit-sentinel','$EMPTY_DATE')" >/dev/null || return 1
   start_commit_drop_proxy || return 1
-  run_source "$NARROW_TASK" "$EMPTY_DATE" "$log" "$DROP_CONFIG"
+  run_source "$NARROW_TASK" "$EMPTY_DATE" "$log" "$COMMIT_DROP_CONFIG"
   status=$?
   assert_eq "commit disconnect source exit" 1 "$status" || return 1
   jq -e . "$log" >/dev/null || return 1
@@ -355,7 +357,7 @@ api_post() {
   local path=$1 payload=$2 response
   response=$(printf '%s' "$payload" | compose exec -T client curl -sS \
     -H 'Content-Type: application/json' --data-binary @- \
-    -w $'\n%{http_code}' "http://127.0.0.1:18080$path") || return 1
+    -w $'\n%{http_code}' "$SINK_URL$path") || return 1
   API_STATUS=${response##*$'\n'}
   API_BODY=${response%$'\n'*}
 }

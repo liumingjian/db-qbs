@@ -259,10 +259,8 @@ impl<D: Destination> SinkService<D> {
                 self.finish_run(run_id, &run, Terminal::Discarded, 0, 0);
                 Err(verify_failed_error(
                     run_id,
-                    total_rows,
+                    &swap_request,
                     staged_rows,
-                    total_batches,
-                    received_batches,
                     run.rows_written,
                     count_ms,
                 ))
@@ -455,13 +453,14 @@ fn run_sealed_error(run_id: &str, status: RunResponse) -> ApiError {
 
 fn verify_failed_error(
     run_id: &str,
-    source_rows: u64,
+    request: &AtomicSwapRequest,
     staged_rows: u64,
-    source_batches: u64,
-    received_batches: u64,
     sink_reported_rows: u64,
     count_ms: u64,
 ) -> ApiError {
+    let source_rows = request.source_rows;
+    let source_batches = request.source_batches;
+    let received_batches = request.received_batches;
     let message = if source_batches == received_batches
         && sink_reported_rows == source_rows
         && staged_rows < sink_reported_rows

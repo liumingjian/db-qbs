@@ -6,17 +6,17 @@ import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
-class Handler(BaseHTTPRequestHandler):
+class CommitDropProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     commit_dropped = False
 
     def do_GET(self):
-        self.forward()
+        self.forward_to_sink()
 
     def do_POST(self):
-        self.forward()
+        self.forward_to_sink()
 
-    def forward(self):
+    def forward_to_sink(self):
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
         connection = http.client.HTTPConnection("127.0.0.1", 18080, timeout=1800)
@@ -25,8 +25,8 @@ class Handler(BaseHTTPRequestHandler):
         response = connection.getresponse()
         response_body = response.read()
 
-        if self.path.endswith("/commit") and not Handler.commit_dropped:
-            Handler.commit_dropped = True
+        if self.path.endswith("/commit") and not CommitDropProxyHandler.commit_dropped:
+            CommitDropProxyHandler.commit_dropped = True
             self.connection.shutdown(socket.SHUT_RDWR)
             self.connection.close()
             return
@@ -41,4 +41,4 @@ class Handler(BaseHTTPRequestHandler):
         return
 
 
-ThreadingHTTPServer(("127.0.0.1", 18081), Handler).serve_forever()
+ThreadingHTTPServer(("127.0.0.1", 18081), CommitDropProxyHandler).serve_forever()

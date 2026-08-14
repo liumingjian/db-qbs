@@ -170,15 +170,20 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
                 let staged_rows: u64 = transaction
                     .query_first(count_statement)?
                     .expect("SELECT COUNT(*) must return one row");
-                let count_ms = elapsed_ms(count_started);
+                let count_ms = count_started
+                    .elapsed()
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX);
                 if staged_rows != request.source_rows
                     || request.received_batches != request.source_batches
                 {
                     transaction.rollback()?;
-                    return Ok(AtomicSwapOutcome::VerifyFailed {
+                    let error = AtomicSwapError::VerifyFailed {
                         staged_rows,
                         count_ms,
-                    });
+                    };
+                    return Ok(AtomicSwapOutcome::Failed(error));
                 }
 
                 let delete_statement = build_delete_statement(
@@ -202,9 +207,9 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
                 let swapped_rows = transaction.affected_rows();
                 if swapped_rows != staged_rows {
                     transaction.rollback()?;
-                    return Ok(AtomicSwapOutcome::SwapFailed(format!(
-                        "暂存表有 {staged_rows} 行，切换 INSERT 只写入 {swapped_rows} 行"
-                    )));
+                    let message =
+                        format!("暂存表有 {staged_rows} 行，切换 INSERT 只写入 {swapped_rows} 行");
+                    return Ok(AtomicSwapOutcome::Failed(AtomicSwapError::Other(message)));
                 }
                 transaction.commit()?;
                 Ok(AtomicSwapOutcome::Swapped(AtomicSwapResult {
@@ -218,14 +223,7 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
 
         match outcome {
             AtomicSwapOutcome::Swapped(result) => Ok(result),
-            AtomicSwapOutcome::VerifyFailed {
-                staged_rows,
-                count_ms,
-            } => Err(AtomicSwapError::VerifyFailed {
-                staged_rows,
-                count_ms,
-            }),
-            AtomicSwapOutcome::SwapFailed(message) => Err(AtomicSwapError::Other(message)),
+            AtomicSwapOutcome::Failed(error) => Err(error),
         }
     }
 
@@ -316,12 +314,7 @@ enum BatchWriteOutcome {
 
 enum AtomicSwapOutcome {
     Swapped(AtomicSwapResult),
-    VerifyFailed { staged_rows: u64, count_ms: u64 },
-    SwapFailed(String),
-}
-
-fn elapsed_ms(started: Instant) -> u64 {
-    started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+    Failed(AtomicSwapError),
 }
 
 fn build_insert_statement(
