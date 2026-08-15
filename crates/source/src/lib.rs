@@ -16,6 +16,7 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 
 mod oracle_source;
 mod protocol;
+mod target_ddl;
 mod transfer;
 
 pub use db_qbs_shared::BatchPayload;
@@ -25,6 +26,7 @@ pub use protocol::{
     SinkClient, SinkError, SinkErrorKind, SinkGateDetails, SinkPrecheckIssue, SourceColumn,
     Terminal,
 };
+pub use target_ddl::{generate_target_ddl, TargetDdlError};
 pub use transfer::{
     generate_run_id, run_transfer, RowSource, RunStage, SourceReadError, TransferEvent,
     TransferFailure, TransferRequest, TransferSummary, BATCH_BYTE_BUDGET, BATCH_ROW_LIMIT,
@@ -144,6 +146,13 @@ pub struct ShapeProblem {
     pub message: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct ShapeCheck {
+    pub rule: &'static str,
+    pub passed: bool,
+    pub message: &'static str,
+}
+
 impl ShapeProblem {
     const fn new(code: &'static str, message: &'static str) -> Self {
         Self { code, message }
@@ -206,6 +215,59 @@ pub fn precheck_sql(task: &TaskConfig) -> Result<(), Vec<ShapeProblem>> {
     } else {
         Err(problems)
     }
+}
+
+pub fn sql_shape_report(task: &TaskConfig) -> Vec<ShapeCheck> {
+    let problems = precheck_sql(task).err().unwrap_or_default();
+    let cannot_inspect_statement = problems
+        .iter()
+        .any(|problem| matches!(problem.code, "invalid_sql" | "unsupported_statement"));
+
+    [
+        (
+            "business_date_range",
+            "invalid_date_predicate",
+            "WHERE must contain the exact half-open :biz_date range on source_date_col",
+            cannot_inspect_statement,
+        ),
+        (
+            "no_additional_predicates",
+            "additional_where_predicate",
+            "WHERE must not contain predicates other than the business-date range",
+            cannot_inspect_statement,
+        ),
+        (
+            "named_projection",
+            "unnamed_projection",
+            "every selected column must be explicitly named",
+            cannot_inspect_statement,
+        ),
+        (
+            "determinate_projection",
+            "indeterminate_projection",
+            "selected expressions must have statically determinate precision",
+            cannot_inspect_statement,
+        ),
+        (
+            "no_relative_time_functions",
+            "relative_time_function",
+            "source SQL must not use relative time functions such as SYSDATE",
+            false,
+        ),
+        (
+            "matching_date_columns",
+            "date_column_mismatch",
+            "target_date_col must equal source_date_col ignoring case",
+            false,
+        ),
+    ]
+    .into_iter()
+    .map(|(rule, problem_code, message, blocked)| ShapeCheck {
+        rule,
+        passed: !blocked && !problems.iter().any(|problem| problem.code == problem_code),
+        message,
+    })
+    .collect()
 }
 
 fn unsupported_statement_problem() -> ShapeProblem {
