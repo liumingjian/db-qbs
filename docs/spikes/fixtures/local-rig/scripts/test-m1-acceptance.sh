@@ -7,7 +7,9 @@ expected=$(cat <<'EOF'
 wide-100k
 narrow-100k
 source-kill-rerun
+sink-kill-rerun
 commit-disconnect
+commit-disconnect-discarded
 empty-result
 verification-failures
 canonical-form
@@ -143,6 +145,42 @@ for assertion in 'kill-sentinel' 'target_with_sentinel' 'target hash after sourc
   }
 done
 
+sink_kill_body=$(sed -n '/^scenario_sink_kill()/,/^}/p' "$runner")
+grep -q 'batch_pushed' <<<"$sink_kill_body" || {
+  echo "sink-kill scenario must reach STREAMING before killing the sink" >&2
+  exit 1
+}
+grep -Fq '/tmp/m1-sink.pid' <<<"$sink_kill_body" || {
+  echo "sink-kill scenario must kill the running sink process" >&2
+  exit 1
+}
+grep -Fq 'kill -KILL' <<<"$sink_kill_body" || {
+  echo "sink-kill scenario must kill the sink without a graceful shutdown" >&2
+  exit 1
+}
+grep -Fq 'assert_eq "sink kill source exit" 1' <<<"$sink_kill_body" || {
+  echo "sink-kill scenario must enforce the source 0/1 exit contract" >&2
+  exit 1
+}
+grep -Fq 'STREAMING "sink kill stage"' <<<"$sink_kill_body" || {
+  echo "sink-kill scenario must prove the run failed inside STREAMING" >&2
+  exit 1
+}
+grep -Fq 'commit_diagnosed' <<<"$sink_kill_body" || {
+  echo "sink-kill scenario must prove no commit was diagnosed" >&2
+  exit 1
+}
+grep -Fq 'assert_run_evidence "$killed" "$old_run"' <<<"$sink_kill_body" || {
+  echo "sink-kill scenario must associate interrupted measurements with its run_id" >&2
+  exit 1
+}
+for assertion in 'sink-kill-sentinel' 'target_with_sentinel' 'target hash after sink kill.*target_with_sentinel' 'rerun hash versus direct run'; do
+  grep -Eq "$assertion" <<<"$sink_kill_body" || {
+    echo "sink-kill scenario must prove the target survived the kill and the rerun restored it" >&2
+    exit 1
+  }
+done
+
 commit_disconnect_body=$(sed -n '/^scenario_commit_disconnect()/,/^}/p' "$runner")
 for assertion in 'commit-sentinel' 'commit disconnect target rows.*0'; do
   grep -Eq "$assertion" <<<"$commit_disconnect_body" || {
@@ -156,6 +194,46 @@ grep -Fq 'assert_eq "commit disconnect source exit" 1 "$status"' <<<"$commit_dis
 }
 grep -Fq 'assert_run_evidence "$log" "$run_id"' <<<"$commit_disconnect_body" || {
   echo "commit-disconnect scenario must associate diagnostic evidence with its run_id" >&2
+  exit 1
+}
+
+commit_discard_body=$(sed -n '/^scenario_commit_disconnect_discarded()/,/^}/p' "$runner")
+grep -Fq 'start_commit_drop_proxy discarded' <<<"$commit_discard_body" || {
+  echo "commit-discard scenario must drive the proxy in its discarding mode" >&2
+  exit 1
+}
+grep -Fq 'DISCARDED "commit diagnostic terminal"' <<<"$commit_discard_body" || {
+  echo "commit-discard scenario must prove the source recovered the DISCARDED terminal" >&2
+  exit 1
+}
+grep -Fq '目标表未被触碰' <<<"$commit_discard_body" || {
+  echo "commit-discard scenario must prove the diagnostic told the operator the target is intact" >&2
+  exit 1
+}
+grep -Fq 'assert_eq "commit discard source exit" 1' <<<"$commit_discard_body" || {
+  echo "commit-discard scenario must enforce the source 0/1 exit contract" >&2
+  exit 1
+}
+grep -Fq 'assert_run_evidence "$log" "$run_id"' <<<"$commit_discard_body" || {
+  echo "commit-discard scenario must associate diagnostic evidence with its run_id" >&2
+  exit 1
+}
+grep -Eq 'commit discard target rows.*1' <<<"$commit_discard_body" || {
+  echo "commit-discard scenario must prove the discarded run left the target untouched" >&2
+  exit 1
+}
+grep -Fq 'assert_eq "commit discard staging tables" 0' <<<"$commit_discard_body" || {
+  echo "commit-discard scenario must prove the sink dropped the staging table" >&2
+  exit 1
+}
+for mode in swapped discarded; do
+  grep -Fq "\"$mode\"" acceptance/commit-drop-proxy.py || {
+    echo "commit-drop proxy must support the $mode terminal" >&2
+    exit 1
+  }
+done
+grep -Fq 'M1_COMMIT_DROP_MODE' acceptance/commit-drop-proxy.py || {
+  echo "commit-drop proxy must select its terminal from M1_COMMIT_DROP_MODE" >&2
   exit 1
 }
 

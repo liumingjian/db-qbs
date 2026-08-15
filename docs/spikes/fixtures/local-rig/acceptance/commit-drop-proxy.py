@@ -1,9 +1,27 @@
 #!/usr/bin/env python3
-"""Forward M1 HTTP calls, but close the first commit connection after sink completion."""
+"""Forward M1 HTTP calls, but close the first commit connection after sink completion.
+
+M1_COMMIT_DROP_MODE selects which sink terminal the dropped commit leaves behind:
+
+- ``swapped`` (default) forwards the commit untouched, so the sink swaps the target
+  and tombstones the run SWAPPED;
+- ``discarded`` inflates the committed ``total_rows`` by one before forwarding, so the
+  sink's staged-versus-source verification fails, the staging table is dropped and the
+  run is tombstoned DISCARDED with the target untouched.
+
+Either way the source only ever sees the transport error, so it has to recover the
+terminal from the tombstone via GET /v1/runs/{run_id}.
+"""
 
 import http.client
+import json
+import os
 import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+MODE = os.environ.get("M1_COMMIT_DROP_MODE", "swapped")
+if MODE not in ("swapped", "discarded"):
+    raise SystemExit(f"unsupported M1_COMMIT_DROP_MODE: {MODE}")
 
 
 class CommitDropProxyHandler(BaseHTTPRequestHandler):
@@ -19,13 +37,18 @@ class CommitDropProxyHandler(BaseHTTPRequestHandler):
     def forward_to_sink(self):
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
+        is_commit = self.path.endswith("/commit")
+        if is_commit and MODE == "discarded":
+            payload = json.loads(body)
+            payload["total_rows"] = payload["total_rows"] + 1
+            body = json.dumps(payload).encode()
         connection = http.client.HTTPConnection("127.0.0.1", 18080, timeout=1800)
         headers = {"Content-Type": self.headers.get("Content-Type", "application/json")}
         connection.request(self.command, self.path, body=body, headers=headers)
         response = connection.getresponse()
         response_body = response.read()
 
-        if self.path.endswith("/commit") and not CommitDropProxyHandler.commit_dropped:
+        if is_commit and not CommitDropProxyHandler.commit_dropped:
             CommitDropProxyHandler.commit_dropped = True
             self.connection.shutdown(socket.SHUT_RDWR)
             self.connection.close()

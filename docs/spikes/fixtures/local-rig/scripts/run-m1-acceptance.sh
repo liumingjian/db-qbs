@@ -6,7 +6,9 @@ SCENARIOS=(
   wide-100k
   narrow-100k
   source-kill-rerun
+  sink-kill-rerun
   commit-disconnect
+  commit-disconnect-discarded
   empty-result
   verification-failures
   canonical-form
@@ -145,6 +147,10 @@ drop_orphan_staging() {
       return 1
     mysql_exec "DROP TABLE IF EXISTS \`$table\`" || return 1
   done <<< "$tables"
+}
+
+staging_table_count() {
+  mysql_exec "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='qbs' AND TABLE_NAME REGEXP '^M1_(NARROW|WIDE)__stg_'"
 }
 
 reset_sink_state() {
@@ -313,10 +319,79 @@ scenario_source_kill() {
   assert_eq "rerun hash versus direct run" "$baseline" "$(narrow_hash)"
 }
 
-start_commit_drop_proxy() {
-  stop_proxy || return 1
+scenario_sink_kill() {
+  local direct="$WORK_ROOT/sink-kill-direct.jsonl" killed="$WORK_ROOT/sink-kill.jsonl"
+  local rerun="$WORK_ROOT/sink-kill-rerun.jsonl" baseline target_with_sentinel target_after_kill
+  local old_run new_run sink_pid exit_code attempt
+  reset_sink_state || return 1
+  mysql_exec "DELETE FROM M1_NARROW" >/dev/null || return 1
+  run_source "$NARROW_TASK" "$BIZ_DATE" "$direct" || return 1
+  assert_source_success "$direct" 100000 || return 1
+  baseline=$(narrow_hash) || return 1
+  mysql_exec "INSERT INTO M1_NARROW (ROW_ID,V_TEXT,D_BIZ) VALUES (99999997,'sink-kill-sentinel','$BIZ_DATE')" >/dev/null || return 1
+  target_with_sentinel=$(narrow_hash) || return 1
+  [[ "$target_with_sentinel" != "$baseline" ]] || fail "target sentinel did not change the direct-run baseline" || return 1
+
+  compose exec -T client rm -f /tmp/m1-source.pid /tmp/m1-sink-kill.jsonl /tmp/m1-sink-kill.rc || return 1
+  # Background plus `wait` instead of `exec`: the wrapper has to outlive the source to
+  # record its exit status, while /tmp/m1-source.pid stays the source pid that cleanup kills.
   compose exec -T -d client sh -c \
-    "echo \$\$ > /tmp/m1-proxy.pid; exec python3 /workspace/docs/spikes/fixtures/local-rig/acceptance/commit-drop-proxy.py" || return 1
+    "$SOURCE_BIN --config $SOURCE_CONFIG --task $NARROW_TASK --biz-date $BIZ_DATE > /tmp/m1-sink-kill.jsonl & echo \$! > /tmp/m1-source.pid; wait \$!; echo \$? > /tmp/m1-sink-kill.rc" || return 1
+  for (( attempt = 1; attempt <= 400; attempt++ )); do
+    if compose exec -T client sh -c \
+      "test -f /tmp/m1-sink-kill.jsonl && grep -q '\"event\":\"batch_pushed\"' /tmp/m1-sink-kill.jsonl"; then
+      break
+    fi
+    sleep 0.05
+  done
+  compose exec -T client grep -q '"event":"batch_pushed"' /tmp/m1-sink-kill.jsonl ||
+    fail "source did not reach STREAMING before the sink kill deadline" || return 1
+  sink_pid=$(compose exec -T client cat /tmp/m1-sink.pid | tr -d '\r') || return 1
+  # sh -c because the client image has no /bin/kill; kill only exists as a shell builtin.
+  compose exec -T client sh -c 'kill -KILL "$1"' sh "$sink_pid" ||
+    fail "sink was already gone before the STREAMING kill could be injected" || return 1
+  for (( attempt = 1; attempt <= 600; attempt++ )); do
+    if compose exec -T client test -f /tmp/m1-sink-kill.rc; then
+      break
+    fi
+    sleep 0.1
+  done
+  exit_code=$(compose exec -T client cat /tmp/m1-sink-kill.rc 2>/dev/null | tr -d '\r') ||
+    fail "source did not exit after the sink was killed" || return 1
+  assert_eq "sink kill source exit" 1 "$exit_code" || return 1
+  compose exec -T client cat /tmp/m1-sink-kill.jsonl > "$killed" || return 1
+  jq -e 'select(.event == "batch_pushed")' "$killed" >/dev/null ||
+    fail "killed-sink source log has no completed batch" || return 1
+  assert_json_eq "$killed" \
+    'select(.event == "run_finished") | .terminal' FAILED "sink kill terminal" || return 1
+  assert_json_eq "$killed" \
+    'select(.event == "run_finished") | .stage' STREAMING "sink kill stage" || return 1
+  if jq -s -e 'any(.[]; .event == "commit_diagnosed")' "$killed" >/dev/null; then
+    fail "source diagnosed a commit that never left STREAMING"
+    return 1
+  fi
+  old_run=$(source_run_id "$killed") || return 1
+  assert_run_id "killed-sink source run_id" "$old_run" || return 1
+  assert_run_evidence "$killed" "$old_run" || return 1
+  target_after_kill=$(narrow_hash) || return 1
+  assert_eq "target hash after sink kill" "$target_with_sentinel" "$target_after_kill" || return 1
+
+  reset_sink_state || return 1
+  run_source "$NARROW_TASK" "$BIZ_DATE" "$rerun" || return 1
+  assert_source_success "$rerun" 100000 || return 1
+  new_run=$(source_run_id "$rerun")
+  [[ "$new_run" != "$old_run" ]] || fail "rerun reused the interrupted run_id" || return 1
+  assert_eq "rerun hash versus direct run" "$baseline" "$(narrow_hash)"
+}
+
+start_commit_drop_proxy() {
+  # Separate declaration: `local` expands every argument before assigning any of them.
+  local mode=${1:-swapped}
+  stop_proxy || return 1
+  # `export` rather than a `VAR=v exec` prefix: assignments in front of the special
+  # builtin `exec` are not guaranteed to reach the replacing process's environment.
+  compose exec -T -d client sh -c \
+    "echo \$\$ > /tmp/m1-proxy.pid; export M1_COMMIT_DROP_MODE=$mode; exec python3 /workspace/docs/spikes/fixtures/local-rig/acceptance/commit-drop-proxy.py" || return 1
   wait_for_endpoint "$COMMIT_DROP_PROXY_URL/v1/runs/not-a-run" ||
     fail "commit-drop proxy did not become ready"
 }
@@ -341,6 +416,29 @@ scenario_commit_disconnect() {
     'select(.event == "run_finished") | .stage' COMMITTING "failed stage" || return 1
   assert_eq "commit disconnect target rows" 0 \
     "$(mysql_exec "SELECT COUNT(*) FROM M1_NARROW WHERE D_BIZ >= '$EMPTY_DATE' AND D_BIZ < '$EMPTY_DATE' + INTERVAL 1 DAY")"
+}
+
+scenario_commit_disconnect_discarded() {
+  local log="$WORK_ROOT/commit-disconnect-discarded.jsonl" run_id status
+  reset_sink_state || return 1
+  mysql_exec "DELETE FROM M1_NARROW WHERE D_BIZ >= '$EMPTY_DATE' AND D_BIZ < '$EMPTY_DATE' + INTERVAL 1 DAY; INSERT INTO M1_NARROW (ROW_ID,V_TEXT,D_BIZ) VALUES (99999998,'discard-sentinel','$EMPTY_DATE')" >/dev/null || return 1
+  start_commit_drop_proxy discarded || return 1
+  run_source "$NARROW_TASK" "$EMPTY_DATE" "$log" "$COMMIT_DROP_CONFIG"
+  status=$?
+  assert_eq "commit discard source exit" 1 "$status" || return 1
+  jq -e . "$log" >/dev/null || return 1
+  run_id=$(source_run_id "$log") || return 1
+  assert_run_id "commit discard run_id" "$run_id" || return 1
+  assert_run_evidence "$log" "$run_id" || return 1
+  assert_json_eq "$log" \
+    'select(.event == "commit_diagnosed") | .terminal' DISCARDED "commit diagnostic terminal" || return 1
+  jq -e 'select(.event == "commit_diagnosed" and (.message | contains("目标表未被触碰")))' \
+    "$log" >/dev/null || fail "commit diagnostic did not explain that the target was untouched" || return 1
+  assert_json_eq "$log" \
+    'select(.event == "run_finished") | .stage' COMMITTING "failed stage" || return 1
+  assert_eq "commit discard target rows" 1 \
+    "$(mysql_exec "SELECT COUNT(*) FROM M1_NARROW WHERE D_BIZ >= '$EMPTY_DATE' AND D_BIZ < '$EMPTY_DATE' + INTERVAL 1 DAY")" || return 1
+  assert_eq "commit discard staging tables" 0 "$(staging_table_count)"
 }
 
 scenario_empty() {
@@ -531,7 +629,9 @@ fi
 run_scenario wide-100k scenario_wide
 run_scenario narrow-100k scenario_narrow
 run_scenario source-kill-rerun scenario_source_kill
+run_scenario sink-kill-rerun scenario_sink_kill
 run_scenario commit-disconnect scenario_commit_disconnect
+run_scenario commit-disconnect-discarded scenario_commit_disconnect_discarded
 run_scenario empty-result scenario_empty
 run_scenario verification-failures scenario_verification_failures
 run_scenario canonical-form scenario_canonical
