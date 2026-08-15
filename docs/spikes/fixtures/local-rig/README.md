@@ -221,3 +221,21 @@ fixture」。两种失败含义不同，混合会破坏 M0 结论的语义。
 
 **判据是 CPU 不是墙钟。** `getrusage(RUSAGE_SELF)` 只计进程占用 CPU 的时间，
 等服务端那段不计入，所以模拟层影响的是墙钟。同理**这里也不能用墙钟下任何结论**。
+
+## M2 的验收编排（规格已定形，脚本待实现期落地）
+
+规格见 [ADR-0028](../../adr/0028-m2-acceptance-criteria-and-rig-extension.md)（决策票
+[#59](https://github.com/liumingjian/db-qbs/issues/59)）。要点：
+
+- **入口独立**：`scripts/run-m2-acceptance.sh` 与 `run-m1-acceptance.sh` **并列，互不吞并**。
+  M2 验收的前置要求是先跑绿 M1 那份。M1 的 9 类场景**不改写成经由 UI 发起**——那会让
+  M1 的回归基线依赖 M2 的实现，已 9/9 PASS 的证据链就不再是常量。
+- **断言面是 `source` 的 `/api/*`，不是 DOM**。渲染面另立人工走查清单
+  [`m2-visual-walkthrough.md`](m2-visual-walkthrough.md)，不给退出码。
+- **长驻进程的驱动**：宿主机后台起进程（**不进 compose**——杀进程本身是被测对象），
+  轮询 `GET /api/tasks` 判就绪（**不新开健康端点**），`SIGTERM` 优雅收尾、超时兜底 `-KILL`。
+- **场景清单** A1–A14 见 ADR-0028 §3.1；纯函数层 F1/F2 进 CI；台架层手工门禁 G1
+  （建表 SQL 生成器 ↔ 映射预检不漂移的第二遍）挂 ADR-0014 §8 的触发条件，与
+  `run-canon-gate.sh` 共用机制。
+- **报告不采性能数**（那是 M1 入口的事），形态是「场景 × PASS/FAIL + 断言实际值」，
+  写 `m2-acceptance-<UTC>.md`。唯一新增记录项是**投影六标量 == 历史行落库值**的一致性对照。

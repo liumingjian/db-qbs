@@ -150,6 +150,10 @@ fixture 因此给 `DATE` 的 `input` 写成 `{y, mo, d, h, mi, s}` 而不是字�
 3. **每次跑完贴实际值进 spike 文档，不是贴「通过」**——照
    [#13](https://github.com/liumingjian/db-qbs/issues/13) 的先例
    （`run-mysql-roundtrip-probe.sh`，可重复，5 秒跑完）。
+4. **M2 验收时必跑一次**（2026-08-15 增补，[#59](https://github.com/liumingjian/db-qbs/issues/59) /
+   [ADR-0028 §3.3](0028-m2-acceptance-criteria-and-rig-extension.md)）。M2 在这一层多挂一条
+   新门禁 **G1**（建表 SQL 生成器 ↔ 映射预检不漂移的台架侧第二遍：真建表、真 `describe`、真跑预检），
+   与本节的 `run-canon-gate.sh` 共用这套触发条件，**不新开第二套机制**。
 
 **为什么不硬塞进 CI**：把跑不了的东西写进流水线，等于让它长期红着或长期被跳过，
 两种都比诚实地写「这层靠人 + 靠触发条件」更糟。
