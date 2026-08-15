@@ -1,0 +1,1475 @@
+<title>db-qbs 调度台原型</title>
+
+<style>
+/* ============================================================
+   db-qbs · M2 全流程高保真交互原型（票 #58 / 地图 #47）
+   设计系统唯一来源：docs/design-system/tokens.css + README.md（ADR-0025）
+   本文件把 tokens.css 逐字内联（Artifact CSP 下无法 @import），
+   ——它不是第二套令牌，改令牌一律先改 tokens.css，再同步回这里。
+   ADR-0025 §6：V1 只发浅色、不提供暗色主题、不留切换开关，故本页单主题。
+   ============================================================ */
+
+/* ---------- tokens.css 逐字内联开始 ---------- */
+:root {
+  --bg:          #F0F2F5;
+  --panel:       #FFFFFF;
+  --line:        #E8EAEC;
+  --line-strong: #DCDEE2;
+
+  --text: #17233D;
+  --dim:  #515A6E;
+  --mute: #808695;
+
+  --brand:     #2C8AF0;
+  --brand-dim: #ECF5FF;
+
+  --ok:   #19BE6B;  --ok-bg:   #F0FAF4;  --ok-bd:   #C4ECD6;
+  --crit: #ED4014;  --crit-bg: #FEF3F0;  --crit-bd: #FBD2C7;
+  --warn: #FF9900;  --warn-bg: #FFF8EC;  --warn-bd: #FFE1B8;
+  --info: #2C8AF0;  --info-bg: #ECF5FF;  --info-bd: #C9E0FB;
+  --mute-bg: #F8F8F9;
+
+  --radius:       4px;
+  --badge-radius: 3px;
+  --row-h:        44px;
+  --ctl-h:        30px;
+  --pad:          20px;
+  --gap:          16px;
+
+  --font-cn:  "PingFang SC", "HarmonyOS Sans SC", "Source Han Sans SC",
+              "Noto Sans CJK SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+  --font-num: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono",
+              Menlo, Consolas, "Liberation Mono", monospace;
+  --size-body:  14px;
+  --size-table: 13.5px;
+  --size-num:   13px;
+  --size-meta:  12px;
+  --size-cap:   11px;
+  --lh-ui:      1.55;
+  --lh-prose:   1.7;
+  --weight-em:  600;
+}
+.num, td.n { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+/* ---------- tokens.css 逐字内联结束 ---------- */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-cn);
+  font-size: var(--size-body);
+  line-height: var(--lh-ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ============================================================
+   原型调试条 —— 不是产品的一部分，故意用中性灰、与产品配色不同源
+   ============================================================ */
+.rig {
+  position: sticky; top: 0; z-index: 60;
+  background: #2B3038; color: #C8CDD4;
+  padding: 10px 16px 12px;
+  display: flex; flex-direction: column; gap: 8px;
+  font-size: var(--size-meta);
+}
+.rig .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rig h1 { margin: 0; font-size: 13px; font-weight: var(--weight-em); color: #fff; letter-spacing: .01em; }
+.rig .note { color: #8B939D; }
+.rig .grp { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.rig .grp > .lab {
+  font-family: var(--font-num); font-size: 10px; letter-spacing: .08em;
+  color: #7C848E; text-transform: uppercase; margin-right: 2px;
+}
+.rig button {
+  font: inherit; font-size: 12px; line-height: 1.3;
+  padding: 3px 9px; border-radius: 3px; cursor: pointer;
+  border: 1px solid #444B55; background: #363C45; color: #C8CDD4;
+}
+.rig button:hover { border-color: #5A626D; color: #fff; }
+.rig button[aria-pressed="true"] { background: var(--brand); border-color: var(--brand); color: #fff; }
+.rig button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+/* ============================================================
+   应用外壳（设计系统 §7）——左导航 188 + 顶栏 52 + 灰底内容区
+   ============================================================ */
+.app { display: grid; grid-template-columns: 188px 1fr; min-height: 760px; background: var(--bg); }
+.app .side { background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+.app .brand {
+  height: 52px; display: flex; align-items: center; gap: 9px; padding: 0 16px;
+  border-bottom: 1px solid var(--line); font-weight: var(--weight-em); font-size: 15px; color: var(--text);
+}
+.app .brand .mark {
+  width: 20px; height: 20px; border-radius: var(--radius); background: var(--brand);
+  display: grid; place-items: center; color: #fff; font-size: 11px; font-family: var(--font-num);
+}
+.app nav { padding: 8px 0; display: flex; flex-direction: column; }
+.app nav a {
+  display: flex; align-items: center; gap: 9px; padding: 0 16px; height: 40px;
+  color: var(--dim); text-decoration: none; font-size: var(--size-body);
+  border-left: 3px solid transparent; cursor: pointer;
+}
+.app nav a .ic { width: 14px; height: 14px; border: 1.5px solid currentColor; border-radius: 3px; opacity: .7; flex: none; }
+.app nav a[aria-current="page"] { background: var(--brand-dim); color: var(--brand); border-left-color: var(--brand); font-weight: var(--weight-em); }
+.app nav a[data-soon] { color: var(--mute); cursor: default; }
+.app nav a[data-soon]::after {
+  content: attr(data-soon); margin-left: auto; font-size: 10px; font-family: var(--font-num);
+  border: 1px solid var(--line-strong); border-radius: 2px; padding: 0 4px; color: var(--mute);
+}
+.app nav .navsec { padding: 14px 16px 6px; font-size: var(--size-cap); color: var(--mute); letter-spacing: .06em; margin: 0; }
+.app .body { display: flex; flex-direction: column; min-width: 0; position: relative; }
+.app .topbar {
+  height: 52px; background: var(--panel); border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; gap: 12px; padding: 0 20px;
+  font-size: 13px; color: var(--dim); flex: none;
+}
+.crumb { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.crumb .sep { color: var(--mute); }
+.crumb .now { color: var(--text); font-weight: var(--weight-em); }
+.crumb .rid { font-family: var(--font-num); }
+.env { margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: var(--size-meta); font-family: var(--font-num); color: var(--mute); }
+.env .pill { border: 1px solid var(--line-strong); border-radius: 3px; padding: 1px 7px; }
+.content { padding: 16px 20px 32px; display: flex; flex-direction: column; gap: var(--gap); overflow: auto; }
+
+/* ---------- 卡片 / 控件（设计系统 §7） ---------- */
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.card > .cardhd {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 12px var(--pad); border-bottom: 1px solid var(--line);
+  font-weight: var(--weight-em); color: var(--text);
+}
+.card > .cardhd .sub { font-weight: 400; color: var(--mute); font-size: var(--size-meta); }
+.card > .cardhd .right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.card > .pane { padding: var(--pad); }
+.card > .pane + .pane { border-top: 1px solid var(--line); }
+.card > .pane.tight { padding: 0; }
+
+.filters { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 14px var(--pad); border-bottom: 1px solid var(--line); }
+.filters .right { margin-left: auto; display: flex; gap: 8px; }
+.field {
+  display: inline-flex; align-items: center; gap: 6px; height: var(--ctl-h); padding: 0 10px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel);
+  color: var(--dim); font-size: 13px; min-width: 132px;
+}
+.field .cap { color: var(--mute); font-size: var(--size-meta); flex: none; }
+.field.sel::after { content: "▾"; margin-left: auto; color: var(--mute); font-size: 10px; }
+.field .val { font-family: var(--font-num); color: var(--text); font-size: 13px; }
+.field .ph { color: var(--mute); }
+.field.wide { min-width: 260px; }
+.field.focus { border-color: var(--brand); box-shadow: 0 0 0 2px var(--brand-dim); }
+
+.btn {
+  font: inherit; font-size: 13px; height: var(--ctl-h); padding: 0 15px; border-radius: var(--radius);
+  border: 1px solid var(--brand); background: var(--brand); color: #fff; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 7px; white-space: nowrap;
+}
+.btn.ghost { background: var(--panel); color: var(--dim); border-color: var(--line-strong); }
+.btn.ghost:hover { color: var(--brand); border-color: var(--brand); }
+.btn.danger { background: var(--panel); color: var(--crit); border-color: var(--crit-bd); }
+.btn:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.btn .spin {
+  width: 12px; height: 12px; border-radius: 50%; flex: none;
+  border: 2px solid rgba(255,255,255,.45); border-top-color: #fff;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.link { color: var(--brand); cursor: pointer; }
+.link + .link { margin-left: 12px; }
+.link.q { color: var(--mute); cursor: default; }
+
+/* ---------- 键值网格（设计系统 §4） ---------- */
+.kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.kv > div { background: var(--panel); padding: 12px 14px; }
+.kv dt { font-size: var(--size-cap); color: var(--mute); margin: 0 0 3px; letter-spacing: .04em; }
+.kv dd { margin: 0; font-family: var(--font-num); font-size: var(--size-num); font-variant-numeric: tabular-nums; color: var(--text); }
+.kv dd.big { font-size: 17px; }
+.kv dd.cn { font-family: var(--font-cn); }
+.kv dd em { font-style: normal; color: var(--crit); }
+.kv dd .u { color: var(--mute); font-size: var(--size-meta); margin-left: 3px; }
+
+/* ---------- 数据表（设计系统 §4） ---------- */
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.card > .pane.tight .tablewrap { border: 0; border-radius: 0; }
+table.grid { width: 100%; border-collapse: collapse; font-size: var(--size-table); }
+table.grid th {
+  text-align: left; font-weight: var(--weight-em); font-size: var(--size-meta);
+  color: var(--text); background: var(--mute-bg); padding: 9px 12px;
+  border-bottom: 1px solid var(--line); white-space: nowrap;
+}
+table.grid td { padding: 0 12px; height: var(--row-h); border-bottom: 1px solid var(--line); color: var(--text); vertical-align: middle; }
+table.grid td.n { font-family: var(--font-num); font-variant-numeric: tabular-nums; text-align: right; }
+table.grid td.m { font-family: var(--font-num); }
+table.grid td.t { font-family: var(--font-num); font-size: var(--size-meta); color: var(--dim); }
+table.grid tbody tr:hover td { background: #F5F7FA; }
+table.grid tr:last-child td { border-bottom: 0; }
+table.grid td .sub2 { color: var(--mute); font-size: var(--size-meta); font-family: var(--font-num); display: block; line-height: 1.35; }
+
+/* ---------- 三条状态轴（设计系统 §3，形状不得互换） ---------- */
+/* 轴一 · 进程阶段：圆点 */
+.phaseline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.phase { display: inline-flex; align-items: center; gap: 7px; font-size: var(--size-meta); color: var(--mute); font-family: var(--font-num); }
+.phase .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--mute); flex: none; }
+.phase.done { color: var(--dim); }
+.phase.done .dot { background: var(--ok); }
+.phase.on { color: var(--text); font-weight: var(--weight-em); }
+.phase.on .dot { background: var(--info); box-shadow: 0 0 0 3px var(--info-bg); }
+.phase.pulse .dot { animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 var(--info-bg); } 50% { box-shadow: 0 0 0 5px var(--info-bg); } }
+.phaseline .arrow { color: var(--mute); font-size: var(--size-cap); }
+.phaseline .after { color: var(--mute); font-size: var(--size-meta); }
+
+/* 轴二 · 资源终态：块 */
+.term {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-family: var(--font-num); font-size: var(--size-meta); letter-spacing: .02em;
+  padding: 3px 9px; border-radius: var(--badge-radius);
+  background: var(--term-bg); color: var(--term-fg); border: 1px solid var(--term-bd);
+}
+.term.swapped   { --term-bg: var(--ok-bg);   --term-fg: var(--ok);  --term-bd: var(--ok-bd); }
+.term.discarded { --term-bg: var(--mute-bg); --term-fg: var(--dim); --term-bd: var(--line-strong); }
+.term .aside { font-family: var(--font-cn); color: var(--dim); }
+
+/* 轴三 · 错误码：标签，4xx 虚边「你能改」/ 5xx 实边「找人」 */
+.code {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: var(--font-num); font-size: var(--size-meta);
+  padding: 2px 8px; border-radius: var(--badge-radius);
+  border: 1px dashed var(--code-bd); color: var(--code-fg); background: var(--code-bg);
+}
+.code .http { font-size: 10px; opacity: .75; }
+.code.reject   { --code-bd: var(--crit-bd); --code-fg: var(--crit); --code-bg: var(--crit-bg); }
+.code.internal { --code-bd: var(--warn-bd); --code-fg: var(--warn); --code-bg: var(--warn-bg); border-style: solid; }
+
+/* 进行中 / 静态点（列表里的「跑没跑」，不是三轴之一，只做行内指示） */
+.dotstate { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; font-size: var(--size-meta); color: var(--dim); }
+.dotstate .d { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.dotstate.run .d { background: var(--brand); box-shadow: 0 0 0 3px var(--info-bg); }
+.dotstate.idle .d { background: var(--mute); }
+
+/* ---------- 人话结论条 / 提示条 ---------- */
+.plain {
+  border-left: 3px solid var(--crit); background: var(--crit-bg);
+  padding: 11px 14px; border-radius: 0 var(--radius) var(--radius) 0;
+  color: var(--text); max-width: 68ch; line-height: var(--lh-prose);
+}
+.plain b { font-weight: var(--weight-em); }
+.plain.info { border-left-color: var(--info); background: var(--info-bg); }
+.plain.ok   { border-left-color: var(--ok);   background: var(--ok-bg); }
+.plain.warn { border-left-color: var(--warn); background: var(--warn-bg); }
+.plain .lead { display: block; font-weight: var(--weight-em); margin-bottom: 2px; }
+.plain code, .mono { font-family: var(--font-num); font-size: 12.5px; }
+
+.hint {
+  border: 1px solid var(--line); background: var(--mute-bg); border-radius: var(--radius);
+  padding: 10px 13px; color: var(--dim); font-size: 13px; line-height: var(--lh-prose); max-width: 74ch;
+}
+.hint b { color: var(--text); font-weight: var(--weight-em); }
+.hint.warnbox { border-color: var(--warn-bd); background: var(--warn-bg); }
+
+/* ---------- 业务值告警框（设计系统 §5） ---------- */
+.sensitive { border: 1px solid var(--warn-bd); border-radius: var(--radius); background: var(--warn-bg); overflow: hidden; max-width: 74ch; }
+.sensitive .top {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 13px; font-size: var(--size-meta); color: var(--warn);
+  border-bottom: 1px solid var(--warn-bd); font-weight: var(--weight-em);
+}
+.sensitive .top .why { color: var(--dim); font-size: 11.5px; font-weight: 400; }
+.sensitive .top .reveal {
+  margin-left: auto; font: inherit; font-size: var(--size-meta); cursor: pointer;
+  border: 1px solid var(--warn-bd); background: var(--panel); color: var(--dim);
+  border-radius: 3px; padding: 1px 9px;
+}
+.sensitive .top .reveal:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+.sensitive .bodyv { padding: 11px 13px; display: grid; grid-template-columns: max-content 1fr; gap: 5px 14px; font-family: var(--font-num); font-size: 12.5px; }
+.sensitive .bodyv .k { color: var(--mute); }
+.sensitive[data-masked="true"] .bodyv .v { filter: blur(5px); user-select: none; }
+
+/* ---------- SQL / DDL 代码块 ---------- */
+.sql {
+  font-family: var(--font-num); font-size: 12.5px; line-height: 1.65;
+  background: var(--mute-bg); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 12px 14px; margin: 0; overflow-x: auto; color: var(--text); white-space: pre;
+}
+.sql .cm { color: var(--mute); }
+.sql .ph { background: var(--warn-bg); border: 1px dashed var(--warn-bd); border-radius: 2px; padding: 0 3px; color: var(--warn); }
+.sqlbox { position: relative; }
+.sqlbox .flag {
+  position: absolute; top: -1px; right: -1px;
+  font-family: var(--font-num); font-size: var(--size-cap);
+  background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn-bd);
+  border-radius: 0 var(--radius) 0 var(--radius); padding: 2px 8px;
+}
+.editable { background: var(--panel); }
+
+/* ---------- 不确定进度条（ADR-0026 §3：无百分比） ---------- */
+.indet { height: 4px; border-radius: 2px; background: var(--info-bg); overflow: hidden; position: relative; }
+.indet::after {
+  content: ""; position: absolute; inset: 0 auto 0 0; width: 34%;
+  background: var(--info); border-radius: 2px; animation: slide 1.5s ease-in-out infinite;
+}
+@keyframes slide { 0% { left: -34%; } 100% { left: 100%; } }
+
+/* ---------- 列勾选表里的复选框 ---------- */
+.cb { width: 14px; height: 14px; border: 1px solid var(--line-strong); border-radius: 2px; display: inline-block; vertical-align: -2px; background: var(--panel); }
+.cb.on { background: var(--brand); border-color: var(--brand); position: relative; }
+.cb.on::after { content: "✓"; position: absolute; inset: 0; color: #fff; font-size: 10px; line-height: 12px; text-align: center; }
+.radio { width: 13px; height: 13px; border: 1px solid var(--line-strong); border-radius: 50%; display: inline-block; vertical-align: -2px; }
+.radio.on { border: 4px solid var(--brand); }
+.flagcell { color: var(--mute); font-size: var(--size-meta); }
+.flagcell.bad { color: var(--warn); }
+
+/* ---------- 对话框 / 模态 ---------- */
+.veil { position: absolute; inset: 0; background: rgba(23,35,61,.34); display: grid; place-items: center; z-index: 40; padding: 24px; }
+.modal { background: var(--panel); border-radius: var(--radius); border: 1px solid var(--line); width: min(560px, 100%); box-shadow: 0 8px 28px -12px rgba(23,35,61,.4); }
+.modal .mh { padding: 14px var(--pad); border-bottom: 1px solid var(--line); font-weight: var(--weight-em); }
+.modal .mb { padding: var(--pad); display: flex; flex-direction: column; gap: 14px; }
+.modal .mf { padding: 12px var(--pad); border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; }
+.formrow { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 12px; }
+.formrow .lbl { color: var(--dim); font-size: 13px; }
+
+/* ---------- 布局工具 ---------- */
+.stack { display: flex; flex-direction: column; gap: 12px; }
+.rowflex { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.rowflex.top { align-items: flex-start; }
+.grow { flex: 1 1 auto; min-width: 0; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
+.idpair { display: flex; flex-wrap: wrap; gap: 4px 22px; }
+.idpair .one { display: flex; align-items: baseline; gap: 8px; }
+.idpair .cap { font-size: var(--size-cap); color: var(--mute); letter-spacing: .04em; }
+.idpair .v { font-family: var(--font-num); font-size: 13px; color: var(--text); }
+.idpair .v.none { color: var(--mute); font-family: var(--font-cn); font-size: var(--size-meta); }
+.sectitle { font-size: var(--size-meta); color: var(--mute); letter-spacing: .05em; margin: 0 0 8px; }
+.screen { display: none; flex-direction: column; gap: var(--gap); }
+.screen.on { display: flex; }
+.spec {
+  font-size: var(--size-meta); color: var(--mute); line-height: var(--lh-prose);
+  border-top: 1px dashed var(--line-strong); padding-top: 10px; max-width: 90ch;
+}
+.spec b { color: var(--dim); font-weight: var(--weight-em); }
+.spec code { font-family: var(--font-num); font-size: 11.5px; }
+
+@media (prefers-reduced-motion: reduce) { *, *::after { animation: none !important; transition: none !important; } }
+@media (max-width: 860px) {
+  .app { grid-template-columns: 1fr; }
+  .app .side { display: none; }
+  .two { grid-template-columns: 1fr; }
+}
+</style>
+
+<!-- ============================================================
+     原型调试条 —— 不是产品的一部分
+     ============================================================ -->
+<div class="rig">
+  <div class="row">
+    <h1>db-qbs · M2 全流程交互原型</h1>
+    <span class="note">票 #58 / 地图 #47 · 设计系统 ADR-0025 · 下面这条深色栏是<b>原型调试条，不属于产品</b></span>
+  </div>
+  <div class="row">
+    <span class="grp"><span class="lab">任务</span>
+      <button data-go="tasks">列表</button>
+      <button data-go="tasks-empty">空态</button>
+      <button data-go="start">发起对话框</button>
+    </span>
+    <span class="grp"><span class="lab">建任务</span>
+      <button data-go="build">向导</button>
+      <button data-go="build-fetching">取列中</button>
+      <button data-go="build-fail-shape">取列失败·形状</button>
+      <button data-go="build-fail-oracle">取列失败·Oracle</button>
+      <button data-go="build-ready">取列成功+建表SQL</button>
+      <button data-go="build-edited">手改+覆盖警告</button>
+    </span>
+  </div>
+  <div class="row">
+    <span class="grp"><span class="lab">运行详情</span>
+      <button data-go="run-accepted">已受理</button>
+      <button data-go="run-live">进行中</button>
+      <button data-go="run-swapped">成功</button>
+      <button data-go="run-fail-shape">形状预检失败</button>
+      <button data-go="run-fail-precheck">映射预检失败</button>
+      <button data-go="run-fail-verify">校验失败</button>
+      <button data-go="run-fail-escape">哨兵逃逸(带业务值)</button>
+      <button data-go="run-lost-gone">进程消失</button>
+      <button data-go="run-lost-restart">服务重启</button>
+    </span>
+    <span class="grp"><span class="lab">历史</span>
+      <button data-go="history">列表</button>
+    </span>
+  </div>
+</div>
+
+<!-- ============================================================
+     产品外壳
+     ============================================================ -->
+<div class="app">
+  <aside class="side">
+    <div class="brand"><span class="mark">Q</span>db-qbs</div>
+    <nav>
+      <a data-nav="task" data-go="tasks"><span class="ic"></span>任务</a>
+      <a data-nav="history" data-go="history"><span class="ic"></span>运行历史</a>
+      <p class="navsec">非 V1 范围</p>
+      <a data-soon="M3+"><span class="ic"></span>定时调度</a>
+      <a data-soon="M3+"><span class="ic"></span>告警</a>
+    </nav>
+  </aside>
+
+  <div class="body">
+    <div class="topbar">
+      <div class="crumb" id="crumb"></div>
+      <div class="env">
+        <span class="pill">source · 127.0.0.1:8080</span>
+        <span class="pill">sink · 可达</span>
+      </div>
+    </div>
+
+    <div class="content">
+
+      <!-- ========== 屏 1 · 任务列表 ========== -->
+      <section class="screen" data-screen="tasks" data-nav="task" data-crumb="任务">
+        <div class="card">
+          <div class="cardhd">任务 <span class="sub">共 3 个</span>
+            <span class="right"><button class="btn" data-go="build">新建任务</button></span>
+          </div>
+          <div class="filters">
+            <span class="field sel"><span class="cap">目标表</span><span class="ph">全部</span></span>
+            <span class="field wide"><span class="cap">搜索</span><span class="ph">任务名 / 源表</span></span>
+            <span class="right"><button class="btn ghost">刷新</button></span>
+          </div>
+          <div class="pane tight">
+            <div class="tablewrap">
+              <table class="grid">
+                <thead><tr>
+                  <th>任务</th><th>源表</th><th>目标表</th><th>日期列</th><th>当前</th><th>最近一次</th><th>操作</th>
+                </tr></thead>
+                <tbody>
+                  <tr>
+                    <td>持仓明细</td>
+                    <td class="m">htbr45.t_r_fr_aststat@FA</td>
+                    <td class="m">T_POSITION</td>
+                    <td class="m">D_BIZ<span class="sub2">→ D_BIZ</span></td>
+                    <td><span class="dotstate run"><span class="d"></span>进行中</span></td>
+                    <td><span class="term swapped">SWAPPED</span><span class="sub2">2026-08-14 03:18</span></td>
+                    <td><span class="link" data-go="start">发起</span><span class="link" data-go="build-ready">编辑</span><span class="link" data-go="history">历史</span></td>
+                  </tr>
+                  <tr>
+                    <td>交易流水</td>
+                    <td class="m">htbr45.t_r_trade@FA</td>
+                    <td class="m">T_TRADE</td>
+                    <td class="m">D_DATE<span class="sub2">→ D_DATE</span></td>
+                    <td><span class="dotstate idle"><span class="d"></span>空闲</span></td>
+                    <td><span class="term discarded">DISCARDED</span><span class="sub2">2026-08-14 02:41</span></td>
+                    <td><span class="link" data-go="start">发起</span><span class="link" data-go="build-ready">编辑</span><span class="link" data-go="history">历史</span></td>
+                  </tr>
+                  <tr>
+                    <td>估值表</td>
+                    <td class="m">htbr45.t_r_val@FA</td>
+                    <td class="m">T_VALUATION</td>
+                    <td class="m">D_BIZ<span class="sub2">→ D_BIZ</span></td>
+                    <td><span class="dotstate idle"><span class="d"></span>空闲</span></td>
+                    <td><span class="sub2">从未运行</span></td>
+                    <td><span class="link" data-go="start">发起</span><span class="link" data-go="build-ready">编辑</span><span class="link q">历史</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <p class="spec">
+          <b>为什么导航里没有「SQL 构建器」。</b> ADR-0023 §2 定它是<b>一次性脚手架</b>——
+          它不是一个能独立存在的功能页，只是建任务/编辑任务这一屏的一段。做成独立导航项会暗示「构建器里存着我选过什么」，
+          而它恰恰不承诺记得（ADR-0023 §2 推论）。<br>
+          <b>「当前」列</b>的进行中来自父进程投影，允许滞后（ADR-0022 §5），它只提示、不禁用任何按钮。
+        </p>
+      </section>
+
+      <!-- ========== 屏 1′ · 任务列表空态 ========== -->
+      <section class="screen" data-screen="tasks-empty" data-nav="task" data-crumb="任务">
+        <div class="card">
+          <div class="cardhd">任务
+            <span class="right"><button class="btn" data-go="build">新建任务</button></span>
+          </div>
+          <div class="pane stack" style="align-items:flex-start;gap:14px;padding:44px 20px">
+            <div style="font-weight:var(--weight-em)">还没有任务</div>
+            <div class="hint">
+              一个任务是<b>四个字段</b>：一段 <code>source_sql</code>、<code>source_date_col</code>、
+              <code>target_table</code>、<code>target_date_col</code>（ADR-0016 §2）。
+              <b>业务日期不在任务里</b>——它是每次发起时才填的运行参数。
+              不会写 SQL 就用构建器选表选列生成一段；已经有现成 SQL 就直接粘。
+            </div>
+            <button class="btn" data-go="build">新建任务</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========== 屏 2 · 建任务（向导初态） ========== -->
+      <section class="screen" data-screen="build" data-nav="task" data-crumb="任务 / 新建任务">
+        <div class="card">
+          <div class="cardhd">① 选表与列 <span class="sub">元数据来自 Oracle 数据字典，<b>只亮不判</b></span></div>
+          <div class="pane stack">
+            <div class="rowflex">
+              <span class="field"><span class="cap">数据库链接</span><span class="val">FA</span></span>
+              <span class="field wide"><span class="cap">表</span><span class="val">htbr45.t_r_fr_aststat</span></span>
+              <button class="btn ghost">列出列</button>
+            </div>
+            <div class="hint">
+              数据库链接<b>可选</b>：填了 <code>FA</code>，本次会话所有字典查询走 <code>ALL_TAB_COLUMNS@FA</code>，
+              生成的 SQL 表名也带 <code>@FA</code>。<b>不给下拉列表</b>——<code>ALL_DB_LINKS</code> 只列当前用户可见的 link，
+              列不全反而误导（ADR-0023 §3）。链接后面若是同义词，构建器列不出它的列，那时请直接粘 SQL。
+            </div>
+            <div class="tablewrap">
+              <table class="grid">
+                <thead><tr><th style="width:44px"></th><th>列名</th><th>字典类型</th><th>精度</th><th>判定</th></tr></thead>
+                <tbody>
+                  <tr><td><span class="cb on"></span></td><td class="m">N_VA_PRICE</td><td class="m">NUMBER</td><td class="m">(18,4)</td><td class="flagcell">白名单内</td></tr>
+                  <tr><td><span class="cb on"></span></td><td class="m">C_NAME</td><td class="m">VARCHAR2</td><td class="m">(50)</td><td class="flagcell">白名单内</td></tr>
+                  <tr><td><span class="cb on"></span></td><td class="m">D_BIZ</td><td class="m">DATE</td><td class="m">—</td><td class="flagcell">白名单内</td></tr>
+                  <tr><td><span class="cb"></span></td><td class="m">C_MEMO</td><td class="m">CLOB</td><td class="m">—</td><td class="flagcell bad">M1 白名单外，预检大概率会拒</td></tr>
+                  <tr><td><span class="cb"></span></td><td class="m">TS_UPD</td><td class="m">TIMESTAMP(6)</td><td class="m">—</td><td class="flagcell bad">M1 白名单外，预检大概率会拒</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="hint">
+              后两行<b>点得动、勾得上</b>，构建器不拦。类型判定的权威是 <b>sink 侧的映射预检</b>（ADR-0023 §4）：
+              字典与运行期的游标 describe 是两份元数据，视图与 dblink 之下可以不一致——
+              拿非权威的那份做门禁，会造出「构建器拒了、其实能跑」。<br>
+              勾成<b>真子集是允许的</b>（ADR-0009 增补 §1）：对齐面是「SQL 结果集 ↔ 目标表」，源表不参与。
+              但<b>目标表里有列没被选中会被预检硬拒</b>（§4）——那是跑不起来，不是搬错。
+            </div>
+          </div>
+        </div>
+
+        <div class="two">
+          <div class="card">
+            <div class="cardhd">② 指定日期列</div>
+            <div class="pane stack">
+              <div class="stack" style="gap:8px">
+                <label class="rowflex" style="gap:8px"><span class="radio"></span><span class="mono">N_VA_PRICE</span></label>
+                <label class="rowflex" style="gap:8px"><span class="radio"></span><span class="mono">C_NAME</span></label>
+                <label class="rowflex" style="gap:8px"><span class="radio on"></span><span class="mono">D_BIZ</span></label>
+              </div>
+              <div class="hint">
+                这里<b>没有业务过滤条件输入框，不是漏了</b>。日期谓词由系统按半开区间生成
+                （<code>&gt;= TO_DATE(:biz_date)</code> 且 <code>&lt; +1</code>，ADR-0008 §3）；
+                <code>AND status = 'X'</code> 这类谓词被 ADR-0008 §2 <b>硬拒</b>——
+                切换时的清除条件只按日期删，加了业务谓词就会连同日期相同、条件不同的存量数据一起删掉，
+                而<b>行数校验结构性抓不到这件事</b>。
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="cardhd">③ 目标端</div>
+            <div class="pane stack">
+              <div class="formrow"><span class="lbl">目标表</span><span class="field wide focus"><span class="val">T_POSITION</span></span></div>
+              <div class="formrow"><span class="lbl">目标日期列</span><span class="field wide"><span class="val">D_BIZ</span></span></div>
+              <div class="hint">
+                两个字段都<b>人手填</b>，目标日期列预填成源端日期列名、可改（ADR-0023 §7）。
+                <b>这里没有目标表下拉、没有目标列列表，是不画，不是没画完</b>——
+                <code>source</code> 不查目标端元数据（ADR-0027 §3）：那条接口能买到的只有一个下拉框，
+                买不到任何一处拦截，却要给协议闭集加一类不属于任何 run 的请求。
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="cardhd">④ SQL <span class="sub">这一段文本才是任务定义存的东西</span>
+            <span class="right">
+              <button class="btn ghost" data-go="build">重走向导</button>
+              <button class="btn" data-go="build-fetching">取列</button>
+            </span>
+          </div>
+          <div class="pane stack">
+            <pre class="sql editable">SELECT a.N_VA_PRICE AS N_VA_PRICE,
+       a.C_NAME     AS C_NAME,
+       a.D_BIZ      AS D_BIZ
+  FROM htbr45.t_r_fr_aststat@FA a
+ WHERE a.D_BIZ &gt;= TO_DATE(:biz_date,'YYYY-MM-DD')
+   AND a.D_BIZ &lt;  TO_DATE(:biz_date,'YYYY-MM-DD') + 1</pre>
+            <div class="hint">
+              可以直接在这里改，也可以整段替换成自己的 SQL——<b>粘一条现成 SQL 是主路径</b>，构建器是给不会写的人的辅助入口（ADR-0023 §2）。
+              改完不必回向导：任务定义存的只有这段文本。
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="cardhd">目标表建表 SQL <span class="sub">取列之后在此给出</span></div>
+          <div class="pane">
+            <div class="hint">点上面的<b>「取列」</b>拿建表 SQL。取列会连一次 Oracle 跑 prepare + describe，
+              <b>只读、不碰目标端、不产生运行记录</b>。</div>
+          </div>
+        </div>
+
+        <p class="spec">
+          <b>这一屏就是「建任务」的全部。</b> 向导 ①②③ 的选择状态<b>不进任务定义</b>——
+          落盘的永远只有 ④ 的四个字段（ADR-0016 §2 格式一字未变）。
+        </p>
+      </section>
+
+      <!-- ========== 屏 2 · 取列进行中 ========== -->
+      <section class="screen" data-screen="build-fetching" data-nav="task" data-crumb="任务 / 新建任务">
+        <div class="card">
+          <div class="cardhd">④ SQL
+            <span class="right">
+              <button class="btn ghost" disabled style="opacity:.5;cursor:default">重走向导</button>
+              <button class="btn"><span class="spin"></span>取列中…</button>
+            </span>
+          </div>
+          <div class="pane stack">
+            <div class="indet"></div>
+            <div class="plain info">
+              <span class="lead">正在取列</span>
+              连接 Oracle，跑一次 <code>prepare</code> + <code>describe</code>，拿结果集的列与类型。
+              <b>只读、无副作用</b>：不碰 <code>sink</code>、不建任何东西、不写任何存储、不产生 <code>run_id</code>。
+            </div>
+            <pre class="sql editable">SELECT a.N_VA_PRICE AS N_VA_PRICE,
+       a.C_NAME     AS C_NAME,
+       a.D_BIZ      AS D_BIZ
+  FROM htbr45.t_r_fr_aststat@FA a
+ WHERE a.D_BIZ &gt;= TO_DATE(:biz_date,'YYYY-MM-DD')
+   AND a.D_BIZ &lt;  TO_DATE(:biz_date,'YYYY-MM-DD') + 1</pre>
+          </div>
+        </div>
+        <p class="spec">
+          <b>取列有自己的进行中态</b>（ADR-0027 §2）。它不是一次 run：历史列表里不会多出一行，
+          <code>run_record_id</code> 与 <code>run_id</code> 都不产生。
+        </p>
+      </section>
+
+      <!-- ========== 屏 2 · 取列失败 · 形状预检 ========== -->
+      <section class="screen" data-screen="build-fail-shape" data-nav="task" data-crumb="任务 / 新建任务">
+        <div class="card">
+          <div class="cardhd">SQL 形状预检 · 未通过 <span class="sub">source 本地成文，未发出任何 HTTP 请求</span>
+            <span class="right"><button class="btn" data-go="build-edited">回去改 SQL</button></span>
+          </div>
+          <div class="pane stack">
+            <div class="plain">
+              <span class="lead">这段 SQL 的形状不能跑，取列没做。</span>
+              一次报出全部不合规之处（下表 3 条）。改完再点一次「取列」。
+            </div>
+            <div class="tablewrap">
+              <table class="grid">
+                <thead><tr><th style="width:52px">#</th><th>约束</th><th>实际</th></tr></thead>
+                <tbody>
+                  <tr><td class="m">1</td><td><code class="mono">:biz_date</code> 恰好出现两次，构成半开区间，两处同一列</td><td>出现 <b>3</b> 次，第 3 处在 <code class="mono">a.D_UPD</code> 上</td></tr>
+                  <tr><td class="m">2</td><td>WHERE 中不存在其他谓词</td><td>多一个 <code class="mono">AND a.C_STATUS = 'A'</code></td></tr>
+                  <tr><td class="m">3</td><td><code class="mono">upper(target_date_col) == upper(source_date_col)</code></td><td><code class="mono">D_BIZ</code> ≠ <code class="mono">D_DATE</code></td></tr>
+                  <tr><td class="m">4</td><td>不含相对时间函数（<code class="mono">SYSDATE</code> / <code class="mono">CURRENT_DATE</code> / <code class="mono">SYSTIMESTAMP</code>）</td><td>通过</td></tr>
+                  <tr><td class="m">5</td><td>每列显式命名</td><td>通过</td></tr>
+                  <tr><td class="m">6</td><td>无表达式列 / 无精度不确定的列</td><td>通过</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="hint">
+              第 2 条不是挑剔：切换时的清除条件只按业务日期删，SQL 里多一个业务谓词就会让搬进来的范围与删掉的范围<b>不等价</b>，
+              而行数校验抓不到（ADR-0008 §2）。<br>
+              第 3 条严格说不是 SQL 文本的形状问题，是<b>两个配置字段的一致性</b>（ADR-0023 §6）——
+              它留在同一段、同一时点、一次报全，只是记了一笔账。
+            </div>
+          </div>
+        </div>
+        <p class="spec">
+          <b>这份报告的产地是 <code>source</code> 本地</b>（ADR-0023 §8）：形状不过就根本不发 HTTP，
+          <code>sink</code> 不知道存在这件事——<b>所以它没有错误码标签</b>，ADR-0010 的 12 码闭集是 source↔sink 的协议码。
+        </p>
+      </section>
+
+      <!-- ========== 屏 2 · 取列失败 · Oracle ========== -->
+      <section class="screen" data-screen="build-fail-oracle" data-nav="task" data-crumb="任务 / 新建任务">
+        <div class="card">
+          <div class="cardhd">取列失败 <span class="sub">连不上源库</span>
+            <span class="right"><button class="btn" data-go="build-fetching">重试取列</button></span>
+          </div>
+          <div class="pane stack">
+            <div class="plain">
+              <span class="lead">数据库链接 <code>FA</code> 那一端连不上，列没取到。</span>
+              SQL 的形状是过的——问题出在链接后面那个库，不在这段 SQL 上。找 DBA 确认 <code>FA</code> 指向的库是否可达。
+            </div>
+            <pre class="sql"><span class="cm">-- Oracle 原样返回：</span>
+ORA-12170: TNS:Connect timeout occurred
+ORA-02063: preceding line from FA</pre>
+            <div class="hint">
+              <code>ORA-02063: preceding line from &lt;LINK&gt;</code> 是 dblink 故障的独立签名——
+              有它就说明错在链接那一端。构建器<b>不做同义词/视图的逐级解析</b>（ADR-0023 §3），
+              失败时给人话即可。
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========== 屏 2 · 取列成功 + 建表 SQL ========== -->
+      <section class="screen" data-screen="build-ready" data-nav="task" data-crumb="任务 / 编辑任务：持仓明细">
+        <div class="card">
+          <div class="cardhd">取列结果 <span class="sub">游标 describe · 3 列</span>
+            <span class="right"><button class="btn ghost" data-go="build-fetching">重新取列</button></span>
+          </div>
+          <div class="pane tight">
+            <div class="tablewrap">
+              <table class="grid">
+                <thead><tr><th>结果集列名</th><th>describe 类型</th><th>精度</th><th>M1 类型白名单</th></tr></thead>
+                <tbody>
+                  <tr><td class="m">N_VA_PRICE</td><td class="m">NUMBER</td><td class="m">(18,4)</td><td class="flagcell">在</td></tr>
+                  <tr><td class="m">C_NAME</td><td class="m">VARCHAR2</td><td class="m">(50)</td><td class="flagcell">在</td></tr>
+                  <tr><td class="m">D_BIZ</td><td class="m">DATE</td><td class="m">—</td><td class="flagcell">在</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div class="pane">
+            <div class="hint">
+              这份结果<b>刷新即丢</b>：不进任务定义、不进存储（ADR-0027 §7）。要建表 SQL 就再点一次取列。
+              留着它反而要回答「它过期没有」，而判断源表结构变没变<b>只有再 describe 一次这一条路</b>。
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="cardhd">目标表建表 SQL <span class="sub">产品不会替你建表，请自行执行</span>
+            <span class="right">
+              <span class="mono" style="font-size:11px;color:var(--mute)">目标表名：</span>
+              <button class="btn ghost" data-tt="filled" aria-pressed="true">已填</button>
+              <button class="btn ghost" data-tt="empty">未填</button>
+              <button class="btn ghost">复制</button>
+            </span>
+          </div>
+          <div class="pane stack">
+            <pre class="sql" id="ddl"></pre>
+            <div class="hint warnbox">
+              <b>执行时若报 <code>ERROR 1118 Row size too large</code></b>：含义是列宽合计超出 MySQL 单行上限，
+              需缩窄字符列或拆表。<br>
+              <span style="color:var(--mute)">这是一段静态提示，不是判定——执行建表的动作在产品之外，
+              产品结构性地看不见那个错误（ADR-0027 §8）。产品也<b>不预先计算行长上限</b>：真实规则要算行格式、
+              off-page 存储与指针开销，自算的近似式松了照样炸、紧了误拒。</span>
+            </div>
+            <div class="hint">
+              三条不是可选项：<b>全列可空</b>（目标列 <code>NOT NULL</code> 被预检全拒，生成带 <code>NOT NULL</code> 的表等于生成一张跑不起来的表）、
+              <b>业务日期列上的索引</b>（切换事务的 <code>DELETE</code> 无索引会锁全表）、
+              <b>显式 <code>utf8mb4</code></b>（吃库默认会撞 <code>ERROR 1366</code>）。<br>
+              <b>不生成 <code>ALTER TABLE</code></b>：改一个已有数据的列的类型安不安全，取决于目标表里现有的数据——
+              写那条 <code>ALTER</code> 是 DBA 三十秒的事，判它安不安全才是难的那半，而产品判不了（ADR-0027 §5）。
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="cardhd">④ SQL
+            <span class="right">
+              <button class="btn ghost" data-go="build-edited">重走向导</button>
+              <button class="btn" data-go="start">保存并发起</button>
+            </span>
+          </div>
+          <div class="pane">
+            <pre class="sql editable">SELECT a.N_VA_PRICE AS N_VA_PRICE,
+       a.C_NAME     AS C_NAME,
+       a.D_BIZ      AS D_BIZ
+  FROM htbr45.t_r_fr_aststat@FA a
+ WHERE a.D_BIZ &gt;= TO_DATE(:biz_date,'YYYY-MM-DD')
+   AND a.D_BIZ &lt;  TO_DATE(:biz_date,'YYYY-MM-DD') + 1</pre>
+          </div>
+        </div>
+
+        <p class="spec">
+          <b>建表 SQL 的出口只有这一个，而且常亮</b>（ADR-0027 §4）：不管目标表存不存在都给，
+          <b>预检失败页不重复生成一份</b>，只放一个回跳入口。理由与取消按钮常亮同源——
+          <b>禁用状态本身会说谎</b>（ADR-0026 §5）。目标表名没填就在 SQL 里留占位符，不拦着人先看（点上面「未填」看形态）。
+        </p>
+      </section>
+
+      <!-- ========== 屏 2 · 手改 + 覆盖警告 ========== -->
+      <section class="screen" data-screen="build-edited" data-nav="task" data-crumb="任务 / 编辑任务：持仓明细">
+        <div class="card">
+          <div class="cardhd">④ SQL
+            <span class="right">
+              <button class="btn ghost" data-modal="open">重走向导</button>
+              <button class="btn" data-go="start">保存并发起</button>
+            </span>
+          </div>
+          <div class="pane stack">
+            <div class="sqlbox">
+              <span class="flag">当前 SQL 已被手改</span>
+              <pre class="sql editable">SELECT a.N_VA_PRICE AS PRICE,
+       a.C_NAME     AS NAME,
+       a.D_BIZ      AS D_BIZ,
+       b.C_MGR      AS MANAGER
+  FROM htbr45.t_r_fr_aststat@FA a
+  JOIN htbr45.t_r_mgr@FA b ON b.C_ID = a.C_MGR_ID
+ WHERE a.D_BIZ &gt;= TO_DATE(:biz_date,'YYYY-MM-DD')
+   AND a.D_BIZ &lt;  TO_DATE(:biz_date,'YYYY-MM-DD') + 1</pre>
+            </div>
+            <div class="hint">
+              手改是<b>一等公民</b>：构建器只负责第一次把文本吐出来，之后这段 SQL 归你。
+              加 <code>JOIN</code>、改 <code>AS</code> 别名都可以——别名不是字段映射，写出来仍是恒等映射（ADR-0009 增补 §5）。
+              发起时的形状预检<b>无条件重跑</b>，不区分改没改。
+            </div>
+          </div>
+        </div>
+        <p class="spec">
+          <b>「重走向导」是破坏性动作</b>，故走确认模态而不是内联提示条。构建器<b>不做合并、也不反解析</b>
+          （ADR-0023 §2 否掉形态 C：那要写一个 Oracle SQL 解析器，买到的只有「改完还能回到向导」这一条舒适度）。
+        </p>
+        <div class="veil" data-modal-el hidden>
+          <div class="modal" role="dialog" aria-modal="true" aria-labelledby="ovh">
+            <div class="mh" id="ovh">重走向导会覆盖你手改的 SQL</div>
+            <div class="mb">
+              <div class="plain warn">
+                <span class="lead">这段手改的 SQL 会被向导生成的新文本<b>整段替换</b>。</span>
+                构建器不做合并，也<b>不记得你上次在向导里选了什么</b>——重走等于从头选一遍。
+                想留住现在这段，先复制出去。
+              </div>
+              <div class="hint">
+                上面那句「不记得你上次选了什么」不是省事：选择状态从不落盘，任务定义里只有 SQL 文本本身（ADR-0023 §2）。
+              </div>
+            </div>
+            <div class="mf">
+              <button class="btn ghost" data-modal="close">取消</button>
+              <button class="btn danger" data-go="build">覆盖并重走向导</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========== 发起对话框 ========== -->
+      <section class="screen" data-screen="start" data-nav="task" data-crumb="任务">
+        <div class="card">
+          <div class="cardhd">任务 <span class="sub">共 3 个</span></div>
+          <div class="pane tight">
+            <div class="tablewrap">
+              <table class="grid">
+                <thead><tr><th>任务</th><th>目标表</th><th>当前</th><th>最近一次</th><th>操作</th></tr></thead>
+                <tbody>
+                  <tr><td>持仓明细</td><td class="m">T_POSITION</td><td><span class="dotstate run"><span class="d"></span>进行中</span></td><td><span class="term swapped">SWAPPED</span></td><td><span class="link">发起</span></td></tr>
+                  <tr><td>交易流水</td><td class="m">T_TRADE</td><td><span class="dotstate idle"><span class="d"></span>空闲</span></td><td><span class="term discarded">DISCARDED</span></td><td><span class="link">发起</span></td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="veil">
+          <div class="modal" role="dialog" aria-modal="true" aria-labelledby="sth">
+            <div class="mh" id="sth">发起运行 · 持仓明细</div>
+            <div class="mb">
+              <div class="formrow"><span class="lbl">业务日期</span><span class="field wide focus"><span class="val">2026-08-14</span></span></div>
+              <div class="hint">
+                业务日期<b>不在任务定义里</b>，每次发起单独填（ADR-0016）。谓词是半开区间：
+                <code>&gt;= 2026-08-14</code> 且 <code>&lt; 2026-08-15</code>，粒度到日。
+              </div>
+              <div class="plain info">
+                <span class="lead">该任务在 2026-08-14 已有一个运行进行中。</span>
+                <code>run_record_id 0f3a91c4</code>，已跑 00:03:41。<br>
+                <b>这条提示允许滞后</b>——它来自父进程的投影，不是权威。所以这里<b>只提示，不拦你</b>；
+                真发起了，后端会当场硬拒绝，那才是真相（ADR-0022 §5）。
+              </div>
+            </div>
+            <div class="mf">
+              <button class="btn ghost" data-go="tasks">取消</button>
+              <button class="btn" data-go="run-accepted">发起</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========== 屏 3 · 运行详情 · 已受理 ========== -->
+      <section class="screen" data-screen="run-accepted" data-nav="history" data-crumb="运行历史 / <span class='rid'>7c1e8b02</span>">
+        <div class="card">
+          <div class="cardhd">运行详情 <span class="sub">持仓明细 · 业务日期 2026-08-14</span>
+            <span class="right">
+              <span class="dotstate run"><span class="d"></span>1s 轮询中</span>
+              <button class="btn ghost">取消运行</button>
+            </span>
+          </div>
+          <div class="pane stack">
+            <div class="idpair">
+              <span class="one"><span class="cap">RUN_RECORD_ID</span><span class="v">7c1e8b02</span></span>
+              <span class="one"><span class="cap">RUN_ID</span><span class="v none">未生成 —— 目标端还不知道这次运行</span></span>
+            </div>
+            <div class="phaseline">
+              <span class="phase on pulse"><span class="dot"></span>PREPARING</span><span class="arrow">─▶</span>
+              <span class="phase"><span class="dot"></span>STREAMING</span><span class="arrow">─▶</span>
+              <span class="phase"><span class="dot"></span>COMMITTING</span>
+              <span class="after">→ 终态待定</span>
+            </div>
+            <div class="indet"></div>
+            <div class="plain info">
+              <span class="lead">已受理，正在拉起。</span>
+              子进程还没进入 <code>PREPARING</code>——这一瞬没有任何阶段是真的。
+              上面第一个圆点在脉冲，<b>不代表已经在 PREPARING 了</b>。
+            </div>
+            <div class="kv">
+              <div><dt>已推行数</dt><dd>—</dd></div>
+              <div><dt>当前批次</dt><dd>—</dd></div>
+              <div><dt>已用时</dt><dd>00:00:02</dd></div>
+              <div><dt>累计字节</dt><dd>—</dd></div>
+            </div>
+          </div>
+        </div>
+        <p class="spec">
+          <b>不伪造 <code>PREPARING</code></b>（ADR-0026 §4）：「已受理」不是五态之一，它是父进程记了一行、子进程还没说话的那段空窗。
+          <b><code>run_id</code> 此刻不存在是语义正确</b>，不是缺陷——它由子进程在形状预检通过后才生成（ADR-0020 §3）。
+        </p>
+      </section>
+
+      <!-- ========== 屏 3 · 运行详情 · 进行中 ========== -->
+      <section class="screen" data-screen="run-live" data-nav="history" data-crumb="运行历史 / <span class='rid'>7c1e8b02</span>">
+        <div class="card">
+          <div class="cardhd">运行详情 <span class="sub">持仓明细 · 业务日期 2026-08-14</span>
+            <span class="right">
+              <span class="dotstate run"><span class="d"></span>1s 轮询中</span>
+              <button class="btn ghost">取消运行</button>
+            </span>
+          </div>
+          <div class="pane stack">
+            <div class="idpair">
+              <span class="one"><span class="cap">RUN_RECORD_ID</span><span class="v">7c1e8b02</span></span>
+              <span class="one"><span class="cap">RUN_ID</span><span class="v">20260814031200_a3f19c</span></span>
+            </div>
+            <div class="phaseline">
+              <span class="phase done"><span class="dot"></span>PREPARING</span><span class="arrow">─▶</span>
+              <span class="phase on pulse"><span class="dot"></span>STREAMING</span><span class="arrow">─▶</span>
+              <span class="phase"><span class="dot"></span>COMMITTING</span>
+              <span class="after">→ 终态待定</span>
+            </div>
+            <div class="indet"></div>
+            <div class="kv">
+              <div><dt>已推行数</dt><dd class="big">174,203</dd></div>
+              <div><dt>当前批次 SEQ</dt><dd class="big">37</dd></div>
+              <div><dt>已用时</dt><dd class="big">00:03:41</dd></div>
+              <div><dt>累计字节</dt><dd class="big">521.4<span class="u">MiB</span></dd></div>
+              <div><dt>最近一行日志</dt><dd>03:15:41.208</dd></div>
+            </div>
+            <div class="hint">
+              <b>没有百分比，也没有进度条的刻度</b>，这是正面决定不是没做（ADR-0026 §3）：
+              分母要买一次 <code>COUNT(*)</code>，而那个数来自<b>另一个读一致性视图</b>——
+              源表在跑的时候有并发写入，算出来的百分比可能冲过 100%，也可能永远停在 97%。
+              <b>一个会说谎的进度条比没有更糟</b>，而且它会被当成校验用。上面四个数都是真数。
+            </div>
+            <div class="hint">
+              <b>「取消运行」常亮，点了当场给结果。</b> 不预先禁用——判断「现在是不是已经过封口点」要靠投影，
+              而投影可能落后，<b>禁用状态本身会说谎</b>：该禁的没禁，不该禁的禁了。权威在父进程手里。
+              已过封口点时点它会当场收到「已过封口点，停不了」。<br>
+              取消成功也<b>不是一个新状态</b>：子进程走已有的失败路径，终态是 <code>FAILED</code>。
+            </div>
+            <div class="hint">
+              <b>这里不做日志尾随</b>（ADR-0026 §8）。要 tail 就得把子进程 stdout 的原始行缓存进父进程内存，
+              而「stdout 无界增长且无轮转」已经是一笔认下的明知缺口——搬进浏览器等于把同一笔账再付一遍。
+              取证面仍然是日志本身。
+            </div>
+          </div>
+        </div>
+        <p class="spec">
+          <b>只有这一屏轮询</b>（ADR-0026 §7）：1s 一次 <code>GET /api/runs/7c1e8b02</code>，页面切到后台即停。
+          历史列表进入时拉一次 + 手动刷新按钮——<b>全站轮询是那种一旦开了就再也收不回来的默认</b>。
+        </p>
+      </section>
+
+      <!-- ========== 屏 3 · 运行详情 · 成功 ========== -->
+      <section class="screen" data-screen="run-swapped" data-nav="history" data-crumb="运行历史 / <span class='rid'>7c1e8b02</span>">
+        <div class="card">
+          <div class="cardhd">运行详情 <span class="sub">持仓明细 · 业务日期 2026-08-14</span>
+            <span class="right"><span class="term swapped">SWAPPED<span class="aside">目标表已是新数据</span></span></span>
+          </div>
+          <div class="pane stack">
+            <div class="idpair">
+              <span class="one"><span class="cap">RUN_RECORD_ID</span><span class="v">7c1e8b02</span></span>
+              <span class="one"><span class="cap">RUN_ID</span><span class="v">20260814031200_a3f19c</span></span>
+              <span class="one"><span class="cap">暂存表</span><span class="v">stg_20260814031200_a3f19c</span></span>
+            </div>
+            <div>
+              <p class="sectitle">校验门禁</p>
+              <div class="kv">
+                <div><dt>源端读出 SOURCE_ROWS</dt><dd class="big">174,203</dd></div>
+                <div><dt>暂存表实有 SINK_ROWS</dt><dd class="big">174,203</dd></div>
+                <div><dt>批数 TOTAL_BATCHES</dt><dd>37</dd></div>
+                <div><dt>批数 SINK_BATCHES</dt><dd>37</dd></div>
+              </div>
+            </div>
+            <div>
+              <p class="sectitle">切换</p>
+              <div class="kv">
+                <div><dt>清除行数</dt><dd>168,940</dd></div>
+                <div><dt>写入行数</dt><dd>174,203</dd></div>
+                <div><dt>切换耗时</dt><dd>00:00:29</dd></div>
+              </div>
+            </div>
+            <div>
+              <p class="sectitle">分段耗时</p>
+              <div class="kv">
+                <div><dt>取数</dt><dd>00:03:02</dd></div>
+                <div><dt>推送</dt><dd>00:02:41</dd></div>
+                <div><dt>提交</dt><dd>00:00:29</dd></div>
+                <div><dt>总计</dt><dd>00:06:12</dd></div>
+              </div>
+            </div>
+            <div class="hint">
+              终态这一屏<b>不出阶段串</b>——进行中不用终态块，终态不用阶段圆点（设计系统 §3 硬规则）。
+              「跑到哪一步了」在结束之后不再是一个有意义的问题，「目标表动没动」才是。
+            </div>
+          </div>
+        </div>
+        <p class="spec">
+          <b>同一个页面、同一个端点</b>：<code>GET /api/runs/&lt;run_record_id&gt;</code> 投影优先、历史回落，
+          前端只看 <code>live</code> 决定继不继续轮询（ADR-0026 §6）。进行中与看结果<b>不是两屏</b>。
+        </p>
+      </section>
+
+      <!-- ========== 屏 3 · 形状预检失败 ========== -->
+      <section class="screen" data-screen="run-fail-shape" data-nav="history" data-crumb="运行历史 / <span class='rid'>4b90de77</span>">
+        <div class="card">
+          <div class="cardhd">运行详情 · 失败 <span class="sub">持仓明细 · 业务日期 2026-08-14</span>
+            <span class="right"><button class="btn ghost" data-go="build-edited">去改 SQL</button><button class="btn" data-go="start">重新发起</button></span>
+          </div>
+          <div class="pane stack">
+            <div class="idpair">
+              <span class="one"><span class="cap">RUN_RECORD_ID</span><span class="v">4b90de77</span></span>
+              <span class="one"><span class="cap">RUN_ID</span><span class="v none">未发起 —— 目标端不知道这次运行</span></span>
+            </div>
+            <div class="plain">
+              <span class="lead">SQL 形状预检没过，运行没有发起出去。</span>
+              目标表<b>未被触碰</b>：这次连请求都没发到目标端，暂存表也没建。改完 SQL 重新发起即可。
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="cardhd">第一段 · SQL 形状预检 <span class="sub">产地：source 本地成文</span>
+            <span class="right"><span class="code reject" style="--code-bd:var(--line-strong);--code-fg:var(--dim);--code-bg:var(--mute-bg)">无错误码</span></span>
+          </div>
+          <div class="pane tight">
+            <div class="tablewrap">
+              <table class="grid">
+                <thead><tr><th style="width:52px">#</th><th>约束</th><th>实际</th></tr></thead>
+                <tbody>
+                  <tr><td class="m">2</td><td>WHERE 中不存在其他谓词</td><td>多一个 <code class="mono">AND a.C_STATUS = 'A'</code></td></tr>
+                  <tr><td class="m">3</td><td><code class="mono">upper(target_date_col) == upper(source_date_col)</code></td><td><code class="mono">D_BIZ</code> ≠ <code class="mono">D_DATE</code></td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="opacity:.6">
+          <div class="cardhd">第二段 · 映射预检 <span class="sub">产地：sink，透传</span>
+            <span class="right"><span class="mono" style="font-size:11px;color:var(--mute)">未执行</span></span>
+          </div>
+          <div class="pane">
+            <div class="hint">
+              没跑到这一段。形状不过就不发 HTTP 请求，<code>sink</code> 不知道存在这个运行。
+            </div>
+          </div>
+        </div>
+
+        <p class="spec">
+          <b>两段预检永远上下分块、各自一次报全部，不合并</b>（ADR-0023 §8）：产地不同、措辞来源不同——
+          第一段是 <code>source</code> 本地成文，第二段是 <code>sink</code> 透传。合并等于把它们搅成一段。<br>
+          <b>这一屏不出终态块。</b> 轴二画的是墓碑，而预检未过时 <code>sink</code> 上根本没有这个 run、没有墓碑——
+          画一个 <code>DISCARDED</code> 等于捏造一条不存在的记录。「目标表未被触碰」写在人话结论条里。
+        </p>
+      </section>
+
+      <!-- ========== 屏 3 · 映射预检失败 ========== -->
+      <section class="screen" data-screen="run-fail-precheck" data-nav="history" data-crumb="运行历史 / <span class='rid'>91ca27de</span>">
+        <div class="card">
+          <div class="cardhd">运行详情 · 失败 <span class="sub">持仓明细 · 业务日期 2026-08-14</span>
+            <span class="right">
+              <button class="btn ghost" data-go="build-ready">回到取列拿建表 SQL</button>
+              <button class="btn" data-go="start">重新发起</button>
+            </span>
+          </div>
+          <div class="pane stack">
+            <div class="idpair">
+              <span class="one"><span class="cap">RUN_RECORD_ID</span><span class="v">91ca27de</span></span>
+              <span class="one"><span class="cap">RUN_ID</span><span class="v">20260814024155_7ce301</span></span>
+              <span class="one"><span class="cap">失败阶段</span><span class="v">PREPARING</span></span>
+            </div>
+            <div class="rowflex">
+              <span class="code reject">PRECHECK_FAILED<span class="http">422</span></span>
+            </div>
+            <div class="plain">
+              <span class="lead">目标表的列跟这段 SQL 对不上，运行没开始。</span>
+              下面一次列全了不合规的 3 列，改完目标表再重新发起。<b>目标表未被触碰</b>，暂存表也没建。
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="cardhd">第一段 · SQL 形状预检 <span class="sub">产地：source 本地成文</span>
+            <span class="right"><span class="mono" style="font-size:11px;color:var(--ok)">六条全过</span></span>
+          </div>
+          <div class="pane"><div class="hint">形状无条件跑过一遍，通过了才发的请求（ADR-0023 §8）。</div></div>
+        </div>
+
+        <div class="card">
+          <div class="cardhd">第二段 · 映射预检 · 未通过 <span class="sub">产地：sink，逐列比对，一次报全部</span></div>
+          <div class="pane tight">
+            <div class="tablewrap">
+              <table class="grid">
+                <thead><tr><th>列名</th><th>源端</th><th>目标端</th><th>违反</th></tr></thead>
+                <tbody>
+                  <tr><td class="m">N_VA_PRICE</td><td class="m">NUMBER(18,4)</td><td class="m">DECIMAL(10,2)</td><td>精度不足，会静默截断</td></tr>
+                  <tr><td class="m">C_NAME</td><td class="m">VARCHAR2(50)</td><td class="m">VARCHAR(50) NOT NULL</td><td>目标列必须可空</td></tr>
+                  <tr><td class="m">D_BIZ</td><td class="m">DATE</td><td class="m">—</td><td>目标表缺这一列</td></tr>
+                  <tr><td class="m">C_MGR</td><td class="m">—</td><td class="m">VARCHAR(20)</td><td>目标表有、SQL 结果集里没有</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div class="pane stack">
+            <div class="hint">
+              合计 <b>4</b> 列不合规 / 共比对 3 + 1 列。<b>一次报全部</b>是规格（ADR-0009 §8）：
+              一次报一条会让「改表 → 重跑 → 又炸一条」循环七八轮，而生产表 70 列时这个循环的代价是实打实的。
+            </div>
+            <div class="hint">
+              最后一行是<b>目标表有列没被选中</b>——它是硬拒，不是警告（ADR-0009 §4）。
+              放它过去，切换时那一列会被静默清成 NULL；拒掉它是<b>跑不起来</b>，比<b>搬错了</b>好。
+            </div>
+          </div>
+        </div>
+
+        <p class="spec">
+          <b>这一页不再生成一份建表 SQL</b>（ADR-0027 §4）：预检失败的常见形态不是「表不存在」，是<b>某几列类型不对</b>——
+          那时摆一份全量 <code>CREATE TABLE</code> 是误导，人执行它会撞 <code>ERROR 1050 Table already exists</code>。
+          只放一个回跳入口，出口仍是建任务页那一个。<br>
+          <b>也不给 <code>ALTER TABLE</code> 建议</b>：<code>DECIMAL(38,0)</code> 改成 <code>DECIMAL(18,4)</code> 会不会截断，
+          只有读了目标表里现有的数据才知道，产品既没权限也没立场表态。
+        </p>
+      </section>
+
+      <!-- ========== 屏 3 · 校验失败 ========== -->
+      <section class="screen" data-screen="run-fail-verify" data-nav="history" data-crumb="运行历史 / <span class='rid'>c5d1044a</span>">
+        <div class="card">
+          <div class="cardhd">运行详情 · 失败 <span class="sub">持仓明细 · 业务日期 2026-08-13</span>
+            <span class="right">
+              <span class="term discarded">DISCARDED<span class="aside">目标表未被触碰</span></span>
+              <button class="btn" data-go="start">重新发起</button>
+            </span>
+          </div>
+          <div class="pane stack">
+            <div class="idpair">
+              <span class="one"><span class="cap">RUN_RECORD_ID</span><span class="v">c5d1044a</span></span>
+              <span class="one"><span class="cap">RUN_ID</span><span class="v">20260813031055_b81f42</span></span>
+              <span class="one"><span class="cap">失败阶段</span><span class="v">COMMITTING</span></span>
+            </div>
+            <div class="rowflex">
+              <span class="code reject">VERIFY_FAILED<span class="http">409</span></span>
+            </div>
+            <div class="plain">
+              <span class="lead">校验未通过：数据在写入 MySQL 的过程中丢失。</span>
+              源端读出 174,203 行，sink 逐批报告已写入 174,203 行，但暂存表实际只有 169,391 行——
+              判定为「<b>写进去了又没落</b>」。目标表未被触碰，可直接重跑；重跑仍失败请报 issue。
+            </div>
+            <div>
+              <p class="sectitle">校验门禁四个数</p>
+              <div class="kv">
+                <div><dt>源端读出 SOURCE_ROWS</dt><dd class="big">174,203</dd></div>
+                <div><dt>暂存表实有 SINK_ROWS</dt><dd class="big"><em>169,391</em></dd></div>
+                <div><dt>批数 TOTAL_BATCHES</dt><dd>37</dd></div>
+                <div><dt>批数 SINK_BATCHES</dt><dd>37</dd></div>
+              </div>
+            </div>
+            <div>
+              <p class="sectitle">诊断数</p>
+              <div class="kv">
+                <div><dt>SINK 逐批自称写入</dt><dd>174,203</dd></div>
+                <div><dt>差额</dt><dd><em>4,812</em></dd></div>
+              </div>
+            </div>
+            <div class="hint">
+              <b>这里没有「差在哪一批」，而且规格明说不承诺有</b>（ADR-0013 §6.1）：
+              逐批断言已经在 source 侧当场炸掉了「某批没写全」，所以能走到 commit 才发现的不一致，
+              按定义是「每一批都自称写对了、总数却不对」——逐批明细里全是「对的」，指不出任何一批。
+              留一个批次号栏位只会让人以为该有个答案。<br>
+              暂存表已 <code>DROP</code>，不留现场（ADR-0013 §8）：为失败开例外会产生一类由失败产生、无人回收的孤儿表。
+            </div>
+          </div>
+        </div>
+        <p class="spec">
+          终态块（轴二）与错误码标签（轴三）<b>同一行并列是允许的</b>，三轴同时出现不允许（设计系统 §3）。
+          <b>失败阶段用文字不用圆点</b>——终态页不出轴一。<br>
+          错误码 4xx 用<b>虚线边框</b>＝「你能改」；下一屏那个 5xx 用<b>实线边框</b>＝「找人」。
+          差别不靠颜色，黑白打印与色觉障碍下仍分得开。
+        </p>
+      </section>
+
+      <!-- ========== 屏 3 · 哨兵逃逸（带业务值） ========== -->
+      <section class="screen" data-screen="run-fail-escape" data-nav="history" data-crumb="运行历史 / <span class='rid'>e07f3312</span>">
+        <div class="card">
+          <div class="cardhd">运行详情 · 失败 <span class="sub">交易流水 · 业务日期 2026-08-13</span>
+            <span class="right">
+              <span class="term discarded">DISCARDED<span class="aside">目标表未被触碰</span></span>
+              <button class="btn" data-go="start">重新发起</button>
+            </span>
+          </div>
+          <div class="pane stack">
+            <div class="idpair">
+              <span class="one"><span class="cap">RUN_RECORD_ID</span><span class="v">e07f3312</span></span>
+              <span class="one"><span class="cap">RUN_ID</span><span class="v">20260813024410_5a90cc</span></span>
+              <span class="one"><span class="cap">失败阶段</span><span class="v">STREAMING</span></span>
+            </div>
+            <div class="rowflex">
+              <span class="code internal">INTERNAL_PRECHECK_ESCAPE<span class="http">500</span></span>
+            </div>
+            <div class="plain">
+              <span class="lead">这是产品自己的缺陷，不是你的数据或配置有问题。</span>
+              写入时 MySQL 报了一条静默截断（<code>Note 1265</code>）——这类情况本该被映射预检提前拦住，
+              它出现说明预检漏了一种情形。<b>请把这一页连同下面的列与值报成 issue。</b>
+              目标表未被触碰，暂存表已丢弃。
+            </div>
+            <div class="sensitive" data-masked="true">
+              <div class="top">
+                源库真实业务值
+                <span class="why">这是定位这条缺陷唯一的线索，故予保留</span>
+                <button class="reveal">显示</button>
+              </div>
+              <div class="bodyv">
+                <span class="k">column</span><span class="v">N_AMOUNT</span>
+                <span class="k">value</span><span class="v">1234567890.987654321</span>
+                <span class="k">batch seq</span><span class="v">14</span>
+              </div>
+            </div>
+            <div class="hint warnbox">
+              <b>点「显示」即把源库真实值送进这台浏览器。</b>
+              <span style="color:var(--mute)">这是设计上的落点，不是安全机制——能连上这个端口的人本来就等价于持有源库凭据（ADR-0024）。
+              打码挡的是肩窥和截图，不是权限。</span>
+            </div>
+          </div>
+        </div>
+        <p class="spec">
+          业务值只有这<b>一个落点</b>：独立告警框，与普通字段视觉上完全分开，默认打码（设计系统 §5）。
+          <b>绝不混进键值网格或表格单元格</b>——那样它会跟着一起被截图、被复制、被贴进工单。<br>
+          <code>INTERNAL_*</code> 这一档是 <b>5xx 实线边框</b>：措辞是「找人」，不是「你能改」。
+        </p>
+      </section>
+
+      <!-- ========== 屏 3 · 进程消失 ========== -->
+      <section class="screen" data-screen="run-lost-gone" data-nav="history" data-crumb="运行历史 / <span class='rid'>2ad55f10</span>">
+        <div class="card">
+          <div class="cardhd">运行详情 · 失败 <span class="sub">估值表 · 业务日期 2026-08-13</span>
+            <span class="right"><button class="btn" data-go="start">重新发起</button></span>
+          </div>
+          <div class="pane stack">
+            <div class="idpair">
+              <span class="one"><span class="cap">RUN_RECORD_ID</span><span class="v">2ad55f10</span></span>
+              <span class="one"><span class="cap">RUN_ID</span><span class="v">20260813051002_11de84</span></span>
+              <span class="one"><span class="cap">最后见到的阶段</span><span class="v">STREAMING</span></span>
+            </div>
+            <div class="plain">
+              <span class="lead">进程消失，无终态日志。</span>
+              子进程没了，也没留下说明结局的那一行。<b>这次运行的结局无法从这里判断</b>——
+              目标表动没动，请去看 stdout 日志，或直接查目标表。
+            </div>
+            <div class="hint">
+              <b>这一屏没有错误码，是刻意的</b>（ADR-0026 §4）：ADR-0010 的 12 码闭集是 <code>source</code> 与
+              <code>sink</code> 之间的协议错误码。往里塞一个只发生在父进程视角里的原因，
+              等于让协议闭集为非协议事件背书。<br>
+              <b>也没有终态块</b>：墓碑在 <code>sink</code> 手里，父进程没看见结局就不知道有没有墓碑。
+              这一族只出人话结论条——与真失败（有码、可能带业务值）在视觉上必须一眼分得开。
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========== 屏 3 · 服务重启 ========== -->
+      <section class="screen" data-screen="run-lost-restart" data-nav="history" data-crumb="运行历史 / <span class='rid'>8fe1b3c6</span>">
+        <div class="card">
+          <div class="cardhd">运行详情 · 失败 <span class="sub">交易流水 · 业务日期 2026-08-12</span>
+            <span class="right"><button class="btn" data-go="start">重新发起</button></span>
+          </div>
+          <div class="pane stack">
+            <div class="idpair">
+              <span class="one"><span class="cap">RUN_RECORD_ID</span><span class="v">8fe1b3c6</span></span>
+              <span class="one"><span class="cap">RUN_ID</span><span class="v none">未生成 —— 目标端不知道这次运行</span></span>
+              <span class="one"><span class="cap">最后见到的阶段</span><span class="v none">无</span></span>
+            </div>
+            <div class="plain">
+              <span class="lead">服务重启，结局未知。</span>
+              这条记录在服务重启时还没封口，被启动清扫封成了失败。
+              <b>它当时跑到哪、目标表动没动，这里都答不了</b>——请去看 stdout 日志，或直接查目标表。
+            </div>
+            <div class="hint">
+              同样<b>没有错误码、没有终态块</b>。这一族三种情形（已受理未拉起 / 进程消失 / 服务重启）共用
+              「结局不明」的呈现，各自的人话固定成文，不随便改字（ADR-0026 §4）。
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========== 屏 4 · 运行历史 ========== -->
+      <section class="screen" data-screen="history" data-nav="history" data-crumb="运行历史">
+        <div class="card">
+          <div class="cardhd">运行历史 <span class="sub">保留 90 天，按时间不按条数</span>
+            <span class="right"><button class="btn ghost">刷新</button></span>
+          </div>
+          <div class="filters">
+            <span class="field sel"><span class="cap">任务</span><span class="ph">全部</span></span>
+            <span class="field sel"><span class="cap">终态</span><span class="ph">全部</span></span>
+            <span class="field"><span class="cap">业务日期</span><span class="val">2026-08</span></span>
+          </div>
+          <div class="pane tight">
+            <div class="tablewrap">
+              <table class="grid">
+                <thead><tr>
+                  <th>RUN_RECORD_ID</th><th>RUN_ID</th><th>任务</th><th>业务日期</th>
+                  <th>结局</th><th>错误码</th><th style="text-align:right">行数</th><th style="text-align:right">耗时</th><th>发起于</th>
+                </tr></thead>
+                <tbody>
+                  <tr>
+                    <td class="m"><span class="link" data-go="run-live">7c1e8b02</span></td>
+                    <td class="m" style="color:var(--dim)">20260814031200_a3f19c</td>
+                    <td>持仓明细</td><td class="m">2026-08-14</td>
+                    <td><span class="dotstate run"><span class="d"></span>进行中 STREAMING</span></td>
+                    <td>—</td><td class="n">174,203</td><td class="n">00:03:41</td><td class="t">03:12:00</td>
+                  </tr>
+                  <tr>
+                    <td class="m"><span class="link" data-go="run-fail-precheck">91ca27de</span></td>
+                    <td class="m" style="color:var(--dim)">20260814024155_7ce301</td>
+                    <td>持仓明细</td><td class="m">2026-08-14</td>
+                    <td><span style="color:var(--mute);font-size:12px">未建暂存表</span></td>
+                    <td><span class="code reject">PRECHECK_FAILED<span class="http">422</span></span></td>
+                    <td class="n">—</td><td class="n">00:00:04</td><td class="t">02:41:55</td>
+                  </tr>
+                  <tr>
+                    <td class="m"><span class="link" data-go="run-fail-shape">4b90de77</span></td>
+                    <td class="m" style="color:var(--mute);font-family:var(--font-cn);font-size:12px">未发起</td>
+                    <td>持仓明细</td><td class="m">2026-08-14</td>
+                    <td><span style="color:var(--mute);font-size:12px">未发起</span></td>
+                    <td><span style="color:var(--mute);font-size:12px">形状预检，无码</span></td>
+                    <td class="n">—</td><td class="n">00:00:01</td><td class="t">02:38:12</td>
+                  </tr>
+                  <tr>
+                    <td class="m"><span class="link" data-go="run-fail-verify">c5d1044a</span></td>
+                    <td class="m" style="color:var(--dim)">20260813031055_b81f42</td>
+                    <td>持仓明细</td><td class="m">2026-08-13</td>
+                    <td><span class="term discarded">DISCARDED</span></td>
+                    <td><span class="code reject">VERIFY_FAILED<span class="http">409</span></span></td>
+                    <td class="n">169,391</td><td class="n">00:05:48</td><td class="t">03:10:55</td>
+                  </tr>
+                  <tr>
+                    <td class="m"><span class="link" data-go="run-fail-escape">e07f3312</span></td>
+                    <td class="m" style="color:var(--dim)">20260813024410_5a90cc</td>
+                    <td>交易流水</td><td class="m">2026-08-13</td>
+                    <td><span class="term discarded">DISCARDED</span></td>
+                    <td><span class="code internal">INTERNAL_PRECHECK_ESCAPE<span class="http">500</span></span></td>
+                    <td class="n">61,208</td><td class="n">00:01:33</td><td class="t">02:44:10</td>
+                  </tr>
+                  <tr>
+                    <td class="m"><span class="link" data-go="run-lost-gone">2ad55f10</span></td>
+                    <td class="m" style="color:var(--dim)">20260813051002_11de84</td>
+                    <td>估值表</td><td class="m">2026-08-13</td>
+                    <td><span style="color:var(--mute);font-size:12px">结局不明</span></td>
+                    <td><span style="color:var(--mute);font-size:12px">进程消失，无码</span></td>
+                    <td class="n">—</td><td class="n">00:12:07</td><td class="t">05:10:02</td>
+                  </tr>
+                  <tr>
+                    <td class="m"><span class="link" data-go="run-lost-restart">8fe1b3c6</span></td>
+                    <td class="m" style="color:var(--mute);font-family:var(--font-cn);font-size:12px">未生成</td>
+                    <td>交易流水</td><td class="m">2026-08-12</td>
+                    <td><span style="color:var(--mute);font-size:12px">结局不明</span></td>
+                    <td><span style="color:var(--mute);font-size:12px">服务重启，无码</span></td>
+                    <td class="n">—</td><td class="n">—</td><td class="t">03:02:44</td>
+                  </tr>
+                  <tr>
+                    <td class="m"><span class="link" data-go="run-swapped">a1c70b93</span></td>
+                    <td class="m" style="color:var(--dim)">20260812031044_92f0ad</td>
+                    <td>持仓明细</td><td class="m">2026-08-12</td>
+                    <td><span class="term swapped">SWAPPED</span></td>
+                    <td>—</td><td class="n">173,880</td><td class="n">00:06:02</td><td class="t">03:10:44</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div class="pane stack">
+            <div class="hint">
+              <b>两个标识符一律同时显示，谁也不替代谁</b>（ADR-0020 §3）。
+              <code>run_record_id</code> 是主键、是这张表的主列——父进程<b>受理发起的那一刻</b>就生成它；
+              <code>run_id</code> 是可空的第二列，由子进程在形状预检<b>通过之后</b>才生成，标识的是「<b>目标端认识的那个 run</b>」。
+              第 3、7 行的「未发起 / 未生成」不是数据缺失，是<b>语义正确</b>——那两次目标端确实不知道有这回事。
+            </div>
+            <div class="hint">
+              <b>这张表不自动刷新</b>（ADR-0026 §7），进入时拉一次，要新的点「刷新」。
+              它的内容按定义是已封口的行，自动刷新唯一能变的是「别人刚发起了一个新运行」，那属于任务列表的提示面。
+              <b>全站轮询是那种一旦开了就再也收不回来的默认。</b>
+            </div>
+          </div>
+        </div>
+        <p class="spec">
+          <b>没有「重试」按钮，只有详情页里的「重新发起」</b>（ADR-0027 §6）：M1 的语义里没有「续上一次」——
+          重新发起是一条全新的记录、全新的 <code>run_id</code>、形状与映射预检都重跑。
+          <b>失败的那条历史原样留着，它是这次改表的凭据。</b>
+        </p>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<script>
+const DDL_HEAD =
+'<span class="cm">-- db-qbs 生成的目标表建表 SQL，请自行执行；产品不会替你建表。\n' +
+'-- 下面这条索引不是可选项：切换事务的 DELETE 会锁住目标表当日范围，\n' +
+'-- 业务日期列无索引时锁全表。</span>\n';
+const DDL_BODY =
+' (\n' +
+'  `N_VA_PRICE` DECIMAL(18,4) NULL,\n' +
+'  `C_NAME`     VARCHAR(50)   NULL,\n' +
+'  `D_BIZ`      DATETIME(0)   NULL,\n' +
+'  KEY `idx_d_biz` (`D_BIZ`)\n' +
+') DEFAULT CHARSET=utf8mb4;';
+
+function paintDdl(mode) {
+  const name = mode === 'empty'
+    ? '<span class="ph">&lt;目标表名&gt;</span>'
+    : '`T_POSITION`';
+  document.getElementById('ddl').innerHTML = DDL_HEAD + 'CREATE TABLE ' + name + DDL_BODY;
+}
+
+function show(name) {
+  const target = document.querySelector('[data-screen="' + name + '"]');
+  if (!target) return;
+  document.querySelectorAll('.screen').forEach(s => s.classList.toggle('on', s === target));
+  document.querySelectorAll('.rig [data-go]').forEach(b =>
+    b.setAttribute('aria-pressed', String(b.dataset.go === name)));
+  const nav = target.dataset.nav;
+  document.querySelectorAll('.app nav a[data-nav]').forEach(a => {
+    if (a.dataset.nav === nav) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
+  });
+  const parts = target.dataset.crumb.split(' / ');
+  document.getElementById('crumb').innerHTML = parts
+    .map((p, i) => (i === parts.length - 1 ? '<span class="now">' + p + '</span>' : '<span>' + p + '</span>'))
+    .join('<span class="sep">/</span>');
+  const veil = target.querySelector('[data-modal-el]');
+  if (veil) veil.hidden = false;
+  document.querySelector('.content').scrollTop = 0;
+  window.scrollTo({ top: 0 });
+}
+
+document.addEventListener('click', e => {
+  const rev = e.target.closest('.reveal');
+  if (rev) {
+    const box = rev.closest('.sensitive');
+    const masked = box.dataset.masked === 'true';
+    box.dataset.masked = String(!masked);
+    rev.textContent = masked ? '隐藏' : '显示';
+    return;
+  }
+  const tt = e.target.closest('[data-tt]');
+  if (tt) {
+    document.querySelectorAll('[data-tt]').forEach(b =>
+      b.setAttribute('aria-pressed', String(b === tt)));
+    paintDdl(tt.dataset.tt);
+    return;
+  }
+  const modal = e.target.closest('[data-modal]');
+  if (modal) {
+    const veil = document.querySelector('.screen.on [data-modal-el]');
+    if (veil) veil.hidden = modal.dataset.modal === 'close';
+    return;
+  }
+  const go = e.target.closest('[data-go]');
+  if (go) { show(go.dataset.go); }
+});
+
+paintDdl('filled');
+show('tasks');
+</script>
