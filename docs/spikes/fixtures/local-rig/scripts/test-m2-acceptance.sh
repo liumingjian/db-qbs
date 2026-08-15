@@ -29,6 +29,17 @@ actual=$($runner --list)
   exit 1
 }
 
+for (( scenario = 1; scenario <= 14; scenario++ )); do
+  grep -Fq "scenario_a$scenario()" "$runner" || {
+    echo "missing scenario_a$scenario implementation" >&2
+    exit 1
+  }
+  grep -Eq "^run_scenario A${scenario}-[^ ]+ scenario_a${scenario}$" "$runner" || {
+    echo "scenario A$scenario is not executed" >&2
+    exit 1
+  }
+done
+
 if grep -Eq '^[[:space:]]*declare[[:space:]]+-A' "$runner"; then
   echo "M2 acceptance runner must support the macOS Bash 3.2 baseline" >&2
   exit 1
@@ -57,12 +68,30 @@ grep -Fq 'kill -KILL "$SOURCE_PID"' "$runner" || {
 }
 
 a2_body=$(sed -n '/^scenario_a2()/,/^}/p' "$runner")
-for evidence in 'columns' 'run_id' 'history' 'component=sink'; do
+for evidence in 'expected_columns' 'run_id' 'history' 'component=sink'; do
   grep -Fq "$evidence" <<<"$a2_body" || {
     echo "A2 must record $evidence evidence" >&2
     exit 1
   }
 done
+grep -Fq 'sink_component_count' <<<"$a2_body" || {
+  echo "A2 must count component=sink JSON log records" >&2
+  exit 1
+}
+
+a5_body=$(sed -n '/^scenario_a5()/,/^}/p' "$runner")
+for evidence in 'pause-committing' 'live_projection' 'release-child' 'terminal_projection'; do
+  grep -Fq "$evidence" <<<"$a5_body" || {
+    echo "A5 must capture $evidence evidence" >&2
+    exit 1
+  }
+done
+
+a6_body=$(sed -n '/^scenario_a6()/,/^}/p' "$runner")
+grep -Fq 'sink_component_count' <<<"$a6_body" || {
+  echo "A6 must prove that a run shape failure does not reach sink" >&2
+  exit 1
+}
 
 grep -Fq 'commit-drop-proxy.py' "$runner" || {
   echo "A11 must reuse the existing commit-drop proxy" >&2
@@ -87,7 +116,17 @@ for file in \
   m2-visual-walkthrough.md; do
   [[ -f "$file" ]] || { echo "missing $file" >&2; exit 1; }
 done
+python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(path).read_text()) for path in sys.argv[1:]]' \
+  acceptance/m2-source-run-wrapper.py acceptance/commit-drop-proxy.py
 
 grep -Fq 'docs/design-system/README.md' README.md
 grep -Fq 'tokens.css' README.md
 grep -Fq 'm2-visual-walkthrough.md' README.md
+grep -Fq '**G1**' README.md
+grep -Fq '**G2**' README.md
+grep -Fq 'm2-visual-walkthrough.md' ../../../../CLAUDE.md
+grep -Fq 'docs/design-system/README.md' ../../../../CLAUDE.md
+grep -Fq 'docs/design-system/tokens.css' ../../../../CLAUDE.md
+grep -Fq 'every M2 acceptance' ../../../../CLAUDE.md
+grep -Fq 'before merge' ../../../../CLAUDE.md
+grep -Fq 'actual observations' ../../../../CLAUDE.md
