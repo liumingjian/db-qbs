@@ -11,7 +11,7 @@ use serde_json::Value;
 const DATABASE_FILE: &str = "db-qbs.sqlite3";
 
 macro_rules! history_params {
-    ($history:expr) => {
+    ($history:expr, $shape_checks:expr, $mapping_issues:expr) => {
         named_params! {
             ":run_record_id": $history.run_record_id,
             ":run_id": $history.run_id,
@@ -46,6 +46,8 @@ macro_rules! history_params {
             ":bytes": $history.bytes,
             ":ms": $history.ms,
             ":last_ts": $history.last_ts,
+            ":shape_checks": $shape_checks,
+            ":mapping_issues": $mapping_issues,
         }
     };
 }
@@ -113,6 +115,8 @@ pub struct RunHistory {
     pub bytes: u64,
     pub ms: u64,
     pub last_ts: Option<String>,
+    pub shape_checks: Vec<Value>,
+    pub mapping_issues: Vec<Value>,
     #[serde(skip)]
     started_at_ms: i64,
 }
@@ -157,6 +161,8 @@ impl RunHistory {
             bytes: 0,
             ms: 0,
             last_ts: None,
+            shape_checks: Vec::new(),
+            mapping_issues: Vec::new(),
             started_at_ms: accepted_at.timestamp_millis(),
         }
     }
@@ -195,6 +201,16 @@ impl RunHistory {
             }
             Some("run_opened") => {
                 self.staging_table = owned_text(log, "staging_table");
+                HistoryChange::MemoryOnly
+            }
+            Some("mapping_precheck_failed") => {
+                self.mapping_issues.push(serde_json::json!({
+                    "column": log.get("column").cloned().unwrap_or(Value::Null),
+                    "source": log.get("source").cloned().unwrap_or(Value::Null),
+                    "target": log.get("target").cloned().unwrap_or(Value::Null),
+                    "rule": log.get("rule").cloned().unwrap_or(Value::Null),
+                    "message": log.get("message").cloned().unwrap_or(Value::Null),
+                }));
                 HistoryChange::MemoryOnly
             }
             Some("batch_pushed") => {
@@ -259,10 +275,15 @@ impl RunHistory {
         self.stage = owned_text(log, "stage");
         self.finished_at = owned_text(log, "ts");
         if self.target_table_effect.is_none() {
-            self.target_table_effect = match (self.outcome.as_deref(), self.stage.as_deref()) {
-                (Some("SUCCEEDED"), _) => Some("SWAPPED".to_owned()),
-                (Some("FAILED"), Some("COMMITTING")) => Some("UNKNOWN".to_owned()),
-                (Some("FAILED"), _) => Some("DISCARDED".to_owned()),
+            self.target_table_effect = match (
+                self.outcome.as_deref(),
+                self.stage.as_deref(),
+                text(log, "sink_code"),
+            ) {
+                (Some("SUCCEEDED"), _, _) => Some("SWAPPED".to_owned()),
+                (Some("FAILED"), _, Some("VERIFY_FAILED")) => Some("DISCARDED".to_owned()),
+                (Some("FAILED"), Some("COMMITTING"), _) => Some("UNKNOWN".to_owned()),
+                (Some("FAILED"), _, _) => Some("DISCARDED".to_owned()),
                 _ => None,
             };
         }
@@ -343,12 +364,16 @@ impl HistoryStore {
                     rows_pushed         INTEGER NOT NULL,
                     bytes               INTEGER NOT NULL,
                     ms                  INTEGER NOT NULL,
-                    last_ts             TEXT
+                    last_ts             TEXT,
+                    shape_checks        TEXT NOT NULL DEFAULT '[]',
+                    mapping_issues      TEXT NOT NULL DEFAULT '[]'
                 );
                  CREATE INDEX IF NOT EXISTS run_history_task_date
                      ON run_history(task_id, biz_date, started_at_ms);",
             )
             .map_err(|error| format!("初始化 SQLite 运行历史表失败：{error}"))?;
+        ensure_json_column(&connection, "shape_checks")?;
+        ensure_json_column(&connection, "mapping_issues")?;
         Ok(store)
     }
 
@@ -362,6 +387,8 @@ impl HistoryStore {
         let transaction = connection
             .transaction()
             .map_err(|error| format!("开启 SQLite 运行历史事务失败：{error}"))?;
+        let shape_checks = json_array_text(&history.shape_checks)?;
+        let mapping_issues = json_array_text(&history.mapping_issues)?;
         transaction
             .execute(
                 "INSERT INTO run_history (
@@ -370,16 +397,17 @@ impl HistoryStore {
                     source_rows, staged_rows, sink_reported_rows, purged_rows, source_batches,
                     received_batches, fetch_ms, push_ms, commit_ms, count_ms, cursor_ms,
                     source_code, sink_code, [column], [value], message, unknown_reason,
-                    seq, rows_pushed, bytes, ms, last_ts
+                    seq, rows_pushed, bytes, ms, last_ts, shape_checks, mapping_issues
                  ) VALUES (
                     :run_record_id, :run_id, :task_id, :biz_date, :staging_table, :started_at,
                     :started_at_ms, :finished_at, :outcome, :target_table_effect, :stage,
                     :source_rows, :staged_rows, :sink_reported_rows, :purged_rows,
                     :source_batches, :received_batches, :fetch_ms, :push_ms, :commit_ms,
                     :count_ms, :cursor_ms, :source_code, :sink_code, :column, :value,
-                    :message, :unknown_reason, :seq, :rows_pushed, :bytes, :ms, :last_ts
+                    :message, :unknown_reason, :seq, :rows_pushed, :bytes, :ms, :last_ts,
+                    :shape_checks, :mapping_issues
                  )",
-                history_params!(history),
+                history_params!(history, shape_checks, mapping_issues),
             )
             .map_err(|error| format!("插入 SQLite 运行历史失败：{error}"))?;
         cleanup_transaction(&transaction, now, retention_days)?;
@@ -398,6 +426,8 @@ impl HistoryStore {
         let transaction = connection
             .transaction()
             .map_err(|error| format!("开启 SQLite 运行历史事务失败：{error}"))?;
+        let shape_checks = json_array_text(&history.shape_checks)?;
+        let mapping_issues = json_array_text(&history.mapping_issues)?;
         transaction
             .execute(
                 "UPDATE run_history SET
@@ -412,9 +442,10 @@ impl HistoryStore {
                     count_ms=:count_ms, cursor_ms=:cursor_ms, source_code=:source_code,
                     sink_code=:sink_code, [column]=:column, [value]=:value, message=:message,
                     unknown_reason=:unknown_reason, seq=:seq, rows_pushed=:rows_pushed,
-                    bytes=:bytes, ms=:ms, last_ts=:last_ts
+                    bytes=:bytes, ms=:ms, last_ts=:last_ts, shape_checks=:shape_checks,
+                    mapping_issues=:mapping_issues
                   WHERE run_record_id=:run_record_id",
-                history_params!(history),
+                history_params!(history, shape_checks, mapping_issues),
             )
             .map_err(|error| format!("更新 SQLite 运行历史失败：{error}"))?;
         cleanup_transaction(&transaction, now, retention_days)?;
@@ -546,6 +577,30 @@ fn retention_cutoff(now: DateTime<Utc>, retention_days: u64) -> Option<DateTime<
     now.checked_sub_signed(TimeDelta::try_days(days)?)
 }
 
+fn ensure_json_column(connection: &Connection, name: &str) -> Result<(), String> {
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('run_history') WHERE name = ?1)",
+            [name],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("检查 SQLite 运行历史列 {name} 失败：{error}"))?;
+    if exists {
+        return Ok(());
+    }
+    connection
+        .execute(
+            &format!("ALTER TABLE run_history ADD COLUMN {name} TEXT NOT NULL DEFAULT '[]'"),
+            [],
+        )
+        .map_err(|error| format!("迁移 SQLite 运行历史列 {name} 失败：{error}"))?;
+    Ok(())
+}
+
+fn json_array_text(values: &[Value]) -> Result<String, String> {
+    serde_json::to_string(values).map_err(|error| format!("序列化运行历史诊断失败：{error}"))
+}
+
 fn text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }
@@ -563,7 +618,7 @@ const HISTORY_SELECT: &str = "SELECT
     finished_at, outcome, target_table_effect, stage, source_rows, staged_rows,
     sink_reported_rows, purged_rows, source_batches, received_batches, fetch_ms, push_ms,
     commit_ms, count_ms, cursor_ms, source_code, sink_code, [column], [value],
-    message, unknown_reason, seq, rows_pushed, bytes, ms, last_ts
+    message, unknown_reason, seq, rows_pushed, bytes, ms, last_ts, shape_checks, mapping_issues
   FROM run_history";
 
 fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunHistory> {
@@ -601,5 +656,19 @@ fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunHistory> {
         bytes: row.get("bytes")?,
         ms: row.get("ms")?,
         last_ts: row.get("last_ts")?,
+        shape_checks: json_array_from_row(row, "shape_checks")?,
+        mapping_issues: json_array_from_row(row, "mapping_issues")?,
+    })
+}
+
+fn json_array_from_row(row: &rusqlite::Row<'_>, name: &str) -> rusqlite::Result<Vec<Value>> {
+    let encoded: String = row.get(name)?;
+    let column_index = row.as_ref().column_index(name)?;
+    serde_json::from_str(&encoded).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column_index,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
     })
 }

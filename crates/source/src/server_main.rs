@@ -457,6 +457,16 @@ fn start_run(
 ) -> Result<String, StartRunError> {
     let run_record_id = generate_run_record_id();
     let mut history = RunHistory::accepted(&run_record_id, &task.task_id, biz_date, Utc::now());
+    let task_config = TaskConfig {
+        source_sql: task.source_sql.clone(),
+        source_date_col: task.source_date_col.clone(),
+        target_table: task.target_table.clone(),
+        target_date_col: task.target_date_col.clone(),
+    };
+    history.shape_checks = sql_shape_report(&task_config)
+        .into_iter()
+        .map(|check| serde_json::to_value(check).expect("shape checks must serialize"))
+        .collect();
     register_active_run(runs, &run_record_id, &task.task_id, biz_date)?;
     if let Err(error) = history_store.insert(&history, Utc::now(), config.history_retention_days) {
         remove_active_run(runs, &run_record_id);

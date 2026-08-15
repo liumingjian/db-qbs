@@ -42,6 +42,14 @@ export interface ShapeCheck {
   message: string;
 }
 
+export interface MappingIssue {
+  column: string | null;
+  source: string | null;
+  target: string | null;
+  rule: string | null;
+  message: string | null;
+}
+
 export interface ColumnFetchResult {
   columns: Omit<BuilderColumn, "nullable">[];
   target_ddl: string;
@@ -80,7 +88,25 @@ export interface RunHistory {
   bytes: number;
   ms: number;
   last_ts: string | null;
+  shape_checks: ShapeCheck[];
+  mapping_issues: MappingIssue[];
 }
+
+export interface LiveRunDetail {
+  run_record_id: string;
+  run_id: string | null;
+  biz_date: string | null;
+  staging_table: string | null;
+  stage: string | null;
+  seq: number;
+  rows_pushed: number;
+  bytes: number;
+  ms: number;
+  last_ts: string | null;
+  live: true;
+}
+
+export type RunDetail = LiveRunDetail | (RunHistory & { live: false });
 
 export interface RunHistoryFilters {
   taskId?: string;
@@ -133,6 +159,35 @@ export async function listRunHistory(
     headers: { Accept: "application/json" },
   });
   return readJson<RunHistory[]>(response, "加载运行历史失败");
+}
+
+export async function startRun(
+  taskId: string,
+  bizDate: string,
+): Promise<{ run_record_id: string }> {
+  return postJson<{ run_record_id: string }>(
+    "/api/runs",
+    { task_id: taskId, biz_date: bizDate },
+    "发起运行失败",
+  );
+}
+
+export async function fetchRun(runRecordId: string): Promise<RunDetail> {
+  const response = await fetch(
+    `/api/runs/${encodeURIComponent(runRecordId)}`,
+    { headers: { Accept: "application/json" } },
+  );
+  return readJson<RunDetail>(response, "读取运行详情失败");
+}
+
+export async function cancelRun(
+  runRecordId: string,
+): Promise<{ message: string }> {
+  return postJson<{ message: string }>(
+    `/api/runs/${encodeURIComponent(runRecordId)}/cancel`,
+    {},
+    "取消运行失败",
+  );
 }
 
 export async function createTask(input: TaskInput): Promise<Task> {

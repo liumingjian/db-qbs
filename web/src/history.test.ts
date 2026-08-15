@@ -36,6 +36,8 @@ const baseHistory: RunHistory = {
   bytes: 64,
   ms: 10,
   last_ts: "2026-08-15T10:01:00.000Z",
+  shape_checks: [],
+  mapping_issues: [],
 };
 
 function history(overrides: Partial<RunHistory>): RunHistory {

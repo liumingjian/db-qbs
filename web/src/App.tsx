@@ -7,6 +7,7 @@ import {
   Database,
   LoaderCircle,
   Pencil,
+  Play,
   Plus,
   RefreshCw,
   TableProperties,
@@ -42,12 +43,15 @@ import type {
 } from "./api";
 import { messageFrom } from "./errors";
 import { HistoryScreen } from "./HistoryScreen";
+import { RunScreen } from "./RunScreen";
+import { StartRunDialog } from "./StartRunDialog";
 
 type DialogState =
   | { kind: "create" }
   | { kind: "edit"; task: Task }
   | { kind: "rename"; task: Task }
   | { kind: "delete"; task: Task }
+  | { kind: "start"; task: Task }
   | null;
 
 type Page = "tasks" | "history";
@@ -73,6 +77,10 @@ export function App() {
   const [refreshing, setRefreshing] = useState(true);
   const [query, setQuery] = useState("");
   const [dialog, setDialog] = useState<DialogState>(null);
+  const [activeRun, setActiveRun] = useState<{
+    task: Task;
+    runRecordId: string;
+  } | null>(null);
 
   const loadTasks = useCallback(async () => {
     setRefreshing(true);
@@ -125,6 +133,7 @@ export function App() {
   }
 
   function navigate(nextPage: Page) {
+    setActiveRun(null);
     setPage(nextPage);
     window.location.hash = nextPage;
   }
@@ -223,7 +232,13 @@ export function App() {
           </nav>
           <span className="breadcrumb">
             数据导入 <span aria-hidden="true">/</span>{" "}
-            <strong>{page === "tasks" ? "任务" : "运行历史"}</strong>
+            <strong>
+              {activeRun !== null
+                ? "运行详情"
+                : page === "tasks"
+                  ? "任务"
+                  : "运行历史"}
+            </strong>
           </span>
           <span className="environment">source · 当前实例</span>
         </header>
@@ -242,7 +257,14 @@ export function App() {
             </div>
           )}
 
-          {page === "tasks" ? (
+          {activeRun !== null ? (
+            <RunScreen
+              task={activeRun.task}
+              runRecordId={activeRun.runRecordId}
+              onBack={() => setActiveRun(null)}
+              onRelaunch={() => setDialog({ kind: "start", task: activeRun.task })}
+            />
+          ) : page === "tasks" ? (
             <section className="card" id="tasks" aria-labelledby="tasks-title">
               <header className="card-header">
                 <div>
@@ -332,6 +354,16 @@ export function App() {
             task={dialog.task}
             onClose={closeDialog}
             onDelete={() => handleDelete(dialog.task)}
+          />
+        )}
+        {dialog?.kind === "start" && (
+          <StartRunDialog
+            task={dialog.task}
+            onClose={closeDialog}
+            onStarted={(runRecordId) => {
+              setActiveRun({ task: dialog.task, runRecordId });
+              closeDialog();
+            }}
           />
         )}
       </main>
@@ -429,6 +461,11 @@ function TaskTable({
               </td>
               <td>
                 <div className="row-actions">
+                  <ActionButton
+                    label="发起运行"
+                    icon={<Play size={15} />}
+                    onClick={() => onAction({ kind: "start", task })}
+                  />
                   <ActionButton
                     label="编辑四个字段"
                     icon={<Pencil size={15} />}

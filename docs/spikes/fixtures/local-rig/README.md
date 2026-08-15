@@ -222,7 +222,7 @@ fixture」。两种失败含义不同，混合会破坏 M0 结论的语义。
 **判据是 CPU 不是墙钟。** `getrusage(RUSAGE_SELF)` 只计进程占用 CPU 的时间，
 等服务端那段不计入，所以模拟层影响的是墙钟。同理**这里也不能用墙钟下任何结论**。
 
-## M2 的验收编排（规格已定形，脚本待实现期落地）
+## M2 的验收编排
 
 规格见 [ADR-0028](../../adr/0028-m2-acceptance-criteria-and-rig-extension.md)（决策票
 [#59](https://github.com/liumingjian/db-qbs/issues/59)）。要点：
@@ -239,3 +239,20 @@ fixture」。两种失败含义不同，混合会破坏 M0 结论的语义。
   `run-canon-gate.sh` 共用机制。
 - **报告不采性能数**（那是 M1 入口的事），形态是「场景 × PASS/FAIL + 断言实际值」，
   写 `m2-acceptance-<UTC>.md`。唯一新增记录项是**投影六标量 == 历史行落库值**的一致性对照。
+
+先独立跑绿 `scripts/run-m1-acceptance.sh`，再在宿主机设置 Oracle Instant Client 目录并运行：
+
+```bash
+M2_ORACLE_CLIENT_LIB_DIR=/path/to/instantclient \
+  ./scripts/run-m2-acceptance.sh
+```
+
+M2 入口会在宿主机拉起 `db-qbs-source`，并把 A1–A14 的 PASS/FAIL 与每条断言实际值写进报告；
+它不会代跑 M1，也不会创建 `/health`。
+
+### M2 手工门禁
+
+- **G1**：真在 MySQL 执行生成的 DDL，真 `describe` 目标列，再真跑映射预检；把实际观察贴进本次验收记录。
+- **G2**：独立运行既有 `scripts/run-canon-gate.sh`，该入口一字不改。
+- **渲染走查**：每次 M2 验收必须跑 [`m2-visual-walkthrough.md`](m2-visual-walkthrough.md)。任何改动
+  `docs/design-system/README.md` 或 `docs/design-system/tokens.css` 的变更，合并前也必须跑同一份走查并记录实际观察。

@@ -73,6 +73,38 @@ fn json_lines_fold_into_one_history_row_with_event_scoped_terminals() {
 }
 
 #[test]
+fn mapping_precheck_diagnostics_survive_the_terminal_fold() {
+    let accepted_at = Utc.with_ymd_and_hms(2026, 8, 15, 9, 59, 59).unwrap();
+    let lines = [
+        r#"{"ts":"2026-08-15T10:00:01.000Z","event":"mapping_precheck_failed","run_id":"run-7","column":"V_TEXT","source":"VARCHAR2(200)","target":"missing","rule":"目标表缺列"}"#,
+        r#"{"ts":"2026-08-15T10:00:02.000Z","event":"mapping_precheck_failed","run_id":"run-7","column":"D_BIZ","source":"DATE","target":"VARCHAR(20)","rule":"类型不兼容"}"#,
+        r#"{"ts":"2026-08-15T10:00:03.000Z","event":"stage_changed","run_id":"run-7","stage":"FAILED"}"#,
+        r#"{"ts":"2026-08-15T10:00:04.000Z","event":"run_finished","run_id":"run-7","terminal":"FAILED","stage":"PREPARING","source_code":null,"sink_code":"PRECHECK_FAILED","column":null,"value":null,"message":"映射预检未通过：一次发现 2 项问题","source_rows":0,"source_batches":0,"staged_rows":null,"received_batches":null,"sink_reported_rows":null,"purged_rows":null,"fetch_ms":0,"push_ms":0,"commit_ms":0,"count_ms":null,"cursor_ms":1}"#,
+    ];
+
+    let history =
+        fold_history_lines("record-1", "task-1", "2026-08-14", accepted_at, &lines).unwrap();
+
+    assert_eq!(history.mapping_issues.len(), 2);
+    assert_eq!(history.mapping_issues[0]["column"], "V_TEXT");
+    assert_eq!(history.mapping_issues[1]["rule"], "类型不兼容");
+}
+
+#[test]
+fn explicit_verification_failure_is_known_to_be_discarded() {
+    let accepted_at = Utc.with_ymd_and_hms(2026, 8, 15, 9, 59, 59).unwrap();
+    let lines = [
+        r#"{"ts":"2026-08-15T10:00:01.000Z","event":"stage_changed","run_id":"run-7","stage":"COMMITTING"}"#,
+        r#"{"ts":"2026-08-15T10:00:02.000Z","event":"run_finished","run_id":"run-7","terminal":"FAILED","stage":"COMMITTING","source_code":null,"sink_code":"VERIFY_FAILED","column":null,"value":null,"message":"counts differ","source_rows":3,"source_batches":1,"staged_rows":2,"received_batches":1,"sink_reported_rows":3,"purged_rows":0,"fetch_ms":1,"push_ms":1,"commit_ms":1,"count_ms":1,"cursor_ms":1}"#,
+    ];
+
+    let history =
+        fold_history_lines("record-1", "task-1", "2026-08-14", accepted_at, &lines).unwrap();
+
+    assert_eq!(history.target_table_effect.as_deref(), Some("DISCARDED"));
+}
+
+#[test]
 fn shape_precheck_failure_keeps_parent_identity_without_inventing_a_run_id() {
     let accepted_at = Utc.with_ymd_and_hms(2026, 8, 15, 9, 59, 59).unwrap();
     let lines = [
@@ -107,10 +139,24 @@ fn sqlite_writes_lazily_remove_expired_rows_and_startup_seals_incomplete_rows() 
     store.insert(&old, old_at, 90).unwrap();
     assert!(store.get("old").unwrap().is_some());
 
-    let current = RunHistory::accepted("current", "task-1", "2026-08-15", now);
+    let mut current = RunHistory::accepted("current", "task-1", "2026-08-15", now);
+    current.shape_checks = vec![serde_json::json!({
+        "rule": "business_date_range",
+        "passed": true,
+        "message": "ok",
+    })];
+    current.mapping_issues = vec![serde_json::json!({
+        "column": "V_TEXT",
+        "source": "VARCHAR2(200)",
+        "target": "missing",
+        "rule": "目标表缺列",
+        "message": null,
+    })];
     store.insert(&current, now, 90).unwrap();
     assert!(store.get("old").unwrap().is_none());
-    assert!(store.get("current").unwrap().is_some());
+    let stored = store.get("current").unwrap().unwrap();
+    assert_eq!(stored.shape_checks, current.shape_checks);
+    assert_eq!(stored.mapping_issues, current.mapping_issues);
 
     store
         .seal_incomplete(UnknownReason::ServiceRestarted, now, 90)

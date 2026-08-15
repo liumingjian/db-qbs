@@ -258,6 +258,12 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
     assert_eq!(history["run_record_id"], run_record_id);
     assert_eq!(history["run_id"], "run-7");
     assert_eq!(history["task_id"], task_id);
+    assert_eq!(history["shape_checks"].as_array().unwrap().len(), 6);
+    assert!(history["shape_checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|check| check["passed"] == true));
     assert_eq!(history["biz_date"], "2026-08-14");
     assert_eq!(history["outcome"], "SUCCEEDED");
     assert_eq!(history["target_table_effect"], "SWAPPED");

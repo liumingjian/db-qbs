@@ -9,8 +9,11 @@ import {
   fetchColumns,
   generateBuilderTask,
   inspectSqlShape,
+  cancelRun,
+  fetchRun,
   listRunHistory,
   listTasks,
+  startRun,
   taskInputFrom,
   updateTask,
 } from "./api";
@@ -165,6 +168,45 @@ describe("run history API", () => {
       "/api/runs?task_id=task%2Fa&biz_date=2026-08-14",
       { headers: { Accept: "application/json" } },
     );
+  });
+
+  it("starts, reads, and cancels a run by its two stable inputs", async () => {
+    const accepted = { run_record_id: "record/01" };
+    const live = {
+      run_record_id: accepted.run_record_id,
+      run_id: null,
+      biz_date: null,
+      staging_table: null,
+      stage: null,
+      seq: 0,
+      rows_pushed: 0,
+      bytes: 0,
+      ms: 0,
+      last_ts: null,
+      live: true,
+    };
+    const canceled = { message: "已发送 SIGTERM" };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(accepted), { status: 202 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(live), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(canceled), { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(startRun("task-01", "2026-08-14")).resolves.toEqual(accepted);
+    await expect(fetchRun(accepted.run_record_id)).resolves.toEqual(live);
+    await expect(cancelRun(accepted.run_record_id)).resolves.toEqual(canceled);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/runs", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ task_id: "task-01", biz_date: "2026-08-14" }),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/runs/record%2F01", {
+      headers: { Accept: "application/json" },
+    });
+    expect(fetchMock).toHaveBeenNthCalledWith(3, "/api/runs/record%2F01/cancel", expect.objectContaining({
+      method: "POST",
+    }));
   });
 });
 
