@@ -12,7 +12,7 @@ struct FakeDestination {
     swap_requests: Mutex<Vec<AtomicSwapRequest>>,
     staged_rows: Mutex<u64>,
     purged_rows: Mutex<u64>,
-    swap_error: Mutex<Option<String>>,
+    swap_error: Mutex<Option<AtomicSwapError>>,
     drop_error: Mutex<Option<DropStagingError>>,
     dropped: Mutex<Vec<String>>,
 }
@@ -65,8 +65,8 @@ impl Destination for FakeDestination {
         request: &AtomicSwapRequest,
     ) -> Result<AtomicSwapResult, AtomicSwapError> {
         self.swap_requests.lock().unwrap().push(request.clone());
-        if let Some(message) = self.swap_error.lock().unwrap().take() {
-            return Err(AtomicSwapError::Other(message));
+        if let Some(error) = self.swap_error.lock().unwrap().take() {
+            return Err(error);
         }
         let staged_rows = *self.staged_rows.lock().unwrap();
         if staged_rows != request.source_rows || request.received_batches != request.source_batches
@@ -237,7 +237,8 @@ fn zero_row_commit_is_valid_and_returns_the_actual_purge_count() {
 #[test]
 fn swap_failure_discards_staging_and_records_a_discarded_tombstone() {
     let destination = Arc::new(FakeDestination::new());
-    *destination.swap_error.lock().unwrap() = Some("duplicate target key".to_owned());
+    *destination.swap_error.lock().unwrap() =
+        Some(AtomicSwapError::Other("duplicate target key".to_owned()));
     let service = SinkService::new("qbs", destination.clone());
     service.open(open_request()).unwrap();
     service.write_batch(RUN_ID, one_row()).unwrap();
@@ -252,6 +253,30 @@ fn swap_failure_discards_staging_and_records_a_discarded_tombstone() {
         serde_json::to_value(service.get(RUN_ID).unwrap()).unwrap()["terminal"],
         "DISCARDED"
     );
+}
+
+#[test]
+fn lock_wait_timeout_and_deadlock_report_target_busy() {
+    for errno in [1205, 1213] {
+        let destination = Arc::new(FakeDestination::new());
+        *destination.swap_error.lock().unwrap() = Some(AtomicSwapError::TargetBusy { errno });
+        let service = SinkService::new("qbs", destination.clone());
+        service.open(open_request()).unwrap();
+        service.write_batch(RUN_ID, one_row()).unwrap();
+
+        let error = service.commit(RUN_ID, 1, 1).unwrap_err();
+
+        assert_eq!((error.status, error.code), (409, "SWAP_TARGET_BUSY"));
+        assert_eq!(error.details["target_table"], "T_POSITION");
+        assert_eq!(error.details["errno"], errno);
+        assert!(error.message.contains("另一个 run"), "{}", error.message);
+        assert!(error.message.contains("重跑即可"), "{}", error.message);
+        assert_eq!(destination.dropped.lock().unwrap().len(), 1);
+        assert_eq!(
+            serde_json::to_value(service.get(RUN_ID).unwrap()).unwrap()["terminal"],
+            "DISCARDED"
+        );
+    }
 }
 
 #[test]
@@ -309,7 +334,8 @@ fn drop_failure_after_verify_failure_keeps_the_gate_numbers_and_discards_the_run
 #[test]
 fn drop_failure_after_swap_failure_keeps_swap_failed_and_discards_the_run() {
     let destination = Arc::new(FakeDestination::new());
-    *destination.swap_error.lock().unwrap() = Some("duplicate target key".to_owned());
+    *destination.swap_error.lock().unwrap() =
+        Some(AtomicSwapError::Other("duplicate target key".to_owned()));
     *destination.drop_error.lock().unwrap() =
         Some(DropStagingError::Other("connection lost".to_owned()));
     let service = SinkService::new("qbs", destination.clone());

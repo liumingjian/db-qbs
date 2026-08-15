@@ -92,12 +92,13 @@ pub enum LogEvent {
     CommitDiagnosed,
     AbortFailed,
     RunFinished,
+    SinkStarted,
     SinkUnavailable,
     HttpResponseFailed,
 }
 
 impl LogEvent {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::CliFailed,
         Self::SourceStarted,
         Self::BusinessDateInvalid,
@@ -112,6 +113,7 @@ impl LogEvent {
         Self::CommitDiagnosed,
         Self::AbortFailed,
         Self::RunFinished,
+        Self::SinkStarted,
         Self::SinkUnavailable,
         Self::HttpResponseFailed,
     ];
@@ -132,6 +134,7 @@ impl LogEvent {
             Self::CommitDiagnosed => "commit_diagnosed",
             Self::AbortFailed => "abort_failed",
             Self::RunFinished => "run_finished",
+            Self::SinkStarted => "sink_started",
             Self::SinkUnavailable => "sink_unavailable",
             Self::HttpResponseFailed => "http_response_failed",
         }

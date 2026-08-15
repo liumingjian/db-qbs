@@ -266,6 +266,24 @@ impl<D: Destination> SinkService<D> {
                 self.drop_after_discard(&run.staging_table, &mut error);
                 Err(error)
             }
+            Err(AtomicSwapError::TargetBusy { errno }) => {
+                self.finish_run(run_id, &run, Terminal::Discarded, 0, 0);
+                let mut error = ApiError {
+                    status: 409,
+                    code: "SWAP_TARGET_BUSY",
+                    message: format!(
+                        "目标表 {} 当前被另一个切换事务占用，通常是同一张表上有另一个 run 正在切换；这不是数据错误，重跑即可",
+                        run.target_table
+                    ),
+                    run_id: Some(run_id.to_owned()),
+                    details: json!({
+                        "target_table": &run.target_table,
+                        "errno": errno,
+                    }),
+                };
+                self.drop_after_discard(&run.staging_table, &mut error);
+                Err(error)
+            }
             Err(AtomicSwapError::Other(message)) => {
                 self.finish_run(run_id, &run, Terminal::Discarded, 0, 0);
                 let mut error = ApiError {

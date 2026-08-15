@@ -20,6 +20,24 @@ pub fn serve(config: SinkConfig) -> Result<(), String> {
     if config.listen.is_empty() {
         return Err("sink 配置 listen 不能为空".to_owned());
     }
+    {
+        let stdout = io::stdout();
+        let mut writer = stdout.lock();
+        let _ = write_log_line_with_fields(
+            &mut writer,
+            LogLevel::Warn,
+            LogEvent::SinkStarted,
+            None,
+            None,
+            json!({
+                "listen": &config.listen,
+                "message": format!(
+                    "本服务无鉴权，能连上者可清空并重写任意暂存表与目标表；当前监听地址：{}",
+                    config.listen
+                ),
+            }),
+        );
+    }
     let destination = Arc::new(MysqlDestination::new(&config)?);
     let service = Arc::new(SinkService::new(config.database.clone(), destination));
     let server = Server::http(&config.listen)

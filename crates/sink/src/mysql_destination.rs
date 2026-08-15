@@ -219,7 +219,7 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
                     count_ms,
                 }))
             })
-            .map_err(|error| AtomicSwapError::Other(error.to_string()))?;
+            .map_err(classify_atomic_swap_error)?;
 
         match outcome {
             AtomicSwapOutcome::Swapped(result) => Ok(result),
@@ -484,6 +484,15 @@ fn classify_drop_error(error: PoolError) -> DropStagingError {
     }
 }
 
+fn classify_atomic_swap_error(error: PoolError) -> AtomicSwapError {
+    match error {
+        PoolError::Mysql(MysqlError::MySqlError(error)) if matches!(error.code, 1205 | 1213) => {
+            AtomicSwapError::TargetBusy { errno: error.code }
+        }
+        other => AtomicSwapError::Other(other.to_string()),
+    }
+}
+
 fn is_permission_error(code: u16) -> bool {
     matches!(code, 1044 | 1045 | 1142 | 1143 | 1227)
 }
@@ -533,9 +542,10 @@ pub fn check_connection_settings(
 mod tests {
     use super::{
         build_delete_statement, build_insert_statement, build_swap_insert_statement,
-        classify_mysql_diagnostic,
+        classify_atomic_swap_error, classify_mysql_diagnostic, PoolError,
     };
-    use crate::WriteBatchError;
+    use crate::{AtomicSwapError, WriteBatchError};
+    use mysql::{Error as MysqlError, MySqlError};
 
     #[test]
     fn mysql_diagnostics_recover_the_original_column_and_value() {
@@ -560,6 +570,20 @@ mod tests {
                 value: Some("10000-01-01 00:00:00".to_owned()),
             }
         );
+    }
+
+    #[test]
+    fn mysql_lock_errors_are_target_busy() {
+        for errno in [1205, 1213] {
+            let error =
+                classify_atomic_swap_error(PoolError::Mysql(MysqlError::MySqlError(MySqlError {
+                    state: "HY000".to_owned(),
+                    message: "target is locked".to_owned(),
+                    code: errno,
+                })));
+
+            assert_eq!(error, AtomicSwapError::TargetBusy { errno });
+        }
     }
 
     #[test]
