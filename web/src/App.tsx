@@ -40,6 +40,8 @@ import type {
   TaskDefinition,
   TaskInput,
 } from "./api";
+import { messageFrom } from "./errors";
+import { HistoryScreen } from "./HistoryScreen";
 
 type DialogState =
   | { kind: "create" }
@@ -47,6 +49,12 @@ type DialogState =
   | { kind: "rename"; task: Task }
   | { kind: "delete"; task: Task }
   | null;
+
+type Page = "tasks" | "history";
+
+function pageFromHash(hash: string): Page {
+  return hash === "#history" ? "history" : "tasks";
+}
 
 const emptyTask: TaskInput = {
   name: "",
@@ -57,6 +65,9 @@ const emptyTask: TaskInput = {
 };
 
 export function App() {
+  const [page, setPage] = useState<Page>(() =>
+    pageFromHash(window.location.hash),
+  );
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(true);
@@ -78,6 +89,14 @@ export function App() {
   useEffect(() => {
     void loadTasks();
   }, [loadTasks]);
+
+  useEffect(() => {
+    function handleHashChange() {
+      setPage(pageFromHash(window.location.hash));
+    }
+    window.addEventListener("hashchange", handleHashChange);
+    return () => window.removeEventListener("hashchange", handleHashChange);
+  }, []);
 
   const filteredTasks = useMemo(() => {
     if (tasks === null) {
@@ -103,6 +122,11 @@ export function App() {
 
   function closeDialog() {
     setDialog(null);
+  }
+
+  function navigate(nextPage: Page) {
+    setPage(nextPage);
+    window.location.hash = nextPage;
   }
 
   async function handleCreate(input: TaskInput) {
@@ -138,15 +162,30 @@ export function App() {
           db-qbs
         </div>
         <nav aria-label="主导航">
-          <a className="nav-item is-active" href="#tasks" aria-current="page">
+          <a
+            className={`nav-item ${page === "tasks" ? "is-active" : ""}`}
+            href="#tasks"
+            aria-current={page === "tasks" ? "page" : undefined}
+            onClick={(event) => {
+              event.preventDefault();
+              navigate("tasks");
+            }}
+          >
             <Database size={15} aria-hidden="true" />
             任务
           </a>
-          <span className="nav-item is-disabled">
+          <a
+            className={`nav-item ${page === "history" ? "is-active" : ""}`}
+            href="#history"
+            aria-current={page === "history" ? "page" : undefined}
+            onClick={(event) => {
+              event.preventDefault();
+              navigate("history");
+            }}
+          >
             <Clock3 size={15} aria-hidden="true" />
             运行历史
-            <span className="nav-badge">后续</span>
-          </span>
+          </a>
           <p className="nav-section">非 V1 范围</p>
           <span className="nav-item is-disabled">
             <CalendarClock size={15} aria-hidden="true" />
@@ -164,14 +203,33 @@ export function App() {
       <main className="main-column">
         <header className="topbar">
           <span className="mobile-brand">db-qbs</span>
+          <nav className="mobile-nav" aria-label="主导航">
+            <button
+              className={page === "tasks" ? "is-active" : ""}
+              type="button"
+              aria-current={page === "tasks" ? "page" : undefined}
+              onClick={() => navigate("tasks")}
+            >
+              <Database size={14} aria-hidden="true" />任务
+            </button>
+            <button
+              className={page === "history" ? "is-active" : ""}
+              type="button"
+              aria-current={page === "history" ? "page" : undefined}
+              onClick={() => navigate("history")}
+            >
+              <Clock3 size={14} aria-hidden="true" />历史
+            </button>
+          </nav>
           <span className="breadcrumb">
-            数据导入 <span aria-hidden="true">/</span> <strong>任务</strong>
+            数据导入 <span aria-hidden="true">/</span>{" "}
+            <strong>{page === "tasks" ? "任务" : "运行历史"}</strong>
           </span>
           <span className="environment">source · 当前实例</span>
         </header>
 
         <div className="content">
-          {loadError !== null && (
+          {loadError !== null && page === "tasks" && (
             <div className="notice is-error" role="alert">
               <span>{loadError}</span>
               <button
@@ -184,62 +242,66 @@ export function App() {
             </div>
           )}
 
-          <section className="card" id="tasks" aria-labelledby="tasks-title">
-            <header className="card-header">
-              <div>
-                <h1 id="tasks-title">任务</h1>
-                <span className="card-subtitle">
-                  {taskSummaryLabel(tasks, refreshing)}
-                </span>
-              </div>
-              <button
-                className="button is-primary"
-                type="button"
-                onClick={openCreateDialog}
-              >
-                <Plus size={15} aria-hidden="true" />
-                新建任务
-              </button>
-            </header>
-
-            {tasks !== null && tasks.length > 0 && (
-              <div className="toolbar">
-                <label className="search-field">
-                  <span>搜索</span>
-                  <input
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                    placeholder="任务名 / 目标表 / SQL"
-                  />
-                </label>
+          {page === "tasks" ? (
+            <section className="card" id="tasks" aria-labelledby="tasks-title">
+              <header className="card-header">
+                <div>
+                  <h1 id="tasks-title">任务</h1>
+                  <span className="card-subtitle">
+                    {taskSummaryLabel(tasks, refreshing)}
+                  </span>
+                </div>
                 <button
-                  className="icon-button"
+                  className="button is-primary"
                   type="button"
-                  title="刷新任务"
-                  aria-label="刷新任务"
-                  onClick={() => void loadTasks()}
-                  disabled={refreshing}
+                  onClick={openCreateDialog}
                 >
-                  <RefreshCw
-                    className={refreshing ? "is-spinning" : ""}
-                    size={16}
-                    aria-hidden="true"
-                  />
+                  <Plus size={15} aria-hidden="true" />
+                  新建任务
                 </button>
-              </div>
-            )}
+              </header>
 
-            <TaskResults
-              tasks={tasks}
-              filteredTasks={filteredTasks}
-              refreshing={refreshing}
-              onCreate={openCreateDialog}
-              onAction={setDialog}
-            />
-          </section>
+              {tasks !== null && tasks.length > 0 && (
+                <div className="toolbar">
+                  <label className="search-field">
+                    <span>搜索</span>
+                    <input
+                      value={query}
+                      onChange={(event) => setQuery(event.target.value)}
+                      placeholder="任务名 / 目标表 / SQL"
+                    />
+                  </label>
+                  <button
+                    className="icon-button"
+                    type="button"
+                    title="刷新任务"
+                    aria-label="刷新任务"
+                    onClick={() => void loadTasks()}
+                    disabled={refreshing}
+                  >
+                    <RefreshCw
+                      className={refreshing ? "is-spinning" : ""}
+                      size={16}
+                      aria-hidden="true"
+                    />
+                  </button>
+                </div>
+              )}
+
+              <TaskResults
+                tasks={tasks}
+                filteredTasks={filteredTasks}
+                refreshing={refreshing}
+                onCreate={openCreateDialog}
+                onAction={setDialog}
+              />
+            </section>
+          ) : (
+            <HistoryScreen tasks={tasks ?? []} />
+          )}
         </div>
 
-        {dialog?.kind === "create" && (
+        {page === "tasks" && dialog?.kind === "create" && (
           <TaskFormDialog
             title="新建任务"
             initial={emptyTask}
@@ -248,7 +310,7 @@ export function App() {
             onSubmit={handleCreate}
           />
         )}
-        {dialog?.kind === "edit" && (
+        {page === "tasks" && dialog?.kind === "edit" && (
           <TaskFormDialog
             title={`编辑 · ${dialog.task.name}`}
             initial={taskInputFrom(dialog.task)}
@@ -258,14 +320,14 @@ export function App() {
             onSubmit={(input) => handleUpdate(dialog.task, input)}
           />
         )}
-        {dialog?.kind === "rename" && (
+        {page === "tasks" && dialog?.kind === "rename" && (
           <RenameDialog
             task={dialog.task}
             onClose={closeDialog}
             onSubmit={(input) => handleUpdate(dialog.task, input)}
           />
         )}
-        {dialog?.kind === "delete" && (
+        {page === "tasks" && dialog?.kind === "delete" && (
           <DeleteDialog
             task={dialog.task}
             onClose={closeDialog}
@@ -1350,8 +1412,4 @@ function FormField({ label, children }: { label: string; children: ReactNode }) 
       {children}
     </label>
   );
-}
-
-function messageFrom(error: unknown): string {
-  return error instanceof Error ? error.message : "请求失败，请稍后重试";
 }
