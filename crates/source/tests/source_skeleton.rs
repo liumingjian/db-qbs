@@ -536,12 +536,12 @@ fi
     wait_for_json(port, &format!("/api/runs/{committing}"), |body| {
         body["stage"] == "COMMITTING"
     });
-    let rejected = post(port, &format!("/api/runs/{committing}/cancel"), "").unwrap();
-    assert_eq!(rejected.status, 409, "{}", rejected.body);
-    let rejected = json_body(&rejected);
-    assert_eq!(rejected["error"]["message"], "已过封口点，停不了");
-    assert!(rejected.get("code").is_none());
-    assert!(rejected["error"].get("code").is_none());
+    let rejected_response = post(port, &format!("/api/runs/{committing}/cancel"), "").unwrap();
+    assert_eq!(rejected_response.status, 409, "{}", rejected_response.body);
+    let rejected_body = json_body(&rejected_response);
+    assert_eq!(rejected_body["error"]["message"], "已过封口点，停不了");
+    assert!(rejected_body.get("code").is_none());
+    assert!(rejected_body["error"].get("code").is_none());
     assert!(!fs::read_to_string(&canceled)
         .unwrap()
         .lines()

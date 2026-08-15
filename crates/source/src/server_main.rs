@@ -33,8 +33,8 @@ type RunRegistry = Arc<Mutex<RunState>>;
 
 #[derive(Default)]
 struct RunState {
-    projections: HashMap<String, RunHistory>,
-    controls: HashMap<String, ActiveRun>,
+    live_histories: HashMap<String, RunHistory>,
+    active_runs: HashMap<String, ActiveRun>,
 }
 
 struct ActiveRun {
@@ -45,7 +45,7 @@ struct ActiveRun {
 }
 
 enum StartRunError {
-    Conflict,
+    AlreadyRunning,
     Internal(String),
 }
 
@@ -336,7 +336,7 @@ fn handle_start_run(request: &mut Request, state: &ServerState<'_>) -> HttpRespo
         state.runs,
     ) {
         Ok(run_record_id) => json_response(202, &json!({ "run_record_id": run_record_id })),
-        Err(StartRunError::Conflict) => json_response(
+        Err(StartRunError::AlreadyRunning) => json_response(
             409,
             &json!({ "error": { "message": "该任务该业务日期已有 run 进行中" } }),
         ),
@@ -349,7 +349,7 @@ fn handle_cancel_run(runs: &RunRegistry, run_record_id: &str) -> HttpResponse {
         Ok(runs) => runs,
         Err(_) => return internal_error("run 控制锁已损坏".to_owned()),
     };
-    let Some(run) = runs.controls.get(run_record_id) else {
+    let Some(run) = runs.active_runs.get(run_record_id) else {
         return not_found();
     };
     match run.stage.as_deref() {
@@ -375,7 +375,7 @@ fn handle_cancel_run(runs: &RunRegistry, run_record_id: &str) -> HttpResponse {
 
 fn send_sigterm(pid: u32) -> Result<(), String> {
     let pid = i32::try_from(pid).map_err(|_| format!("run 子进程 PID 超出范围：{pid}"))?;
-    // SAFETY: kill only reads the numeric PID and signal; both values are validated above.
+    // SAFETY: libc::kill has no memory-safety preconditions; pid fits the platform's pid_t.
     if unsafe { libc::kill(pid, SIGTERM) } == 0 {
         Ok(())
     } else {
@@ -392,7 +392,7 @@ fn handle_get_run(
     run_record_id: &str,
 ) -> HttpResponse {
     let record = match runs.lock() {
-        Ok(registry) => registry.projections.get(run_record_id).cloned(),
+        Ok(registry) => registry.live_histories.get(run_record_id).cloned(),
         Err(_) => return internal_error("run 投影锁已损坏".to_owned()),
     };
     if let Some(record) = record {
@@ -457,14 +457,14 @@ fn start_run(
 ) -> Result<String, StartRunError> {
     let run_record_id = generate_run_record_id();
     let mut history = RunHistory::accepted(&run_record_id, &task.task_id, biz_date, Utc::now());
-    reserve_run(runs, &run_record_id, &task.task_id, biz_date)?;
+    register_active_run(runs, &run_record_id, &task.task_id, biz_date)?;
     if let Err(error) = history_store.insert(&history, Utc::now(), config.history_retention_days) {
-        release_run(runs, &run_record_id);
+        remove_active_run(runs, &run_record_id);
         return Err(StartRunError::Internal(error));
     }
     runs.lock()
         .map_err(|_| StartRunError::Internal("run 投影锁已损坏".to_owned()))?
-        .projections
+        .live_histories
         .insert(run_record_id.clone(), history.clone());
 
     let task_path = match materialize_task(config, task, &run_record_id) {
@@ -472,8 +472,8 @@ fn start_run(
         Err(error) => {
             history.mark_parent_failure(error.clone(), Utc::now());
             let _ = history_store.save(&history, Utc::now(), config.history_retention_days);
-            remove_projection(runs, &run_record_id);
-            release_run(runs, &run_record_id);
+            remove_live_history(runs, &run_record_id);
+            remove_active_run(runs, &run_record_id);
             return Err(StartRunError::Internal(error));
         }
     };
@@ -494,16 +494,16 @@ fn start_run(
             let message = format!("启动 run 子进程失败：{error}");
             history.mark_parent_failure(message.clone(), Utc::now());
             let _ = history_store.save(&history, Utc::now(), config.history_retention_days);
-            remove_projection(runs, &run_record_id);
-            release_run(runs, &run_record_id);
+            remove_live_history(runs, &run_record_id);
+            remove_active_run(runs, &run_record_id);
             return Err(StartRunError::Internal(message));
         }
     };
     runs.lock()
         .map_err(|_| StartRunError::Internal("run 控制锁已损坏".to_owned()))?
-        .controls
+        .active_runs
         .get_mut(&run_record_id)
-        .expect("a reserved run remains registered until child reap")
+        .expect("an active run remains registered until child reap")
         .child_pid = Some(child.id());
     let stdout = child
         .stdout
@@ -593,14 +593,14 @@ fn supervise_run(
             continue;
         }
         if is_terminal {
-            remove_projection(&runs, &run_record_id);
+            remove_live_history(&runs, &run_record_id);
         }
     }
     let _ = child.wait();
     let _ = fs::remove_file(task_path);
     if !terminal_observed {
         let history = runs.lock().ok().and_then(|mut registry| {
-            let history = registry.projections.get_mut(&run_record_id)?;
+            let history = registry.live_histories.get_mut(&run_record_id)?;
             history.mark_unknown(UnknownReason::ProcessDisappeared, Utc::now());
             Some(history.clone())
         });
@@ -608,8 +608,8 @@ fn supervise_run(
             let _ = history_store.save(&history, Utc::now(), retention_days);
         }
     }
-    remove_projection(&runs, &run_record_id);
-    release_run(&runs, &run_record_id);
+    remove_live_history(&runs, &run_record_id);
+    remove_active_run(&runs, &run_record_id);
 }
 
 fn apply_log_line(
@@ -620,18 +620,18 @@ fn apply_log_line(
     let Ok(mut registry) = runs.lock() else {
         return None;
     };
-    let (change, history, stage) = {
-        let record = registry.projections.get_mut(run_record_id)?;
+    let (change, history) = {
+        let record = registry.live_histories.get_mut(run_record_id)?;
         let change = record.apply_log(log);
-        (change, record.clone(), record.stage.clone())
+        (change, record.clone())
     };
     if change == HistoryChange::StageChanged {
-        registry.controls.get_mut(run_record_id)?.stage = stage;
+        registry.active_runs.get_mut(run_record_id)?.stage = history.stage.clone();
     }
     Some((change, history))
 }
 
-fn reserve_run(
+fn register_active_run(
     runs: &RunRegistry,
     run_record_id: &str,
     task_id: &str,
@@ -641,13 +641,13 @@ fn reserve_run(
         .lock()
         .map_err(|_| StartRunError::Internal("run 控制锁已损坏".to_owned()))?;
     if runs
-        .controls
+        .active_runs
         .values()
         .any(|run| run.task_id == task_id && run.biz_date == biz_date)
     {
-        return Err(StartRunError::Conflict);
+        return Err(StartRunError::AlreadyRunning);
     }
-    runs.controls.insert(
+    runs.active_runs.insert(
         run_record_id.to_owned(),
         ActiveRun {
             task_id: task_id.to_owned(),
@@ -659,15 +659,15 @@ fn reserve_run(
     Ok(())
 }
 
-fn release_run(runs: &RunRegistry, run_record_id: &str) {
+fn remove_active_run(runs: &RunRegistry, run_record_id: &str) {
     if let Ok(mut runs) = runs.lock() {
-        runs.controls.remove(run_record_id);
+        runs.active_runs.remove(run_record_id);
     }
 }
 
-fn remove_projection(runs: &RunRegistry, run_record_id: &str) {
+fn remove_live_history(runs: &RunRegistry, run_record_id: &str) {
     if let Ok(mut registry) = runs.lock() {
-        registry.projections.remove(run_record_id);
+        registry.live_histories.remove(run_record_id);
     }
 }
 
