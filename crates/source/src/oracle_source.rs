@@ -2,7 +2,10 @@ use db_qbs_shared::{canon_date, canon_number, canon_text};
 use oracle::sql_type::{OracleType, Timestamp};
 use oracle::{Connection, InitParams, ResultSet, Row};
 
-use crate::{RowSource, SourceColumn, SourceConfig, SourceReadError, TaskConfig, FETCH_ARRAY_SIZE};
+use crate::{
+    builder_column_query, builder_table_query, BuilderColumn, BuilderTable, RowSource,
+    SourceColumn, SourceConfig, SourceReadError, TaskConfig, FETCH_ARRAY_SIZE,
+};
 
 const DESCRIBE_BIZ_DATE: &str = "0001-01-01";
 
@@ -43,6 +46,57 @@ impl OracleRowSource {
         let (columns, _) = describe_columns(rows.column_info());
         Ok(columns)
     }
+
+    pub fn list_builder_tables(
+        config: &SourceConfig,
+        dblink: Option<&str>,
+    ) -> Result<Vec<BuilderTable>, SourceReadError> {
+        let query =
+            builder_table_query(dblink).map_err(|error| SourceReadError::new(error, None))?;
+        let connection = open_connection(config)?;
+        let rows = connection.query(&query, &[]).map_err(oracle_error)?;
+        let mut tables = Vec::new();
+        for row in rows {
+            let row = row.map_err(oracle_error)?;
+            tables.push(BuilderTable {
+                owner: row.get(0).map_err(oracle_error)?,
+                name: row.get(1).map_err(oracle_error)?,
+            });
+        }
+        Ok(tables)
+    }
+
+    pub fn list_builder_columns(
+        config: &SourceConfig,
+        dblink: Option<&str>,
+        owner: &str,
+        table: &str,
+    ) -> Result<Vec<BuilderColumn>, SourceReadError> {
+        let query =
+            builder_column_query(dblink).map_err(|error| SourceReadError::new(error, None))?;
+        let connection = open_connection(config)?;
+        let rows = connection
+            .query(&query, &[&owner, &table])
+            .map_err(oracle_error)?;
+        let mut columns = Vec::new();
+        for row in rows {
+            let row = row.map_err(oracle_error)?;
+            let length = row
+                .get::<usize, Option<i64>>(4)
+                .map_err(oracle_error)?
+                .and_then(|value| u64::try_from(value).ok());
+            let nullable: String = row.get(5).map_err(oracle_error)?;
+            columns.push(BuilderColumn {
+                name: row.get(0).map_err(oracle_error)?,
+                data_type: row.get(1).map_err(oracle_error)?,
+                precision: row.get(2).map_err(oracle_error)?,
+                scale: row.get(3).map_err(oracle_error)?,
+                length,
+                nullable: nullable == "Y",
+            });
+        }
+        Ok(columns)
+    }
 }
 
 fn open_result_set(
@@ -50,19 +104,7 @@ fn open_result_set(
     task: &TaskConfig,
     biz_date: &str,
 ) -> Result<ResultSet<'static, Row>, SourceReadError> {
-    std::env::set_var("NLS_LANG", ".AL32UTF8");
-    let mut init = InitParams::new();
-    init.oracle_client_lib_dir(&config.oracle_client_lib_dir)
-        .and_then(|params| params.default_driver_name("db-qbs-source : 0.1.0"))
-        .and_then(|params| params.init())
-        .map_err(oracle_error)?;
-
-    let connection = Connection::connect(
-        &config.oracle_username,
-        &config.oracle_password,
-        &config.oracle_connect_string,
-    )
-    .map_err(oracle_error)?;
+    let connection = open_connection(config)?;
     let statement = connection
         .statement(&task.source_sql)
         .fetch_array_size(FETCH_ARRAY_SIZE)
@@ -72,6 +114,22 @@ fn open_result_set(
         .into_result_set_named(&[("biz_date", &biz_date)])
         .map_err(oracle_error)?;
     Ok(rows)
+}
+
+fn open_connection(config: &SourceConfig) -> Result<Connection, SourceReadError> {
+    std::env::set_var("NLS_LANG", ".AL32UTF8");
+    let mut init = InitParams::new();
+    init.oracle_client_lib_dir(&config.oracle_client_lib_dir)
+        .and_then(|params| params.default_driver_name("db-qbs-source : 0.1.0"))
+        .and_then(|params| params.init())
+        .map_err(oracle_error)?;
+
+    Connection::connect(
+        &config.oracle_username,
+        &config.oracle_password,
+        &config.oracle_connect_string,
+    )
+    .map_err(oracle_error)
 }
 
 fn describe_columns(infos: &[oracle::ColumnInfo]) -> (Vec<SourceColumn>, Vec<ValueKind>) {

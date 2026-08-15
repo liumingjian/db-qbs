@@ -16,6 +16,7 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 
 mod oracle_source;
 mod protocol;
+mod sql_builder;
 mod target_ddl;
 mod task_store;
 mod transfer;
@@ -27,6 +28,10 @@ pub use protocol::{
     BatchResponse, CommitResponse, HttpSinkClient, OpenRunRequest, OpenRunResponse, RunResponse,
     SinkClient, SinkError, SinkErrorKind, SinkGateDetails, SinkPrecheckIssue, SourceColumn,
     Terminal,
+};
+pub use sql_builder::{
+    builder_column_query, builder_table_query, generate_builder_task, BuilderColumn, BuilderTable,
+    BuilderTaskInput,
 };
 pub use target_ddl::{generate_target_ddl, TargetDdlError};
 pub use task_store::{Task, TaskInput, TaskStore};

@@ -1,6 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createTask, deleteTask, listTasks, taskInputFrom, updateTask } from "./api";
+import {
+  createTask,
+  deleteTask,
+  fetchBuilderColumns,
+  fetchBuilderTables,
+  fetchColumns,
+  generateBuilderTask,
+  inspectSqlShape,
+  listTasks,
+  taskInputFrom,
+  updateTask,
+} from "./api";
 
 describe("task API", () => {
   afterEach(() => {
@@ -127,5 +138,97 @@ describe("task API", () => {
       target_table: task.target_table,
       target_date_col: task.target_date_col,
     });
+  });
+});
+
+describe("SQL builder API", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("loads transient table and column metadata without type judgments", async () => {
+    const tables = [{ owner: "HTBR45", name: "T_R_FR_ASTSTAT" }];
+    const columns = [
+      {
+        name: "C_MEMO",
+        data_type: "CLOB",
+        precision: null,
+        scale: null,
+        length: null,
+        nullable: true,
+      },
+    ];
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(tables), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(columns), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchBuilderTables("FA")).resolves.toEqual(tables);
+    await expect(
+      fetchBuilderColumns({ dblink: "FA", owner: "HTBR45", table: "T_R_FR_ASTSTAT" }),
+    ).resolves.toEqual(columns);
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/builder/tables", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ dblink: "FA" }),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/builder/columns", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ dblink: "FA", owner: "HTBR45", table: "T_R_FR_ASTSTAT" }),
+    }));
+    expect(columns[0]).not.toHaveProperty("supported");
+  });
+
+  it("generates exactly the four task-definition fields", async () => {
+    const output = {
+      source_sql: "SELECT a.D_BIZ AS D_BIZ FROM ORDERS a WHERE a.D_BIZ >= :biz_date AND a.D_BIZ < :biz_date + 1",
+      source_date_col: "D_BIZ",
+      target_table: "ORDERS",
+      target_date_col: "D_BIZ",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(output), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(generateBuilderTask({
+      dblink: "",
+      owner: "APP",
+      table: "ORDERS",
+      columns: ["D_BIZ"],
+      source_date_col: "D_BIZ",
+      target_table: "ORDERS",
+      target_date_col: "D_BIZ",
+    })).resolves.toEqual(output);
+    expect(Object.keys(output)).toEqual([
+      "source_sql",
+      "source_date_col",
+      "target_table",
+      "target_date_col",
+    ]);
+  });
+
+  it("requests shape feedback separately from the side-effect-free column fetch", async () => {
+    const task = {
+      source_sql: "SELECT D_BIZ FROM ORDERS",
+      source_date_col: "D_BIZ",
+      target_table: "ORDERS",
+      target_date_col: "D_BIZ",
+    };
+    const checks = [{ rule: "business_date_range", passed: false, message: "bad range" }];
+    const columns = {
+      columns: [{ name: "D_BIZ", data_type: "DATE", precision: null, scale: null, length: null }],
+      target_ddl: "CREATE TABLE `ORDERS` (...)",
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ checks }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(columns), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(inspectSqlShape(task)).resolves.toEqual(checks);
+    await expect(fetchColumns(task)).resolves.toEqual(columns);
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/sql-shape", expect.objectContaining({ method: "POST" }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/columns", expect.objectContaining({ method: "POST" }));
   });
 });
