@@ -17,6 +17,7 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 mod oracle_source;
 mod protocol;
 mod run_history;
+mod sql_builder;
 mod target_ddl;
 mod task_store;
 mod transfer;
@@ -32,6 +33,10 @@ pub use protocol::{
 pub use run_history::{
     expired_history_indices, fold_history_lines, HistoryChange, HistoryStore, RunHistory,
     UnknownReason,
+};
+pub use sql_builder::{
+    builder_column_query, builder_table_query, generate_builder_task, validate_builder_dblink,
+    BuilderColumn, BuilderTable, BuilderTaskInput,
 };
 pub use target_ddl::{generate_target_ddl, TargetDdlError};
 pub use task_store::{Task, TaskInput, TaskStore};

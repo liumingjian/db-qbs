@@ -14,9 +14,10 @@ use std::time::Duration;
 use chrono::Utc;
 use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
 use db_qbs_source::{
-    embedded_web_asset, generate_target_ddl, load_source_config, parse_biz_date, sql_shape_report,
-    HistoryChange, HistoryStore, OracleRowSource, RunHistory, SourceConfig, Task, TaskConfig,
-    TaskInput, TaskStore, UnknownReason,
+    embedded_web_asset, generate_builder_task, generate_target_ddl, load_source_config,
+    parse_biz_date, sql_shape_report, validate_builder_dblink, BuilderTaskInput, OracleRowSource,
+    HistoryChange, HistoryStore, RunHistory, SourceConfig, Task, TaskConfig, TaskInput, TaskStore,
+    UnknownReason,
 };
 use rand::RngCore;
 use serde::de::DeserializeOwned;
@@ -43,6 +44,20 @@ struct ServerState<'a> {
 struct StartRunInput {
     task_id: String,
     biz_date: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuilderLinkInput {
+    dblink: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuilderColumnsInput {
+    dblink: Option<String>,
+    owner: String,
+    table: String,
 }
 
 fn main() -> ExitCode {
@@ -207,6 +222,22 @@ fn route_api_request(
 ) -> HttpResponse {
     if method == Method::Post && path == "/api/columns" {
         return handle_column_fetch(request, state.config);
+    }
+
+    if method == Method::Post && path == "/api/sql-shape" {
+        return handle_sql_shape(request);
+    }
+
+    if method == Method::Post && path == "/api/builder/tables" {
+        return handle_builder_tables(request, state.config);
+    }
+
+    if method == Method::Post && path == "/api/builder/columns" {
+        return handle_builder_columns(request, state.config);
+    }
+
+    if method == Method::Post && path == "/api/builder/sql" {
+        return handle_builder_sql(request);
     }
 
     if method == Method::Post && path == "/api/runs" {
@@ -620,6 +651,72 @@ fn embedded_response(body: Vec<u8>, content_type: &str, path: &str) -> HttpRespo
         .with_status_code(StatusCode(200))
         .with_header(content_type_header)
         .with_header(cache_control_header)
+}
+
+fn handle_sql_shape(request: &mut Request) -> HttpResponse {
+    let task: TaskConfig = match read_json_body(request) {
+        Ok(task) => task,
+        Err(error) => return bad_request(error),
+    };
+    json_response(200, &json!({ "checks": sql_shape_report(&task) }))
+}
+
+fn handle_builder_tables(request: &mut Request, config: &SourceConfig) -> HttpResponse {
+    let input: BuilderLinkInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    if let Err(error) = validate_builder_dblink(input.dblink.as_deref()) {
+        return bad_request(error);
+    }
+    match OracleRowSource::list_builder_tables(config, input.dblink.as_deref()) {
+        Ok(tables) => json_response(200, &tables),
+        Err(error) => oracle_failure(error),
+    }
+}
+
+fn handle_builder_columns(request: &mut Request, config: &SourceConfig) -> HttpResponse {
+    let input: BuilderColumnsInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    if input.owner.trim().is_empty() || input.table.trim().is_empty() {
+        return bad_request("owner and table are required".to_owned());
+    }
+    if let Err(error) = validate_builder_dblink(input.dblink.as_deref()) {
+        return bad_request(error);
+    }
+    match OracleRowSource::list_builder_columns(
+        config,
+        input.dblink.as_deref(),
+        &input.owner,
+        &input.table,
+    ) {
+        Ok(columns) => json_response(200, &columns),
+        Err(error) => oracle_failure(error),
+    }
+}
+
+fn handle_builder_sql(request: &mut Request) -> HttpResponse {
+    let input: BuilderTaskInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    match generate_builder_task(input) {
+        Ok(task) => json_response(200, &task),
+        Err(error) => bad_request(error),
+    }
+}
+
+fn oracle_failure(error: db_qbs_source::SourceReadError) -> HttpResponse {
+    json_response(
+        502,
+        &json!({
+            "kind": "oracle",
+            "message": error.user_message(),
+            "oracle_code": error.oracle_code,
+        }),
+    )
 }
 
 fn handle_column_fetch(request: &mut Request, config: &SourceConfig) -> HttpResponse {

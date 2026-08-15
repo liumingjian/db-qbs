@@ -1,26 +1,45 @@
 import {
   Bell,
   CalendarClock,
+  Check,
   Clock3,
+  Copy,
   Database,
+  LoaderCircle,
   Pencil,
   Plus,
   RefreshCw,
+  TableProperties,
   Tag,
   Trash2,
+  WandSparkles,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 
 import {
+  ApiError,
   createTask,
   deleteTask,
+  fetchBuilderColumns,
+  fetchBuilderTables,
+  fetchColumns,
+  generateBuilderTask,
+  inspectSqlShape,
   listTasks,
   taskInputFrom,
   updateTask,
 } from "./api";
-import type { Task, TaskInput } from "./api";
+import type {
+  BuilderColumn,
+  BuilderTable,
+  ColumnFetchResult,
+  ShapeCheck,
+  Task,
+  TaskDefinition,
+  TaskInput,
+} from "./api";
 
 type DialogState =
   | { kind: "create" }
@@ -416,12 +435,81 @@ function TaskFormDialog({
   const [input, setInput] = useState<TaskInput>({ ...initial });
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
+  const [overwriteConfirm, setOverwriteConfirm] = useState(false);
+  const [generatedSql, setGeneratedSql] = useState<string | null>(null);
+  const [shapeChecks, setShapeChecks] = useState<ShapeCheck[]>([]);
+  const [shapeError, setShapeError] = useState<string | null>(null);
+  const [columnFetch, setColumnFetch] = useState<ColumnFetchState>({ kind: "idle" });
+
+  const definition = useMemo(() => taskDefinitionFrom(input), [input]);
+
+  useEffect(() => {
+    if (input.source_sql.trim() === "") {
+      setShapeChecks([]);
+      setShapeError(null);
+      return;
+    }
+    let active = true;
+    const timeout = window.setTimeout(() => {
+      void inspectSqlShape(definition)
+        .then((checks) => {
+          if (active) {
+            setShapeChecks(checks);
+            setShapeError(null);
+          }
+        })
+        .catch((inspectError) => {
+          if (active) {
+            setShapeError(messageFrom(inspectError));
+          }
+        });
+    }, 250);
+    return () => {
+      active = false;
+      window.clearTimeout(timeout);
+    };
+  }, [definition]);
 
   function updateField<K extends keyof TaskInput>(
     field: K,
     value: TaskInput[K],
   ) {
     setInput((currentInput) => ({ ...currentInput, [field]: value }));
+    if (field !== "name") {
+      setColumnFetch({ kind: "idle" });
+    }
+  }
+
+  function openGuide() {
+    const sqlIsProtected =
+      input.source_sql.trim() !== "" && input.source_sql !== generatedSql;
+    if (sqlIsProtected) {
+      setOverwriteConfirm(true);
+    } else {
+      setGuideOpen(true);
+    }
+  }
+
+  function applyGeneratedTask(task: TaskDefinition) {
+    setInput((currentInput) => ({ ...currentInput, ...task }));
+    setGeneratedSql(task.source_sql);
+    setGuideOpen(false);
+    setColumnFetch({ kind: "idle" });
+  }
+
+  async function handleColumnFetch() {
+    setColumnFetch({ kind: "loading" });
+    try {
+      setColumnFetch({ kind: "ready", result: await fetchColumns(definition) });
+    } catch (fetchError) {
+      const checks = shapeChecksFromColumnFetchError(fetchError);
+      if (checks !== null) {
+        setColumnFetch({ kind: "shape-failed", checks });
+      } else {
+        setColumnFetch({ kind: "oracle-failed", message: messageFrom(fetchError) });
+      }
+    }
   }
 
   async function handleSubmit(event: FormEvent) {
@@ -439,7 +527,12 @@ function TaskFormDialog({
   }
 
   return (
-    <Modal title={title} onClose={onClose} busy={submitting}>
+    <Modal
+      title={title}
+      onClose={onClose}
+      busy={submitting || overwriteConfirm}
+      wide
+    >
       <form onSubmit={(event) => void handleSubmit(event)}>
         <div className="modal-body form-stack">
           {!editFieldsOnly && (
@@ -452,6 +545,23 @@ function TaskFormDialog({
               />
             </FormField>
           )}
+          <section className="builder-entry" aria-label="SQL 构建器">
+            <div>
+              <strong>SQL 构建器</strong>
+              <span>一次性生成四字段，选择状态不会保存</span>
+            </div>
+            <button className="button is-ghost" type="button" onClick={openGuide}>
+              <WandSparkles size={15} aria-hidden="true" />
+              {input.source_sql.trim() === "" ? "打开构建器" : "重走向导"}
+            </button>
+          </section>
+          {guideOpen && (
+            <SqlBuilderGuide
+              targetTable={input.target_table}
+              onCancel={() => setGuideOpen(false)}
+              onGenerated={applyGeneratedTask}
+            />
+          )}
           <FormField label="source_sql">
             <textarea
               autoFocus={editFieldsOnly}
@@ -463,6 +573,7 @@ function TaskFormDialog({
               }
             />
           </FormField>
+          <ShapeFeedback checks={shapeChecks} error={shapeError} />
           <div className="field-grid">
             <FormField label="source_date_col">
               <input
@@ -492,6 +603,28 @@ function TaskFormDialog({
               />
             </FormField>
           </div>
+          <section className="column-fetch-section" aria-labelledby="column-fetch-title">
+            <header>
+              <div>
+                <strong id="column-fetch-title">目标表建表 SQL</strong>
+                <span>由当前 SQL 的游标 describe 正向推导</span>
+              </div>
+              <button
+                className="button is-primary"
+                type="button"
+                onClick={() => void handleColumnFetch()}
+                disabled={columnFetch.kind === "loading"}
+              >
+                {columnFetch.kind === "loading" ? (
+                  <LoaderCircle className="is-spinning" size={15} aria-hidden="true" />
+                ) : (
+                  <TableProperties size={15} aria-hidden="true" />
+                )}
+                {columnFetch.kind === "loading" ? "取列中" : "拿建表 SQL"}
+              </button>
+            </header>
+            <ColumnFetchPanel state={columnFetch} />
+          </section>
           {error !== null && (
             <div className="form-error" role="alert">
               {error}
@@ -504,8 +637,505 @@ function TaskFormDialog({
           submitLabel={submitLabel}
         />
       </form>
+      {overwriteConfirm && (
+        <div className="confirm-backdrop" role="presentation">
+          <section
+            className="confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="overwrite-title"
+          >
+            <header id="overwrite-title">重走向导会覆盖你手改的 SQL</header>
+            <p>
+              构建器会用新生成的四字段整段替换当前内容，也不会恢复上一次的勾选状态。
+            </p>
+            <footer>
+              <button
+                className="button is-ghost"
+                type="button"
+                onClick={() => setOverwriteConfirm(false)}
+              >
+                取消
+              </button>
+              <button
+                className="button is-danger"
+                type="button"
+                onClick={() => {
+                  setOverwriteConfirm(false);
+                  setGuideOpen(true);
+                }}
+              >
+                覆盖并重走向导
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
     </Modal>
   );
+}
+
+type ColumnFetchState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "shape-failed"; checks: ShapeCheck[] }
+  | { kind: "oracle-failed"; message: string }
+  | { kind: "ready"; result: ColumnFetchResult };
+
+function SqlBuilderGuide({
+  targetTable,
+  onCancel,
+  onGenerated,
+}: {
+  targetTable: string;
+  onCancel: () => void;
+  onGenerated: (task: TaskDefinition) => void;
+}) {
+  const [dblink, setDblink] = useState("");
+  const [tables, setTables] = useState<BuilderTable[]>([]);
+  const [tableKey, setTableKey] = useState("");
+  const [columns, setColumns] = useState<BuilderColumn[]>([]);
+  const [selectedColumns, setSelectedColumns] = useState<string[]>([]);
+  const [dateColumn, setDateColumn] = useState("");
+  const [loading, setLoading] = useState<
+    "tables" | "columns" | "generate" | null
+  >(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const selectedTable = tables.find(
+    (table) => tableKeyFor(table) === tableKey,
+  );
+  const loadingTables = loading === "tables";
+  const loadingColumns = loading === "columns";
+  const generatingTask = loading === "generate";
+
+  async function loadTables() {
+    setLoading("tables");
+    setError(null);
+    try {
+      setTables(await fetchBuilderTables(dblink));
+      setTableKey("");
+      setColumns([]);
+      setSelectedColumns([]);
+      setDateColumn("");
+    } catch (loadError) {
+      setError(messageFrom(loadError));
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  async function loadColumns() {
+    if (selectedTable === undefined) {
+      return;
+    }
+    setLoading("columns");
+    setError(null);
+    try {
+      const loaded = await fetchBuilderColumns({
+        dblink,
+        owner: selectedTable.owner,
+        table: selectedTable.name,
+      });
+      setColumns(loaded);
+      setSelectedColumns(loaded.map((column) => column.name));
+      setDateColumn("");
+    } catch (loadError) {
+      setError(messageFrom(loadError));
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  function toggleColumn(column: string) {
+    setSelectedColumns((selected) => {
+      if (selected.includes(column)) {
+        return selected.filter((name) => name !== column);
+      }
+      return [...selected, column];
+    });
+    if (dateColumn === column) {
+      setDateColumn("");
+    }
+  }
+
+  async function generateTask() {
+    if (selectedTable === undefined || dateColumn === "") {
+      return;
+    }
+    setLoading("generate");
+    setError(null);
+    try {
+      onGenerated(
+        await generateBuilderTask({
+          dblink,
+          owner: selectedTable.owner,
+          table: selectedTable.name,
+          columns: selectedColumns,
+          source_date_col: dateColumn,
+          target_table: targetTable,
+          target_date_col: dateColumn,
+        }),
+      );
+    } catch (generateError) {
+      setError(messageFrom(generateError));
+      setLoading(null);
+    }
+  }
+
+  return (
+    <section className="builder-guide" aria-labelledby="builder-guide-title">
+      <header>
+        <div>
+          <strong id="builder-guide-title">选表、勾列、指定日期列</strong>
+          <span>Oracle 字典元数据仅展示，不判定类型是否可搬</span>
+        </div>
+        <button
+          className="icon-button"
+          type="button"
+          title="收起构建器"
+          aria-label="收起构建器"
+          onClick={onCancel}
+        >
+          <X size={15} aria-hidden="true" />
+        </button>
+      </header>
+      <div className="builder-controls">
+        <FormField label="数据库链接（可选）">
+          <input
+            value={dblink}
+            placeholder="如 FA"
+            onChange={(event) => setDblink(event.target.value)}
+          />
+        </FormField>
+        <button
+          className="button is-ghost"
+          type="button"
+          onClick={() => void loadTables()}
+          disabled={loading !== null}
+        >
+          {loadingTables ? (
+            <LoaderCircle className="is-spinning" size={15} />
+          ) : (
+            <RefreshCw size={15} />
+          )}
+          {loadingTables ? "读取中" : "读取表"}
+        </button>
+        <FormField label="Oracle 表">
+          <select
+            value={tableKey}
+            onChange={(event) => setTableKey(event.target.value)}
+            disabled={tables.length === 0}
+          >
+            <option value="">请选择</option>
+            {tables.map((table) => {
+              const key = tableKeyFor(table);
+              return (
+                <option key={key} value={key}>
+                  {table.owner}.{table.name}
+                </option>
+              );
+            })}
+          </select>
+        </FormField>
+        <button
+          className="button is-ghost"
+          type="button"
+          onClick={() => void loadColumns()}
+          disabled={selectedTable === undefined || loading !== null}
+        >
+          {loadingColumns ? (
+            <LoaderCircle className="is-spinning" size={15} />
+          ) : (
+            <TableProperties size={15} />
+          )}
+          {loadingColumns ? "读取中" : "读取列"}
+        </button>
+      </div>
+      {columns.length > 0 && (
+        <div className="builder-columns table-wrap">
+          <table className="data-grid">
+            <thead>
+              <tr>
+                <th>选择</th>
+                <th>日期列</th>
+                <th>列名</th>
+                <th>字典类型</th>
+                <th>精度 / 长度</th>
+                <th>可空</th>
+              </tr>
+            </thead>
+            <tbody>
+              {columns.map((column) => {
+                const selected = selectedColumns.includes(column.name);
+                return (
+                  <tr key={column.name}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={() => toggleColumn(column.name)}
+                        aria-label={`选择 ${column.name}`}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="radio"
+                        name="source-date-column"
+                        checked={dateColumn === column.name}
+                        disabled={!selected}
+                        onChange={() => setDateColumn(column.name)}
+                        aria-label={`指定 ${column.name} 为日期列`}
+                      />
+                    </td>
+                    <td className="mono">{column.name}</td>
+                    <td className="mono">{column.data_type}</td>
+                    <td className="mono">{columnShape(column)}</td>
+                    <td>{column.nullable ? "是" : "否"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {error !== null && (
+        <div className="form-error" role="alert">
+          {error}
+        </div>
+      )}
+      <footer>
+        <span>{selectedColumns.length} 列已选</span>
+        <button
+          className="button is-primary"
+          type="button"
+          onClick={() => void generateTask()}
+          disabled={
+            selectedTable === undefined ||
+            selectedColumns.length === 0 ||
+            dateColumn === "" ||
+            loading !== null
+          }
+        >
+          {generatingTask ? (
+            <LoaderCircle className="is-spinning" size={15} />
+          ) : (
+            <WandSparkles size={15} />
+          )}
+          {generatingTask ? "生成中" : "生成四字段"}
+        </button>
+      </footer>
+    </section>
+  );
+}
+
+function ShapeFeedback({
+  checks,
+  error,
+}: {
+  checks: ShapeCheck[];
+  error: string | null;
+}) {
+  if (error !== null) {
+    return (
+      <div className="shape-feedback is-unavailable">
+        形状反馈暂不可用：{error}
+      </div>
+    );
+  }
+
+  const failures = checks.filter((check) => !check.passed);
+  if (failures.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="shape-feedback" role="alert">
+      <strong>SQL 形状预检未通过</strong>
+      {failures.map((check) => (
+        <span key={check.rule}>
+          {shapeRuleLabel(check.rule)}：{check.message}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function ColumnFetchPanel({ state }: { state: ColumnFetchState }) {
+  if (state.kind === "idle") {
+    return (
+      <p className="column-fetch-hint">
+        随时可取；目标表名为空时，DDL 会保留可见占位符。
+      </p>
+    );
+  }
+  if (state.kind === "loading") {
+    return (
+      <div className="fetch-progress">
+        <span />
+        正在连接 Oracle 并 describe 当前 SQL
+      </div>
+    );
+  }
+  if (state.kind === "shape-failed") {
+    return (
+      <div className="fetch-failure" role="alert">
+        <strong>这段 SQL 的形状不能跑，取列未执行。</strong>
+        <ShapeCheckTable checks={state.checks} />
+      </div>
+    );
+  }
+  if (state.kind === "oracle-failed") {
+    return (
+      <div className="fetch-failure" role="alert">
+        <strong>Oracle 取列失败</strong>
+        <span>{state.message}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="fetch-ready">
+      <div className="table-wrap">
+        <table className="data-grid">
+          <thead>
+            <tr>
+              <th>结果集列名</th>
+              <th>describe 类型</th>
+              <th>精度 / 长度</th>
+            </tr>
+          </thead>
+          <tbody>
+            {state.result.columns.map((column) => (
+              <tr key={column.name}>
+                <td className="mono">{column.name}</td>
+                <td className="mono">{column.data_type}</td>
+                <td className="mono">{columnShape(column)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="ddl-header">
+        <strong>CREATE TABLE</strong>
+        <button
+          className="icon-button"
+          type="button"
+          title="复制建表 SQL"
+          aria-label="复制建表 SQL"
+          onClick={() =>
+            void navigator.clipboard.writeText(state.result.target_ddl)
+          }
+        >
+          <Copy size={15} aria-hidden="true" />
+        </button>
+      </div>
+      <pre className="ddl-output">{state.result.target_ddl}</pre>
+      <div className="row-size-warning">
+        <strong>执行时若报 ERROR 1118 Row size too large</strong>
+        <span>
+          列宽合计超出 MySQL
+          单行上限，需缩窄字符列或拆表；这是静态提示，产品不预先判定行长。
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function ShapeCheckTable({ checks }: { checks: ShapeCheck[] }) {
+  return (
+    <div className="table-wrap">
+      <table className="data-grid shape-grid">
+        <thead>
+          <tr>
+            <th>约束</th>
+            <th>结果</th>
+          </tr>
+        </thead>
+        <tbody>
+          {checks.map((check) => (
+            <tr key={check.rule}>
+              <td>{shapeRuleLabel(check.rule)}</td>
+              <td className={check.passed ? "shape-pass" : "shape-fail"}>
+                {check.passed ? (
+                  <>
+                    <Check size={14} />通过
+                  </>
+                ) : (
+                  check.message
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function taskDefinitionFrom(input: TaskInput): TaskDefinition {
+  return {
+    source_sql: input.source_sql,
+    source_date_col: input.source_date_col,
+    target_table: input.target_table,
+    target_date_col: input.target_date_col,
+  };
+}
+
+function shapeChecksFromColumnFetchError(error: unknown): ShapeCheck[] | null {
+  if (!(error instanceof ApiError) || !isRecord(error.body)) {
+    return null;
+  }
+  if (error.body.kind !== "sql_shape" || !Array.isArray(error.body.checks)) {
+    return null;
+  }
+  if (!error.body.checks.every(isShapeCheck)) {
+    return null;
+  }
+  return error.body.checks;
+}
+
+function isShapeCheck(value: unknown): value is ShapeCheck {
+  return (
+    isRecord(value) &&
+    typeof value.rule === "string" &&
+    typeof value.passed === "boolean" &&
+    typeof value.message === "string"
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function tableKeyFor(table: BuilderTable): string {
+  return `${table.owner}\u0000${table.name}`;
+}
+
+function columnShape(column: Pick<BuilderColumn, "precision" | "scale" | "length">): string {
+  if (column.precision !== null) {
+    if (column.scale === null) {
+      return `(${column.precision})`;
+    }
+    return `(${column.precision},${column.scale})`;
+  }
+  if (column.length === null) {
+    return "-";
+  }
+  return `(${column.length})`;
+}
+
+const SHAPE_RULE_LABELS: Readonly<Record<string, string>> = {
+  business_date_range: "业务日期半开区间",
+  no_additional_predicates: "WHERE 无额外谓词",
+  named_projection: "每列显式命名",
+  determinate_projection: "列精度可确定",
+  no_relative_time_functions: "无相对时间函数",
+  matching_date_columns: "源/目标日期列同名",
+};
+
+function shapeRuleLabel(rule: string): string {
+  return SHAPE_RULE_LABELS[rule] ?? rule;
 }
 
 function RenameDialog({
@@ -628,12 +1258,14 @@ function Modal({
   onClose,
   busy,
   narrow = false,
+  wide = false,
   children,
 }: {
   title: string;
   onClose: () => void;
   busy: boolean;
   narrow?: boolean;
+  wide?: boolean;
   children: ReactNode;
 }) {
   useEffect(() => {
@@ -657,7 +1289,7 @@ function Modal({
       }}
     >
       <section
-        className={`modal ${narrow ? "is-narrow" : ""}`}
+        className={`modal ${narrow ? "is-narrow" : ""} ${wide ? "is-wide" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="modal-title"

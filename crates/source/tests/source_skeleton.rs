@@ -549,6 +549,84 @@ fn column_fetch_shape_failure_reports_all_checks_without_a_run_code() {
 }
 
 #[test]
+fn builder_generation_is_transient_and_its_sql_passes_all_shape_checks() {
+    let directory = temp_directory();
+    let port = unused_port();
+    let config = write_config(&directory, &format!("127.0.0.1:{port}"));
+    let mut child = start_source(&config);
+    wait_for_tasks(port, &mut child);
+
+    let generated = post(
+        port,
+        "/api/builder/sql",
+        r#"{
+          "dblink":"FA",
+          "owner":"HTBR45",
+          "table":"T_R_FR_ASTSTAT",
+          "columns":["N_VA_PRICE","D_BIZ"],
+          "source_date_col":"D_BIZ",
+          "target_table":"T_POSITION",
+          "target_date_col":"D_BIZ"
+        }"#,
+    )
+    .unwrap();
+
+    assert_eq!(generated.status, 200);
+    let task: Value = serde_json::from_str(&generated.body).unwrap();
+    assert_eq!(task.as_object().unwrap().len(), 4);
+    assert_eq!(task["source_date_col"], "D_BIZ");
+    assert!(task["source_sql"]
+        .as_str()
+        .unwrap()
+        .contains("T_R_FR_ASTSTAT@FA"));
+
+    let shape = post(port, "/api/sql-shape", &generated.body).unwrap();
+    assert_eq!(shape.status, 200);
+    let shape: Value = serde_json::from_str(&shape.body).unwrap();
+    assert_eq!(shape["checks"].as_array().unwrap().len(), 6);
+    assert!(
+        shape["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|check| check["passed"] == true),
+        "shape report: {}",
+        shape
+    );
+
+    let tasks = get(port, "/api/tasks").unwrap();
+    assert_eq!(tasks.status, 200);
+    assert_eq!(
+        serde_json::from_str::<Value>(&tasks.body).unwrap(),
+        Value::Array(Vec::new())
+    );
+
+    assert_success(&terminate(child));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn builder_rejects_an_invalid_dblink_before_connecting_to_oracle() {
+    let directory = temp_directory();
+    let port = unused_port();
+    let config = write_config(&directory, &format!("127.0.0.1:{port}"));
+    let mut child = start_source(&config);
+    wait_for_tasks(port, &mut child);
+
+    let response = post(port, "/api/builder/tables", r#"{"dblink":"FA WHERE 1=1"}"#).unwrap();
+
+    assert_eq!(response.status, 400);
+    let body: Value = serde_json::from_str(&response.body).unwrap();
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("dblink"));
+
+    assert_success(&terminate(child));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn column_fetch_oracle_failure_does_not_create_a_run_touch_sink_or_write_storage() {
     let directory = temp_directory();
     let port = unused_port();
