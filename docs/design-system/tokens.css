@@ -1,0 +1,52 @@
+/* db-qbs 设计系统 · 令牌（唯一来源）
+ * 定调票 #55 / ADR-0025。方向 D「调度台」，V1 只发浅色（不提供暗色主题）。
+ * 后续所有 UI 原型与生产前端一律引用本文件，不得另起一套。
+ */
+:root {
+  /* ---- 层次：灰底衬白卡是唯一的分层手法，不叠阴影 ---- */
+  --bg:          #F0F2F5;  /* 内容区底 */
+  --panel:       #FFFFFF;  /* 卡片 / 导航 / 顶栏 */
+  --line:        #E8EAEC;  /* 常规分隔线、卡片边框 */
+  --line-strong: #DCDEE2;  /* 控件边框、表头下边线 */
+
+  /* ---- 文字三级 ---- */
+  --text: #17233D;  /* 正文与数据 */
+  --dim:  #515A6E;  /* 次要说明、导航未选中 */
+  --mute: #808695;  /* 标签、单位、占位 */
+
+  /* ---- 主色：只标「可点」，不承担状态语义 ---- */
+  --brand:     #2C8AF0;
+  --brand-dim: #ECF5FF;  /* 选中项底色 */
+
+  /* ---- 语义四色 + 各自的底/边（只出现在圆点、标签、告警框上） ---- */
+  --ok:   #19BE6B;  --ok-bg:   #F0FAF4;  --ok-bd:   #C4ECD6;  /* 成功 / 已切换 */
+  --crit: #ED4014;  --crit-bg: #FEF3F0;  --crit-bd: #FBD2C7;  /* 拒绝 4xx / 失败 */
+  --warn: #FF9900;  --warn-bg: #FFF8EC;  --warn-bd: #FFE1B8;  /* 内部错 5xx / 业务值容器 */
+  --info: #2C8AF0;  --info-bg: #ECF5FF;  --info-bd: #C9E0FB;  /* 进行中 */
+  --mute-bg: #F8F8F9;  /* 表头底、中性终态底 */
+
+  /* ---- 形状与密度 ---- */
+  --radius:       4px;   /* 卡片、控件、表格容器 */
+  --badge-radius: 3px;   /* 标签类（不用胶囊，胶囊读起来像营销页） */
+  --row-h:        44px;  /* 表格行高 */
+  --ctl-h:        30px;  /* 按钮、下拉、输入 */
+  --pad:          20px;  /* 卡片内边距 */
+  --gap:          16px;  /* 卡片之间 */
+
+  /* ---- 排版：中文优先，数字与标识符走独立等宽栈 ---- */
+  --font-cn:  "PingFang SC", "HarmonyOS Sans SC", "Source Han Sans SC",
+              "Noto Sans CJK SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+  --font-num: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono",
+              Menlo, Consolas, "Liberation Mono", monospace;
+  --size-body:  14px;    /* 正文 */
+  --size-table: 13.5px;  /* 表格单元格 */
+  --size-num:   13px;    /* 键值区数字 */
+  --size-meta:  12px;    /* 次要说明、标签 */
+  --size-cap:   11px;    /* 键值区字段名 */
+  --lh-ui:      1.55;    /* 界面正文 */
+  --lh-prose:   1.7;     /* 成段中文（错误解释、说明文字） */
+  --weight-em:  600;     /* 强调字重上限：不用 700，中文小字号 700 发糊 */
+}
+
+/* 数字一律定宽，列对齐才成立 */
+.num, td.n { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
