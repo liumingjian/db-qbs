@@ -284,7 +284,7 @@ fn rows_written_mismatch_aborts_before_commit() {
     assert_eq!(failure.stage, db_qbs_source::RunStage::Streaming);
     assert_eq!(
         failure.sink_code.as_deref(),
-        Some("INTERNAL_PRECHECK_ESCAPE")
+        Some("INTERNAL_ASSERTION_FAILED")
     );
 }
 

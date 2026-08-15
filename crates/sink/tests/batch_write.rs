@@ -174,7 +174,14 @@ fn error_1153_points_to_environment_configuration_not_data() {
 
 #[test]
 fn golden_payload_keeps_source_order_null_and_empty_string() {
-    let payload: BatchPayload = serde_json::from_str(GOLDEN_PAYLOAD).unwrap();
+    // The fixture's top-level `_comment` / `_source_columns` are human-only annotations
+    // (ADR-0011), not wire fields; strip them so deny_unknown_fields sees the real message.
+    let mut fixture: serde_json::Value = serde_json::from_str(GOLDEN_PAYLOAD).unwrap();
+    fixture
+        .as_object_mut()
+        .unwrap()
+        .retain(|key, _| !key.starts_with('_'));
+    let payload: BatchPayload = serde_json::from_value(fixture).unwrap();
     let (sources, targets) = golden_columns();
     let destination = Arc::new(FakeDestination {
         columns: targets,
@@ -301,6 +308,10 @@ fn affected_rows_mismatch_names_batch_and_counts() {
         .write_batch(RUN_ID, payload(1, 5_000, 3))
         .unwrap_err();
 
+    assert_eq!(
+        (error.status, error.code),
+        (500, "INTERNAL_ASSERTION_FAILED")
+    );
     assert!(error.message.contains("第 1 批"), "{}", error.message);
     assert_eq!(error.details["expected"], 5_000);
     assert_eq!(error.details["written"], 4_999);

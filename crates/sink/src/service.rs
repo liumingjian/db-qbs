@@ -177,7 +177,7 @@ impl<D: Destination> SinkService<D> {
         if rows_written != row_count as u64 {
             return Err(ApiError {
                 status: 500,
-                code: "INTERNAL_PRECHECK_ESCAPE",
+                code: "INTERNAL_ASSERTION_FAILED",
                 message: format!(
                     "第 {} 批写入行数断言失败：发送 {} 行，MySQL affected_rows 合计为 {rows_written}；这是程序缺陷，不是数据或环境问题，请报 issue",
                     payload.seq,
@@ -235,7 +235,6 @@ impl<D: Destination> SinkService<D> {
 
         match self.destination.atomic_swap(&swap_request) {
             Ok(result) => {
-                self.drop_after_commit(run_id, &run.staging_table, true)?;
                 self.finish_run(
                     run_id,
                     &run,
@@ -243,6 +242,7 @@ impl<D: Destination> SinkService<D> {
                     result.purged_rows,
                     result.swapped_rows,
                 );
+                self.drop_after_swap(run_id, &run.staging_table)?;
                 Ok(CommitResponse {
                     source_rows: total_rows,
                     staged_rows: result.staged_rows,
@@ -255,20 +255,20 @@ impl<D: Destination> SinkService<D> {
                 staged_rows,
                 count_ms,
             }) => {
-                self.drop_after_commit(run_id, &run.staging_table, false)?;
                 self.finish_run(run_id, &run, Terminal::Discarded, 0, 0);
-                Err(verify_failed_error(
+                let mut error = verify_failed_error(
                     run_id,
                     &swap_request,
                     staged_rows,
                     run.rows_written,
                     count_ms,
-                ))
+                );
+                self.drop_after_discard(&run.staging_table, &mut error);
+                Err(error)
             }
             Err(AtomicSwapError::Other(message)) => {
-                self.drop_after_commit(run_id, &run.staging_table, false)?;
                 self.finish_run(run_id, &run, Terminal::Discarded, 0, 0);
-                Err(ApiError {
+                let mut error = ApiError {
                     status: 500,
                     code: "SWAP_FAILED",
                     message: format!(
@@ -276,7 +276,9 @@ impl<D: Destination> SinkService<D> {
                     ),
                     run_id: Some(run_id.to_owned()),
                     details: json!({}),
-                })
+                };
+                self.drop_after_discard(&run.staging_table, &mut error);
+                Err(error)
             }
         }
     }
@@ -338,41 +340,54 @@ impl<D: Destination> SinkService<D> {
         }
     }
 
-    fn drop_after_commit(
-        &self,
-        run_id: &str,
-        staging_table: &str,
-        target_swapped: bool,
-    ) -> Result<(), ApiError> {
+    fn drop_after_swap(&self, run_id: &str, staging_table: &str) -> Result<(), ApiError> {
         self.destination.drop_staging(staging_table).map_err(|error| {
-            if target_swapped {
-                let (message, details) = match error {
-                    DropStagingError::PermissionDenied => (
-                        format!(
-                            "目标表已完成切换，但暂存表 {staging_table} 清理失败：sink 的 MySQL 账号缺少 DROP 权限"
-                        ),
-                        json!({ "kind": "PERMISSION_DENIED", "operation": "DROP" }),
+            let (message, details) = match error {
+                DropStagingError::PermissionDenied => (
+                    format!(
+                        "目标表已完成切换，但暂存表 {staging_table} 清理失败：sink 的 MySQL 账号缺少 DROP 权限"
                     ),
-                    DropStagingError::Other(message) => (
-                        format!(
-                            "目标表已完成切换，但暂存表 {staging_table} 清理失败：{message}"
-                        ),
-                        json!({ "kind": "OTHER" }),
+                    json!({ "kind": "PERMISSION_DENIED", "operation": "DROP" }),
+                ),
+                DropStagingError::Other(message) => (
+                    format!(
+                        "目标表已完成切换，但暂存表 {staging_table} 清理失败：{message}"
                     ),
-                };
-                ApiError {
-                    status: 500,
-                    code: "SWAP_FAILED",
-                    message,
-                    run_id: Some(run_id.to_owned()),
-                    details,
-                }
-            } else {
-                let mut api_error = drop_staging_api_error(run_id, staging_table, error);
-                api_error.code = "SWAP_FAILED";
-                api_error
+                    json!({ "kind": "OTHER" }),
+                ),
+            };
+            ApiError {
+                status: 500,
+                code: "SWAP_FAILED",
+                message,
+                run_id: Some(run_id.to_owned()),
+                details,
             }
         })
+    }
+
+    // 失败路径上的 DROP 失败不得顶替主错误（VERIFY_FAILED 的五个门禁数、SWAP_FAILED 的
+    // 回滚措辞都比清理失败重要）；残留暂存表按 ADR-0010 §6 的口径留给手工清。
+    fn drop_after_discard(&self, staging_table: &str, error: &mut ApiError) {
+        if let Err(drop_error) = self.destination.drop_staging(staging_table) {
+            let reason = match drop_error {
+                DropStagingError::PermissionDenied => {
+                    "sink 的 MySQL 账号缺少 DROP 权限".to_owned()
+                }
+                DropStagingError::Other(message) => message,
+            };
+            let separator = if error.message.ends_with('。') { "" } else { "；" };
+            error.message = format!(
+                "{}{separator}另外，暂存表 {staging_table} 清理失败：{reason}，需手工 DROP。",
+                error.message
+            );
+            if let Some(details) = error.details.as_object_mut() {
+                details.insert(
+                    "staging_drop_failed".to_owned(),
+                    json!({ "staging_table": staging_table }),
+                );
+            }
+        }
     }
 
     fn finish_run(

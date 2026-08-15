@@ -195,6 +195,9 @@ impl HttpSinkClient {
         format!("{}{suffix}", self.base_url)
     }
 
+    // Pooled keep-alive is safe for these POSTs despite ADR-0010 §5's retry=0: ureq 2.10.1
+    // (unit.rs is_retryable) only ever resends idempotent methods with zero-length bodies,
+    // so a stale pooled connection can never replay a POST with a JSON body.
     fn post<T: DeserializeOwned>(
         &self,
         suffix: &str,

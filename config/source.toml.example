@@ -1,3 +1,4 @@
+# Store the real source.toml outside version control and chmod it 0600.
 oracle_connect_string = "//oracle:1521/XE"
 oracle_username = "source_user"
 oracle_password = "replace-me"

@@ -500,7 +500,7 @@ fn push_rows(
         || response.rows_written != row_count as u64
     {
         return Err(SinkError::response(
-            Some("INTERNAL_PRECHECK_ESCAPE".to_owned()),
+            Some("INTERNAL_ASSERTION_FAILED".to_owned()),
             format!(
                 "目标端第 {seq} 批响应断言失败：发送 {row_count} 行，响应 seq={}、rows_written={}、next_seq={}",
                 response.seq, response.rows_written, response.next_seq

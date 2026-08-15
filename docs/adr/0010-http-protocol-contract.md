@@ -204,6 +204,7 @@ M1 分类码闭集：
 | `VERIFY_FAILED` | 409 | `details` 带两端行数（口径归 [#29](https://github.com/liumingjian/db-qbs/issues/29)） |
 | `SWAP_FAILED` | 500 | |
 | `INTERNAL_PRECHECK_ESCAPE` | 500 | 见下 |
+| `INTERNAL_ASSERTION_FAILED` | 500 | 2026-08-15 增补，见下 |
 | `PAYLOAD_TOO_LARGE` | 413 | |
 | `BAD_REQUEST` | 400 | `Content-Type` 非 `application/json` 为 **415** |
 
@@ -211,6 +212,15 @@ M1 分类码闭集：
 （预检漏网的静默舍入）一旦出现**属于 P0 缺陷而非运行故障**。这个区分必须在协议上可见，
 否则运维看到的就是又一条运行错误。message 明写「这是程序缺陷，不是数据或环境问题，请报 issue」。
 **协议层把缺陷和故障分开，这是 ADR-0009 那条要求唯一能兑现的地方。**
+
+> **2026-08-15 增补：`INTERNAL_ASSERTION_FAILED`，闭集 10 → 11。**
+> 实现期曾把两处「行数/序号断言失败」借用 `INTERNAL_PRECHECK_ESCAPE` 表达：
+> sink 侧「本批 `affected_rows` 合计 ≠ 发送行数」与 source 侧 ADR-0013 §3 的逐批响应断言
+> （`seq` / `next_seq` / `rows_written` 不符）。它们与 `Note 1265` 同属「P0 缺陷不是故障」，
+> 但**成因是两类**：前者是预检漏网的静默改值，后者是写入/记账不变量被破坏——
+> 共用一个码会让排障从第一行就走错方向。故新增 `INTERNAL_ASSERTION_FAILED` 承接后一类，
+> `INTERNAL_PRECHECK_ESCAPE` 回归 `Note 1265` 哨兵本义。
+> **闭集字段只增不删**：这是首次增码，增码必须像本条一样写回本表。
 
 #### 7.1 非常规时序的响应矩阵
 

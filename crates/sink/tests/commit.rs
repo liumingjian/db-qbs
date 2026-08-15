@@ -13,6 +13,7 @@ struct FakeDestination {
     staged_rows: Mutex<u64>,
     purged_rows: Mutex<u64>,
     swap_error: Mutex<Option<String>>,
+    drop_error: Mutex<Option<DropStagingError>>,
     dropped: Mutex<Vec<String>>,
 }
 
@@ -23,6 +24,7 @@ impl FakeDestination {
             staged_rows: Mutex::new(1),
             purged_rows: Mutex::new(7),
             swap_error: Mutex::new(None),
+            drop_error: Mutex::new(None),
             dropped: Mutex::new(Vec::new()),
         }
     }
@@ -83,6 +85,9 @@ impl Destination for FakeDestination {
     }
 
     fn drop_staging(&self, staging_table: &str) -> Result<(), DropStagingError> {
+        if let Some(error) = self.drop_error.lock().unwrap().take() {
+            return Err(error);
+        }
         self.dropped.lock().unwrap().push(staging_table.to_owned());
         Ok(())
     }
@@ -243,6 +248,80 @@ fn swap_failure_discards_staging_and_records_a_discarded_tombstone() {
     assert_eq!(error.code, "SWAP_FAILED");
     assert!(error.message.contains("目标表未被触碰，可直接重跑"));
     assert_eq!(destination.dropped.lock().unwrap().len(), 1);
+    assert_eq!(
+        serde_json::to_value(service.get(RUN_ID).unwrap()).unwrap()["terminal"],
+        "DISCARDED"
+    );
+}
+
+#[test]
+fn drop_failure_after_successful_swap_still_records_a_swapped_tombstone() {
+    let destination = Arc::new(FakeDestination::new());
+    *destination.drop_error.lock().unwrap() = Some(DropStagingError::PermissionDenied);
+    let service = SinkService::new("qbs", destination.clone());
+    service.open(open_request()).unwrap();
+    service.write_batch(RUN_ID, one_row()).unwrap();
+
+    let error = service.commit(RUN_ID, 1, 1).unwrap_err();
+
+    assert_eq!(error.status, 500);
+    assert_eq!(error.code, "SWAP_FAILED");
+    assert!(error.message.contains("目标表已完成切换"), "{}", error.message);
+    assert!(error.message.contains("缺少 DROP 权限"), "{}", error.message);
+
+    let status = serde_json::to_value(service.get(RUN_ID).unwrap()).unwrap();
+    assert_eq!(status["terminal"], "SWAPPED");
+    assert_eq!(status["sealed"], true);
+
+    let retry = service.commit(RUN_ID, 1, 1).unwrap_err();
+    assert_eq!(retry.code, "RUN_SEALED");
+    assert_eq!(destination.swap_requests.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn drop_failure_after_verify_failure_keeps_the_gate_numbers_and_discards_the_run() {
+    let destination = Arc::new(FakeDestination::new());
+    *destination.staged_rows.lock().unwrap() = 0;
+    *destination.drop_error.lock().unwrap() =
+        Some(DropStagingError::Other("connection lost".to_owned()));
+    let service = SinkService::new("qbs", destination.clone());
+    service.open(open_request()).unwrap();
+    service.write_batch(RUN_ID, one_row()).unwrap();
+
+    let error = service.commit(RUN_ID, 1, 1).unwrap_err();
+
+    assert_eq!(error.status, 409);
+    assert_eq!(error.code, "VERIFY_FAILED");
+    assert_eq!(error.details["source_rows"], 1);
+    assert_eq!(error.details["staged_rows"], 0);
+    assert_eq!(error.details["source_batches"], 1);
+    assert_eq!(error.details["received_batches"], 1);
+    assert_eq!(error.details["sink_reported_rows"], 1);
+    assert_eq!(error.details["count_ms"], 4);
+    assert!(error.message.contains("清理失败"), "{}", error.message);
+    assert!(error.message.contains("需手工 DROP"), "{}", error.message);
+    assert_eq!(
+        serde_json::to_value(service.get(RUN_ID).unwrap()).unwrap()["terminal"],
+        "DISCARDED"
+    );
+}
+
+#[test]
+fn drop_failure_after_swap_failure_keeps_swap_failed_and_discards_the_run() {
+    let destination = Arc::new(FakeDestination::new());
+    *destination.swap_error.lock().unwrap() = Some("duplicate target key".to_owned());
+    *destination.drop_error.lock().unwrap() =
+        Some(DropStagingError::Other("connection lost".to_owned()));
+    let service = SinkService::new("qbs", destination.clone());
+    service.open(open_request()).unwrap();
+    service.write_batch(RUN_ID, one_row()).unwrap();
+
+    let error = service.commit(RUN_ID, 1, 1).unwrap_err();
+
+    assert_eq!(error.status, 500);
+    assert_eq!(error.code, "SWAP_FAILED");
+    assert!(error.message.contains("duplicate target key"), "{}", error.message);
+    assert!(error.message.contains("清理失败"), "{}", error.message);
     assert_eq!(
         serde_json::to_value(service.get(RUN_ID).unwrap()).unwrap()["terminal"],
         "DISCARDED"

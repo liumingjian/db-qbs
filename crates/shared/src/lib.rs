@@ -62,6 +62,7 @@ pub fn canon_text(value: &str) -> &str {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BatchPayload {
     pub seq: u64,
     pub rows: Vec<Vec<Option<String>>>,
