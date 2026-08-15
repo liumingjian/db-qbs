@@ -40,6 +40,15 @@ actual=$($runner --list)
   exit 1
 }
 
+grep -Fq 'SOURCE_BIN=/usr/local/bin/db-qbs-source-run' "$runner" || {
+  echo "M1 acceptance runner must invoke the renamed one-shot source binary" >&2
+  exit 1
+}
+grep -Fq 'target/release/db-qbs-source-run' "$runner" || {
+  echo "M1 acceptance runner must install the renamed one-shot source binary" >&2
+  exit 1
+}
+
 run_id_validation_body=$(sed -n '/^assert_run_id()/,/^}/p' "$runner")
 (
   fail() { return 1; }

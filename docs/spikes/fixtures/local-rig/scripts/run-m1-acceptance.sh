@@ -29,7 +29,7 @@ REPO_ROOT=$(cd "$RIG_ROOT/../../../.." && pwd)
 ACCEPTANCE_ROOT="$RIG_ROOT/acceptance"
 WORK_ROOT=$(mktemp -d)
 REPORT=${M1_REPORT:-"$RIG_ROOT/m1-acceptance-$(date -u +%Y%m%dT%H%M%SZ).md"}
-SOURCE_BIN=/usr/local/bin/db-qbs-source
+SOURCE_BIN=/usr/local/bin/db-qbs-source-run
 SINK_BIN=/usr/local/bin/db-qbs-sink
 SOURCE_CONFIG=/workspace/docs/spikes/fixtures/local-rig/acceptance/source.toml
 COMMIT_DROP_CONFIG=/workspace/docs/spikes/fixtures/local-rig/acceptance/source-commit-drop.toml
@@ -170,7 +170,7 @@ prepare_rig() {
     -v "$REPO_ROOT:/workspace" -w /workspace \
     -v qbs-cargo-registry:/usr/local/cargo/registry \
     rust:1-bookworm cargo build --release --workspace || return 1
-  docker cp "$REPO_ROOT/target/release/db-qbs-source" qbs-client:"$SOURCE_BIN" || return 1
+  docker cp "$REPO_ROOT/target/release/db-qbs-source-run" qbs-client:"$SOURCE_BIN" || return 1
   docker cp "$REPO_ROOT/target/release/db-qbs-sink" qbs-client:"$SINK_BIN" || return 1
 
   compose exec -T client sqlplus -S spike/spike123@//oracle:1521/XE \

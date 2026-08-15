@@ -47,6 +47,24 @@ pub struct SourceConfig {
     pub oracle_password: String,
     pub oracle_client_lib_dir: String,
     pub sink_base_url: String,
+    pub listen: String,
+    pub data_dir: PathBuf,
+    #[serde(default = "default_history_retention_days")]
+    pub history_retention_days: u64,
+    #[serde(default = "default_run_executable")]
+    pub run_executable: PathBuf,
+}
+
+fn default_history_retention_days() -> u64 {
+    90
+}
+
+fn default_run_executable() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_owned))
+        .unwrap_or_default()
+        .join("db-qbs-source-run")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

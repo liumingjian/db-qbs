@@ -45,6 +45,31 @@ fn missing_and_malformed_files_name_the_file_kind_and_path() {
 }
 
 #[test]
+fn source_service_settings_require_listen_and_apply_documented_defaults() {
+    let directory = temp_directory();
+    let missing_listen = write(
+        &directory,
+        "missing-listen.toml",
+        &valid_source().replace("listen = \"127.0.0.1:8088\"\n", ""),
+    );
+    let configured = write(&directory, "source.toml", valid_source());
+
+    let error = load_source_config(&missing_listen).unwrap_err().to_string();
+    assert!(error.contains("listen"), "{error}");
+
+    let config = load_source_config(&configured).unwrap();
+    assert_eq!(config.listen, "127.0.0.1:8088");
+    assert_eq!(config.data_dir, PathBuf::from("/var/lib/db-qbs-source"));
+    assert_eq!(config.history_retention_days, 90);
+    assert_eq!(
+        config.run_executable.file_name().unwrap(),
+        "db-qbs-source-run"
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn business_date_is_an_exact_timezone_free_calendar_day() {
     assert!(parse_biz_date("2024-02-29").is_ok());
     for invalid in [
@@ -63,7 +88,9 @@ fn valid_source() -> &'static str {
      oracle_username = \"source\"\n\
      oracle_password = \"secret\"\n\
      oracle_client_lib_dir = \"/opt/oracle\"\n\
-     sink_base_url = \"http://sink:8080\"\n"
+     sink_base_url = \"http://sink:8080\"\n\
+     listen = \"127.0.0.1:8088\"\n\
+     data_dir = \"/var/lib/db-qbs-source\"\n"
 }
 
 fn valid_task() -> &'static str {

@@ -18,12 +18,12 @@
 
 ## 运行日志
 
-`db-qbs-source` 与 `db-qbs-sink` 只向 stdout 输出 JSON Lines。失败记录可能包含业务列值；
+`db-qbs-source-run` 与 `db-qbs-sink` 只向 stdout 输出 JSON Lines。失败记录可能包含业务列值；
 需要重定向到文件时，须在创建文件前收紧权限：
 
 ```sh
 umask 077
-db-qbs-source --config source.toml --task task.toml --biz-date 2026-08-14 > run.jsonl
+db-qbs-source-run --config source.toml --task task.toml --biz-date 2026-08-14 > run.jsonl
 chmod 0600 run.jsonl
 ```
 

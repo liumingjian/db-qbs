@@ -4,3 +4,7 @@ oracle_username = "source_user"
 oracle_password = "replace-me"
 oracle_client_lib_dir = "/opt/oracle/instantclient"
 sink_base_url = "http://127.0.0.1:8080"
+listen = "127.0.0.1:8088"
+data_dir = "/var/lib/db-qbs-source"
+# history_retention_days defaults to 90.
+# run_executable defaults to db-qbs-source-run beside db-qbs-source.

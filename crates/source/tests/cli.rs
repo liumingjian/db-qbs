@@ -104,7 +104,7 @@ fn valid_shape_attempts_oracle_describe_before_sink() {
 }
 
 fn run_source(config: &Path, task: &Path, biz_date: &str) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_db-qbs-source"))
+    Command::new(env!("CARGO_BIN_EXE_db-qbs-source-run"))
         .args(["--config"])
         .arg(config)
         .args(["--task"])
@@ -123,7 +123,10 @@ fn write_source_config(directory: &Path, port: u16) -> PathBuf {
              oracle_username = \"source\"\n\
              oracle_password = \"secret\"\n\
              oracle_client_lib_dir = \"/opt/oracle\"\n\
-             sink_base_url = \"http://127.0.0.1:{port}\"\n"
+             sink_base_url = \"http://127.0.0.1:{port}\"\n\
+             listen = \"127.0.0.1:18088\"\n\
+             data_dir = \"{}\"\n",
+            directory.display()
         ),
     )
     .unwrap();
