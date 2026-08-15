@@ -35,11 +35,20 @@ export function runPresentation(detail: RunDetail): RunPresentation {
 
   if (detail.live) {
     const phase = runPhase(detail.stage);
+    if (phase === null) {
+      return {
+        kind: "accepted",
+        phase: null,
+        conclusion: "已受理，正在拉起",
+        terminalEffect: null,
+        error: null,
+        metrics,
+      };
+    }
     return {
-      kind: phase === null ? "accepted" : "live",
+      kind: "live",
       phase,
-      conclusion:
-        phase === null ? "已受理，正在拉起" : `运行中 ${detail.stage}`,
+      conclusion: `运行中 ${phase}`,
       terminalEffect: null,
       error: null,
       metrics,
@@ -89,9 +98,12 @@ export function runPresentation(detail: RunDetail): RunPresentation {
 }
 
 function runPhase(stage: string | null): RunPhase | null {
-  return stage === "PREPARING" ||
-    stage === "STREAMING" ||
-    stage === "COMMITTING"
-    ? stage
-    : null;
+  switch (stage) {
+    case "PREPARING":
+    case "STREAMING":
+    case "COMMITTING":
+      return stage;
+    default:
+      return null;
+  }
 }

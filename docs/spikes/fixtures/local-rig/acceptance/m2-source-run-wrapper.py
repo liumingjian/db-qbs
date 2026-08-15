@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """M2 acceptance child seam: wrap the real runner or emit controlled JSON Lines."""
 
-import json
 import atexit
+import json
 import os
 import random
 import signal

@@ -457,12 +457,7 @@ fn start_run(
 ) -> Result<String, StartRunError> {
     let run_record_id = generate_run_record_id();
     let mut history = RunHistory::accepted(&run_record_id, &task.task_id, biz_date, Utc::now());
-    let task_config = TaskConfig {
-        source_sql: task.source_sql.clone(),
-        source_date_col: task.source_date_col.clone(),
-        target_table: task.target_table.clone(),
-        target_date_col: task.target_date_col.clone(),
-    };
+    let task_config = task_config_from_task(task);
     history.shape_checks = sql_shape_report(&task_config)
         .into_iter()
         .map(|check| serde_json::to_value(check).expect("shape checks must serialize"))
@@ -546,12 +541,7 @@ fn materialize_task(
     let directory = config.data_dir.join(RUN_TASKS_DIRECTORY);
     fs::create_dir_all(&directory).map_err(|error| format!("创建临时任务目录失败：{error}"))?;
     let path = directory.join(format!("task-{run_record_id}.toml"));
-    let task_config = TaskConfig {
-        source_sql: task.source_sql.clone(),
-        source_date_col: task.source_date_col.clone(),
-        target_table: task.target_table.clone(),
-        target_date_col: task.target_date_col.clone(),
-    };
+    let task_config = task_config_from_task(task);
     let contents = toml::to_string(&task_config)
         .map_err(|error| format!("序列化临时任务定义失败：{error}"))?;
     let mut file = OpenOptions::new()
@@ -565,6 +555,15 @@ fn materialize_task(
     fs::set_permissions(&path, Permissions::from_mode(0o600))
         .map_err(|error| format!("设置临时任务定义权限失败：{error}"))?;
     Ok(path)
+}
+
+fn task_config_from_task(task: &Task) -> TaskConfig {
+    TaskConfig {
+        source_sql: task.source_sql.clone(),
+        source_date_col: task.source_date_col.clone(),
+        target_table: task.target_table.clone(),
+        target_date_col: task.target_date_col.clone(),
+    }
 }
 
 fn supervise_run(

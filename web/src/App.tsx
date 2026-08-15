@@ -232,13 +232,7 @@ export function App() {
           </nav>
           <span className="breadcrumb">
             数据导入 <span aria-hidden="true">/</span>{" "}
-            <strong>
-              {activeRun !== null
-                ? "运行详情"
-                : page === "tasks"
-                  ? "任务"
-                  : "运行历史"}
-            </strong>
+            <strong>{activeRun !== null ? "运行详情" : pageLabel(page)}</strong>
           </span>
           <span className="environment">source · 当前实例</span>
         </header>
@@ -257,14 +251,16 @@ export function App() {
             </div>
           )}
 
-          {activeRun !== null ? (
+          {activeRun !== null && (
             <RunScreen
               task={activeRun.task}
               runRecordId={activeRun.runRecordId}
               onBack={() => setActiveRun(null)}
               onRelaunch={() => setDialog({ kind: "start", task: activeRun.task })}
             />
-          ) : page === "tasks" ? (
+          )}
+
+          {activeRun === null && page === "tasks" && (
             <section className="card" id="tasks" aria-labelledby="tasks-title">
               <header className="card-header">
                 <div>
@@ -318,7 +314,9 @@ export function App() {
                 onAction={setDialog}
               />
             </section>
-          ) : (
+          )}
+
+          {activeRun === null && page === "history" && (
             <HistoryScreen tasks={tasks ?? []} />
           )}
         </div>
@@ -369,6 +367,15 @@ export function App() {
       </main>
     </div>
   );
+}
+
+function pageLabel(page: Page): string {
+  switch (page) {
+    case "tasks":
+      return "任务";
+    case "history":
+      return "运行历史";
+  }
 }
 
 function taskSummaryLabel(tasks: Task[] | null, refreshing: boolean): string {

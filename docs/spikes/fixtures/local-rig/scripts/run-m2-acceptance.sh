@@ -468,7 +468,10 @@ scenario_a14() {
 scenario_index() {
   local wanted=$1 index
   for (( index = 0; index < ${#SCENARIOS[@]}; index++ )); do
-    [[ "${SCENARIOS[$index]}" == "$wanted" ]] && { printf '%s' "$index"; return 0; }
+    if [[ "${SCENARIOS[$index]}" == "$wanted" ]]; then
+      printf '%s' "$index"
+      return 0
+    fi
   done
   return 1
 }

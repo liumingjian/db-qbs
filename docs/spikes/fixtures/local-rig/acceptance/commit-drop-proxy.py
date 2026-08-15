@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Forward M1 HTTP calls, but close the first commit connection after sink completion.
+"""Proxy commit calls for the M1 disconnect and M2 verification scenarios.
 
-M1_COMMIT_DROP_MODE selects which sink terminal the dropped commit leaves behind:
+M1_COMMIT_DROP_MODE selects how the commit is forwarded:
 
 - ``swapped`` (default) forwards the commit untouched, so the sink swaps the target
   and tombstones the run SWAPPED;
@@ -11,8 +11,8 @@ M1_COMMIT_DROP_MODE selects which sink terminal the dropped commit leaves behind
 - ``verify`` performs the same inflation but returns the sink response to the source,
   exposing the normal ``VERIFY_FAILED`` path without a transport failure.
 
-Either way the source only ever sees the transport error, so it has to recover the
-terminal from the tombstone via GET /v1/runs/{run_id}.
+In the two dropped-connection modes the source only sees the transport error, so it
+has to recover the terminal from the tombstone via GET /v1/runs/{run_id}.
 """
 
 import http.client

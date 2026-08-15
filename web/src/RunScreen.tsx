@@ -1,5 +1,5 @@
 import { ArrowLeft, Ban, Play, RefreshCw } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { cancelRun, fetchRun } from "./api";
 import type { RunDetail, Task } from "./api";
@@ -11,8 +11,13 @@ import {
 } from "./components/DesignSystem";
 import { messageFrom } from "./errors";
 import { runPresentation } from "./run";
+import type { RunPresentation, RunPresentationKind } from "./run";
 
 const countFormatter = new Intl.NumberFormat("zh-CN");
+type PrecheckKind = Extract<
+  RunPresentationKind,
+  "shape-failed" | "mapping-failed"
+>;
 
 export function RunScreen({
   task,
@@ -82,10 +87,7 @@ export function RunScreen({
     };
   }, [runRecordId]);
 
-  const presentation = useMemo(
-    () => (detail === null ? null : runPresentation(detail)),
-    [detail],
-  );
+  const presentation = detail === null ? null : runPresentation(detail);
 
   async function handleCancel() {
     setCancelMessage(null);
@@ -174,7 +176,7 @@ function LiveRun({
   presentation,
 }: {
   detail: RunDetail & { live: true };
-  presentation: ReturnType<typeof runPresentation>;
+  presentation: RunPresentation;
 }) {
   return (
     <>
@@ -203,10 +205,12 @@ function FinishedRun({
   presentation,
 }: {
   detail: RunDetail & { live: false };
-  presentation: ReturnType<typeof runPresentation>;
+  presentation: RunPresentation;
 }) {
-  const showPrechecks =
-    presentation.kind === "shape-failed" || presentation.kind === "mapping-failed";
+  const precheckKind =
+    presentation.kind === "shape-failed" || presentation.kind === "mapping-failed"
+      ? presentation.kind
+      : null;
   return (
     <>
       <section className={`run-result is-${presentation.kind}`}>
@@ -218,26 +222,12 @@ function FinishedRun({
             <TerminalBlock effect={presentation.terminalEffect} />
           )}
         </div>
-        {presentation.kind === "unknown" ? (
-          <div className={`unknown-conclusion is-${detail.unknown_reason?.toLowerCase()}`}>
-            <strong>结局不明</strong>
-            <span>{presentation.conclusion}</span>
-            <small>没有错误码，也没有目标端终态块。</small>
-          </div>
-        ) : presentation.error !== null ? (
-          <ErrorCodeTag
-            code={presentation.error.code}
-            httpStatus={presentation.error.httpStatus ?? undefined}
-            conclusion={presentation.conclusion}
-          />
-        ) : (
-          <div className={presentation.kind === "succeeded" ? "success-conclusion" : "plain-conclusion"}>
-            {presentation.conclusion}
-          </div>
-        )}
+        <RunConclusion detail={detail} presentation={presentation} />
       </section>
 
-      {showPrechecks && <PrecheckReports detail={detail} kind={presentation.kind} />}
+      {precheckKind !== null && (
+        <PrecheckReports detail={detail} kind={precheckKind} />
+      )}
 
       <dl className="run-metrics is-finished">
         <Metric label="已推行数" value={formatCount(detail.rows_pushed)} />
@@ -257,12 +247,46 @@ function FinishedRun({
   );
 }
 
+function RunConclusion({
+  detail,
+  presentation,
+}: {
+  detail: RunDetail & { live: false };
+  presentation: RunPresentation;
+}) {
+  if (presentation.kind === "unknown") {
+    return (
+      <div className={`unknown-conclusion is-${detail.unknown_reason?.toLowerCase()}`}>
+        <strong>结局不明</strong>
+        <span>{presentation.conclusion}</span>
+        <small>没有错误码，也没有目标端终态块。</small>
+      </div>
+    );
+  }
+
+  if (presentation.error !== null) {
+    return (
+      <ErrorCodeTag
+        code={presentation.error.code}
+        httpStatus={presentation.error.httpStatus ?? undefined}
+        conclusion={presentation.conclusion}
+      />
+    );
+  }
+
+  const className =
+    presentation.kind === "succeeded"
+      ? "success-conclusion"
+      : "plain-conclusion";
+  return <div className={className}>{presentation.conclusion}</div>;
+}
+
 function PrecheckReports({
   detail,
   kind,
 }: {
   detail: RunDetail & { live: false };
-  kind: ReturnType<typeof runPresentation>["kind"];
+  kind: PrecheckKind;
 }) {
   const shapeFailed = kind === "shape-failed";
   return (
