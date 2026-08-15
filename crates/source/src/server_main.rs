@@ -17,17 +17,18 @@ use db_qbs_source::{
     SourceConfig, Task, TaskConfig, TaskInput, TaskStore,
 };
 use rand::RngCore;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use signal_hook::consts::SIGTERM;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
-const MAX_TASK_BODY_BYTES: u64 = 1024 * 1024;
-const RUN_TASK_DIRECTORY: &str = "run-tasks";
+const MAX_REQUEST_BODY_BYTES: u64 = 1024 * 1024;
+const RUN_TASKS_DIRECTORY: &str = "run-tasks";
 
 type RunRegistry = Arc<Mutex<HashMap<String, RunRecord>>>;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct RunRecord {
     run_id: Option<String>,
     biz_date: Option<String>,
@@ -35,7 +36,7 @@ struct RunRecord {
     projection: RunProjection,
 }
 
-#[derive(Clone, Default, Serialize)]
+#[derive(Clone, Default)]
 struct RunProjection {
     stage: Option<String>,
     seq: u64,
@@ -50,6 +51,12 @@ struct RunProjection {
 struct StartRunInput {
     task_id: String,
     biz_date: String,
+}
+
+#[derive(Default)]
+struct ObservedRunIdentity {
+    run_id: Option<String>,
+    biz_date: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -172,7 +179,7 @@ fn route_request(
     }
 
     if method == Method::Get {
-        if let Some(run_record_id) = run_record_id_from_path(&path) {
+        if let Some(run_record_id) = resource_id_from_path(&path, "/api/runs/") {
             return handle_get_run(runs, run_record_id);
         }
     }
@@ -185,7 +192,7 @@ fn route_request(
         };
     }
 
-    let Some(task_id) = task_id_from_path(&path) else {
+    let Some(task_id) = resource_id_from_path(&path, "/api/tasks/") else {
         return not_found();
     };
     match method {
@@ -196,12 +203,12 @@ fn route_request(
     }
 }
 
-fn run_record_id_from_path(path: &str) -> Option<&str> {
-    let run_record_id = path.strip_prefix("/api/runs/")?;
-    if run_record_id.is_empty() || run_record_id.contains('/') {
+fn resource_id_from_path<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    let resource_id = path.strip_prefix(prefix)?;
+    if resource_id.is_empty() || resource_id.contains('/') {
         return None;
     }
-    Some(run_record_id)
+    Some(resource_id)
 }
 
 fn handle_start_run(
@@ -224,7 +231,7 @@ fn handle_start_run(
         Err(error) => return internal_error(error),
     };
 
-    match start_run(config, config_path, task, input.biz_date, runs) {
+    match start_run(config, config_path, &task, &input.biz_date, runs) {
         Ok(run_record_id) => json_response(202, &json!({ "run_record_id": run_record_id })),
         Err(error) => internal_error(error),
     }
@@ -232,7 +239,7 @@ fn handle_start_run(
 
 fn handle_get_run(runs: &RunRegistry, run_record_id: &str) -> HttpResponse {
     let record = match runs.lock() {
-        Ok(runs) => runs.get(run_record_id).cloned(),
+        Ok(registry) => registry.get(run_record_id).cloned(),
         Err(_) => return internal_error("run 投影锁已损坏".to_owned()),
     };
     let Some(record) = record else {
@@ -259,19 +266,19 @@ fn handle_get_run(runs: &RunRegistry, run_record_id: &str) -> HttpResponse {
 fn start_run(
     config: &SourceConfig,
     config_path: &Path,
-    task: Task,
-    biz_date: String,
+    task: &Task,
+    biz_date: &str,
     runs: &RunRegistry,
 ) -> Result<String, String> {
-    let run_record_id = generate_record_id();
-    let task_path = materialize_task(config, &task, &run_record_id)?;
+    let run_record_id = generate_run_record_id();
+    let task_path = materialize_task(config, task, &run_record_id)?;
     let mut child = match Command::new(&config.run_executable)
         .arg("--config")
         .arg(config_path)
         .arg("--task")
         .arg(&task_path)
         .arg("--biz-date")
-        .arg(&biz_date)
+        .arg(biz_date)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .spawn()
@@ -289,15 +296,7 @@ fn start_run(
 
     runs.lock()
         .map_err(|_| "run 投影锁已损坏".to_owned())?
-        .insert(
-            run_record_id.clone(),
-            RunRecord {
-                run_id: None,
-                biz_date: None,
-                staging_table: None,
-                projection: RunProjection::default(),
-            },
-        );
+        .insert(run_record_id.clone(), RunRecord::default());
 
     let worker_runs = Arc::clone(runs);
     let worker_record_id = run_record_id.clone();
@@ -310,7 +309,7 @@ fn materialize_task(
     task: &Task,
     run_record_id: &str,
 ) -> Result<PathBuf, String> {
-    let directory = config.data_dir.join(RUN_TASK_DIRECTORY);
+    let directory = config.data_dir.join(RUN_TASKS_DIRECTORY);
     fs::create_dir_all(&directory).map_err(|error| format!("创建临时任务目录失败：{error}"))?;
     let path = directory.join(format!("task-{run_record_id}.toml"));
     let task_config = TaskConfig {
@@ -341,8 +340,7 @@ fn supervise_run(
     run_record_id: String,
     runs: RunRegistry,
 ) {
-    let mut pending_biz_date = None;
-    let mut active_run_id = None;
+    let mut observed_identity = ObservedRunIdentity::default();
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else {
             break;
@@ -355,14 +353,8 @@ fn supervise_run(
         let Ok(log) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        let terminal = apply_log_line(
-            &runs,
-            &run_record_id,
-            &log,
-            &mut pending_biz_date,
-            &mut active_run_id,
-        );
-        if terminal {
+        let is_terminal = apply_log_line(&runs, &run_record_id, &log, &mut observed_identity);
+        if is_terminal {
             remove_projection(&runs, &run_record_id);
         }
     }
@@ -375,12 +367,11 @@ fn apply_log_line(
     runs: &RunRegistry,
     run_record_id: &str,
     log: &Value,
-    pending_biz_date: &mut Option<String>,
-    active_run_id: &mut Option<String>,
+    observed_identity: &mut ObservedRunIdentity,
 ) -> bool {
     let event = log.get("event").and_then(Value::as_str);
     if event == Some("source_started") {
-        *pending_biz_date = log
+        observed_identity.biz_date = log
             .get("biz_date")
             .and_then(Value::as_str)
             .map(str::to_owned);
@@ -388,12 +379,12 @@ fn apply_log_line(
 
     let line_run_id = log.get("run_id").and_then(Value::as_str);
     if let Some(line_run_id) = line_run_id {
-        if let Some(active_run_id) = active_run_id.as_deref() {
-            if active_run_id != line_run_id {
+        if let Some(observed_run_id) = observed_identity.run_id.as_deref() {
+            if observed_run_id != line_run_id {
                 return false;
             }
         } else {
-            *active_run_id = Some(line_run_id.to_owned());
+            observed_identity.run_id = Some(line_run_id.to_owned());
         }
     }
 
@@ -404,9 +395,9 @@ fn apply_log_line(
         return event == Some("run_finished");
     };
     if record.run_id.is_none() {
-        if let Some(run_id) = active_run_id.as_ref() {
+        if let Some(run_id) = observed_identity.run_id.as_ref() {
             record.run_id = Some(run_id.clone());
-            record.biz_date = pending_biz_date.clone();
+            record.biz_date = observed_identity.biz_date.clone();
         }
     }
     if let Some(ts) = log.get("ts").and_then(Value::as_str) {
@@ -440,12 +431,12 @@ fn apply_log_line(
 }
 
 fn remove_projection(runs: &RunRegistry, run_record_id: &str) {
-    if let Ok(mut runs) = runs.lock() {
-        runs.remove(run_record_id);
+    if let Ok(mut registry) = runs.lock() {
+        registry.remove(run_record_id);
     }
 }
 
-fn generate_record_id() -> String {
+fn generate_run_record_id() -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut bytes = [0_u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
@@ -457,14 +448,6 @@ fn generate_record_id() -> String {
     id
 }
 
-fn task_id_from_path(path: &str) -> Option<&str> {
-    let task_id = path.strip_prefix("/api/tasks/")?;
-    if task_id.is_empty() || task_id.contains('/') {
-        return None;
-    }
-    Some(task_id)
-}
-
 fn handle_list_tasks(store: &TaskStore) -> HttpResponse {
     match store.list() {
         Ok(tasks) => json_response(200, &tasks),
@@ -473,7 +456,7 @@ fn handle_list_tasks(store: &TaskStore) -> HttpResponse {
 }
 
 fn handle_create_task(request: &mut Request, store: &TaskStore) -> HttpResponse {
-    let input = match read_task_input(request) {
+    let input: TaskInput = match read_json_body(request) {
         Ok(input) => input,
         Err(error) => return bad_request(error),
     };
@@ -492,7 +475,7 @@ fn handle_get_task(store: &TaskStore, task_id: &str) -> HttpResponse {
 }
 
 fn handle_update_task(request: &mut Request, store: &TaskStore, task_id: &str) -> HttpResponse {
-    let input = match read_task_input(request) {
+    let input: TaskInput = match read_json_body(request) {
         Ok(input) => input,
         Err(error) => return bad_request(error),
     };
@@ -511,18 +494,14 @@ fn handle_delete_task(store: &TaskStore, task_id: &str) -> HttpResponse {
     }
 }
 
-fn read_task_input(request: &mut Request) -> Result<TaskInput, String> {
-    read_json_body(request)
-}
-
-fn read_json_body<T: for<'de> Deserialize<'de>>(request: &mut Request) -> Result<T, String> {
+fn read_json_body<T: DeserializeOwned>(request: &mut Request) -> Result<T, String> {
     let mut body = Vec::new();
     request
         .as_reader()
-        .take(MAX_TASK_BODY_BYTES + 1)
+        .take(MAX_REQUEST_BODY_BYTES + 1)
         .read_to_end(&mut body)
         .map_err(|error| format!("读取请求体失败：{error}"))?;
-    if body.len() as u64 > MAX_TASK_BODY_BYTES {
+    if body.len() as u64 > MAX_REQUEST_BODY_BYTES {
         return Err("请求体超过 1 MiB".to_owned());
     }
     serde_json::from_slice(&body).map_err(|error| format!("JSON 请求体无效：{error}"))

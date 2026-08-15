@@ -538,15 +538,7 @@ fn request(
 }
 
 fn post(port: u16, path: &str, body: &str) -> std::io::Result<HttpResponse> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
-    stream.write_all(
-        format!(
-            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        )
-        .as_bytes(),
-    )?;
-    read_response(&mut stream)
+    request(port, "POST", path, Some(body))
 }
 
 fn read_response(stream: &mut TcpStream) -> std::io::Result<HttpResponse> {
