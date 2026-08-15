@@ -13,3 +13,13 @@ The five canonical triage roles, using their default label strings. See `docs/ag
 ### Domain docs
 
 Single-context — `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+## Commit trailer
+
+Agent-authored commits end with exactly this trailer — no other spelling:
+
+```
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+
+History before 2026-08-15 also contains `Claude Fable 5`; that variant is retired, old commits stay as they are.

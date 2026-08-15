@@ -8,7 +8,8 @@
 [ADR-0009](0009-m1-mapping-precheck-rules.md)（按名字对齐、预检时点）、
 [ADR-0010](0010-http-protocol-contract.md)（§3.1 与 §8 由本 ADR 订正/落实）、
 [ADR-0012](0012-run-lifecycle-and-state-authority.md)（状态只在 source 进程内存）、
-[ADR-0017](0017-run-log-format-and-contract.md)（日志形态；**§9 由它订正**）
+[ADR-0017](0017-run-log-format-and-contract.md)（日志形态；**§9 由它订正**）、
+[ADR-0019](0019-m2-source-process-topology.md)（**M2 形态，订正本 ADR §3、§5、§6、§7、§8、§9**）
 
 ## 背景
 
@@ -210,6 +211,10 @@ SQL 形状问题在 sink 侧不可表示，不存在「本可以合并却分了�
 - **凭据明文**是一个明知的缺口，随 V1「不做鉴权」一起被接受；引入鉴权时两者一并重开。
 
 ## 时效
+
+> **已重开并被订正：[ADR-0019](0019-m2-source-process-topology.md)（2026-08-15，来源 #48）。**
+> 被订正的是 **§3、§5、§6、§7、§8、§9**；**§1（对连接配置）、§2、§2.1、§4 一字不改仍然有效**。
+> 逐节对照见 ADR-0019「后果」。下面这三条时效条目保留为历史记录。
 
 - 第 3 节的 one-shot 形态在 **M2 引入 Web UI 与 SQL 构建器时整体重开**：届时 source 变长驻，
   ADR-0012 那五个状态会第一次真的有外部查询者，任务定义也会从文件挪进某种存储。
