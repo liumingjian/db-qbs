@@ -50,7 +50,10 @@ export function ErrorCodeTag({
   httpStatus?: number;
   conclusion: string;
 }) {
-  const category = httpStatus === undefined || httpStatus >= 500 ? "is-internal" : "is-rejected";
+  const category =
+    httpStatus === undefined || httpStatus >= 500
+      ? "is-internal"
+      : "is-rejected";
   return (
     <span className="error-summary">
       <span>{conclusion}</span>
@@ -64,7 +67,13 @@ export function ErrorCodeTag({
   );
 }
 
-export function SensitiveValue({ column, value }: { column?: string; value?: string }) {
+export function SensitiveValue({
+  column,
+  value,
+}: {
+  column?: string;
+  value?: string;
+}) {
   const [revealed, setRevealed] = useState(false);
   const RevealIcon = revealed ? EyeOff : Eye;
   return (

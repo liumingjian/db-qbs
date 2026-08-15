@@ -21,6 +21,13 @@ const ERROR_HTTP_STATUS: Readonly<Record<string, number>> = {
   BAD_REQUEST: 400,
 };
 
+const UNKNOWN_CONCLUSIONS: Readonly<
+  Record<NonNullable<RunHistory["unknown_reason"]>, string>
+> = {
+  PROCESS_DISAPPEARED: "进程消失，无终态日志",
+  SERVICE_RESTARTED: "服务重启，结局未知",
+};
+
 export function runIdPresentation(history: RunHistory): string {
   return history.run_id ?? "未发起，目标端不知道这次运行";
 }
@@ -29,10 +36,7 @@ export function historyPresentation(history: RunHistory): HistoryPresentation {
   if (history.unknown_reason !== null) {
     return {
       kind: "unknown",
-      conclusion:
-        history.unknown_reason === "PROCESS_DISAPPEARED"
-          ? "进程消失，无终态日志"
-          : "服务重启，结局未知",
+      conclusion: UNKNOWN_CONCLUSIONS[history.unknown_reason],
       terminalEffect: null,
       error: null,
     };
@@ -43,9 +47,7 @@ export function historyPresentation(history: RunHistory): HistoryPresentation {
     code === null
       ? null
       : { code, httpStatus: ERROR_HTTP_STATUS[code] ?? null };
-  const terminalEffect = hasSinkTombstone(history)
-    ? history.target_table_effect as "SWAPPED" | "DISCARDED"
-    : null;
+  const terminalEffect = sinkTerminalEffect(history);
 
   if (history.outcome === null) {
     return {
@@ -72,11 +74,16 @@ export function historyPresentation(history: RunHistory): HistoryPresentation {
   };
 }
 
-function hasSinkTombstone(history: RunHistory): boolean {
-  return (
-    history.run_id !== null &&
-    history.sink_code !== "PRECHECK_FAILED" &&
-    (history.target_table_effect === "SWAPPED" ||
-      history.target_table_effect === "DISCARDED")
-  );
+function sinkTerminalEffect(
+  history: RunHistory,
+): HistoryPresentation["terminalEffect"] {
+  if (history.run_id === null || history.sink_code === "PRECHECK_FAILED") {
+    return null;
+  }
+
+  const effect = history.target_table_effect;
+  if (effect === "SWAPPED" || effect === "DISCARDED") {
+    return effect;
+  }
+  return null;
 }

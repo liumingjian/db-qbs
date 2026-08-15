@@ -43,53 +43,66 @@ function history(overrides: Partial<RunHistory>): RunHistory {
 }
 
 describe("run history presentation", () => {
-  it("keeps both unknown outcomes distinct from a protocol failure", () => {
-    expect(
-      historyPresentation(
-        history({
-          unknown_reason: "PROCESS_DISAPPEARED",
-          target_table_effect: null,
-          sink_code: null,
-          message: "进程消失，无终态日志",
-        }),
-      ),
-    ).toEqual({
-      kind: "unknown",
-      conclusion: "进程消失，无终态日志",
-      terminalEffect: null,
-      error: null,
-    });
-    expect(
-      historyPresentation(
-        history({
-          unknown_reason: "SERVICE_RESTARTED",
-          target_table_effect: null,
-          sink_code: null,
-          message: "服务重启，结局未知",
-        }),
-      ),
-    ).toEqual({
-      kind: "unknown",
-      conclusion: "服务重启，结局未知",
-      terminalEffect: null,
-      error: null,
-    });
+  it.each([
+    ["PROCESS_DISAPPEARED", "进程消失，无终态日志"],
+    ["SERVICE_RESTARTED", "服务重启，结局未知"],
+  ] as const)(
+    "presents %s as an unknown outcome without sink status",
+    (unknownReason, conclusion) => {
+      expect(
+        historyPresentation(
+          history({
+            unknown_reason: unknownReason,
+            target_table_effect: null,
+            sink_code: null,
+            message: conclusion,
+          }),
+        ),
+      ).toEqual({
+        kind: "unknown",
+        conclusion,
+        terminalEffect: null,
+        error: null,
+      });
+    },
+  );
+
+  it("presents a protocol failure with its terminal effect and HTTP status", () => {
     expect(historyPresentation(baseHistory)).toEqual({
       kind: "failed",
       conclusion: "目标端：门禁计数不一致",
       terminalEffect: "DISCARDED",
       error: { code: "VERIFY_FAILED", httpStatus: 409 },
     });
+  });
+
+  it("does not present a source error as a sink protocol error", () => {
     expect(
       historyPresentation(
         history({ source_code: "1555", sink_code: null }),
       ).error,
     ).toBeNull();
+  });
+
+  it("keeps an unmapped sink error code without inventing an HTTP status", () => {
     expect(
       historyPresentation(
         history({ sink_code: "STAGING_CREATE_FAILED" }),
       ).error,
     ).toEqual({ code: "STAGING_CREATE_FAILED", httpStatus: null });
+  });
+
+  it.each([
+    { run_id: null, sink_code: "VERIFY_FAILED" },
+    { run_id: "run-1", sink_code: "PRECHECK_FAILED" },
+  ] satisfies Array<Partial<RunHistory>>)(
+    "does not invent a sink tombstone for $sink_code without a created run",
+    (overrides) => {
+      expect(historyPresentation(history(overrides)).terminalEffect).toBeNull();
+    },
+  );
+
+  it("explains a missing run id", () => {
     expect(runIdPresentation(history({ run_id: null }))).toBe(
       "未发起，目标端不知道这次运行",
     );
