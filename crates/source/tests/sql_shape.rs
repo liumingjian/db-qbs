@@ -1,4 +1,4 @@
-use db_qbs_source::{precheck_sql, TaskConfig};
+use db_qbs_source::{precheck_sql, sql_shape_report, TaskConfig};
 
 #[test]
 fn precheck_reports_all_shape_violations_together() {
@@ -41,6 +41,27 @@ fn valid_oracle_dblink_subquery_shape_passes() {
     );
 
     assert_eq!(precheck_sql(&task), Ok(()));
+}
+
+#[test]
+fn shape_report_marks_uninspectable_rules_failed_in_stable_order() {
+    let checks = sql_shape_report(&task(""));
+    let results = checks
+        .iter()
+        .map(|check| (check.rule, check.passed))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        results,
+        [
+            ("business_date_range", false),
+            ("no_additional_predicates", false),
+            ("named_projection", false),
+            ("determinate_projection", false),
+            ("no_relative_time_functions", true),
+            ("matching_date_columns", true),
+        ]
+    );
 }
 
 #[test]

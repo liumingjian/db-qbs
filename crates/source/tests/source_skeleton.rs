@@ -215,6 +215,87 @@ fn non_loopback_listen_emits_the_required_warning() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+#[test]
+fn column_fetch_shape_failure_reports_all_checks_without_a_run_code() {
+    let directory = temp_directory();
+    let port = unused_port();
+    let config = write_config(&directory, &format!("127.0.0.1:{port}"));
+    let mut child = start_source(&config);
+    wait_for_tasks(port, &mut child);
+
+    let response = post(
+        port,
+        "/api/columns",
+        r#"{
+          "source_sql":"SELECT a.id AS ID, a.biz_day AS BIZ_DAY FROM orders a WHERE a.biz_day >= TO_DATE(:biz_date,'YYYY-MM-DD') AND a.biz_day < TO_DATE(:biz_date,'YYYY-MM-DD') + 1",
+          "source_date_col":"BIZ_DAY",
+          "target_table":"ORDERS",
+          "target_date_col":"OTHER_DAY"
+        }"#,
+    )
+    .unwrap();
+
+    assert_eq!(response.status, 422);
+    let body: Value = serde_json::from_str(&response.body).unwrap();
+    assert_eq!(body["kind"], "sql_shape");
+    assert!(body.get("code").is_none());
+    assert!(body.get("run_id").is_none());
+    let checks = body["checks"].as_array().unwrap();
+    assert_eq!(checks.len(), 6);
+    assert_eq!(
+        checks
+            .iter()
+            .filter(|check| check["passed"] == true)
+            .count(),
+        5
+    );
+    assert!(checks.iter().all(|check| check.get("code").is_none()));
+
+    assert_success(&terminate(child));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn column_fetch_oracle_failure_does_not_create_a_run_touch_sink_or_write_storage() {
+    let directory = temp_directory();
+    let port = unused_port();
+    let sink = TcpListener::bind("127.0.0.1:0").unwrap();
+    sink.set_nonblocking(true).unwrap();
+    let sink_url = format!("http://{}", sink.local_addr().unwrap());
+    let config = write_config_with_oracle(
+        &directory,
+        &format!("127.0.0.1:{port}"),
+        &sink_url,
+        "/db-qbs-missing-oracle-client",
+    );
+    let mut child = start_source(&config);
+    wait_for_tasks(port, &mut child);
+    let files_before = directory_entries(&directory);
+
+    let response = post(
+        port,
+        "/api/columns",
+        r#"{
+          "source_sql":"SELECT a.id AS ID, a.biz_day AS BIZ_DAY FROM missing_orders a WHERE a.biz_day >= TO_DATE(:biz_date,'YYYY-MM-DD') AND a.biz_day < TO_DATE(:biz_date,'YYYY-MM-DD') + 1",
+          "source_date_col":"BIZ_DAY",
+          "target_table":"ORDERS",
+          "target_date_col":"BIZ_DAY"
+        }"#,
+    )
+    .unwrap();
+
+    assert_eq!(response.status, 502);
+    let body: Value = serde_json::from_str(&response.body).unwrap();
+    assert_eq!(body["kind"], "oracle");
+    assert!(body.get("run_id").is_none());
+    assert_eq!(directory_entries(&directory), files_before);
+    let sink_error = sink.accept().unwrap_err();
+    assert_eq!(sink_error.kind(), std::io::ErrorKind::WouldBlock);
+
+    assert_success(&terminate(child));
+    fs::remove_dir_all(directory).unwrap();
+}
+
 fn start_source(config: &Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_db-qbs-source"))
         .args(["--config"])
@@ -267,6 +348,22 @@ fn request(
         )
         .as_bytes(),
     )?;
+    read_response(&mut stream)
+}
+
+fn post(port: u16, path: &str, body: &str) -> std::io::Result<HttpResponse> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+    stream.write_all(
+        format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .as_bytes(),
+    )?;
+    read_response(&mut stream)
+}
+
+fn read_response(stream: &mut TcpStream) -> std::io::Result<HttpResponse> {
     let mut raw = String::new();
     stream.read_to_string(&mut raw)?;
     let (head, body) = raw.split_once("\r\n\r\n").unwrap();
@@ -298,6 +395,15 @@ fn assert_task_fields(task: &Value) {
 }
 
 fn write_config(directory: &Path, listen: &str) -> PathBuf {
+    write_config_with_oracle(directory, listen, "http://127.0.0.1:18080", "/opt/oracle")
+}
+
+fn write_config_with_oracle(
+    directory: &Path,
+    listen: &str,
+    sink_base_url: &str,
+    oracle_client_lib_dir: &str,
+) -> PathBuf {
     let path = directory.join("source.toml");
     fs::write(
         &path,
@@ -305,8 +411,8 @@ fn write_config(directory: &Path, listen: &str) -> PathBuf {
             "oracle_connect_string = \"//oracle:1521/XE\"\n\
              oracle_username = \"source\"\n\
              oracle_password = \"secret\"\n\
-             oracle_client_lib_dir = \"/opt/oracle\"\n\
-             sink_base_url = \"http://127.0.0.1:18080\"\n\
+             oracle_client_lib_dir = \"{oracle_client_lib_dir}\"\n\
+             sink_base_url = \"{sink_base_url}\"\n\
              listen = \"{listen}\"\n\
              data_dir = \"{}\"\n",
             directory.display(),
@@ -314,6 +420,15 @@ fn write_config(directory: &Path, listen: &str) -> PathBuf {
     )
     .unwrap();
     path
+}
+
+fn directory_entries(directory: &Path) -> Vec<PathBuf> {
+    let mut entries = fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
 }
 
 fn unused_port() -> u16 {

@@ -16,6 +16,7 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 
 mod oracle_source;
 mod protocol;
+mod target_ddl;
 mod task_store;
 mod transfer;
 
@@ -26,6 +27,7 @@ pub use protocol::{
     SinkClient, SinkError, SinkErrorKind, SinkGateDetails, SinkPrecheckIssue, SourceColumn,
     Terminal,
 };
+pub use target_ddl::{generate_target_ddl, TargetDdlError};
 pub use task_store::{Task, TaskInput, TaskStore};
 pub use transfer::{
     generate_run_id, run_transfer, RowSource, RunStage, SourceReadError, TransferEvent,
@@ -146,6 +148,59 @@ pub struct ShapeProblem {
     pub message: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct ShapeCheck {
+    pub rule: &'static str,
+    pub passed: bool,
+    pub message: &'static str,
+}
+
+struct ShapeRule {
+    name: &'static str,
+    problem_code: &'static str,
+    message: &'static str,
+    requires_inspectable_statement: bool,
+}
+
+const SHAPE_RULES: [ShapeRule; 6] = [
+    ShapeRule {
+        name: "business_date_range",
+        problem_code: "invalid_date_predicate",
+        message: "WHERE must contain the exact half-open :biz_date range on source_date_col",
+        requires_inspectable_statement: true,
+    },
+    ShapeRule {
+        name: "no_additional_predicates",
+        problem_code: "additional_where_predicate",
+        message: "WHERE must not contain predicates other than the business-date range",
+        requires_inspectable_statement: true,
+    },
+    ShapeRule {
+        name: "named_projection",
+        problem_code: "unnamed_projection",
+        message: "every selected column must be explicitly named",
+        requires_inspectable_statement: true,
+    },
+    ShapeRule {
+        name: "determinate_projection",
+        problem_code: "indeterminate_projection",
+        message: "selected expressions must have statically determinate precision",
+        requires_inspectable_statement: true,
+    },
+    ShapeRule {
+        name: "no_relative_time_functions",
+        problem_code: "relative_time_function",
+        message: "source SQL must not use relative time functions such as SYSDATE",
+        requires_inspectable_statement: false,
+    },
+    ShapeRule {
+        name: "matching_date_columns",
+        problem_code: "date_column_mismatch",
+        message: "target_date_col must equal source_date_col ignoring case",
+        requires_inspectable_statement: false,
+    },
+];
+
 impl ShapeProblem {
     const fn new(code: &'static str, message: &'static str) -> Self {
         Self { code, message }
@@ -208,6 +263,25 @@ pub fn precheck_sql(task: &TaskConfig) -> Result<(), Vec<ShapeProblem>> {
     } else {
         Err(problems)
     }
+}
+
+pub fn sql_shape_report(task: &TaskConfig) -> Vec<ShapeCheck> {
+    let problems = precheck_sql(task).err().unwrap_or_default();
+    let statement_is_inspectable = !problems
+        .iter()
+        .any(|problem| matches!(problem.code, "invalid_sql" | "unsupported_statement"));
+
+    SHAPE_RULES
+        .iter()
+        .map(|rule| ShapeCheck {
+            rule: rule.name,
+            passed: (!rule.requires_inspectable_statement || statement_is_inspectable)
+                && !problems
+                    .iter()
+                    .any(|problem| problem.code == rule.problem_code),
+            message: rule.message,
+        })
+        .collect()
 }
 
 fn unsupported_statement_problem() -> ShapeProblem {

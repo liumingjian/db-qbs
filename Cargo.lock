@@ -339,10 +339,12 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "db-qbs-shared",
+ "db-qbs-source",
  "mysql",
  "regex",
  "serde",
  "serde_json",
+ "sqlparser",
  "tiny_http",
  "toml",
 ]

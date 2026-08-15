@@ -8,7 +8,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
-use db_qbs_source::{load_source_config, SourceConfig, TaskInput, TaskStore};
+use db_qbs_source::{
+    generate_target_ddl, load_source_config, sql_shape_report, OracleRowSource, SourceConfig,
+    TaskConfig, TaskInput, TaskStore,
+};
 use serde::Serialize;
 use serde_json::json;
 use signal_hook::consts::SIGTERM;
@@ -82,7 +85,7 @@ fn serve(config: SourceConfig) -> Result<(), String> {
             .recv_timeout(Duration::from_millis(100))
             .map_err(|error| format!("接收 HTTP 请求失败：{error}"))?
         {
-            handle_request(request, &store);
+            handle_request(request, &config, &store);
         }
     }
     Ok(())
@@ -98,8 +101,8 @@ fn is_loopback(listen: &str) -> bool {
     first.ip().is_loopback() && addresses.all(|address| address.ip().is_loopback())
 }
 
-fn handle_request(mut request: Request, store: &TaskStore) {
-    let response = route_request(&mut request, store);
+fn handle_request(mut request: Request, config: &SourceConfig, store: &TaskStore) {
+    let response = route_request(&mut request, config, store);
 
     if let Err(error) = request.respond(response) {
         emit(
@@ -110,9 +113,13 @@ fn handle_request(mut request: Request, store: &TaskStore) {
     }
 }
 
-fn route_request(request: &mut Request, store: &TaskStore) -> HttpResponse {
+fn route_request(request: &mut Request, config: &SourceConfig, store: &TaskStore) -> HttpResponse {
     let method = request.method().clone();
     let path = request.url().to_owned();
+
+    if method == Method::Post && path == "/api/columns" {
+        return handle_column_fetch(request, config);
+    }
 
     if path == "/api/tasks" {
         return match method {
@@ -226,6 +233,64 @@ fn json_response(status: u16, value: &impl Serialize) -> HttpResponse {
         .with_header(content_type)
 }
 
+fn handle_column_fetch(request: &mut Request, config: &SourceConfig) -> HttpResponse {
+    let mut body = String::new();
+    if let Err(error) = request.as_reader().read_to_string(&mut body) {
+        return json_response(
+            400,
+            &json!({ "kind": "request", "message": format!("could not read request: {error}") }),
+        );
+    }
+    let task: TaskConfig = match serde_json::from_str(&body) {
+        Ok(task) => task,
+        Err(error) => {
+            return json_response(
+                400,
+                &json!({ "kind": "request", "message": format!("invalid JSON request: {error}") }),
+            )
+        }
+    };
+
+    let checks = sql_shape_report(&task);
+    if checks.iter().any(|check| !check.passed) {
+        return json_response(
+            422,
+            &json!({
+                "kind": "sql_shape",
+                "message": "source-local SQL shape precheck failed",
+                "checks": checks,
+            }),
+        );
+    }
+
+    let columns = match OracleRowSource::describe(config, &task) {
+        Ok(columns) => columns,
+        Err(error) => {
+            return json_response(
+                502,
+                &json!({
+                    "kind": "oracle",
+                    "message": error.user_message(),
+                    "oracle_code": error.oracle_code,
+                }),
+            )
+        }
+    };
+    match generate_target_ddl(&columns, &task.target_table, &task.target_date_col) {
+        Ok(target_ddl) => json_response(
+            200,
+            &json!({ "columns": columns, "target_ddl": target_ddl }),
+        ),
+        Err(error) => json_response(
+            422,
+            &json!({
+                "kind": "target_ddl",
+                "message": error.message,
+                "column": error.column,
+            }),
+        ),
+    }
+}
 fn emit(level: LogLevel, event: LogEvent, fields: serde_json::Value) {
     let stdout = io::stdout();
     let mut writer = stdout.lock();

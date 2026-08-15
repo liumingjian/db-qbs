@@ -4,6 +4,8 @@ use oracle::{Connection, InitParams, ResultSet, Row};
 
 use crate::{RowSource, SourceColumn, SourceConfig, SourceReadError, TaskConfig, FETCH_ARRAY_SIZE};
 
+const DESCRIBE_BIZ_DATE: &str = "0001-01-01";
+
 pub struct OracleRowSource {
     rows: ResultSet<'static, Row>,
     columns: Vec<SourceColumn>,
@@ -23,35 +25,8 @@ impl OracleRowSource {
         task: &TaskConfig,
         biz_date: &str,
     ) -> Result<Self, SourceReadError> {
-        std::env::set_var("NLS_LANG", ".AL32UTF8");
-        let mut init = InitParams::new();
-        init.oracle_client_lib_dir(&config.oracle_client_lib_dir)
-            .and_then(|params| params.default_driver_name("db-qbs-source : 0.1.0"))
-            .and_then(|params| params.init())
-            .map_err(oracle_error)?;
-
-        let connection = Connection::connect(
-            &config.oracle_username,
-            &config.oracle_password,
-            &config.oracle_connect_string,
-        )
-        .map_err(oracle_error)?;
-        let statement = connection
-            .statement(&task.source_sql)
-            .fetch_array_size(FETCH_ARRAY_SIZE)
-            .build()
-            .map_err(oracle_error)?;
-        let rows = statement
-            .into_result_set_named(&[("biz_date", &biz_date)])
-            .map_err(oracle_error)?;
-
-        let mut columns = Vec::with_capacity(rows.column_info().len());
-        let mut value_kinds = Vec::with_capacity(rows.column_info().len());
-        for info in rows.column_info() {
-            let (column, value_kind) = describe_column(info.name(), info.oracle_type());
-            columns.push(column);
-            value_kinds.push(value_kind);
-        }
+        let rows = open_result_set(config, task, biz_date)?;
+        let (columns, value_kinds) = describe_columns(rows.column_info());
 
         Ok(Self {
             rows,
@@ -59,6 +34,51 @@ impl OracleRowSource {
             value_kinds,
         })
     }
+
+    pub fn describe(
+        config: &SourceConfig,
+        task: &TaskConfig,
+    ) -> Result<Vec<SourceColumn>, SourceReadError> {
+        let rows = open_result_set(config, task, DESCRIBE_BIZ_DATE)?;
+        let (columns, _) = describe_columns(rows.column_info());
+        Ok(columns)
+    }
+}
+
+fn open_result_set(
+    config: &SourceConfig,
+    task: &TaskConfig,
+    biz_date: &str,
+) -> Result<ResultSet<'static, Row>, SourceReadError> {
+    std::env::set_var("NLS_LANG", ".AL32UTF8");
+    let mut init = InitParams::new();
+    init.oracle_client_lib_dir(&config.oracle_client_lib_dir)
+        .and_then(|params| params.default_driver_name("db-qbs-source : 0.1.0"))
+        .and_then(|params| params.init())
+        .map_err(oracle_error)?;
+
+    let connection = Connection::connect(
+        &config.oracle_username,
+        &config.oracle_password,
+        &config.oracle_connect_string,
+    )
+    .map_err(oracle_error)?;
+    let statement = connection
+        .statement(&task.source_sql)
+        .fetch_array_size(FETCH_ARRAY_SIZE)
+        .build()
+        .map_err(oracle_error)?;
+    let rows = statement
+        .into_result_set_named(&[("biz_date", &biz_date)])
+        .map_err(oracle_error)?;
+    Ok(rows)
+}
+
+fn describe_columns(infos: &[oracle::ColumnInfo]) -> (Vec<SourceColumn>, Vec<ValueKind>) {
+    infos
+        .iter()
+        .map(|info| describe_column(info.name(), info.oracle_type()))
+        .unzip()
 }
 
 impl RowSource for OracleRowSource {
