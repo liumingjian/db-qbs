@@ -93,8 +93,8 @@ history_count() {
   sqlite3 "$SOURCE_DATA/db-qbs.sqlite3" 'SELECT COUNT(*) FROM run_history;'
 }
 
-sink_component_count() {
-  compose exec -T client sh -c "test ! -f $SINK_LOG || cat $SINK_LOG" |
+sink_log_record_count() {
+  compose exec -T client sh -c 'test ! -f "$1" || cat "$1"' _ "$SINK_LOG" |
     jq -s '[.[] | select(.component == "sink")] | length'
 }
 
@@ -271,9 +271,9 @@ scenario_a1() {
 
 scenario_a2() {
   start_source real || return 1
-  local before_history after_history before_sink after_sink task_id payload columns expected_columns
+  local before_history after_history before_sink_records after_sink_records task_id payload columns expected_columns
   before_history=$(history_count) || return 1
-  before_sink=$(sink_component_count) || return 1
+  before_sink_records=$(sink_log_record_count) || return 1
   task_id=$(create_task "A2 取列" "$(normal_sql)") || return 1
   payload=$(jq -nc --arg sql "$(normal_sql)" '{source_sql:$sql,source_date_col:"D_BIZ",target_table:"M1_NARROW",target_date_col:"D_BIZ"}')
   api POST /api/columns "$payload" || return 1
@@ -284,8 +284,8 @@ scenario_a2() {
   assert_eq "run_id absent" false "$(jq 'has("run_id")' <<<"$API_BODY")" || return 1
   after_history=$(history_count) || return 1
   assert_eq "history rows unchanged" "$before_history" "$after_history" || return 1
-  after_sink=$(sink_component_count) || return 1
-  assert_eq "component=sink new log lines" 0 "$((after_sink - before_sink))" || return 1
+  after_sink_records=$(sink_log_record_count) || return 1
+  assert_eq "component=sink new log lines" 0 "$((after_sink_records - before_sink_records))" || return 1
   echo "task_id: $task_id"
 }
 
@@ -303,8 +303,8 @@ scenario_a3() {
 
 scenario_a4() {
   start_source real || return 1
-  local before after payload missing_table_sql
-  before=$(history_count) || return 1
+  local before_history after_history payload missing_table_sql
+  before_history=$(history_count) || return 1
   missing_table_sql="SELECT n.D_BIZ AS D_BIZ FROM table_that_does_not_exist n WHERE n.D_BIZ >= TO_DATE(:biz_date,'YYYY-MM-DD') AND n.D_BIZ < TO_DATE(:biz_date,'YYYY-MM-DD') + 1"
   payload=$(jq -nc --arg sql "$missing_table_sql" '{source_sql:$sql,source_date_col:"D_BIZ",target_table:"M1_NARROW",target_date_col:"D_BIZ"}') || return 1
   api POST /api/columns "$payload" || return 1
@@ -312,50 +312,50 @@ scenario_a4() {
   assert_eq "Oracle failure kind" oracle "$(jq -r '.kind' <<<"$API_BODY")" || return 1
   assert_eq "Oracle missing table code" 942 "$(jq -r '.oracle_code' <<<"$API_BODY")" || return 1
   assert_eq "Oracle failure run_id absent" false "$(jq 'has("run_id")' <<<"$API_BODY")" || return 1
-  after=$(history_count) || return 1
-  assert_eq "Oracle failure history unchanged" "$before" "$after" || return 1
+  after_history=$(history_count) || return 1
+  assert_eq "Oracle failure history unchanged" "$before_history" "$after_history" || return 1
   echo "actual response: $API_BODY"
 }
 
 scenario_a5() {
   start_source pause-committing || return 1
-  local task_id record run_id live_projection terminal_marker terminal_projection history
+  local task_id run_record_id run_id live_projection terminal_marker terminal_projection history_projection
   task_id=$(create_task "A5 正常 10 万行" "$(normal_sql)") || return 1
-  record=$(start_task_run "$task_id") || return 1
-  wait_for_run "$record" '.live == true and .stage == "COMMITTING"' || return 1
+  run_record_id=$(start_task_run "$task_id") || return 1
+  wait_for_run "$run_record_id" '.live == true and .stage == "COMMITTING"' || return 1
   live_projection=$(jq -c '{seq,rows_pushed,bytes,ms}' <<<"$API_BODY") || return 1
   echo "live_projection: $live_projection"
   touch "$WORK_ROOT/release-child" || return 1
-  wait_for_run "$record" '.live == false' || return 1
+  wait_for_run "$run_record_id" '.live == false' || return 1
   assert_eq "terminal effect" SWAPPED "$(jq -r '.target_table_effect' <<<"$API_BODY")" || return 1
   assert_eq "source rows" 100000 "$(jq -r '.source_rows' <<<"$API_BODY")" || return 1
   run_id=$(jq -r '.run_id' <<<"$API_BODY") || return 1
-  history=$(jq -c '{stage,seq,rows_pushed,bytes,ms,last_ts}' <<<"$API_BODY") || return 1
+  history_projection=$(jq -c '{stage,seq,rows_pushed,bytes,ms,last_ts}' <<<"$API_BODY") || return 1
   terminal_marker=$(jq -sc --arg run "$run_id" '
     [.[] | select(.run_id == $run and .event == "run_finished")] | last |
     {stage,last_ts:.ts}' "$SOURCE_LOG") || return 1
   terminal_projection=$(jq -nc --argjson live "$live_projection" --argjson terminal "$terminal_marker" '$live + $terminal') || return 1
   echo "terminal_projection: $terminal_projection"
-  echo "projection-versus-history: $(jq -nc --argjson projection "$terminal_projection" --argjson history "$history" '{projection:$projection,history:$history}')"
-  assert_eq "six aggregate scalars" "$(jq -S . <<<"$terminal_projection")" "$(jq -S . <<<"$history")" || return 1
-  A5_RECORD=$record
+  echo "projection-versus-history: $(jq -nc --argjson projection "$terminal_projection" --argjson history "$history_projection" '{projection:$projection,history:$history}')"
+  assert_eq "six aggregate scalars" "$(jq -S . <<<"$terminal_projection")" "$(jq -S . <<<"$history_projection")" || return 1
+  A5_RECORD=$run_record_id
 }
 
 scenario_a6() {
   start_source real || return 1
-  local task_id record before_sink after_sink
-  before_sink=$(sink_component_count) || return 1
+  local task_id run_record_id before_sink_records after_sink_records
+  before_sink_records=$(sink_log_record_count) || return 1
   task_id=$(create_task "A6 形状失败" "SELECT * FROM t_m1_narrow") || return 1
-  record=$(start_task_run "$task_id") || return 1
-  wait_for_run "$record" '.live == false' || return 1
-  assert_eq "run_record_id retained" "$record" "$(jq -r '.run_record_id' <<<"$API_BODY")" || return 1
+  run_record_id=$(start_task_run "$task_id") || return 1
+  wait_for_run "$run_record_id" '.live == false' || return 1
+  assert_eq "run_record_id retained" "$run_record_id" "$(jq -r '.run_record_id' <<<"$API_BODY")" || return 1
   assert_eq "run_id is null" null "$(jq -r '.run_id' <<<"$API_BODY")" || return 1
   assert_eq "run shape check count" 6 "$(jq '.shape_checks | length' <<<"$API_BODY")" || return 1
   assert_eq "run shape report has failure" true "$(jq '[.shape_checks[].passed] | any(. == false)' <<<"$API_BODY")" || return 1
   api GET "/api/runs?task_id=$task_id" || return 1
-  assert_eq "history row present" true "$(jq --arg record "$record" 'any(.[]; .run_record_id == $record)' <<<"$API_BODY")" || return 1
-  after_sink=$(sink_component_count) || return 1
-  assert_eq "component=sink new log lines" 0 "$((after_sink - before_sink))"
+  assert_eq "history row present" true "$(jq --arg record "$run_record_id" 'any(.[]; .run_record_id == $record)' <<<"$API_BODY")" || return 1
+  after_sink_records=$(sink_log_record_count) || return 1
+  assert_eq "component=sink new log lines" 0 "$((after_sink_records - before_sink_records))"
 }
 
 scenario_a7() {

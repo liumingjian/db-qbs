@@ -74,7 +74,7 @@ for evidence in 'expected_columns' 'run_id' 'history' 'component=sink'; do
     exit 1
   }
 done
-grep -Fq 'sink_component_count' <<<"$a2_body" || {
+grep -Fq 'sink_log_record_count' <<<"$a2_body" || {
   echo "A2 must count component=sink JSON log records" >&2
   exit 1
 }
@@ -88,7 +88,7 @@ for evidence in 'pause-committing' 'live_projection' 'release-child' 'terminal_p
 done
 
 a6_body=$(sed -n '/^scenario_a6()/,/^}/p' "$runner")
-grep -Fq 'sink_component_count' <<<"$a6_body" || {
+grep -Fq 'sink_log_record_count' <<<"$a6_body" || {
   echo "A6 must prove that a run shape failure does not reach sink" >&2
   exit 1
 }
@@ -116,8 +116,14 @@ for file in \
   m2-visual-walkthrough.md; do
   [[ -f "$file" ]] || { echo "missing $file" >&2; exit 1; }
 done
-python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(path).read_text()) for path in sys.argv[1:]]' \
-  acceptance/m2-source-run-wrapper.py acceptance/commit-drop-proxy.py
+python3 - acceptance/m2-source-run-wrapper.py acceptance/commit-drop-proxy.py <<'PY'
+import ast
+import pathlib
+import sys
+
+for path in sys.argv[1:]:
+    ast.parse(pathlib.Path(path).read_text())
+PY
 
 grep -Fq 'docs/design-system/README.md' README.md
 grep -Fq 'tokens.css' README.md
