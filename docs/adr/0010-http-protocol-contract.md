@@ -203,6 +203,7 @@ M1 分类码闭集：
 | `RUN_UNKNOWN` | 404 | |
 | `VERIFY_FAILED` | 409 | `details` 带两端行数（口径归 [#29](https://github.com/liumingjian/db-qbs/issues/29)） |
 | `SWAP_FAILED` | 500 | |
+| `SWAP_TARGET_BUSY` | 409 | 2026-08-15 增补，见下（[ADR-0020](0020-concurrent-run-mutual-exclusion.md)） |
 | `INTERNAL_PRECHECK_ESCAPE` | 500 | 见下 |
 | `INTERNAL_ASSERTION_FAILED` | 500 | 2026-08-15 增补，见下 |
 | `PAYLOAD_TOO_LARGE` | 413 | |
@@ -221,6 +222,15 @@ M1 分类码闭集：
 > 共用一个码会让排障从第一行就走错方向。故新增 `INTERNAL_ASSERTION_FAILED` 承接后一类，
 > `INTERNAL_PRECHECK_ESCAPE` 回归 `Note 1265` 哨兵本义。
 > **闭集字段只增不删**：这是首次增码，增码必须像本条一样写回本表。
+
+> **2026-08-15 增补：`SWAP_TARGET_BUSY`，闭集 11 → 12（[ADR-0020](0020-concurrent-run-mutual-exclusion.md)）。**
+> 切换事务里的 `DELETE` 会锁住目标表当日范围（目标表业务日期列无索引时锁全表），
+> 同一张目标表上并发的两个切换事务因此会锁等待超时（errno 1205）或死锁（errno 1213）。
+> 这两类错误原样透传就是一条从第一行指错方向的报错——**它既不是数据错误、也不是环境故障，
+> 而是「另一个 run 正占着这张表」**。故 sink 在切换事务中捕获这两个 errno，
+> 映射为 `SWAP_TARGET_BUSY`（409），不与 `SWAP_FAILED`（500）混用；
+> `details` 带 `target_table` 与底层 errno，message 明写「重跑即可」。**不自动重试**，
+> 重试归 ADR-0018。M2 只增这一个码，报文形状与时序一字不改。
 
 #### 7.1 非常规时序的响应矩阵
 
