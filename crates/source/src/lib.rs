@@ -16,6 +16,7 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 
 mod oracle_source;
 mod protocol;
+mod task_store;
 mod transfer;
 
 pub use db_qbs_shared::BatchPayload;
@@ -25,6 +26,7 @@ pub use protocol::{
     SinkClient, SinkError, SinkErrorKind, SinkGateDetails, SinkPrecheckIssue, SourceColumn,
     Terminal,
 };
+pub use task_store::{Task, TaskInput, TaskStore};
 pub use transfer::{
     generate_run_id, run_transfer, RowSource, RunStage, SourceReadError, TransferEvent,
     TransferFailure, TransferRequest, TransferSummary, BATCH_BYTE_BUDGET, BATCH_ROW_LIMIT,

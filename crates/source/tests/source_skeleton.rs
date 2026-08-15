@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,6 +11,136 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+const TASK_FIELDS: [&str; 6] = [
+    "name",
+    "source_date_col",
+    "source_sql",
+    "target_date_col",
+    "target_table",
+    "task_id",
+];
+
+#[test]
+fn task_crud_persists_stable_identity_without_exposing_credentials() {
+    let directory = temp_directory();
+    let port = unused_port();
+    let config = write_config(&directory, &format!("127.0.0.1:{port}"));
+    let mut child = start_source(&config);
+    wait_for_tasks(port, &mut child);
+
+    let created = request(
+        port,
+        "POST",
+        "/api/tasks",
+        Some(
+            r#"{"name":"持仓明细","source_sql":"SELECT ID, D_BIZ FROM HOLDINGS WHERE D_BIZ >= :biz_date AND D_BIZ < :biz_date + 1","source_date_col":"D_BIZ","target_table":"HOLDINGS","target_date_col":"D_BIZ"}"#,
+        ),
+    )
+    .unwrap();
+    assert_eq!(created.status, 201, "{}", created.body);
+    let created = json_body(&created);
+    assert_task_fields(&created);
+    let task_id = created["task_id"].as_str().unwrap().to_owned();
+    assert!(!task_id.is_empty());
+
+    let listed = get(port, "/api/tasks").unwrap();
+    assert_eq!(listed.status, 200);
+    assert_eq!(json_body(&listed), serde_json::json!([created]));
+
+    let detail = get(port, &format!("/api/tasks/{task_id}")).unwrap();
+    assert_eq!(detail.status, 200);
+    assert_eq!(json_body(&detail), created);
+
+    let updated = request(
+        port,
+        "PUT",
+        &format!("/api/tasks/{task_id}"),
+        Some(
+            r#"{"name":"持仓日明细","source_sql":"SELECT ID, AMOUNT, D_BIZ FROM HOLDINGS WHERE D_BIZ >= :biz_date AND D_BIZ < :biz_date + 1","source_date_col":"D_BIZ","target_table":"HOLDINGS_DAILY","target_date_col":"D_BIZ"}"#,
+        ),
+    )
+    .unwrap();
+    assert_eq!(updated.status, 200, "{}", updated.body);
+    let updated = json_body(&updated);
+    assert_task_fields(&updated);
+    assert_eq!(updated["task_id"], task_id);
+    assert_eq!(updated["name"], "持仓日明细");
+    assert_eq!(updated["target_table"], "HOLDINGS_DAILY");
+
+    let first_output = terminate(child);
+    assert_success(&first_output);
+    let database = directory.join("db-qbs.sqlite3");
+    assert_eq!(
+        fs::metadata(&database).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let mut restarted = start_source(&config);
+    let listed = wait_for_tasks(port, &mut restarted);
+    assert_eq!(listed.status, 200);
+    assert_eq!(json_body(&listed), serde_json::json!([updated]));
+
+    let no_config_endpoint = get(port, "/api/config").unwrap();
+    assert_eq!(no_config_endpoint.status, 404);
+    for response in [&listed, &no_config_endpoint] {
+        assert!(!response.body.contains("secret"));
+        assert!(!response.body.contains("oracle_password"));
+    }
+
+    let deleted = request(port, "DELETE", &format!("/api/tasks/{task_id}"), None).unwrap();
+    assert_eq!(deleted.status, 200, "{}", deleted.body);
+    assert_eq!(json_body(&deleted), updated);
+    assert_eq!(
+        get(port, &format!("/api/tasks/{task_id}")).unwrap().status,
+        404
+    );
+    assert_eq!(
+        json_body(&get(port, "/api/tasks").unwrap()),
+        serde_json::json!([])
+    );
+
+    assert_success(&terminate(restarted));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn task_writes_reject_client_identity_and_incomplete_definitions() {
+    let directory = temp_directory();
+    let port = unused_port();
+    let config = write_config(&directory, &format!("127.0.0.1:{port}"));
+    let mut child = start_source(&config);
+    wait_for_tasks(port, &mut child);
+
+    let client_identity = request(
+        port,
+        "POST",
+        "/api/tasks",
+        Some(
+            r#"{"task_id":"chosen-by-client","name":"持仓明细","source_sql":"SELECT ID FROM HOLDINGS","source_date_col":"D_BIZ","target_table":"HOLDINGS","target_date_col":"D_BIZ"}"#,
+        ),
+    )
+    .unwrap();
+    assert_eq!(client_identity.status, 400, "{}", client_identity.body);
+
+    let missing_name = request(
+        port,
+        "POST",
+        "/api/tasks",
+        Some(
+            r#"{"source_sql":"SELECT ID FROM HOLDINGS","source_date_col":"D_BIZ","target_table":"HOLDINGS","target_date_col":"D_BIZ"}"#,
+        ),
+    )
+    .unwrap();
+    assert_eq!(missing_name.status, 400, "{}", missing_name.body);
+    assert_eq!(
+        json_body(&get(port, "/api/tasks").unwrap()),
+        serde_json::json!([])
+    );
+
+    assert_success(&terminate(child));
+    fs::remove_dir_all(directory).unwrap();
+}
 
 #[test]
 fn tasks_endpoint_is_ready_and_sigterm_allows_same_port_restart() {
@@ -118,10 +249,23 @@ fn wait_for_tasks(port: u16, child: &mut Child) -> HttpResponse {
 }
 
 fn get(port: u16, path: &str) -> std::io::Result<HttpResponse> {
+    request(port, "GET", path, None)
+}
+
+fn request(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> std::io::Result<HttpResponse> {
+    let body = body.unwrap_or("");
     let mut stream = TcpStream::connect(("127.0.0.1", port))?;
     stream.write_all(
-        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
-            .as_bytes(),
+        format!(
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .as_bytes(),
     )?;
     let mut raw = String::new();
     stream.read_to_string(&mut raw)?;
@@ -136,6 +280,21 @@ fn get(port: u16, path: &str) -> std::io::Result<HttpResponse> {
         status,
         body: body.to_owned(),
     })
+}
+
+fn json_body(response: &HttpResponse) -> Value {
+    serde_json::from_str(&response.body).unwrap()
+}
+
+fn assert_task_fields(task: &Value) {
+    let mut fields: Vec<_> = task
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort_unstable();
+    assert_eq!(fields, TASK_FIELDS);
 }
 
 fn write_config(directory: &Path, listen: &str) -> PathBuf {
