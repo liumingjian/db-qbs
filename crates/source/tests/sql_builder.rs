@@ -1,6 +1,6 @@
 use db_qbs_source::{
     builder_column_query, builder_table_query, generate_builder_task, sql_shape_report,
-    BuilderTaskInput,
+    validate_builder_dblink, BuilderTaskInput,
 };
 
 #[test]
@@ -21,8 +21,16 @@ fn generated_builder_task_has_four_fields_and_passes_all_shape_checks() {
     assert_eq!(task.source_date_col, "D_BIZ");
     assert_eq!(task.target_table, "T_POSITION");
     assert_eq!(task.target_date_col, "D_BIZ");
-    assert!(task.source_sql.contains("FROM HTBR45.T_R_FR_ASTSTAT@FA a"));
-    assert!(task.source_sql.contains("a.N_VA_PRICE AS N_VA_PRICE"));
+    assert_eq!(
+        task.source_sql,
+        concat!(
+            "SELECT a.N_VA_PRICE AS N_VA_PRICE,\n",
+            "       a.D_BIZ AS D_BIZ\n",
+            "  FROM HTBR45.T_R_FR_ASTSTAT@FA a\n",
+            " WHERE a.D_BIZ >= TO_DATE(:biz_date,'YYYY-MM-DD')\n",
+            "   AND a.D_BIZ <  TO_DATE(:biz_date,'YYYY-MM-DD') + 1"
+        )
+    );
     let checks = sql_shape_report(&task);
     assert!(
         checks.iter().all(|check| check.passed),
@@ -40,10 +48,11 @@ fn builder_allows_a_true_column_subset_and_requires_the_date_column_in_it() {
         columns: vec!["D_BIZ".to_owned()],
         source_date_col: "D_BIZ".to_owned(),
         target_table: String::new(),
-        target_date_col: "D_BIZ".to_owned(),
+        target_date_col: String::new(),
     };
 
     let task = generate_builder_task(input.clone()).unwrap();
+    assert_eq!(task.target_date_col, "D_BIZ");
     let checks = sql_shape_report(&task);
     assert!(
         checks.iter().all(|check| check.passed),
@@ -61,6 +70,7 @@ fn builder_allows_a_true_column_subset_and_requires_the_date_column_in_it() {
 
 #[test]
 fn metadata_queries_use_only_a_validated_dblink_suffix() {
+    assert_eq!(validate_builder_dblink(Some("fa")), Ok(()));
     assert_eq!(
         builder_table_query(Some("fa")),
         Ok("SELECT OWNER, TABLE_NAME FROM ALL_TABLES@FA ORDER BY OWNER, TABLE_NAME".to_owned())
@@ -74,5 +84,6 @@ fn metadata_queries_use_only_a_validated_dblink_suffix() {
         )
         .to_owned())
     );
+    assert!(validate_builder_dblink(Some("FA WHERE 1=1")).is_err());
     assert!(builder_table_query(Some("FA WHERE 1=1")).is_err());
 }

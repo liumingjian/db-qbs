@@ -31,6 +31,40 @@ pub struct BuilderColumn {
 }
 
 pub fn generate_builder_task(input: BuilderTaskInput) -> Result<TaskConfig, String> {
+    validate_builder_task_input(&input)?;
+
+    let BuilderTaskInput {
+        dblink,
+        owner,
+        table,
+        columns,
+        source_date_col,
+        target_table,
+        target_date_col,
+    } = input;
+    let dblink_suffix = dictionary_suffix(dblink.as_deref())?;
+    let projection = columns
+        .iter()
+        .map(|column| format!("a.{column} AS {column}"))
+        .collect::<Vec<_>>()
+        .join(",\n       ");
+    let target_date_col = if target_date_col.trim().is_empty() {
+        source_date_col.clone()
+    } else {
+        target_date_col
+    };
+
+    Ok(TaskConfig {
+        source_sql: format!(
+            "SELECT {projection}\n  FROM {owner}.{table}{dblink_suffix} a\n WHERE a.{source_date_col} >= TO_DATE(:biz_date,'YYYY-MM-DD')\n   AND a.{source_date_col} <  TO_DATE(:biz_date,'YYYY-MM-DD') + 1"
+        ),
+        source_date_col,
+        target_table,
+        target_date_col,
+    })
+}
+
+fn validate_builder_task_input(input: &BuilderTaskInput) -> Result<(), String> {
     if input.owner.trim().is_empty() || input.table.trim().is_empty() {
         return Err("owner and table are required".to_owned());
     }
@@ -61,35 +95,7 @@ pub fn generate_builder_task(input: BuilderTaskInput) -> Result<TaskConfig, Stri
     {
         return Err("source_date_col must be one of the selected columns".to_owned());
     }
-
-    let dblink = normalize_dblink(input.dblink.as_deref())?;
-    let projection = input
-        .columns
-        .iter()
-        .map(|column| format!("a.{column} AS {column}"))
-        .collect::<Vec<_>>()
-        .join(",\n       ");
-    let owner = input.owner;
-    let table = input.table;
-    let dblink_suffix = dblink
-        .as_deref()
-        .map(|link| format!("@{link}"))
-        .unwrap_or_default();
-    let date_column = &input.source_date_col;
-    let target_date_col = if input.target_date_col.trim().is_empty() {
-        input.source_date_col.clone()
-    } else {
-        input.target_date_col
-    };
-
-    Ok(TaskConfig {
-        source_sql: format!(
-            "SELECT {projection}\n  FROM {owner}.{table}{dblink_suffix} a\n WHERE a.{date_column} >= TO_DATE(:biz_date,'YYYY-MM-DD')\n   AND a.{date_column} <  TO_DATE(:biz_date,'YYYY-MM-DD') + 1"
-        ),
-        source_date_col: input.source_date_col,
-        target_table: input.target_table,
-        target_date_col,
-    })
+    Ok(())
 }
 
 pub fn builder_table_query(dblink: Option<&str>) -> Result<String, String> {
@@ -105,6 +111,10 @@ pub fn builder_column_query(dblink: Option<&str>) -> Result<String, String> {
 FROM ALL_TAB_COLUMNS{} WHERE OWNER = :owner AND TABLE_NAME = :table_name ORDER BY COLUMN_ID",
         dictionary_suffix(dblink)?
     ))
+}
+
+pub fn validate_builder_dblink(dblink: Option<&str>) -> Result<(), String> {
+    normalize_dblink(dblink).map(|_| ())
 }
 
 fn dictionary_suffix(dblink: Option<&str>) -> Result<String, String> {

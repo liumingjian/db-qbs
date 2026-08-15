@@ -145,15 +145,16 @@ export async function fetchColumns(
   return postJson<ColumnFetchResult>("/api/columns", input, "取列失败");
 }
 
-function postJson<T>(path: string, body: unknown, fallback: string): Promise<T> {
-  return fetch(path, {
+async function postJson<T>(path: string, body: unknown, fallback: string): Promise<T> {
+  const response = await fetch(path, {
     method: "POST",
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
-  }).then((response) => readJson<T>(response, fallback));
+  });
+  return readJson<T>(response, fallback);
 }
 
 async function readJson<T>(response: Response, fallback: string): Promise<T> {

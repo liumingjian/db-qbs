@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
 use db_qbs_source::{
-    builder_column_query, builder_table_query, embedded_web_asset, generate_builder_task,
-    generate_target_ddl, load_source_config, parse_biz_date, sql_shape_report, BuilderTaskInput,
-    OracleRowSource, SourceConfig, Task, TaskConfig, TaskInput, TaskStore,
+    embedded_web_asset, generate_builder_task, generate_target_ddl, load_source_config,
+    parse_biz_date, sql_shape_report, validate_builder_dblink, BuilderTaskInput, OracleRowSource,
+    SourceConfig, Task, TaskConfig, TaskInput, TaskStore,
 };
 use rand::RngCore;
 use serde::de::DeserializeOwned;
@@ -615,7 +615,7 @@ fn handle_builder_tables(request: &mut Request, config: &SourceConfig) -> HttpRe
         Ok(input) => input,
         Err(error) => return bad_request(error),
     };
-    if let Err(error) = builder_table_query(input.dblink.as_deref()) {
+    if let Err(error) = validate_builder_dblink(input.dblink.as_deref()) {
         return bad_request(error);
     }
     match OracleRowSource::list_builder_tables(config, input.dblink.as_deref()) {
@@ -632,7 +632,7 @@ fn handle_builder_columns(request: &mut Request, config: &SourceConfig) -> HttpR
     if input.owner.trim().is_empty() || input.table.trim().is_empty() {
         return bad_request("owner and table are required".to_owned());
     }
-    if let Err(error) = builder_column_query(input.dblink.as_deref()) {
+    if let Err(error) = validate_builder_dblink(input.dblink.as_deref()) {
         return bad_request(error);
     }
     match OracleRowSource::list_builder_columns(

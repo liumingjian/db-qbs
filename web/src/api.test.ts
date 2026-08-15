@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  ApiError,
   createTask,
   deleteTask,
   fetchBuilderColumns,
@@ -230,5 +231,41 @@ describe("SQL builder API", () => {
     await expect(fetchColumns(task)).resolves.toEqual(columns);
     expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/sql-shape", expect.objectContaining({ method: "POST" }));
     expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/columns", expect.objectContaining({ method: "POST" }));
+  });
+
+  it("preserves structured shape failures from column fetches", async () => {
+    const body = {
+      kind: "sql_shape",
+      message: "source-local SQL shape precheck failed",
+      checks: [
+        {
+          rule: "business_date_range",
+          passed: false,
+          message: "bad range",
+        },
+      ],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(body), { status: 422 }),
+      ),
+    );
+
+    const request = fetchColumns({
+      source_sql: "SELECT D_BIZ FROM ORDERS",
+      source_date_col: "D_BIZ",
+      target_table: "ORDERS",
+      target_date_col: "D_BIZ",
+    });
+
+    const error = await request.catch((requestError: unknown) => requestError);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({
+      message: body.message,
+      status: 422,
+      body,
+    });
   });
 });
