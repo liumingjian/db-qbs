@@ -436,6 +436,127 @@ while [ ! -f '{}' ]; do sleep 0.02; done
 }
 
 #[test]
+fn run_launch_rejects_only_the_same_task_and_business_date_until_child_reap() {
+    let directory = temp_directory();
+    let port = unused_port();
+    let release = directory.join("release-children");
+    let fake_child = write_fake_child(
+        &directory,
+        &format!(
+            "while [ ! -f '{}' ]; do sleep 0.02; done\nexit 1\n",
+            release.display()
+        ),
+    );
+    let config = write_run_config(&directory, port, &fake_child);
+    let mut source = start_source(&config);
+    wait_for_tasks(port, &mut source);
+    let first_task_id = create_task(port);
+    let second_task_id = create_task(port);
+
+    let first = start_run_for_date(port, &first_task_id, "2026-08-14");
+    let duplicate = post(
+        port,
+        "/api/runs",
+        &format!(r#"{{"task_id":"{first_task_id}","biz_date":"2026-08-14"}}"#),
+    )
+    .unwrap();
+    assert_eq!(duplicate.status, 409, "{}", duplicate.body);
+    assert!(json_body(&duplicate)["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("已有 run 进行中"));
+
+    let other_date = start_run_for_date(port, &first_task_id, "2026-08-15");
+    let other_task = start_run_for_date(port, &second_task_id, "2026-08-14");
+
+    fs::write(release, "").unwrap();
+    for run_record_id in [&first, &other_date, &other_task] {
+        wait_for_json(port, &format!("/api/runs/{run_record_id}"), |body| {
+            body["live"] == false
+        });
+    }
+    wait_for_empty_directory(&directory.join("run-tasks"));
+
+    let relaunched = start_run_for_date(port, &first_task_id, "2026-08-14");
+    wait_for_json(port, &format!("/api/runs/{relaunched}"), |body| {
+        body["live"] == false
+    });
+
+    assert_success(&terminate(source));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn cancel_signals_preparing_and_streaming_but_rejects_committing() {
+    let directory = temp_directory();
+    let port = unused_port();
+    let canceled = directory.join("canceled-dates");
+    let release_committing = directory.join("release-committing");
+    let fake_child = write_fake_child(
+        &directory,
+        &format!(
+            r#"biz_date="$6"
+case "$biz_date" in
+  2026-08-14) stage=PREPARING ;;
+  2026-08-15) stage=STREAMING ;;
+  2026-08-16) stage=COMMITTING ;;
+esac
+trap 'printf "%s\n" "$biz_date" >> "{}"; exit 0' TERM
+printf '%s\n' "{{\"ts\":\"2026-08-15T13:00:00.000Z\",\"level\":\"info\",\"event\":\"stage_changed\",\"run_id\":\"run-$biz_date\",\"task\":null,\"stage\":\"$stage\"}}"
+if [ "$stage" = COMMITTING ]; then
+  while [ ! -f '{}' ]; do sleep 0.02; done
+else
+  while :; do sleep 0.02; done
+fi
+"#,
+            canceled.display(),
+            release_committing.display(),
+        ),
+    );
+    let config = write_run_config(&directory, port, &fake_child);
+    let mut source = start_source(&config);
+    wait_for_tasks(port, &mut source);
+    let task_id = create_task(port);
+
+    for (biz_date, stage) in [("2026-08-14", "PREPARING"), ("2026-08-15", "STREAMING")] {
+        let run_record_id = start_run_for_date(port, &task_id, biz_date);
+        wait_for_json(port, &format!("/api/runs/{run_record_id}"), |body| {
+            body["stage"] == stage
+        });
+        let canceled_response =
+            post(port, &format!("/api/runs/{run_record_id}/cancel"), "").unwrap();
+        assert_eq!(canceled_response.status, 202, "{}", canceled_response.body);
+        wait_for_file_text(&canceled, |text| text.lines().any(|line| line == biz_date));
+        wait_for_json(port, &format!("/api/runs/{run_record_id}"), |body| {
+            body["live"] == false
+        });
+    }
+
+    let committing = start_run_for_date(port, &task_id, "2026-08-16");
+    wait_for_json(port, &format!("/api/runs/{committing}"), |body| {
+        body["stage"] == "COMMITTING"
+    });
+    let rejected = post(port, &format!("/api/runs/{committing}/cancel"), "").unwrap();
+    assert_eq!(rejected.status, 409, "{}", rejected.body);
+    let rejected = json_body(&rejected);
+    assert_eq!(rejected["error"]["message"], "已过封口点，停不了");
+    assert!(rejected.get("code").is_none());
+    assert!(rejected["error"].get("code").is_none());
+    assert!(!fs::read_to_string(&canceled)
+        .unwrap()
+        .lines()
+        .any(|line| line == "2026-08-16"));
+
+    fs::write(release_committing, "").unwrap();
+    wait_for_json(port, &format!("/api/runs/{committing}"), |body| {
+        body["live"] == false
+    });
+
+    assert_success(&terminate(source));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn tasks_endpoint_is_ready_and_sigterm_allows_same_port_restart() {
     let directory = temp_directory();
     let port = unused_port();
@@ -773,10 +894,14 @@ fn create_task(port: u16) -> String {
 }
 
 fn start_run(port: u16, task_id: &str) -> String {
+    start_run_for_date(port, task_id, "2026-08-14")
+}
+
+fn start_run_for_date(port: u16, task_id: &str, biz_date: &str) -> String {
     let response = post(
         port,
         "/api/runs",
-        &format!(r#"{{"task_id":"{task_id}","biz_date":"2026-08-14"}}"#),
+        &format!(r#"{{"task_id":"{task_id}","biz_date":"{biz_date}"}}"#),
     )
     .unwrap();
     assert_eq!(response.status, 202, "{}", response.body);
@@ -838,6 +963,19 @@ fn wait_for_empty_directory(path: &Path) {
             return;
         }
         assert!(Instant::now() < deadline, "timed out waiting for cleanup");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_file_text(path: &Path, predicate: impl Fn(&str) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(text) = fs::read_to_string(path) {
+            if predicate(&text) {
+                return;
+            }
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {path:?}");
         thread::sleep(Duration::from_millis(20));
     }
 }

@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 chrono.workspace = true
 db-qbs-shared = { path = "../shared" }
+libc = "0.2.189"
 oracle.workspace = true
 rand.workspace = true
 rust-embed = { version = "=8.11.0", features = ["debug-embed"] }

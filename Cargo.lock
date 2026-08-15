@@ -355,6 +355,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "db-qbs-shared",
+ "libc",
  "oracle",
  "rand",
  "rusqlite",
