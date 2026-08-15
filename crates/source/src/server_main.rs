@@ -253,20 +253,20 @@ fn json_response(status: u16, value: &impl Serialize) -> HttpResponse {
 }
 
 fn embedded_response(body: Vec<u8>, content_type: &str, path: &str) -> HttpResponse {
-    let content_type = Header::from_bytes("Content-Type", content_type)
+    let content_type_header = Header::from_bytes("Content-Type", content_type)
         .expect("embedded content type must be valid");
     let request_path = path.split('?').next().unwrap_or(path);
-    let cache_control = if matches!(request_path, "/" | "/index.html") {
+    let cache_control_value = if matches!(request_path, "/" | "/index.html") {
         "no-cache"
     } else {
         "public, max-age=31536000, immutable"
     };
-    let cache_control = Header::from_bytes("Cache-Control", cache_control)
+    let cache_control_header = Header::from_bytes("Cache-Control", cache_control_value)
         .expect("static cache control must be valid");
     Response::from_data(body)
         .with_status_code(StatusCode(200))
-        .with_header(content_type)
-        .with_header(cache_control)
+        .with_header(content_type_header)
+        .with_header(cache_control_header)
 }
 
 fn handle_column_fetch(request: &mut Request, config: &SourceConfig) -> HttpResponse {
