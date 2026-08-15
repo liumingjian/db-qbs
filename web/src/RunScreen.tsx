@@ -10,13 +10,10 @@ import {
   TerminalBlock,
 } from "./components/DesignSystem";
 import { messageFrom } from "./errors";
-import {
-  RUN_POLL_INTERVAL_MS,
-  runPresentation,
-  shouldLoadRun,
-} from "./run";
+import { runPresentation } from "./run";
 import type { RunPresentation, RunPresentationKind } from "./run";
 
+const RUN_POLL_INTERVAL_MS = 1000;
 const countFormatter = new Intl.NumberFormat("zh-CN");
 type PrecheckKind = Extract<
   RunPresentationKind,
@@ -39,56 +36,59 @@ export function RunScreen({
   const [cancelMessage, setCancelMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    let active = true;
-    let live = true;
-    let loading = false;
-    let timer: number | undefined;
+    let effectActive = true;
+    let runIsLive = true;
+    let requestInFlight = false;
+    let pollTimer: number | undefined;
 
-    function schedule() {
-      if (
-        active &&
-        timer === undefined &&
-        shouldLoadRun(live, document.visibilityState === "visible", loading)
-      ) {
-        timer = window.setTimeout(() => {
-          timer = undefined;
-          void load();
-        }, RUN_POLL_INTERVAL_MS);
+    function canLoadRun() {
+      return (
+        effectActive &&
+        runIsLive &&
+        document.visibilityState === "visible" &&
+        !requestInFlight
+      );
+    }
+
+    function scheduleNextLoad() {
+      if (!canLoadRun() || pollTimer !== undefined) {
+        return;
       }
+      pollTimer = window.setTimeout(() => {
+        pollTimer = undefined;
+        void load();
+      }, RUN_POLL_INTERVAL_MS);
     }
 
     async function load() {
-      if (
-        !active ||
-        !shouldLoadRun(live, document.visibilityState === "visible", loading)
-      ) {
+      if (!canLoadRun()) {
         return;
       }
-      loading = true;
+      requestInFlight = true;
       try {
         const nextDetail = await fetchRun(runRecordId);
-        if (!active) {
+        if (!effectActive) {
           return;
         }
         setDetail(nextDetail);
         setLoadError(null);
-        live = nextDetail.live;
+        runIsLive = nextDetail.live;
       } catch (error) {
-        if (active) {
+        if (effectActive) {
           setLoadError(messageFrom(error));
         }
       } finally {
-        loading = false;
-        schedule();
+        requestInFlight = false;
+        scheduleNextLoad();
       }
     }
 
     function handleVisibilityChange() {
-      if (timer !== undefined) {
-        window.clearTimeout(timer);
-        timer = undefined;
+      if (pollTimer !== undefined) {
+        window.clearTimeout(pollTimer);
+        pollTimer = undefined;
       }
-      if (shouldLoadRun(live, document.visibilityState === "visible", loading)) {
+      if (canLoadRun()) {
         void load();
       }
     }
@@ -96,9 +96,9 @@ export function RunScreen({
     document.addEventListener("visibilitychange", handleVisibilityChange);
     void load();
     return () => {
-      active = false;
-      if (timer !== undefined) {
-        window.clearTimeout(timer);
+      effectActive = false;
+      if (pollTimer !== undefined) {
+        window.clearTimeout(pollTimer);
       }
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };

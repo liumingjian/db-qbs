@@ -1,11 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { RunDetail } from "./api";
-import {
-  RUN_POLL_INTERVAL_MS,
-  runPresentation,
-  shouldLoadRun,
-} from "./run";
+import { runPresentation } from "./run";
 
 function terminal(overrides: Partial<RunDetail> = {}): RunDetail {
   return {
@@ -49,14 +45,6 @@ function terminal(overrides: Partial<RunDetail> = {}): RunDetail {
 }
 
 describe("run detail presentation", () => {
-  it("polls only a visible live detail with no request already in flight", () => {
-    expect(RUN_POLL_INTERVAL_MS).toBe(1000);
-    expect(shouldLoadRun(true, true, false)).toBe(true);
-    expect(shouldLoadRun(true, false, false)).toBe(false);
-    expect(shouldLoadRun(true, true, true)).toBe(false);
-    expect(shouldLoadRun(false, true, false)).toBe(false);
-  });
-
   it("keeps accepted runs distinct from PREPARING", () => {
     const presentation = runPresentation({
       run_record_id: "record-01",

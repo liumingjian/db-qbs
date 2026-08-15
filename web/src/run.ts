@@ -2,16 +2,6 @@ import type { RunDetail } from "./api";
 import type { RunPhase } from "./components/DesignSystem";
 import { historyPresentation } from "./history";
 
-export const RUN_POLL_INTERVAL_MS = 1000;
-
-export function shouldLoadRun(
-  live: boolean,
-  visible: boolean,
-  loading: boolean,
-): boolean {
-  return live && visible && !loading;
-}
-
 export type RunPresentationKind =
   | "accepted"
   | "live"
