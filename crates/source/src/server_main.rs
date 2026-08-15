@@ -77,7 +77,7 @@ fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
         return Err("source 配置 listen 不能为空".to_owned());
     }
 
-    let store = TaskStore::open(&config.data_dir)?;
+    let task_store = TaskStore::open(&config.data_dir)?;
     let history_store = HistoryStore::open(&config.data_dir)?;
     history_store.seal_incomplete(
         UnknownReason::ProcessDisappeared,
@@ -113,19 +113,19 @@ fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
     let terminated = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(SIGTERM, Arc::clone(&terminated))
         .map_err(|error| format!("注册 SIGTERM 处理失败：{error}"))?;
+    let state = ServerState {
+        config: &config,
+        config_path: &config_path,
+        tasks: &task_store,
+        history: &history_store,
+        runs: &runs,
+    };
 
     while !terminated.load(Ordering::Relaxed) {
         if let Some(request) = server
             .recv_timeout(Duration::from_millis(100))
             .map_err(|error| format!("接收 HTTP 请求失败：{error}"))?
         {
-            let state = ServerState {
-                config: &config,
-                config_path: &config_path,
-                tasks: &store,
-                history: &history_store,
-                runs: &runs,
-            };
             handle_request(request, &state);
         }
     }
@@ -210,14 +210,7 @@ fn route_api_request(
     }
 
     if method == Method::Post && path == "/api/runs" {
-        return handle_start_run(
-            request,
-            state.config,
-            state.config_path,
-            state.tasks,
-            state.history,
-            state.runs,
-        );
+        return handle_start_run(request, state);
     }
 
     if method == Method::Get && path == "/api/runs" {
@@ -257,14 +250,7 @@ fn resource_id_from_path<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
     Some(resource_id)
 }
 
-fn handle_start_run(
-    request: &mut Request,
-    config: &SourceConfig,
-    config_path: &Path,
-    store: &TaskStore,
-    history_store: &HistoryStore,
-    runs: &RunRegistry,
-) -> HttpResponse {
+fn handle_start_run(request: &mut Request, state: &ServerState<'_>) -> HttpResponse {
     let input: StartRunInput = match read_json_body(request) {
         Ok(input) => input,
         Err(error) => return bad_request(error),
@@ -272,19 +258,19 @@ fn handle_start_run(
     if let Err(error) = parse_biz_date(&input.biz_date) {
         return bad_request(error.to_owned());
     }
-    let task = match store.get(&input.task_id) {
+    let task = match state.tasks.get(&input.task_id) {
         Ok(Some(task)) => task,
         Ok(None) => return not_found(),
         Err(error) => return internal_error(error),
     };
 
     match start_run(
-        config,
-        config_path,
+        state.config,
+        state.config_path,
         &task,
         &input.biz_date,
-        history_store,
-        runs,
+        state.history,
+        state.runs,
     ) {
         Ok(run_record_id) => json_response(202, &json!({ "run_record_id": run_record_id })),
         Err(error) => internal_error(error),
@@ -474,19 +460,17 @@ fn supervise_run(
         let Some((change, history)) = apply_log_line(&runs, &run_record_id, &log) else {
             continue;
         };
-        if change == HistoryChange::Terminal {
-            terminal_observed = true;
-        }
-        if matches!(
-            change,
-            HistoryChange::StageChanged | HistoryChange::Terminal
-        ) && history_store
-            .save(&history, Utc::now(), retention_days)
-            .is_err()
+        let is_terminal = change == HistoryChange::Terminal;
+        let requires_persistence = change != HistoryChange::MemoryOnly;
+        terminal_observed |= is_terminal;
+        if requires_persistence
+            && history_store
+                .save(&history, Utc::now(), retention_days)
+                .is_err()
         {
             continue;
         }
-        if change == HistoryChange::Terminal {
+        if is_terminal {
             remove_projection(&runs, &run_record_id);
         }
     }

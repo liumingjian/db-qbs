@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{DateTime, TimeDelta, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{named_params, params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -12,41 +12,41 @@ const DATABASE_FILE: &str = "db-qbs.sqlite3";
 
 macro_rules! history_params {
     ($history:expr) => {
-        params![
-            $history.run_record_id,
-            $history.run_id,
-            $history.task_id,
-            $history.biz_date,
-            $history.staging_table,
-            $history.started_at,
-            $history.started_at_ms,
-            $history.finished_at,
-            $history.outcome,
-            $history.target_table_effect,
-            $history.stage,
-            $history.source_rows,
-            $history.staged_rows,
-            $history.sink_reported_rows,
-            $history.purged_rows,
-            $history.source_batches,
-            $history.received_batches,
-            $history.fetch_ms,
-            $history.push_ms,
-            $history.commit_ms,
-            $history.count_ms,
-            $history.cursor_ms,
-            $history.source_code,
-            $history.sink_code,
-            $history.column,
-            $history.value,
-            $history.message,
-            $history.unknown_reason,
-            $history.seq,
-            $history.rows_pushed,
-            $history.bytes,
-            $history.ms,
-            $history.last_ts,
-        ]
+        named_params! {
+            ":run_record_id": $history.run_record_id,
+            ":run_id": $history.run_id,
+            ":task_id": $history.task_id,
+            ":biz_date": $history.biz_date,
+            ":staging_table": $history.staging_table,
+            ":started_at": $history.started_at,
+            ":started_at_ms": $history.started_at_ms,
+            ":finished_at": $history.finished_at,
+            ":outcome": $history.outcome,
+            ":target_table_effect": $history.target_table_effect,
+            ":stage": $history.stage,
+            ":source_rows": $history.source_rows,
+            ":staged_rows": $history.staged_rows,
+            ":sink_reported_rows": $history.sink_reported_rows,
+            ":purged_rows": $history.purged_rows,
+            ":source_batches": $history.source_batches,
+            ":received_batches": $history.received_batches,
+            ":fetch_ms": $history.fetch_ms,
+            ":push_ms": $history.push_ms,
+            ":commit_ms": $history.commit_ms,
+            ":count_ms": $history.count_ms,
+            ":cursor_ms": $history.cursor_ms,
+            ":source_code": $history.source_code,
+            ":sink_code": $history.sink_code,
+            ":column": $history.column,
+            ":value": $history.value,
+            ":message": $history.message,
+            ":unknown_reason": $history.unknown_reason,
+            ":seq": $history.seq,
+            ":rows_pushed": $history.rows_pushed,
+            ":bytes": $history.bytes,
+            ":ms": $history.ms,
+            ":last_ts": $history.last_ts,
+        }
     };
 }
 
@@ -190,11 +190,11 @@ impl RunHistory {
                 HistoryChange::MemoryOnly
             }
             Some("stage_changed") => {
-                self.stage = optional_text(log, "stage");
+                self.stage = owned_text(log, "stage");
                 HistoryChange::StageChanged
             }
             Some("run_opened") => {
-                self.staging_table = optional_text(log, "staging_table");
+                self.staging_table = owned_text(log, "staging_table");
                 HistoryChange::MemoryOnly
             }
             Some("batch_pushed") => {
@@ -226,9 +226,9 @@ impl RunHistory {
             ) => {
                 self.outcome = Some("FAILED".to_owned());
                 self.target_table_effect = Some("DISCARDED".to_owned());
-                self.finished_at = optional_text(log, "ts");
-                self.message = optional_text(log, "message");
-                self.value = optional_text(log, "value");
+                self.finished_at = owned_text(log, "ts");
+                self.message = owned_text(log, "message");
+                self.value = owned_text(log, "value");
                 HistoryChange::Terminal
             }
             _ => HistoryChange::MemoryOnly,
@@ -255,9 +255,9 @@ impl RunHistory {
     }
 
     fn finish_from_log(&mut self, log: &Value) {
-        self.outcome = optional_text(log, "terminal");
-        self.stage = optional_text(log, "stage");
-        self.finished_at = optional_text(log, "ts");
+        self.outcome = owned_text(log, "terminal");
+        self.stage = owned_text(log, "stage");
+        self.finished_at = owned_text(log, "ts");
         if self.target_table_effect.is_none() {
             self.target_table_effect = match (self.outcome.as_deref(), self.stage.as_deref()) {
                 (Some("SUCCEEDED"), _) => Some("SWAPPED".to_owned()),
@@ -277,11 +277,11 @@ impl RunHistory {
         self.commit_ms = number(log, "commit_ms");
         self.count_ms = number(log, "count_ms");
         self.cursor_ms = number(log, "cursor_ms");
-        self.source_code = optional_text(log, "source_code");
-        self.sink_code = optional_text(log, "sink_code");
-        self.column = optional_text(log, "column");
-        self.value = optional_text(log, "value");
-        self.message = optional_text(log, "message");
+        self.source_code = owned_text(log, "source_code");
+        self.sink_code = owned_text(log, "sink_code");
+        self.column = owned_text(log, "column");
+        self.value = owned_text(log, "value");
+        self.message = owned_text(log, "message");
     }
 }
 
@@ -372,9 +372,12 @@ impl HistoryStore {
                     source_code, sink_code, [column], [value], message, unknown_reason,
                     seq, rows_pushed, bytes, ms, last_ts
                  ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                    ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28,
-                    ?29, ?30, ?31, ?32, ?33
+                    :run_record_id, :run_id, :task_id, :biz_date, :staging_table, :started_at,
+                    :started_at_ms, :finished_at, :outcome, :target_table_effect, :stage,
+                    :source_rows, :staged_rows, :sink_reported_rows, :purged_rows,
+                    :source_batches, :received_batches, :fetch_ms, :push_ms, :commit_ms,
+                    :count_ms, :cursor_ms, :source_code, :sink_code, :column, :value,
+                    :message, :unknown_reason, :seq, :rows_pushed, :bytes, :ms, :last_ts
                  )",
                 history_params!(history),
             )
@@ -398,15 +401,19 @@ impl HistoryStore {
         transaction
             .execute(
                 "UPDATE run_history SET
-                    run_id=?2, task_id=?3, biz_date=?4, staging_table=?5, started_at=?6,
-                    started_at_ms=?7, finished_at=?8, outcome=?9, target_table_effect=?10,
-                    stage=?11, source_rows=?12, staged_rows=?13, sink_reported_rows=?14,
-                    purged_rows=?15, source_batches=?16, received_batches=?17, fetch_ms=?18,
-                    push_ms=?19, commit_ms=?20, count_ms=?21, cursor_ms=?22, source_code=?23,
-                    sink_code=?24, [column]=?25, [value]=?26, message=?27,
-                    unknown_reason=?28, seq=?29, rows_pushed=?30, bytes=?31, ms=?32,
-                    last_ts=?33
-                  WHERE run_record_id=?1",
+                    run_id=:run_id, task_id=:task_id, biz_date=:biz_date,
+                    staging_table=:staging_table, started_at=:started_at,
+                    started_at_ms=:started_at_ms, finished_at=:finished_at, outcome=:outcome,
+                    target_table_effect=:target_table_effect, stage=:stage,
+                    source_rows=:source_rows, staged_rows=:staged_rows,
+                    sink_reported_rows=:sink_reported_rows, purged_rows=:purged_rows,
+                    source_batches=:source_batches, received_batches=:received_batches,
+                    fetch_ms=:fetch_ms, push_ms=:push_ms, commit_ms=:commit_ms,
+                    count_ms=:count_ms, cursor_ms=:cursor_ms, source_code=:source_code,
+                    sink_code=:sink_code, [column]=:column, [value]=:value, message=:message,
+                    unknown_reason=:unknown_reason, seq=:seq, rows_pushed=:rows_pushed,
+                    bytes=:bytes, ms=:ms, last_ts=:last_ts
+                  WHERE run_record_id=:run_record_id",
                 history_params!(history),
             )
             .map_err(|error| format!("更新 SQLite 运行历史失败：{error}"))?;
@@ -543,7 +550,7 @@ fn text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }
 
-fn optional_text(value: &Value, key: &str) -> Option<String> {
+fn owned_text(value: &Value, key: &str) -> Option<String> {
     text(value, key).map(str::to_owned)
 }
 
@@ -561,38 +568,38 @@ const HISTORY_SELECT: &str = "SELECT
 
 fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunHistory> {
     Ok(RunHistory {
-        run_record_id: row.get(0)?,
-        run_id: row.get(1)?,
-        task_id: row.get(2)?,
-        biz_date: row.get(3)?,
-        staging_table: row.get(4)?,
-        started_at: row.get(5)?,
-        started_at_ms: row.get(6)?,
-        finished_at: row.get(7)?,
-        outcome: row.get(8)?,
-        target_table_effect: row.get(9)?,
-        stage: row.get(10)?,
-        source_rows: row.get(11)?,
-        staged_rows: row.get(12)?,
-        sink_reported_rows: row.get(13)?,
-        purged_rows: row.get(14)?,
-        source_batches: row.get(15)?,
-        received_batches: row.get(16)?,
-        fetch_ms: row.get(17)?,
-        push_ms: row.get(18)?,
-        commit_ms: row.get(19)?,
-        count_ms: row.get(20)?,
-        cursor_ms: row.get(21)?,
-        source_code: row.get(22)?,
-        sink_code: row.get(23)?,
-        column: row.get(24)?,
-        value: row.get(25)?,
-        message: row.get(26)?,
-        unknown_reason: row.get(27)?,
-        seq: row.get(28)?,
-        rows_pushed: row.get(29)?,
-        bytes: row.get(30)?,
-        ms: row.get(31)?,
-        last_ts: row.get(32)?,
+        run_record_id: row.get("run_record_id")?,
+        run_id: row.get("run_id")?,
+        task_id: row.get("task_id")?,
+        biz_date: row.get("biz_date")?,
+        staging_table: row.get("staging_table")?,
+        started_at: row.get("started_at")?,
+        started_at_ms: row.get("started_at_ms")?,
+        finished_at: row.get("finished_at")?,
+        outcome: row.get("outcome")?,
+        target_table_effect: row.get("target_table_effect")?,
+        stage: row.get("stage")?,
+        source_rows: row.get("source_rows")?,
+        staged_rows: row.get("staged_rows")?,
+        sink_reported_rows: row.get("sink_reported_rows")?,
+        purged_rows: row.get("purged_rows")?,
+        source_batches: row.get("source_batches")?,
+        received_batches: row.get("received_batches")?,
+        fetch_ms: row.get("fetch_ms")?,
+        push_ms: row.get("push_ms")?,
+        commit_ms: row.get("commit_ms")?,
+        count_ms: row.get("count_ms")?,
+        cursor_ms: row.get("cursor_ms")?,
+        source_code: row.get("source_code")?,
+        sink_code: row.get("sink_code")?,
+        column: row.get("column")?,
+        value: row.get("value")?,
+        message: row.get("message")?,
+        unknown_reason: row.get("unknown_reason")?,
+        seq: row.get("seq")?,
+        rows_pushed: row.get("rows_pushed")?,
+        bytes: row.get("bytes")?,
+        ms: row.get("ms")?,
+        last_ts: row.get("last_ts")?,
     })
 }
