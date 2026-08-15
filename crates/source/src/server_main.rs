@@ -99,48 +99,7 @@ fn is_loopback(listen: &str) -> bool {
 }
 
 fn handle_request(mut request: Request, store: &TaskStore) {
-    let method = request.method().clone();
-    let path = request.url().to_owned();
-    let response = if path == "/api/tasks" {
-        match method {
-            Method::Get => match store.list() {
-                Ok(tasks) => json_response(200, &tasks),
-                Err(error) => internal_error(error),
-            },
-            Method::Post => match read_task_input(&mut request) {
-                Ok(input) => match store.create(input) {
-                    Ok(task) => json_response(201, &task),
-                    Err(error) => internal_error(error),
-                },
-                Err(error) => bad_request(error),
-            },
-            _ => not_found(),
-        }
-    } else if let Some(task_id) = task_resource(&path) {
-        match method {
-            Method::Get => match store.get(task_id) {
-                Ok(Some(task)) => json_response(200, &task),
-                Ok(None) => not_found(),
-                Err(error) => internal_error(error),
-            },
-            Method::Put => match read_task_input(&mut request) {
-                Ok(input) => match store.update(task_id, input) {
-                    Ok(Some(task)) => json_response(200, &task),
-                    Ok(None) => not_found(),
-                    Err(error) => internal_error(error),
-                },
-                Err(error) => bad_request(error),
-            },
-            Method::Delete => match store.delete(task_id) {
-                Ok(Some(task)) => json_response(200, &task),
-                Ok(None) => not_found(),
-                Err(error) => internal_error(error),
-            },
-            _ => not_found(),
-        }
-    } else {
-        not_found()
-    };
+    let response = route_request(&mut request, store);
 
     if let Err(error) = request.respond(response) {
         emit(
@@ -151,12 +110,81 @@ fn handle_request(mut request: Request, store: &TaskStore) {
     }
 }
 
-fn task_resource(path: &str) -> Option<&str> {
+fn route_request(request: &mut Request, store: &TaskStore) -> HttpResponse {
+    let method = request.method().clone();
+    let path = request.url().to_owned();
+
+    if path == "/api/tasks" {
+        return match method {
+            Method::Get => handle_list_tasks(store),
+            Method::Post => handle_create_task(request, store),
+            _ => not_found(),
+        };
+    }
+
+    let Some(task_id) = task_id_from_path(&path) else {
+        return not_found();
+    };
+    match method {
+        Method::Get => handle_get_task(store, task_id),
+        Method::Put => handle_update_task(request, store, task_id),
+        Method::Delete => handle_delete_task(store, task_id),
+        _ => not_found(),
+    }
+}
+
+fn task_id_from_path(path: &str) -> Option<&str> {
     let task_id = path.strip_prefix("/api/tasks/")?;
     if task_id.is_empty() || task_id.contains('/') {
         return None;
     }
     Some(task_id)
+}
+
+fn handle_list_tasks(store: &TaskStore) -> HttpResponse {
+    match store.list() {
+        Ok(tasks) => json_response(200, &tasks),
+        Err(error) => internal_error(error),
+    }
+}
+
+fn handle_create_task(request: &mut Request, store: &TaskStore) -> HttpResponse {
+    let input = match read_task_input(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    match store.create(input) {
+        Ok(task) => json_response(201, &task),
+        Err(error) => internal_error(error),
+    }
+}
+
+fn handle_get_task(store: &TaskStore, task_id: &str) -> HttpResponse {
+    match store.get(task_id) {
+        Ok(Some(task)) => json_response(200, &task),
+        Ok(None) => not_found(),
+        Err(error) => internal_error(error),
+    }
+}
+
+fn handle_update_task(request: &mut Request, store: &TaskStore, task_id: &str) -> HttpResponse {
+    let input = match read_task_input(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    match store.update(task_id, input) {
+        Ok(Some(task)) => json_response(200, &task),
+        Ok(None) => not_found(),
+        Err(error) => internal_error(error),
+    }
+}
+
+fn handle_delete_task(store: &TaskStore, task_id: &str) -> HttpResponse {
+    match store.delete(task_id) {
+        Ok(Some(task)) => json_response(200, &task),
+        Ok(None) => not_found(),
+        Err(error) => internal_error(error),
+    }
 }
 
 fn read_task_input(request: &mut Request) -> Result<TaskInput, String> {

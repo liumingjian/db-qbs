@@ -124,7 +124,7 @@ impl TaskStore {
     }
 
     pub fn update(&self, task_id: &str, input: TaskInput) -> Result<Option<Task>, String> {
-        let changed = self
+        let updated_rows = self
             .connection
             .execute(
                 "UPDATE tasks
@@ -144,7 +144,7 @@ impl TaskStore {
                 ],
             )
             .map_err(|error| format!("更新 SQLite 任务失败：{error}"))?;
-        if changed == 0 {
+        if updated_rows == 0 {
             return Ok(None);
         }
         self.get(task_id)
@@ -175,10 +175,10 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
 fn generate_task_id() -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
 
-    let mut random = [0_u8; 16];
-    rand::thread_rng().fill_bytes(&mut random);
+    let mut random_bytes = [0_u8; 16];
+    rand::thread_rng().fill_bytes(&mut random_bytes);
     let mut task_id = String::with_capacity(32);
-    for byte in random {
+    for byte in random_bytes {
         task_id.push(HEX[(byte >> 4) as usize] as char);
         task_id.push(HEX[(byte & 0x0f) as usize] as char);
     }
