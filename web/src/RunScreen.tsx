@@ -10,7 +10,11 @@ import {
   TerminalBlock,
 } from "./components/DesignSystem";
 import { messageFrom } from "./errors";
-import { runPresentation } from "./run";
+import {
+  RUN_POLL_INTERVAL_MS,
+  runPresentation,
+  shouldLoadRun,
+} from "./run";
 import type { RunPresentation, RunPresentationKind } from "./run";
 
 const countFormatter = new Intl.NumberFormat("zh-CN");
@@ -37,18 +41,30 @@ export function RunScreen({
   useEffect(() => {
     let active = true;
     let live = true;
+    let loading = false;
     let timer: number | undefined;
 
     function schedule() {
-      if (active && live && document.visibilityState === "visible") {
-        timer = window.setTimeout(() => void load(), 1000);
+      if (
+        active &&
+        timer === undefined &&
+        shouldLoadRun(live, document.visibilityState === "visible", loading)
+      ) {
+        timer = window.setTimeout(() => {
+          timer = undefined;
+          void load();
+        }, RUN_POLL_INTERVAL_MS);
       }
     }
 
     async function load() {
-      if (!active) {
+      if (
+        !active ||
+        !shouldLoadRun(live, document.visibilityState === "visible", loading)
+      ) {
         return;
       }
+      loading = true;
       try {
         const nextDetail = await fetchRun(runRecordId);
         if (!active) {
@@ -57,12 +73,13 @@ export function RunScreen({
         setDetail(nextDetail);
         setLoadError(null);
         live = nextDetail.live;
-        schedule();
       } catch (error) {
         if (active) {
           setLoadError(messageFrom(error));
-          schedule();
         }
+      } finally {
+        loading = false;
+        schedule();
       }
     }
 
@@ -71,7 +88,7 @@ export function RunScreen({
         window.clearTimeout(timer);
         timer = undefined;
       }
-      if (document.visibilityState === "visible" && live) {
+      if (shouldLoadRun(live, document.visibilityState === "visible", loading)) {
         void load();
       }
     }
