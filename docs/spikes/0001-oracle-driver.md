@@ -831,6 +831,58 @@ ADR-0009 的 `DATE` 规则只判 `fsp == 0`，**没判值域**——因为值域
 探针与脚本：`docs/spikes/fixtures/local-rig/probes/mysql-datetime-domain.sql`、
 `scripts/run-mysql-datetime-domain-probe.sh`（一次性，可重复执行）。
 
+### 7.9a M1 规范形式手工门禁首跑（[#43](https://github.com/liumingjian/db-qbs/issues/43)，2026-08-15）
+
+ADR-0014 §8 触发条件 1（M1 验收必跑一次）的记录，按同节条件 3 的要求贴**实际值**而非「通过」。
+入口：`docs/spikes/fixtures/local-rig/scripts/run-canon-gate.sh`（arm64 mac 台架，
+Oracle XE 11.2 容器，client 字符集 AL32UTF8，`NLS_NUMERIC_CHARACTERS = ".,"`）。
+判定权威是仓库内 `canon-golden.json` + 共享库 `canon_*`，不读 M0 的 `t_canon_expected`。
+
+```
+[PASS] num-zero: driver NUMBER = "0"
+[PASS] num-int-plain: driver NUMBER = "100"
+[PASS] num-lt-one: driver NUMBER = "0.5"
+[PASS] num-neg-lt-one: driver NUMBER = "-0.01"
+[PASS] num-frac: driver NUMBER = "1.23"
+[PASS] num-38-positive: driver NUMBER = "12345678901234567890123456789012345678"
+[PASS] num-38-negative: driver NUMBER = "-12345678901234567890123456789012345678"
+[PASS] num-38-split: driver NUMBER = "1234567890123456789012345678.0123456789"
+[PASS] num-drift-neg-zero: repository reject witness was rejected by the shared canonical function
+[PASS] num-drift-zero-scale: repository reject witness was rejected by the shared canonical function
+[PASS] num-drift-trail-zero: repository reject witness was rejected by the shared canonical function
+[PASS] num-drift-lead-zero: repository reject witness was rejected by the shared canonical function
+[PASS] num-drift-bare-dot: repository reject witness was rejected by the shared canonical function
+[PASS] num-drift-nls-comma: repository reject witness was rejected by the shared canonical function
+[PASS] num-drift-sci: repository reject witness was rejected by the shared canonical function
+[PASS] num-drift-sci-signed: repository reject witness was rejected by the shared canonical function
+[PASS] num-drift-plus: repository reject witness was rejected by the shared canonical function
+[PASS] num-drift-empty: repository reject witness was rejected by the shared canonical function
+[PASS] num-drift-space: repository reject witness was rejected by the shared canonical function
+[PASS] num-drift-trail-dot: repository reject witness was rejected by the shared canonical function
+[PASS] date-plain: driver DATE = "2026-08-13 14:35:09"
+[PASS] date-midnight: driver DATE = "2026-08-13 00:00:00"
+[PASS] date-century-last: driver DATE = "1999-12-31 23:59:59"
+[PASS] date-century-first: driver DATE = "2000-01-01 00:00:00"
+[PASS] date-leap-day: driver DATE = "2024-02-29 12:00:00"
+[PASS] date-leap-century: driver DATE = "2000-02-29 00:00:00"
+[PASS] date-min: driver DATE = "0001-01-01 00:00:00"
+[PASS] date-max: driver DATE = "9999-12-31 23:59:59"
+[PASS] date-reject-year-zero: repository reject witness was rejected by the shared canonical function
+[PASS] date-reject-year-negative: repository reject witness was rejected by the shared canonical function
+[PASS] date-reject-year-overflow: repository reject witness was rejected by the shared canonical function
+[PASS] vc-cn: driver VARCHAR2 = "资产净值合计"
+[PASS] vc-trailing-space: driver VARCHAR2 = "AB        "
+[PASS] vc-escape-chars: driver VARCHAR2 = "a\"b\\c\td\ne"
+[PASS] vc-length-boundary: driver VARCHAR2 = "甲乙丙丁戊己庚辛壬癸"
+[PASS] null-bypass: Oracle NULL bypassed canon_* and remains JSON null
+
+TOTAL PASS: PASS 36 / FAIL 0
+```
+
+驱动侧结论与 §2.2 的 M0 结果一致：规范形式的 8 个 NUMBER、8 个 DATE 形态原样命中，
+12 个 NUMBER 漂移见证与 3 个 DATE 越界见证全部被共享 `canon_*` 拒绝，
+Oracle NULL 绕过 `canon_*` 保持 JSON null（ADR-0014 §5 的 bypass 语义）。
+
 ### 7.10 Oracle 11g 分页批次边界实测（[#21](https://github.com/liumingjian/db-qbs/issues/21)，2026-08-14）
 
 **问的是什么**：[#15](https://github.com/liumingjian/db-qbs/issues/15) 的重试若只记住分页边界，

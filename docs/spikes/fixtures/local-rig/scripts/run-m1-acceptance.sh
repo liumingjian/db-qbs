@@ -288,7 +288,8 @@ scenario_source_kill() {
   compose exec -T client grep -q '"event":"batch_pushed"' /tmp/m1-kill.jsonl ||
     fail "source did not reach STREAMING before the kill deadline" || return 1
   pid=$(compose exec -T client cat /tmp/m1-source.pid | tr -d '\r') || return 1
-  compose exec -T client kill -KILL "$pid" ||
+  # sh -c because the client image has no /bin/kill; kill only exists as a shell builtin.
+  compose exec -T client sh -c 'kill -KILL "$1"' sh "$pid" ||
     fail "source completed before the STREAMING kill could be injected" || return 1
   compose exec -T client cat /tmp/m1-kill.jsonl > "$killed" || return 1
   jq -e 'select(.event == "batch_pushed")' "$killed" >/dev/null ||
@@ -431,7 +432,7 @@ write_report() {
     echo "# M1 rig acceptance report"
     echo
     echo "- Generated (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "- Git commit: $(git -C "$REPO_ROOT" rev-parse HEAD)"
+    echo "- Git commit: $(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown (workspace is not a git checkout)")"
     echo "- Business date: $BIZ_DATE"
     echo
     echo "## Scenarios"
@@ -505,7 +506,10 @@ write_report() {
 }
 
 run_scenario() {
-  local name=$1 function=$2 output="$WORK_ROOT/$name.out" index
+  local name=$1 function=$2 index
+  # Separate declaration: arguments to a single `local` are all expanded before any
+  # assignment happens, so `$name` would still be unset (set -u kills the script).
+  local output="$WORK_ROOT/$name.out"
   index=$(scenario_index "$name") || { fail "unknown scenario: $name"; return 1; }
   echo "==> $name"
   if "$function" > "$output" 2>&1; then
