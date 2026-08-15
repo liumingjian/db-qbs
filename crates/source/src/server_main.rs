@@ -33,12 +33,8 @@ fn run() -> Result<(), String> {
     serve(config)
 }
 
-fn parse_config_path(mut arguments: impl Iterator<Item = String>) -> Result<String, String> {
-    match (
-        arguments.next().as_deref(),
-        arguments.next(),
-        arguments.next(),
-    ) {
+fn parse_config_path(mut args: impl Iterator<Item = String>) -> Result<String, String> {
+    match (args.next().as_deref(), args.next(), args.next()) {
         (Some("--config"), Some(path), None) => Ok(path),
         _ => Err("用法：db-qbs-source --config <source.toml>".to_owned()),
     }
@@ -89,25 +85,27 @@ fn serve(config: SourceConfig) -> Result<(), String> {
 }
 
 fn is_loopback(listen: &str) -> bool {
-    let Ok(addresses) = listen.to_socket_addrs() else {
+    let Ok(mut addresses) = listen.to_socket_addrs() else {
         return false;
     };
-    let addresses: Vec<_> = addresses.collect();
-    !addresses.is_empty() && addresses.iter().all(|address| address.ip().is_loopback())
+    let Some(first) = addresses.next() else {
+        return false;
+    };
+    first.ip().is_loopback() && addresses.all(|address| address.ip().is_loopback())
 }
 
 fn handle_request(request: Request) {
-    let content_type =
-        Header::from_bytes("Content-Type", "application/json; charset=utf-8").unwrap();
-    let response = if request.method() == &Method::Get && request.url() == "/api/tasks" {
-        Response::from_string("[]")
-            .with_status_code(StatusCode(200))
-            .with_header(content_type)
+    let (status, body) = if request.method() == &Method::Get && request.url() == "/api/tasks" {
+        (200, "[]")
     } else {
-        Response::from_string(r#"{"message":"not found"}"#)
-            .with_status_code(StatusCode(404))
-            .with_header(content_type)
+        (404, r#"{"message":"not found"}"#)
     };
+    let content_type = Header::from_bytes("Content-Type", "application/json; charset=utf-8")
+        .expect("static response header must be valid");
+    let response = Response::from_string(body)
+        .with_status_code(StatusCode(status))
+        .with_header(content_type);
+
     if let Err(error) = request.respond(response) {
         emit(
             LogLevel::Error,

@@ -23,11 +23,7 @@ fn tasks_endpoint_is_ready_and_sigterm_allows_same_port_restart() {
     assert_eq!(response.body, "[]");
     assert_eq!(get(port, "/health").unwrap().status, 404);
     let first_output = terminate(first);
-    assert!(
-        first_output.status.success(),
-        "{}",
-        output_text(&first_output)
-    );
+    assert_success(&first_output);
     let first_lines = json_lines(&first_output.stdout);
     assert!(first_lines.iter().any(|line| {
         line["level"] == "info"
@@ -40,11 +36,7 @@ fn tasks_endpoint_is_ready_and_sigterm_allows_same_port_restart() {
     assert_eq!(response.status, 200);
     assert_eq!(response.body, "[]");
     let second_output = terminate(second);
-    assert!(
-        second_output.status.success(),
-        "{}",
-        output_text(&second_output)
-    );
+    assert_success(&second_output);
 
     fs::remove_dir_all(directory).unwrap();
 }
@@ -57,11 +49,8 @@ fn empty_listen_fails_with_a_readable_reason() {
     let output = start_source(&config).wait_with_output().unwrap();
 
     assert_eq!(output.status.code(), Some(1));
-    assert!(
-        output_text(&output).contains("listen"),
-        "{}",
-        output_text(&output)
-    );
+    let output_text = output_text(&output);
+    assert!(output_text.contains("listen"), "{output_text}");
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -106,11 +95,11 @@ fn start_source(config: &Path) -> Child {
 }
 
 fn terminate(child: Child) -> Output {
-    let status = Command::new("kill")
+    let kill_status = Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
         .status()
         .unwrap();
-    assert!(status.success());
+    assert!(kill_status.success());
     child.wait_with_output().unwrap()
 }
 
@@ -182,6 +171,10 @@ fn output_text(output: &Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+fn assert_success(output: &Output) {
+    assert!(output.status.success(), "{}", output_text(output));
 }
 
 fn json_lines(stdout: &[u8]) -> Vec<Value> {

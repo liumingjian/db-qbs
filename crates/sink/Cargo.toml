@@ -11,5 +11,5 @@ mysql = { version = "25.0.1", default-features = false, features = ["minimal-rus
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tiny_http = "0.12.0"
+tiny_http.workspace = true
 toml = "0.8.19"
