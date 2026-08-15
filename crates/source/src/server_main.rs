@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
 use db_qbs_source::{
-    generate_target_ddl, load_source_config, parse_biz_date, sql_shape_report, OracleRowSource,
-    SourceConfig, Task, TaskConfig, TaskInput, TaskStore,
+    embedded_web_asset, generate_target_ddl, load_source_config, parse_biz_date, sql_shape_report,
+    OracleRowSource, SourceConfig, Task, TaskConfig, TaskInput, TaskStore,
 };
 use rand::RngCore;
 use serde::de::DeserializeOwned;
@@ -170,6 +170,27 @@ fn route_request(
     let method = request.method().clone();
     let path = request.url().to_owned();
 
+    if path == "/api" || path.starts_with("/api/") {
+        return route_api_request(request, config, config_path, store, runs, method, &path);
+    }
+
+    if method == Method::Get {
+        if let Some(asset) = embedded_web_asset(&path) {
+            return embedded_response(asset.body.into_owned(), asset.content_type, &path);
+        }
+    }
+    not_found()
+}
+
+fn route_api_request(
+    request: &mut Request,
+    config: &SourceConfig,
+    config_path: &Path,
+    store: &TaskStore,
+    runs: &RunRegistry,
+    method: Method,
+    path: &str,
+) -> HttpResponse {
     if method == Method::Post && path == "/api/columns" {
         return handle_column_fetch(request, config);
     }
@@ -531,6 +552,23 @@ fn json_response(status: u16, value: &impl Serialize) -> HttpResponse {
     Response::from_data(body)
         .with_status_code(StatusCode(status))
         .with_header(content_type)
+}
+
+fn embedded_response(body: Vec<u8>, content_type: &str, path: &str) -> HttpResponse {
+    let content_type_header = Header::from_bytes("Content-Type", content_type)
+        .expect("embedded content type must be valid");
+    let request_path = path.split('?').next().unwrap_or(path);
+    let cache_control_value = if matches!(request_path, "/" | "/index.html") {
+        "no-cache"
+    } else {
+        "public, max-age=31536000, immutable"
+    };
+    let cache_control_header = Header::from_bytes("Cache-Control", cache_control_value)
+        .expect("static cache control must be valid");
+    Response::from_data(body)
+        .with_status_code(StatusCode(200))
+        .with_header(content_type_header)
+        .with_header(cache_control_header)
 }
 
 fn handle_column_fetch(request: &mut Request, config: &SourceConfig) -> HttpResponse {

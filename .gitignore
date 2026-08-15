@@ -1,2 +1,4 @@
 /target/
 /config/*.toml
+node_modules/
+/web/dist/
