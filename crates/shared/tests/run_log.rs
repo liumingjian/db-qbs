@@ -66,6 +66,7 @@ fn event_vocabulary_is_closed_and_stable() {
             "commit_diagnosed",
             "abort_failed",
             "run_finished",
+            "sink_started",
             "sink_unavailable",
             "http_response_failed",
         ]

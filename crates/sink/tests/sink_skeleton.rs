@@ -1,3 +1,5 @@
+use std::fs;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use db_qbs_sink::{
@@ -111,6 +113,41 @@ databsae = "misspelled"
     let error = SinkConfig::parse(config).unwrap_err().to_string();
 
     assert!(error.contains("databsae"), "{error}");
+}
+
+#[test]
+fn startup_warns_about_the_unauthenticated_write_surface_before_connecting() {
+    let config_path = std::env::temp_dir().join(format!(
+        "db-qbs-sink-startup-banner-{}.toml",
+        std::process::id()
+    ));
+    fs::write(
+        &config_path,
+        "mysql_dsn = \"mysql://sink:secret@127.0.0.1:1\"\n\
+         database = \"qbs\"\n\
+         listen = \"127.0.0.1:0\"\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_db-qbs-sink"))
+        .args(["--config"])
+        .arg(&config_path)
+        .output()
+        .unwrap();
+    fs::remove_file(config_path).unwrap();
+
+    assert!(!output.status.success());
+    let lines = String::from_utf8(output.stdout).unwrap();
+    let banner: serde_json::Value = serde_json::from_str(lines.lines().next().unwrap()).unwrap();
+    assert_eq!(banner["level"], "warn");
+    assert_eq!(banner["event"], "sink_started");
+    assert_eq!(banner["listen"], "127.0.0.1:0");
+    assert!(banner["run_id"].is_null());
+    assert!(banner["task"].is_null());
+    let message = banner["message"].as_str().unwrap();
+    assert!(message.contains("无鉴权"), "{message}");
+    assert!(message.contains("任意暂存表与目标表"), "{message}");
+    assert!(message.contains("127.0.0.1:0"), "{message}");
 }
 
 #[test]

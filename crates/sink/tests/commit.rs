@@ -13,6 +13,7 @@ struct FakeDestination {
     staged_rows: Mutex<u64>,
     purged_rows: Mutex<u64>,
     swap_error: Mutex<Option<String>>,
+    swap_errno: Mutex<Option<u16>>,
     drop_error: Mutex<Option<DropStagingError>>,
     dropped: Mutex<Vec<String>>,
 }
@@ -24,6 +25,7 @@ impl FakeDestination {
             staged_rows: Mutex::new(1),
             purged_rows: Mutex::new(7),
             swap_error: Mutex::new(None),
+            swap_errno: Mutex::new(None),
             drop_error: Mutex::new(None),
             dropped: Mutex::new(Vec::new()),
         }
@@ -65,6 +67,9 @@ impl Destination for FakeDestination {
         request: &AtomicSwapRequest,
     ) -> Result<AtomicSwapResult, AtomicSwapError> {
         self.swap_requests.lock().unwrap().push(request.clone());
+        if let Some(errno) = self.swap_errno.lock().unwrap().take() {
+            return Err(AtomicSwapError::TargetBusy { errno });
+        }
         if let Some(message) = self.swap_error.lock().unwrap().take() {
             return Err(AtomicSwapError::Other(message));
         }
@@ -252,6 +257,30 @@ fn swap_failure_discards_staging_and_records_a_discarded_tombstone() {
         serde_json::to_value(service.get(RUN_ID).unwrap()).unwrap()["terminal"],
         "DISCARDED"
     );
+}
+
+#[test]
+fn lock_wait_timeout_and_deadlock_report_target_busy() {
+    for errno in [1205, 1213] {
+        let destination = Arc::new(FakeDestination::new());
+        *destination.swap_errno.lock().unwrap() = Some(errno);
+        let service = SinkService::new("qbs", destination.clone());
+        service.open(open_request()).unwrap();
+        service.write_batch(RUN_ID, one_row()).unwrap();
+
+        let error = service.commit(RUN_ID, 1, 1).unwrap_err();
+
+        assert_eq!((error.status, error.code), (409, "SWAP_TARGET_BUSY"));
+        assert_eq!(error.details["target_table"], "T_POSITION");
+        assert_eq!(error.details["errno"], errno);
+        assert!(error.message.contains("另一个 run"), "{}", error.message);
+        assert!(error.message.contains("重跑即可"), "{}", error.message);
+        assert_eq!(destination.dropped.lock().unwrap().len(), 1);
+        assert_eq!(
+            serde_json::to_value(service.get(RUN_ID).unwrap()).unwrap()["terminal"],
+            "DISCARDED"
+        );
+    }
 }
 
 #[test]

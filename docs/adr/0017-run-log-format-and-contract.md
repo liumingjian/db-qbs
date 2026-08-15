@@ -196,8 +196,13 @@ jq -c 'select(.run_id == $run_id and (.event == "run_opened" or .event == "run_f
 | `commit_diagnosed` | source | `terminal`, `message` |
 | `abort_failed` | source | `message` |
 | `run_finished` | source | `terminal`, `stage`, `message`, `source_code`, `sink_code`, `column`, `value`, `source_rows`, `source_batches`, `staged_rows`, `received_batches`, `sink_reported_rows`, `purged_rows`, `fetch_ms`, `push_ms`, `commit_ms`, `count_ms`, `cursor_ms` |
+| `sink_started` | sink | `listen`, `message` |
 | `sink_unavailable` | sink | `message` |
 | `http_response_failed` | sink | `message` |
+
+> **2026-08-15（[#62](https://github.com/liumingjian/db-qbs/issues/62)）增补：**
+> 闭集只增 `sink_started`；它在 sink 启动时无条件以 `warn` 写出，`listen` 与 `message`
+> 点明当前监听地址、无鉴权入站面及其清空重写任意暂存表与目标表的权限含义。
 
 `mapping_precheck_failed` **每个不合格列一行**，sink 仍在一次响应里返回全部列，source 再逐项写行；
 不会退回「改一列、重跑、再发现下一列」。`batch_pushed.source_rows` 是 fetch 累加器到本批为止的
