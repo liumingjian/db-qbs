@@ -16,6 +16,7 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 
 mod oracle_source;
 mod protocol;
+mod run_history;
 mod target_ddl;
 mod task_store;
 mod transfer;
@@ -27,6 +28,10 @@ pub use protocol::{
     BatchResponse, CommitResponse, HttpSinkClient, OpenRunRequest, OpenRunResponse, RunResponse,
     SinkClient, SinkError, SinkErrorKind, SinkGateDetails, SinkPrecheckIssue, SourceColumn,
     Terminal,
+};
+pub use run_history::{
+    expired_history_indices, fold_history_lines, HistoryChange, HistoryStore, RunHistory,
+    UnknownReason,
 };
 pub use target_ddl::{generate_target_ddl, TargetDdlError};
 pub use task_store::{Task, TaskInput, TaskStore};

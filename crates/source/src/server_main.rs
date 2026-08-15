@@ -11,10 +11,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use chrono::Utc;
 use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
 use db_qbs_source::{
     embedded_web_asset, generate_target_ddl, load_source_config, parse_biz_date, sql_shape_report,
-    OracleRowSource, SourceConfig, Task, TaskConfig, TaskInput, TaskStore,
+    HistoryChange, HistoryStore, OracleRowSource, RunHistory, SourceConfig, Task, TaskConfig,
+    TaskInput, TaskStore, UnknownReason,
 };
 use rand::RngCore;
 use serde::de::DeserializeOwned;
@@ -26,24 +28,14 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 const MAX_REQUEST_BODY_BYTES: u64 = 1024 * 1024;
 const RUN_TASKS_DIRECTORY: &str = "run-tasks";
 
-type RunRegistry = Arc<Mutex<HashMap<String, RunRecord>>>;
+type RunRegistry = Arc<Mutex<HashMap<String, RunHistory>>>;
 
-#[derive(Clone, Default)]
-struct RunRecord {
-    run_id: Option<String>,
-    biz_date: Option<String>,
-    staging_table: Option<String>,
-    projection: RunProjection,
-}
-
-#[derive(Clone, Default)]
-struct RunProjection {
-    stage: Option<String>,
-    seq: u64,
-    rows_pushed: u64,
-    bytes: u64,
-    ms: u64,
-    last_ts: Option<String>,
+struct ServerState<'a> {
+    config: &'a SourceConfig,
+    config_path: &'a Path,
+    tasks: &'a TaskStore,
+    history: &'a HistoryStore,
+    runs: &'a RunRegistry,
 }
 
 #[derive(Deserialize)]
@@ -51,12 +43,6 @@ struct RunProjection {
 struct StartRunInput {
     task_id: String,
     biz_date: String,
-}
-
-#[derive(Default)]
-struct ObservedRunIdentity {
-    run_id: Option<String>,
-    biz_date: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -92,6 +78,13 @@ fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
     }
 
     let store = TaskStore::open(&config.data_dir)?;
+    let history_store = HistoryStore::open(&config.data_dir)?;
+    history_store.seal_incomplete(
+        UnknownReason::ProcessDisappeared,
+        Utc::now(),
+        config.history_retention_days,
+    )?;
+    clean_run_tasks(&config.data_dir)?;
     let runs = Arc::new(Mutex::new(HashMap::new()));
     let server = Server::http(&config.listen)
         .map_err(|error| format!("监听 {} 失败：{error}", config.listen))?;
@@ -126,7 +119,39 @@ fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
             .recv_timeout(Duration::from_millis(100))
             .map_err(|error| format!("接收 HTTP 请求失败：{error}"))?
         {
-            handle_request(request, &config, &config_path, &store, &runs);
+            let state = ServerState {
+                config: &config,
+                config_path: &config_path,
+                tasks: &store,
+                history: &history_store,
+                runs: &runs,
+            };
+            handle_request(request, &state);
+        }
+    }
+    history_store.seal_incomplete(
+        UnknownReason::ServiceRestarted,
+        Utc::now(),
+        config.history_retention_days,
+    )?;
+    clean_run_tasks(&config.data_dir)?;
+    Ok(())
+}
+
+fn clean_run_tasks(data_dir: &Path) -> Result<(), String> {
+    let directory = data_dir.join(RUN_TASKS_DIRECTORY);
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("读取临时任务目录失败：{error}")),
+    };
+    for entry in entries {
+        let path = entry
+            .map_err(|error| format!("读取临时任务文件失败：{error}"))?
+            .path();
+        if path.is_file() {
+            fs::remove_file(&path)
+                .map_err(|error| format!("清扫临时任务文件 {} 失败：{error}", path.display()))?;
         }
     }
     Ok(())
@@ -142,14 +167,8 @@ fn is_loopback(listen: &str) -> bool {
     first.ip().is_loopback() && addresses.all(|address| address.ip().is_loopback())
 }
 
-fn handle_request(
-    mut request: Request,
-    config: &SourceConfig,
-    config_path: &Path,
-    store: &TaskStore,
-    runs: &RunRegistry,
-) {
-    let response = route_request(&mut request, config, config_path, store, runs);
+fn handle_request(mut request: Request, state: &ServerState<'_>) {
+    let response = route_request(&mut request, state);
 
     if let Err(error) = request.respond(response) {
         emit(
@@ -160,23 +179,20 @@ fn handle_request(
     }
 }
 
-fn route_request(
-    request: &mut Request,
-    config: &SourceConfig,
-    config_path: &Path,
-    store: &TaskStore,
-    runs: &RunRegistry,
-) -> HttpResponse {
+fn route_request(request: &mut Request, state: &ServerState<'_>) -> HttpResponse {
     let method = request.method().clone();
-    let path = request.url().to_owned();
+    let url = request.url().to_owned();
+    let (path, query) = url
+        .split_once('?')
+        .map_or((url.as_str(), None), |(path, query)| (path, Some(query)));
 
     if path == "/api" || path.starts_with("/api/") {
-        return route_api_request(request, config, config_path, store, runs, method, &path);
+        return route_api_request(request, state, method, path, query);
     }
 
     if method == Method::Get {
-        if let Some(asset) = embedded_web_asset(&path) {
-            return embedded_response(asset.body.into_owned(), asset.content_type, &path);
+        if let Some(asset) = embedded_web_asset(path) {
+            return embedded_response(asset.body.into_owned(), asset.content_type, path);
         }
     }
     not_found()
@@ -184,42 +200,51 @@ fn route_request(
 
 fn route_api_request(
     request: &mut Request,
-    config: &SourceConfig,
-    config_path: &Path,
-    store: &TaskStore,
-    runs: &RunRegistry,
+    state: &ServerState<'_>,
     method: Method,
     path: &str,
+    query: Option<&str>,
 ) -> HttpResponse {
     if method == Method::Post && path == "/api/columns" {
-        return handle_column_fetch(request, config);
+        return handle_column_fetch(request, state.config);
     }
 
     if method == Method::Post && path == "/api/runs" {
-        return handle_start_run(request, config, config_path, store, runs);
+        return handle_start_run(
+            request,
+            state.config,
+            state.config_path,
+            state.tasks,
+            state.history,
+            state.runs,
+        );
+    }
+
+    if method == Method::Get && path == "/api/runs" {
+        return handle_list_history(state.history, query);
     }
 
     if method == Method::Get {
-        if let Some(run_record_id) = resource_id_from_path(&path, "/api/runs/") {
-            return handle_get_run(runs, run_record_id);
+        if let Some(run_record_id) = resource_id_from_path(path, "/api/runs/") {
+            return handle_get_run(state.runs, state.history, run_record_id);
         }
     }
 
     if path == "/api/tasks" {
         return match method {
-            Method::Get => handle_list_tasks(store),
-            Method::Post => handle_create_task(request, store),
+            Method::Get => handle_list_tasks(state.tasks),
+            Method::Post => handle_create_task(request, state.tasks),
             _ => not_found(),
         };
     }
 
-    let Some(task_id) = resource_id_from_path(&path, "/api/tasks/") else {
+    let Some(task_id) = resource_id_from_path(path, "/api/tasks/") else {
         return not_found();
     };
     match method {
-        Method::Get => handle_get_task(store, task_id),
-        Method::Put => handle_update_task(request, store, task_id),
-        Method::Delete => handle_delete_task(store, task_id),
+        Method::Get => handle_get_task(state.tasks, task_id),
+        Method::Put => handle_update_task(request, state.tasks, task_id),
+        Method::Delete => handle_delete_task(state.tasks, task_id),
         _ => not_found(),
     }
 }
@@ -237,6 +262,7 @@ fn handle_start_run(
     config: &SourceConfig,
     config_path: &Path,
     store: &TaskStore,
+    history_store: &HistoryStore,
     runs: &RunRegistry,
 ) -> HttpResponse {
     let input: StartRunInput = match read_json_body(request) {
@@ -252,36 +278,78 @@ fn handle_start_run(
         Err(error) => return internal_error(error),
     };
 
-    match start_run(config, config_path, &task, &input.biz_date, runs) {
+    match start_run(
+        config,
+        config_path,
+        &task,
+        &input.biz_date,
+        history_store,
+        runs,
+    ) {
         Ok(run_record_id) => json_response(202, &json!({ "run_record_id": run_record_id })),
         Err(error) => internal_error(error),
     }
 }
 
-fn handle_get_run(runs: &RunRegistry, run_record_id: &str) -> HttpResponse {
+fn handle_get_run(
+    runs: &RunRegistry,
+    history_store: &HistoryStore,
+    run_record_id: &str,
+) -> HttpResponse {
     let record = match runs.lock() {
         Ok(registry) => registry.get(run_record_id).cloned(),
         Err(_) => return internal_error("run 投影锁已损坏".to_owned()),
     };
-    let Some(record) = record else {
-        return not_found();
-    };
-    json_response(
-        200,
-        &json!({
-            "run_record_id": run_record_id,
-            "run_id": record.run_id,
-            "biz_date": record.biz_date,
-            "staging_table": record.staging_table,
-            "stage": record.projection.stage,
-            "seq": record.projection.seq,
-            "rows_pushed": record.projection.rows_pushed,
-            "bytes": record.projection.bytes,
-            "ms": record.projection.ms,
-            "last_ts": record.projection.last_ts,
-            "live": true,
-        }),
-    )
+    if let Some(record) = record {
+        let observed_biz_date = record.run_id.as_ref().map(|_| &record.biz_date);
+        return json_response(
+            200,
+            &json!({
+                "run_record_id": run_record_id,
+                "run_id": record.run_id,
+                "biz_date": observed_biz_date,
+                "staging_table": record.staging_table,
+                "stage": record.stage,
+                "seq": record.seq,
+                "rows_pushed": record.rows_pushed,
+                "bytes": record.bytes,
+                "ms": record.ms,
+                "last_ts": record.last_ts,
+                "live": true,
+            }),
+        );
+    }
+    match history_store.get(run_record_id) {
+        Ok(Some(history)) => history_response(&history),
+        Ok(None) => not_found(),
+        Err(error) => internal_error(error),
+    }
+}
+
+fn handle_list_history(history_store: &HistoryStore, query: Option<&str>) -> HttpResponse {
+    let mut task_id = None;
+    let mut biz_date = None;
+    for (key, value) in url::form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
+        match key.as_ref() {
+            "task_id" => task_id = Some(value.into_owned()),
+            "biz_date" => biz_date = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+    match history_store.list(task_id.as_deref(), biz_date.as_deref()) {
+        Ok(history) => json_response(200, &history),
+        Err(error) => internal_error(error),
+    }
+}
+
+fn history_response(history: &RunHistory) -> HttpResponse {
+    let mut value =
+        serde_json::to_value(history).expect("serializing a run history response must succeed");
+    value
+        .as_object_mut()
+        .expect("run history serializes as an object")
+        .insert("live".to_owned(), Value::Bool(false));
+    json_response(200, &value)
 }
 
 fn start_run(
@@ -289,10 +357,25 @@ fn start_run(
     config_path: &Path,
     task: &Task,
     biz_date: &str,
+    history_store: &HistoryStore,
     runs: &RunRegistry,
 ) -> Result<String, String> {
     let run_record_id = generate_run_record_id();
-    let task_path = materialize_task(config, task, &run_record_id)?;
+    let mut history = RunHistory::accepted(&run_record_id, &task.task_id, biz_date, Utc::now());
+    history_store.insert(&history, Utc::now(), config.history_retention_days)?;
+    runs.lock()
+        .map_err(|_| "run 投影锁已损坏".to_owned())?
+        .insert(run_record_id.clone(), history.clone());
+
+    let task_path = match materialize_task(config, task, &run_record_id) {
+        Ok(path) => path,
+        Err(error) => {
+            history.mark_parent_failure(error.clone(), Utc::now());
+            let _ = history_store.save(&history, Utc::now(), config.history_retention_days);
+            remove_projection(runs, &run_record_id);
+            return Err(error);
+        }
+    };
     let mut child = match Command::new(&config.run_executable)
         .arg("--config")
         .arg(config_path)
@@ -307,7 +390,11 @@ fn start_run(
         Ok(child) => child,
         Err(error) => {
             let _ = fs::remove_file(&task_path);
-            return Err(format!("启动 run 子进程失败：{error}"));
+            let message = format!("启动 run 子进程失败：{error}");
+            history.mark_parent_failure(message.clone(), Utc::now());
+            let _ = history_store.save(&history, Utc::now(), config.history_retention_days);
+            remove_projection(runs, &run_record_id);
+            return Err(message);
         }
     };
     let stdout = child
@@ -315,13 +402,21 @@ fn start_run(
         .take()
         .expect("stdout is available after configuring it as piped");
 
-    runs.lock()
-        .map_err(|_| "run 投影锁已损坏".to_owned())?
-        .insert(run_record_id.clone(), RunRecord::default());
-
     let worker_runs = Arc::clone(runs);
     let worker_record_id = run_record_id.clone();
-    thread::spawn(move || supervise_run(child, stdout, task_path, worker_record_id, worker_runs));
+    let worker_history_store = history_store.clone();
+    let retention_days = config.history_retention_days;
+    thread::spawn(move || {
+        supervise_run(
+            child,
+            stdout,
+            task_path,
+            worker_record_id,
+            worker_history_store,
+            retention_days,
+            worker_runs,
+        )
+    });
     Ok(run_record_id)
 }
 
@@ -359,9 +454,11 @@ fn supervise_run(
     stdout: impl Read,
     task_path: PathBuf,
     run_record_id: String,
+    history_store: HistoryStore,
+    retention_days: u64,
     runs: RunRegistry,
 ) {
-    let mut observed_identity = ObservedRunIdentity::default();
+    let mut terminal_observed = false;
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else {
             break;
@@ -374,13 +471,37 @@ fn supervise_run(
         let Ok(log) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        let is_terminal = apply_log_line(&runs, &run_record_id, &log, &mut observed_identity);
-        if is_terminal {
+        let Some((change, history)) = apply_log_line(&runs, &run_record_id, &log) else {
+            continue;
+        };
+        if change == HistoryChange::Terminal {
+            terminal_observed = true;
+        }
+        if matches!(
+            change,
+            HistoryChange::StageChanged | HistoryChange::Terminal
+        ) && history_store
+            .save(&history, Utc::now(), retention_days)
+            .is_err()
+        {
+            continue;
+        }
+        if change == HistoryChange::Terminal {
             remove_projection(&runs, &run_record_id);
         }
     }
     let _ = child.wait();
     let _ = fs::remove_file(task_path);
+    if !terminal_observed {
+        let history = runs.lock().ok().and_then(|mut registry| {
+            let history = registry.get_mut(&run_record_id)?;
+            history.mark_unknown(UnknownReason::ProcessDisappeared, Utc::now());
+            Some(history.clone())
+        });
+        if let Some(history) = history {
+            let _ = history_store.save(&history, Utc::now(), retention_days);
+        }
+    }
     remove_projection(&runs, &run_record_id);
 }
 
@@ -388,67 +509,13 @@ fn apply_log_line(
     runs: &RunRegistry,
     run_record_id: &str,
     log: &Value,
-    observed_identity: &mut ObservedRunIdentity,
-) -> bool {
-    let event = log.get("event").and_then(Value::as_str);
-    if event == Some("source_started") {
-        observed_identity.biz_date = log
-            .get("biz_date")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-    }
-
-    let line_run_id = log.get("run_id").and_then(Value::as_str);
-    if let Some(line_run_id) = line_run_id {
-        if let Some(observed_run_id) = observed_identity.run_id.as_deref() {
-            if observed_run_id != line_run_id {
-                return false;
-            }
-        } else {
-            observed_identity.run_id = Some(line_run_id.to_owned());
-        }
-    }
-
+) -> Option<(HistoryChange, RunHistory)> {
     let Ok(mut registry) = runs.lock() else {
-        return false;
+        return None;
     };
-    let Some(record) = registry.get_mut(run_record_id) else {
-        return event == Some("run_finished");
-    };
-    if record.run_id.is_none() {
-        if let Some(run_id) = observed_identity.run_id.as_ref() {
-            record.run_id = Some(run_id.clone());
-            record.biz_date = observed_identity.biz_date.clone();
-        }
-    }
-    if let Some(ts) = log.get("ts").and_then(Value::as_str) {
-        record.projection.last_ts = Some(ts.to_owned());
-    }
-
-    match event {
-        Some("stage_changed") => {
-            if let Some(stage) = log.get("stage").and_then(Value::as_str) {
-                record.projection.stage = Some(stage.to_owned());
-            }
-        }
-        Some("run_opened") => {
-            record.staging_table = log
-                .get("staging_table")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-        }
-        Some("batch_pushed") => {
-            if let Some(seq) = log.get("seq").and_then(Value::as_u64) {
-                record.projection.seq = seq;
-            }
-            record.projection.rows_pushed += log.get("rows").and_then(Value::as_u64).unwrap_or(0);
-            record.projection.bytes += log.get("bytes").and_then(Value::as_u64).unwrap_or(0);
-            record.projection.ms += log.get("ms").and_then(Value::as_u64).unwrap_or(0);
-        }
-        _ => {}
-    }
-
-    event == Some("run_finished")
+    let record = registry.get_mut(run_record_id)?;
+    let change = record.apply_log(log);
+    Some((change, record.clone()))
 }
 
 fn remove_projection(runs: &RunRegistry, run_record_id: &str) {

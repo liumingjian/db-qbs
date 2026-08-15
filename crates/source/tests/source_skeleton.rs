@@ -160,7 +160,7 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:04.000Z","level":"info","event":"batch_p
 printf '%s\n' '{{"ts":"2026-08-15T10:00:05.000Z","level":"info","event":"batch_pushed","run_id":"run-7","task":null,"seq":2,"rows":4,"source_rows":7,"bytes":120,"written":4,"ms":12}}'
 while [ ! -f '{}' ]; do sleep 0.02; done
 printf '%s\n' '{{"ts":"2026-08-15T10:00:06.000Z","level":"info","event":"stage_changed","run_id":"run-7","task":null,"stage":"COMMITTING","message":"committing"}}'
-printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_finished","run_id":"run-7","task":null,"terminal":"SUCCEEDED","stage":"SUCCEEDED","message":"done"}}'
+printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_finished","run_id":"run-7","task":null,"terminal":"SUCCEEDED","stage":"SUCCEEDED","message":"done","source_code":null,"sink_code":null,"column":null,"value":null,"source_rows":7,"source_batches":2,"staged_rows":7,"received_batches":2,"sink_reported_rows":7,"purged_rows":1,"fetch_ms":4,"push_ms":22,"commit_ms":6,"count_ms":2,"cursor_ms":1}}'
 "#,
             invocation.display(),
             release.display(),
@@ -170,6 +170,17 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
     let mut source = start_source(&config);
     wait_for_tasks(port, &mut source);
     let task_id = create_task(port);
+    let audit = rusqlite::Connection::open(directory.join("db-qbs.sqlite3")).unwrap();
+    audit
+        .execute_batch(
+            "CREATE TABLE history_write_audit (operation TEXT NOT NULL);
+             CREATE TRIGGER audit_history_insert AFTER INSERT ON run_history
+             BEGIN INSERT INTO history_write_audit VALUES ('INSERT'); END;
+             CREATE TRIGGER audit_history_update AFTER UPDATE ON run_history
+             BEGIN INSERT INTO history_write_audit VALUES ('UPDATE'); END;",
+        )
+        .unwrap();
+    drop(audit);
 
     let started = post(
         port,
@@ -241,7 +252,38 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
     );
 
     fs::write(release, "").unwrap();
-    wait_for_status(port, &format!("/api/runs/{run_record_id}"), 404);
+    let history = wait_for_json(port, &format!("/api/runs/{run_record_id}"), |body| {
+        body["live"] == false
+    });
+    assert_eq!(history["run_record_id"], run_record_id);
+    assert_eq!(history["run_id"], "run-7");
+    assert_eq!(history["task_id"], task_id);
+    assert_eq!(history["biz_date"], "2026-08-14");
+    assert_eq!(history["outcome"], "SUCCEEDED");
+    assert_eq!(history["target_table_effect"], "SWAPPED");
+    assert_eq!(history["source_rows"], 7);
+    assert_eq!(history["source_batches"], 2);
+    assert_eq!(history["rows_pushed"], 7);
+    assert_eq!(history["seq"], 2);
+    assert_eq!(history["bytes"], 220);
+    assert_eq!(history["ms"], 22);
+    assert_eq!(history["source_code"], Value::Null);
+    assert_eq!(history["sink_code"], Value::Null);
+
+    let by_task = json_body(&get(port, &format!("/api/runs?task_id={task_id}")).unwrap());
+    assert_eq!(by_task.as_array().unwrap().len(), 1);
+    assert_eq!(by_task[0]["run_record_id"], run_record_id);
+    let by_date = json_body(&get(port, "/api/runs?biz_date=2026-08-14").unwrap());
+    assert_eq!(by_date.as_array().unwrap().len(), 1);
+    let no_match = json_body(&get(port, "/api/runs?biz_date=2026-08-13").unwrap());
+    assert_eq!(no_match, serde_json::json!([]));
+    let audit = rusqlite::Connection::open(directory.join("db-qbs.sqlite3")).unwrap();
+    let history_writes: u64 = audit
+        .query_row("SELECT COUNT(*) FROM history_write_audit", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(history_writes, 5);
     wait_for_empty_directory(&directory.join("run-tasks"));
 
     assert_success(&terminate(source));
@@ -259,10 +301,72 @@ fn silent_child_disappearance_evicts_projection_and_removes_task_file() {
     let task_id = create_task(port);
 
     let run_record_id = start_run(port, &task_id);
-    wait_for_status(port, &format!("/api/runs/{run_record_id}"), 404);
+    let history = wait_for_json(port, &format!("/api/runs/{run_record_id}"), |body| {
+        body["live"] == false
+    });
+    assert_eq!(history["outcome"], "FAILED");
+    assert_eq!(history["unknown_reason"], "PROCESS_DISAPPEARED");
+    assert_eq!(history["message"], "进程消失，无终态日志");
+    assert_eq!(history["source_code"], Value::Null);
+    assert_eq!(history["sink_code"], Value::Null);
+    assert_eq!(history["target_table_effect"], Value::Null);
     wait_for_empty_directory(&directory.join("run-tasks"));
 
     assert_success(&terminate(source));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn restart_cleanup_distinguishes_graceful_restart_from_process_disappearance() {
+    let directory = temp_directory();
+    let port = unused_port();
+    let fake_child = write_fake_child(
+        &directory,
+        r#"printf '%s\n' '{"ts":"2026-08-15T12:00:00.000Z","level":"info","event":"source_started","run_id":null,"task":null,"biz_date":"2026-08-14"}'
+printf '%s\n' '{"ts":"2026-08-15T12:00:01.000Z","level":"info","event":"stage_changed","run_id":"run-restart","task":null,"stage":"PREPARING"}'
+sleep 2
+"#,
+    );
+    let config = write_run_config(&directory, port, &fake_child);
+    let mut source = start_source(&config);
+    wait_for_tasks(port, &mut source);
+    let task_id = create_task(port);
+
+    let graceful_record_id = start_run(port, &task_id);
+    wait_for_json(port, &format!("/api/runs/{graceful_record_id}"), |body| {
+        body["stage"] == "PREPARING"
+    });
+    assert_success(&terminate(source));
+
+    let mut restarted = start_source(&config);
+    wait_for_tasks(port, &mut restarted);
+    let graceful = json_body(&get(port, &format!("/api/runs/{graceful_record_id}")).unwrap());
+    assert_eq!(graceful["live"], false);
+    assert_eq!(graceful["unknown_reason"], "SERVICE_RESTARTED");
+    assert_eq!(graceful["message"], "服务重启，结局未知");
+    assert_eq!(graceful["source_code"], Value::Null);
+    assert_eq!(graceful["target_table_effect"], Value::Null);
+
+    let disappeared_record_id = start_run(port, &task_id);
+    wait_for_json(
+        port,
+        &format!("/api/runs/{disappeared_record_id}"),
+        |body| body["stage"] == "PREPARING",
+    );
+    let killed = kill_source(restarted, "-KILL");
+    assert!(!killed.status.success(), "{}", output_text(&killed));
+
+    let mut after_kill = start_source(&config);
+    wait_for_tasks(port, &mut after_kill);
+    let disappeared = json_body(&get(port, &format!("/api/runs/{disappeared_record_id}")).unwrap());
+    assert_eq!(disappeared["live"], false);
+    assert_eq!(disappeared["unknown_reason"], "PROCESS_DISAPPEARED");
+    assert_eq!(disappeared["message"], "进程消失，无终态日志");
+    assert_eq!(disappeared["sink_code"], Value::Null);
+    assert_eq!(disappeared["target_table_effect"], Value::Null);
+    wait_for_empty_directory(&directory.join("run-tasks"));
+
+    assert_success(&terminate(after_kill));
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -322,7 +426,10 @@ while [ ! -f '{}' ]; do sleep 0.02; done
         200
     );
     fs::write(release, "").unwrap();
-    wait_for_status(port, &format!("/api/runs/{run_record_id}"), 404);
+    let history = wait_for_json(port, &format!("/api/runs/{run_record_id}"), |body| {
+        body["live"] == false
+    });
+    assert_eq!(history["unknown_reason"], "PROCESS_DISAPPEARED");
 
     assert_success(&terminate(source));
     fs::remove_dir_all(directory).unwrap();
@@ -493,8 +600,12 @@ fn start_source(config: &Path) -> Child {
 }
 
 fn terminate(child: Child) -> Output {
+    kill_source(child, "-TERM")
+}
+
+fn kill_source(child: Child, signal: &str) -> Output {
     let kill_status = Command::new("kill")
-        .args(["-TERM", &child.id().to_string()])
+        .args([signal, &child.id().to_string()])
         .status()
         .unwrap();
     assert!(kill_status.success());
@@ -638,17 +749,6 @@ fn wait_for_json(port: u16, path: &str, predicate: impl Fn(&Value) -> bool) -> V
             }
         }
         assert!(Instant::now() < deadline, "timed out waiting for {path}");
-        thread::sleep(Duration::from_millis(20));
-    }
-}
-
-fn wait_for_status(port: u16, path: &str, status: u16) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if get(port, path).unwrap().status == status {
-            return;
-        }
-        assert!(Instant::now() < deadline, "timed out waiting for {status}");
         thread::sleep(Duration::from_millis(20));
     }
 }
