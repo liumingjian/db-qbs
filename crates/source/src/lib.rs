@@ -19,6 +19,7 @@ mod protocol;
 mod target_ddl;
 mod task_store;
 mod transfer;
+mod web_assets;
 
 pub use db_qbs_shared::BatchPayload;
 pub use oracle_source::OracleRowSource;
@@ -34,6 +35,7 @@ pub use transfer::{
     TransferFailure, TransferRequest, TransferSummary, BATCH_BYTE_BUDGET, BATCH_ROW_LIMIT,
     FETCH_ARRAY_SIZE,
 };
+pub use web_assets::{embedded_web_asset, EmbeddedWebAsset};
 
 const RELATIVE_TIME_FUNCTION_NAMES: &[&str] = &[
     "SYSDATE",

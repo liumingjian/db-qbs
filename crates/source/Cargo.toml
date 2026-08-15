@@ -18,6 +18,7 @@ chrono.workspace = true
 db-qbs-shared = { path = "../shared" }
 oracle.workspace = true
 rand.workspace = true
+rust-embed = { version = "=8.11.0", features = ["debug-embed"] }
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
