@@ -47,21 +47,24 @@ export function ErrorCodeTag({
   conclusion,
 }: {
   code: string;
-  httpStatus: number;
+  httpStatus?: number;
   conclusion: string;
 }) {
-  const category = httpStatus >= 500 ? "is-internal" : "is-rejected";
+  const category = httpStatus === undefined || httpStatus >= 500 ? "is-internal" : "is-rejected";
   return (
     <span className="error-summary">
       <span>{conclusion}</span>
       <span className={`error-code ${category}`}>
-        {code} <span className="http-code">HTTP {httpStatus}</span>
+        {code}
+        {httpStatus !== undefined && (
+          <span className="http-code">HTTP {httpStatus}</span>
+        )}
       </span>
     </span>
   );
 }
 
-export function SensitiveValue({ column, value }: { column?: string; value: string }) {
+export function SensitiveValue({ column, value }: { column?: string; value?: string }) {
   const [revealed, setRevealed] = useState(false);
   const RevealIcon = revealed ? EyeOff : Eye;
   return (
@@ -85,8 +88,12 @@ export function SensitiveValue({ column, value }: { column?: string; value: stri
             <dd>{column}</dd>
           </>
         )}
-        <dt>value</dt>
-        <dd>{value}</dd>
+        {value !== undefined && (
+          <>
+            <dt>value</dt>
+            <dd>{value}</dd>
+          </>
+        )}
       </dl>
     </section>
   );

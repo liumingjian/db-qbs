@@ -47,6 +47,46 @@ export interface ColumnFetchResult {
   target_ddl: string;
 }
 
+export interface RunHistory {
+  run_record_id: string;
+  run_id: string | null;
+  task_id: string;
+  biz_date: string;
+  staging_table: string | null;
+  started_at: string;
+  finished_at: string | null;
+  outcome: "SUCCEEDED" | "FAILED" | null;
+  target_table_effect: "SWAPPED" | "DISCARDED" | "UNKNOWN" | null;
+  stage: string | null;
+  source_rows: number | null;
+  staged_rows: number | null;
+  sink_reported_rows: number | null;
+  purged_rows: number | null;
+  source_batches: number | null;
+  received_batches: number | null;
+  fetch_ms: number | null;
+  push_ms: number | null;
+  commit_ms: number | null;
+  count_ms: number | null;
+  cursor_ms: number | null;
+  source_code: string | null;
+  sink_code: string | null;
+  column: string | null;
+  value: string | null;
+  message: string | null;
+  unknown_reason: "PROCESS_DISAPPEARED" | "SERVICE_RESTARTED" | null;
+  seq: number;
+  rows_pushed: number;
+  bytes: number;
+  ms: number;
+  last_ts: string | null;
+}
+
+export interface RunHistoryFilters {
+  taskId?: string;
+  bizDate?: string;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -76,6 +116,23 @@ export async function listTasks(): Promise<Task[]> {
     headers: { Accept: "application/json" },
   });
   return readJson<Task[]>(response, "加载任务失败");
+}
+
+export async function listRunHistory(
+  filters: RunHistoryFilters = {},
+): Promise<RunHistory[]> {
+  const query = new URLSearchParams();
+  if (filters.taskId !== undefined && filters.taskId !== "") {
+    query.set("task_id", filters.taskId);
+  }
+  if (filters.bizDate !== undefined && filters.bizDate !== "") {
+    query.set("biz_date", filters.bizDate);
+  }
+  const suffix = query.size === 0 ? "" : `?${query.toString()}`;
+  const response = await fetch(`/api/runs${suffix}`, {
+    headers: { Accept: "application/json" },
+  });
+  return readJson<RunHistory[]>(response, "加载运行历史失败");
 }
 
 export async function createTask(input: TaskInput): Promise<Task> {

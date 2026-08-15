@@ -9,6 +9,7 @@ import {
   fetchColumns,
   generateBuilderTask,
   inspectSqlShape,
+  listRunHistory,
   listTasks,
   taskInputFrom,
   updateTask,
@@ -139,6 +140,31 @@ describe("task API", () => {
       target_table: task.target_table,
       target_date_col: task.target_date_col,
     });
+  });
+});
+
+describe("run history API", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("loads history with task and business-date filters", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("[]", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      listRunHistory({ taskId: "task/a", bizDate: "2026-08-14" }),
+    ).resolves.toEqual([]);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/runs?task_id=task%2Fa&biz_date=2026-08-14",
+      { headers: { Accept: "application/json" } },
+    );
   });
 });
 
