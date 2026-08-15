@@ -143,6 +143,192 @@ fn task_writes_reject_client_identity_and_incomplete_definitions() {
 }
 
 #[test]
+fn run_launch_materializes_task_and_aggregates_child_output_until_exit() {
+    let directory = temp_directory();
+    let port = unused_port();
+    let release = directory.join("release-child");
+    let invocation = directory.join("child-args");
+    let fake_child = write_fake_child(
+        &directory,
+        &format!(
+            r#"printf '%s\n' "$@" > '{}'
+printf '%s\n' '{{"ts":"2026-08-15T10:00:00.000Z","level":"info","event":"source_started","run_id":null,"task":null,"biz_date":"2026-08-14","message":"started"}}'
+printf '%s\n' '{{"ts":"2026-08-15T10:00:01.000Z","level":"info","event":"stage_changed","run_id":"run-7","task":null,"stage":"PREPARING","message":"preparing"}}'
+printf '%s\n' '{{"ts":"2026-08-15T10:00:02.000Z","level":"info","event":"run_opened","run_id":"run-7","task":null,"staging_table":"STG_7","columns_checked":2,"message":"opened"}}'
+printf '%s\n' '{{"ts":"2026-08-15T10:00:03.000Z","level":"info","event":"stage_changed","run_id":"run-7","task":null,"stage":"STREAMING","message":"streaming"}}'
+printf '%s\n' '{{"ts":"2026-08-15T10:00:04.000Z","level":"info","event":"batch_pushed","run_id":"run-7","task":null,"seq":1,"rows":3,"source_rows":3,"bytes":100,"written":3,"ms":10}}'
+printf '%s\n' '{{"ts":"2026-08-15T10:00:05.000Z","level":"info","event":"batch_pushed","run_id":"run-7","task":null,"seq":2,"rows":4,"source_rows":7,"bytes":120,"written":4,"ms":12}}'
+while [ ! -f '{}' ]; do sleep 0.02; done
+printf '%s\n' '{{"ts":"2026-08-15T10:00:06.000Z","level":"info","event":"stage_changed","run_id":"run-7","task":null,"stage":"COMMITTING","message":"committing"}}'
+printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_finished","run_id":"run-7","task":null,"terminal":"SUCCEEDED","stage":"SUCCEEDED","message":"done"}}'
+"#,
+            invocation.display(),
+            release.display(),
+        ),
+    );
+    let config = write_run_config(&directory, port, &fake_child);
+    let mut source = start_source(&config);
+    wait_for_tasks(port, &mut source);
+    let task_id = create_task(port);
+
+    let started = post(
+        port,
+        "/api/runs",
+        &format!(r#"{{"task_id":"{task_id}","biz_date":"2026-08-14"}}"#),
+    )
+    .unwrap();
+    assert_eq!(started.status, 202, "{}", started.body);
+    let run_record_id = json_body(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let detail = wait_for_json(port, &format!("/api/runs/{run_record_id}"), |body| {
+        body["rows_pushed"] == 7
+    });
+    assert_eq!(
+        detail,
+        serde_json::json!({
+            "run_record_id": run_record_id,
+            "run_id": "run-7",
+            "biz_date": "2026-08-14",
+            "staging_table": "STG_7",
+            "stage": "STREAMING",
+            "seq": 2,
+            "rows_pushed": 7,
+            "bytes": 220,
+            "ms": 22,
+            "last_ts": "2026-08-15T10:00:05.000Z",
+            "live": true,
+        })
+    );
+
+    let task_files = directory_entries(&directory.join("run-tasks"));
+    assert_eq!(task_files.len(), 1);
+    assert!(task_files[0]
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .contains(&run_record_id));
+    assert_eq!(
+        fs::metadata(&task_files[0]).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let task_toml = fs::read_to_string(&task_files[0]).unwrap();
+    for field in [
+        "source_sql",
+        "source_date_col",
+        "target_table",
+        "target_date_col",
+    ] {
+        assert!(task_toml.contains(field), "{task_toml}");
+    }
+    for secret in ["name", "task_id", "oracle_password", "secret"] {
+        assert!(!task_toml.contains(secret), "{task_toml}");
+    }
+
+    let args = fs::read_to_string(invocation).unwrap();
+    assert_eq!(
+        args.lines().collect::<Vec<_>>(),
+        [
+            "--config",
+            config.to_str().unwrap(),
+            "--task",
+            task_files[0].to_str().unwrap(),
+            "--biz-date",
+            "2026-08-14",
+        ]
+    );
+
+    fs::write(release, "").unwrap();
+    wait_for_status(port, &format!("/api/runs/{run_record_id}"), 404);
+    wait_for_empty_directory(&directory.join("run-tasks"));
+
+    assert_success(&terminate(source));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn silent_child_disappearance_evicts_projection_and_removes_task_file() {
+    let directory = temp_directory();
+    let port = unused_port();
+    let fake_child = write_fake_child(&directory, "exit 1\n");
+    let config = write_run_config(&directory, port, &fake_child);
+    let mut source = start_source(&config);
+    wait_for_tasks(port, &mut source);
+    let task_id = create_task(port);
+
+    let run_record_id = start_run(port, &task_id);
+    wait_for_status(port, &format!("/api/runs/{run_record_id}"), 404);
+    wait_for_empty_directory(&directory.join("run-tasks"));
+
+    assert_success(&terminate(source));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn child_hanging_mid_run_remains_live_and_accepted_is_not_preparing() {
+    let directory = temp_directory();
+    let port = unused_port();
+    let emit = directory.join("emit-lines");
+    let release = directory.join("release-child");
+    let fake_child = write_fake_child(
+        &directory,
+        &format!(
+            r#"while [ ! -f '{}' ]; do sleep 0.02; done
+printf '%s\n' '{{"ts":"2026-08-15T11:00:00.000Z","level":"info","event":"source_started","run_id":null,"task":null,"biz_date":"2026-08-14","message":"started"}}'
+printf '%s\n' '{{"ts":"2026-08-15T11:00:01.000Z","level":"info","event":"stage_changed","run_id":"run-hanging","task":null,"stage":"PREPARING","message":"preparing"}}'
+printf '%s\n' '{{"ts":"2026-08-15T11:00:02.000Z","level":"info","event":"batch_pushed","run_id":"run-hanging","task":null,"seq":1,"rows":5,"source_rows":5,"bytes":64,"written":5,"ms":9}}'
+while [ ! -f '{}' ]; do sleep 0.02; done
+"#,
+            emit.display(),
+            release.display(),
+        ),
+    );
+    let config = write_run_config(&directory, port, &fake_child);
+    let mut source = start_source(&config);
+    wait_for_tasks(port, &mut source);
+    let task_id = create_task(port);
+
+    let run_record_id = start_run(port, &task_id);
+    let accepted = json_body(&get(port, &format!("/api/runs/{run_record_id}")).unwrap());
+    assert_eq!(accepted["stage"], Value::Null);
+    assert_eq!(accepted["run_id"], Value::Null);
+    assert_eq!(accepted["biz_date"], Value::Null);
+    assert_eq!(accepted["seq"], 0);
+    assert_eq!(accepted["rows_pushed"], 0);
+    assert_eq!(accepted["bytes"], 0);
+    assert_eq!(accepted["ms"], 0);
+    assert_eq!(accepted["last_ts"], Value::Null);
+    assert_eq!(accepted["live"], true);
+
+    fs::write(emit, "").unwrap();
+    let partial = wait_for_json(port, &format!("/api/runs/{run_record_id}"), |body| {
+        body["rows_pushed"] == 5
+    });
+    assert_eq!(partial["stage"], "PREPARING");
+    assert_eq!(partial["run_id"], "run-hanging");
+    assert_eq!(partial["biz_date"], "2026-08-14");
+    assert_eq!(partial["seq"], 1);
+    assert_eq!(partial["bytes"], 64);
+    assert_eq!(partial["ms"], 9);
+    assert_eq!(partial["live"], true);
+
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        get(port, &format!("/api/runs/{run_record_id}"))
+            .unwrap()
+            .status,
+        200
+    );
+    fs::write(release, "").unwrap();
+    wait_for_status(port, &format!("/api/runs/{run_record_id}"), 404);
+
+    assert_success(&terminate(source));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn tasks_endpoint_is_ready_and_sigterm_allows_same_port_restart() {
     let directory = temp_directory();
     let port = unused_port();
@@ -392,6 +578,98 @@ fn assert_task_fields(task: &Value) {
         .collect();
     fields.sort_unstable();
     assert_eq!(fields, TASK_FIELDS);
+}
+
+fn create_task(port: u16) -> String {
+    let response = post(
+        port,
+        "/api/tasks",
+        r#"{"name":"holdings","source_sql":"SELECT ID, D_BIZ FROM HOLDINGS WHERE D_BIZ >= :biz_date AND D_BIZ < :biz_date + 1","source_date_col":"D_BIZ","target_table":"HOLDINGS","target_date_col":"D_BIZ"}"#,
+    )
+    .unwrap();
+    assert_eq!(response.status, 201, "{}", response.body);
+    json_body(&response)["task_id"].as_str().unwrap().to_owned()
+}
+
+fn start_run(port: u16, task_id: &str) -> String {
+    let response = post(
+        port,
+        "/api/runs",
+        &format!(r#"{{"task_id":"{task_id}","biz_date":"2026-08-14"}}"#),
+    )
+    .unwrap();
+    assert_eq!(response.status, 202, "{}", response.body);
+    json_body(&response)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn write_fake_child(directory: &Path, body: &str) -> PathBuf {
+    let path = directory.join("fake-source-run.sh");
+    fs::write(&path, format!("#!/bin/sh\nset -eu\n{body}")).unwrap();
+    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&path, permissions).unwrap();
+    path
+}
+
+fn write_run_config(directory: &Path, port: u16, run_executable: &Path) -> PathBuf {
+    let path = directory.join("source.toml");
+    fs::write(
+        &path,
+        format!(
+            "oracle_connect_string = \"//oracle:1521/XE\"\n\
+             oracle_username = \"source\"\n\
+             oracle_password = \"secret\"\n\
+             oracle_client_lib_dir = \"/opt/oracle\"\n\
+             sink_base_url = \"http://127.0.0.1:18080\"\n\
+             listen = \"127.0.0.1:{port}\"\n\
+             data_dir = \"{}\"\n\
+             run_executable = \"{}\"\n",
+            directory.display(),
+            run_executable.display(),
+        ),
+    )
+    .unwrap();
+    path
+}
+
+fn wait_for_json(port: u16, path: &str, predicate: impl Fn(&Value) -> bool) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let response = get(port, path).unwrap();
+        if response.status == 200 {
+            let body = json_body(&response);
+            if predicate(&body) {
+                return body;
+            }
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {path}");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_status(port: u16, path: &str, status: u16) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if get(port, path).unwrap().status == status {
+            return;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {status}");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_empty_directory(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if fs::read_dir(path).unwrap().next().is_none() {
+            return;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for cleanup");
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn write_config(directory: &Path, listen: &str) -> PathBuf {

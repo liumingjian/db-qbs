@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sqlparser::ast::{
     visit_expressions, BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
     Query, Select, SelectItem, SetExpr, Statement, Value, Visit, Visitor,
@@ -71,7 +71,7 @@ fn default_run_executable() -> PathBuf {
         .join("db-qbs-source-run")
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskConfig {
     pub source_sql: String,
