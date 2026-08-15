@@ -4,6 +4,8 @@ use oracle::{Connection, InitParams, ResultSet, Row};
 
 use crate::{RowSource, SourceColumn, SourceConfig, SourceReadError, TaskConfig, FETCH_ARRAY_SIZE};
 
+const DESCRIBE_BIZ_DATE: &str = "0001-01-01";
+
 pub struct OracleRowSource {
     rows: ResultSet<'static, Row>,
     columns: Vec<SourceColumn>,
@@ -37,8 +39,9 @@ impl OracleRowSource {
         config: &SourceConfig,
         task: &TaskConfig,
     ) -> Result<Vec<SourceColumn>, SourceReadError> {
-        let rows = open_result_set(config, task, "0001-01-01")?;
-        Ok(describe_columns(rows.column_info()).0)
+        let rows = open_result_set(config, task, DESCRIBE_BIZ_DATE)?;
+        let (columns, _) = describe_columns(rows.column_info());
+        Ok(columns)
     }
 }
 

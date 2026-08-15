@@ -153,6 +153,52 @@ pub struct ShapeCheck {
     pub message: &'static str,
 }
 
+struct ShapeRule {
+    name: &'static str,
+    problem_code: &'static str,
+    message: &'static str,
+    requires_inspectable_statement: bool,
+}
+
+const SHAPE_RULES: [ShapeRule; 6] = [
+    ShapeRule {
+        name: "business_date_range",
+        problem_code: "invalid_date_predicate",
+        message: "WHERE must contain the exact half-open :biz_date range on source_date_col",
+        requires_inspectable_statement: true,
+    },
+    ShapeRule {
+        name: "no_additional_predicates",
+        problem_code: "additional_where_predicate",
+        message: "WHERE must not contain predicates other than the business-date range",
+        requires_inspectable_statement: true,
+    },
+    ShapeRule {
+        name: "named_projection",
+        problem_code: "unnamed_projection",
+        message: "every selected column must be explicitly named",
+        requires_inspectable_statement: true,
+    },
+    ShapeRule {
+        name: "determinate_projection",
+        problem_code: "indeterminate_projection",
+        message: "selected expressions must have statically determinate precision",
+        requires_inspectable_statement: true,
+    },
+    ShapeRule {
+        name: "no_relative_time_functions",
+        problem_code: "relative_time_function",
+        message: "source SQL must not use relative time functions such as SYSDATE",
+        requires_inspectable_statement: false,
+    },
+    ShapeRule {
+        name: "matching_date_columns",
+        problem_code: "date_column_mismatch",
+        message: "target_date_col must equal source_date_col ignoring case",
+        requires_inspectable_statement: false,
+    },
+];
+
 impl ShapeProblem {
     const fn new(code: &'static str, message: &'static str) -> Self {
         Self { code, message }
@@ -219,55 +265,21 @@ pub fn precheck_sql(task: &TaskConfig) -> Result<(), Vec<ShapeProblem>> {
 
 pub fn sql_shape_report(task: &TaskConfig) -> Vec<ShapeCheck> {
     let problems = precheck_sql(task).err().unwrap_or_default();
-    let cannot_inspect_statement = problems
+    let statement_is_inspectable = !problems
         .iter()
         .any(|problem| matches!(problem.code, "invalid_sql" | "unsupported_statement"));
 
-    [
-        (
-            "business_date_range",
-            "invalid_date_predicate",
-            "WHERE must contain the exact half-open :biz_date range on source_date_col",
-            cannot_inspect_statement,
-        ),
-        (
-            "no_additional_predicates",
-            "additional_where_predicate",
-            "WHERE must not contain predicates other than the business-date range",
-            cannot_inspect_statement,
-        ),
-        (
-            "named_projection",
-            "unnamed_projection",
-            "every selected column must be explicitly named",
-            cannot_inspect_statement,
-        ),
-        (
-            "determinate_projection",
-            "indeterminate_projection",
-            "selected expressions must have statically determinate precision",
-            cannot_inspect_statement,
-        ),
-        (
-            "no_relative_time_functions",
-            "relative_time_function",
-            "source SQL must not use relative time functions such as SYSDATE",
-            false,
-        ),
-        (
-            "matching_date_columns",
-            "date_column_mismatch",
-            "target_date_col must equal source_date_col ignoring case",
-            false,
-        ),
-    ]
-    .into_iter()
-    .map(|(rule, problem_code, message, blocked)| ShapeCheck {
-        rule,
-        passed: !blocked && !problems.iter().any(|problem| problem.code == problem_code),
-        message,
-    })
-    .collect()
+    SHAPE_RULES
+        .iter()
+        .map(|rule| ShapeCheck {
+            rule: rule.name,
+            passed: (!rule.requires_inspectable_statement || statement_is_inspectable)
+                && !problems
+                    .iter()
+                    .any(|problem| problem.code == rule.problem_code),
+            message: rule.message,
+        })
+        .collect()
 }
 
 fn unsupported_statement_problem() -> ShapeProblem {

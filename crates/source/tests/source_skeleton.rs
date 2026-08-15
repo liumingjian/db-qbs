@@ -204,19 +204,7 @@ fn get(port: u16, path: &str) -> std::io::Result<HttpResponse> {
         format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
             .as_bytes(),
     )?;
-    let mut raw = String::new();
-    stream.read_to_string(&mut raw)?;
-    let (head, body) = raw.split_once("\r\n\r\n").unwrap();
-    let status = head
-        .split_whitespace()
-        .nth(1)
-        .unwrap()
-        .parse::<u16>()
-        .unwrap();
-    Ok(HttpResponse {
-        status,
-        body: body.to_owned(),
-    })
+    read_response(&mut stream)
 }
 
 fn post(port: u16, path: &str, body: &str) -> std::io::Result<HttpResponse> {
@@ -228,6 +216,10 @@ fn post(port: u16, path: &str, body: &str) -> std::io::Result<HttpResponse> {
         )
         .as_bytes(),
     )?;
+    read_response(&mut stream)
+}
+
+fn read_response(stream: &mut TcpStream) -> std::io::Result<HttpResponse> {
     let mut raw = String::new();
     stream.read_to_string(&mut raw)?;
     let (head, body) = raw.split_once("\r\n\r\n").unwrap();
