@@ -13,6 +13,7 @@ import { messageFrom } from "./errors";
 import { runPresentation } from "./run";
 import type { RunPresentation, RunPresentationKind } from "./run";
 
+const RUN_POLL_INTERVAL_MS = 1000;
 const countFormatter = new Intl.NumberFormat("zh-CN");
 type PrecheckKind = Extract<
   RunPresentationKind,
@@ -35,43 +36,59 @@ export function RunScreen({
   const [cancelMessage, setCancelMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    let active = true;
-    let live = true;
-    let timer: number | undefined;
+    let effectActive = true;
+    let runIsLive = true;
+    let requestInFlight = false;
+    let pollTimer: number | undefined;
 
-    function schedule() {
-      if (active && live && document.visibilityState === "visible") {
-        timer = window.setTimeout(() => void load(), 1000);
+    function canLoadRun() {
+      return (
+        effectActive &&
+        runIsLive &&
+        document.visibilityState === "visible" &&
+        !requestInFlight
+      );
+    }
+
+    function scheduleNextLoad() {
+      if (!canLoadRun() || pollTimer !== undefined) {
+        return;
       }
+      pollTimer = window.setTimeout(() => {
+        pollTimer = undefined;
+        void load();
+      }, RUN_POLL_INTERVAL_MS);
     }
 
     async function load() {
-      if (!active) {
+      if (!canLoadRun()) {
         return;
       }
+      requestInFlight = true;
       try {
         const nextDetail = await fetchRun(runRecordId);
-        if (!active) {
+        if (!effectActive) {
           return;
         }
         setDetail(nextDetail);
         setLoadError(null);
-        live = nextDetail.live;
-        schedule();
+        runIsLive = nextDetail.live;
       } catch (error) {
-        if (active) {
+        if (effectActive) {
           setLoadError(messageFrom(error));
-          schedule();
         }
+      } finally {
+        requestInFlight = false;
+        scheduleNextLoad();
       }
     }
 
     function handleVisibilityChange() {
-      if (timer !== undefined) {
-        window.clearTimeout(timer);
-        timer = undefined;
+      if (pollTimer !== undefined) {
+        window.clearTimeout(pollTimer);
+        pollTimer = undefined;
       }
-      if (document.visibilityState === "visible" && live) {
+      if (canLoadRun()) {
         void load();
       }
     }
@@ -79,9 +96,9 @@ export function RunScreen({
     document.addEventListener("visibilitychange", handleVisibilityChange);
     void load();
     return () => {
-      active = false;
-      if (timer !== undefined) {
-        window.clearTimeout(timer);
+      effectActive = false;
+      if (pollTimer !== undefined) {
+        window.clearTimeout(pollTimer);
       }
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };

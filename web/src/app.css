@@ -215,7 +215,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .live-state > strong { color: var(--text); font-size: 14px; font-weight: var(--weight-em); }
 .live-state > span { font-size: var(--size-meta); }
 .live-state.is-accepted { border-left-color: var(--mute); background: var(--mute-bg); }
-.live-state.is-accepted .phase-dot { animation: accepted-pulse 1.2s ease-in-out infinite; }
+.live-state.is-accepted .phase-item-wrap:first-child .phase-dot { animation: accepted-pulse 1.2s ease-in-out infinite; }
 .indeterminate-progress { width: 100%; height: 4px; overflow: hidden; background: var(--line); }
 .indeterminate-progress span { display: block; width: 28%; height: 100%; background: var(--info); animation: run-progress 1s ease-in-out infinite alternate; }
 .live-state.is-accepted .indeterminate-progress span { background: var(--mute); }
