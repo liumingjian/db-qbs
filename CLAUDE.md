@@ -20,6 +20,13 @@ Run `docs/spikes/fixtures/local-rig/m2-visual-walkthrough.md` for every M2 accep
 Any change to `docs/design-system/README.md` or `docs/design-system/tokens.css` must run the
 same walkthrough before merge and record the actual observations, not only a pass claim.
 
+## M3 visual gate
+
+Run `docs/spikes/fixtures/local-rig/m3-visual-walkthrough.md` (W1–W6) for every M3 acceptance.
+Any change to the `.precheck-reports` layout in `web/src/app.css`, or to the `DiagnosticTable`
+column structure, must run the same walkthrough before merge and record the actual observations.
+M3 does **not** re-run the full V1–V25 walkthrough — #102 ruled it a zero design-system change.
+
 ## Commit trailer
 
 Agent-authored commits end with exactly this trailer — no other spelling:

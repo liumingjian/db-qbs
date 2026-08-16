@@ -154,6 +154,12 @@ fixture 因此给 `DATE` 的 `input` 写成 `{y, mo, d, h, mi, s}` 而不是字�
    [ADR-0028 §3.3](0028-m2-acceptance-criteria-and-rig-extension.md)）。M2 在这一层多挂一条
    新门禁 **G1**（建表 SQL 生成器 ↔ 映射预检不漂移的台架侧第二遍：真建表、真 `describe`、真跑预检），
    与本节的 `run-canon-gate.sh` 共用这套触发条件，**不新开第二套机制**。
+5. **M3 验收时必跑一次**（2026-08-16 增补，[#103](https://github.com/liumingjian/db-qbs/issues/103) /
+   [ADR-0032 §7](0032-m3-acceptance-criteria-and-rig-extension.md)）。M3 **不新增字母**：
+   `G1` 的覆盖面就地从 `tier = m1` 三种类型扩到 [ADR-0030](0030-m3-type-whitelist.md) §1 的**九行形态**，
+   `G2`（`run-canon-gate.sh`）一字不改——新增的 canon 用例由
+   [#105](https://github.com/liumingjian/db-qbs/issues/105) 加进 fixture，门禁机制不动。
+   这是本节这套触发条件**第三次被复用**（M1 / M2 / M3），三次都没有新开第二套机制。
 
 **为什么不硬塞进 CI**：把跑不了的东西写进流水线，等于让它长期红着或长期被跳过，
 两种都比诚实地写「这层靠人 + 靠触发条件」更糟。
