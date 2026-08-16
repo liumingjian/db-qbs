@@ -535,7 +535,9 @@ write_report() {
     echo "# M2 rig acceptance report"
     echo
     echo "- Generated (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "- Git commit: $(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+    # 台架常常是 rsync 过去的、不带 .git 的工作区，那时 rev-parse 读不到 SHA。
+    # 派发的一方用 DB_QBS_GIT_COMMIT 把源端的 HEAD 传进来，报告就不会再写 unknown。
+    echo "- Git commit: ${DB_QBS_GIT_COMMIT:-$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown（工作区不是 git checkout，且没传 DB_QBS_GIT_COMMIT）")}"
     echo "- Visual walkthrough: required separately by m2-visual-walkthrough.md"
     echo
     echo "## Scenarios"
