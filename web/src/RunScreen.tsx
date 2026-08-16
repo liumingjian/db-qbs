@@ -10,7 +10,11 @@ import {
   TerminalBlock,
 } from "./components/DesignSystem";
 import { messageFrom } from "./errors";
-import { shapeRuleDescription, shapeRuleLabel } from "./shape";
+import {
+  failedShapeRuleCount,
+  shapeRuleDescription,
+  shapeRuleLabel,
+} from "./shape";
 import { runPresentation } from "./run";
 import type { RunPresentation, RunPresentationKind } from "./run";
 
@@ -328,6 +332,12 @@ function PrecheckReports({
   kind: PrecheckKind;
 }) {
   const shapeFailed = kind === "shape-failed";
+  // 副标题不复述结论条：卡头已经说了这是哪一段预检，结论条已经说了「未向 sink 发出请求」，
+  // 这里只报「六条里几条没过」，与通过态那句同句式。source 回的 `detail.message`
+  // 是英文原文（`source-local SQL shape precheck found N problem(s)`），属于 API 语义不动它。
+  const shapeSubtitle = shapeFailed
+    ? `六条形状规则中 ${failedShapeRuleCount(detail.shape_checks)} 条未通过。`
+    : "六条形状规则已通过。";
   return (
     <div className="precheck-reports">
       <section className={shapeFailed ? "is-failed" : "is-passed"}>
@@ -335,7 +345,7 @@ function PrecheckReports({
           <strong>SQL 形状预检</strong>
           <span>source 本地</span>
         </header>
-        <p>{shapeFailed ? detail.message : "六条形状规则已通过。"}</p>
+        <p>{shapeSubtitle}</p>
         <DiagnosticTable
           columns={["规则", "结果", "说明"]}
           rows={detail.shape_checks.map((check) => [

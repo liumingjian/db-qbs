@@ -4,6 +4,8 @@
 // 属于 API 语义不动它）。新建任务对话框和运行详情的形状预检卡都要给中文，
 // 各抄一份迟早会漂，所以两边都从这里取。
 
+import type { ShapeCheck } from "./api";
+
 const SHAPE_RULE_LABELS: Readonly<Record<string, string>> = {
   business_date_range: "业务日期半开区间",
   no_additional_predicates: "WHERE 无额外谓词",
@@ -31,4 +33,14 @@ export function shapeRuleLabel(rule: string): string {
 /** 规则的中文说明；遇到没登记的规则名就退回 source 给的原文，不吞信息。 */
 export function shapeRuleDescription(rule: string, fallback: string): string {
   return SHAPE_RULE_DESCRIPTIONS[rule] ?? fallback;
+}
+
+/**
+ * 未通过的形状规则条数。
+ *
+ * 结论条（`run.ts`）与运行详情的形状预检卡副标题（`RunScreen.tsx`）都要报这个数。
+ * 各数一遍迟早会漂成两个数字摆在同一屏上，所以只留这一处。
+ */
+export function failedShapeRuleCount(checks: ReadonlyArray<ShapeCheck>): number {
+  return checks.filter((check) => !check.passed).length;
 }

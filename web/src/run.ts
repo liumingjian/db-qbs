@@ -1,6 +1,7 @@
 import type { RunDetail } from "./api";
 import type { RunPhase } from "./components/DesignSystem";
 import { historyPresentation } from "./history";
+import { failedShapeRuleCount } from "./shape";
 
 export type RunPresentationKind =
   | "accepted"
@@ -105,7 +106,7 @@ export function runPresentation(detail: RunDetail): RunPresentation {
  * 给源端配一句，并明写目标表未被触碰——形状不过时根本没向 sink 发过请求。
  */
 function shapeFailureConclusion(detail: RunDetail & { live: false }): string {
-  const failed = detail.shape_checks.filter((check) => !check.passed).length;
+  const failed = failedShapeRuleCount(detail.shape_checks);
   const count = failed === 0 ? "" : `一次发现 ${failed} 项问题，`;
   return `源端：SQL 形状预检未通过：${count}未向 sink 发出请求，未创建暂存表，目标表未被触碰。`;
 }
