@@ -38,6 +38,13 @@ fixture **收 ADR-0003 白名单的全部七种类型**，每条用例带 `tier`
 | `m1` | **门禁必须绿** | `NUMBER(p,s)` / `DATE` / `VARCHAR2` |
 | `m3` | 挂起，不跑 | `TIMESTAMP` / `NVARCHAR2` / `CHAR` / `NCHAR` |
 
+> **2026-08-16 增补（[#105](https://github.com/liumingjian/db-qbs/issues/105)）**：
+> **M3 起，`tier = m3` 从「挂起，不跑」改为「门禁必须绿」**，与 `m1` 同级。
+> **tier 机制本身一个字不改**——仍是 `m1` / `m3` 二分，不引入第三档、不改标记方式；
+> 变的只有 `canon_golden.rs` 里那句 `tier == "m1"` 过滤。
+> **`m1` 那批的门禁地位不变**：它是不随白名单漂移的基线，理由与
+> [ADR-0032](0032-m3-acceptance-criteria-and-rig-extension.md) §2 拒绝往 M1 台架塞新类型同源。
+
 为什么全收而不是只写三种：`TIMESTAMP` 的**「固定 6 位补零」**恰好是 `NUMBER`
 **「去尾零」**的反例，两条写在一起才看得出这不是自相矛盾。
 为什么门禁只认三种：让 M3 的类型进 M1 的门禁，就是地图明令要挡的「顺便也把 X 考虑了」——
@@ -93,6 +100,13 @@ fixture 因此给 `DATE` 的 `input` 写成 `{y, mo, d, h, mi, s}` 而不是字�
 而**行数校验永远发现不了**。一行断言，护住一个 ADR 的全部前提。
 
 **并钉死一句写进规格：M1 的源端不存在空串 `VARCHAR2` 值。任何声称测到它的用例都是假用例。**
+
+> **2026-08-16 改写（[#105](https://github.com/liumingjian/db-qbs/issues/105)）**：这句话**扩到全部字符类型**——
+> **Oracle 把空串存成 NULL 是 Oracle 的语义，不是 `VARCHAR2` 的特殊性质**（台架
+> `03-boundary-rows.sql` 第 6 行实测）。因此 **`CHAR` / `NCHAR` / `NVARCHAR2` 的源端同样不存在空串值，
+> 任何 `*-empty-string` 用例都是假用例。** 不写死这一条，M3 加 `CHAR` 用例时必然有人补一条
+> `char-empty-string`——而 [ADR-0030](0030-m3-type-whitelist.md) §5 判「形态 7 的空串/全空格碰撞已消解」
+> 正是架在「空串到不了字符列」这句上，那条假用例会把已消解的问题重新变成悬案。
 
 ## 6. 规格必须明文写出：本套件**不**管什么
 
@@ -183,6 +197,10 @@ fixture 因此给 `DATE` 的 `input` 写成 `{y, mo, d, h, mi, s}` 而不是字�
 
 > **⚠️ 本节「它买不到公元前检测」那部分已由文末「§11 增补（2026-08-16，[#99](https://github.com/liumingjian/db-qbs/issues/99)）」订正**：
 > 驱动实测给**负年**，这条断言**就是**纪元丢失的防线。删改它等于重开 #99 的判定。
+> **⚠️ 2026-08-16（[#105](https://github.com/liumingjian/db-qbs/issues/105)）：日期入口从一个变成两个。**
+> M3 放行 `TIMESTAMP(n)` 后，`canon_timestamp` 是第二个入口，它**逐字复刻同一条断言**——
+> 见文末 **§12**。**「唯一防线」现在是「两条防线各守一个入口」，
+> 删改任意一条都等于重开 [#99](https://github.com/liumingjian/db-qbs/issues/99)。**
 
 `canon_date` 除格式化外**多一条输入断言**：`1 <= year <= 9999`，不满足即报错，
 **不得静默修正、不得取模、不得钳位**。fixture 里三条 `kind = "format"` 且
@@ -211,7 +229,12 @@ fixture 因此给 `DATE` 的 `input` 写成 `{y, mo, d, h, mi, s}` 而不是字�
 3. ~~**§11 的年份域断言会被误当成公元前日期的防线**，而它不是（`4712` 是合法年份）。~~
    **已订正（2026-08-16，#99）**：它**就是**那道防线（驱动给负年，实测见 spike §7.12）。
    要防的误读因此反转——从「误以为已解决」变成「误以为这个检查可删」。详见文末 §11 增补。
-4. **`m3` 的四种类型有 fixture 但无人跑**，M3 启动时它们可能已经和实现漂移。
+4. ~~**`m3` 的四种类型有 fixture 但无人跑**，M3 启动时它们可能已经和实现漂移。~~
+   **2026-08-16（[#105](https://github.com/liumingjian/db-qbs/issues/105)）：已定关闭方式，但窗口期延长了一段。**
+   §2 增补已把 `m3` 改成门禁必须绿，§12 已定清单——**但两者都要等 M3 实现票落盘才生效**
+   （#105 是规格票，不动 fixture、不动 `crates/`）。因此从 #105 关闭到实现票落盘之间，
+   这条代价仍然成立，且新增的 `TIMESTAMP` / 新 `NUMBER` 形态用例连 fixture 都还没进去。
+   **实现票必须点名关掉它**，否则它会以「M3 门禁跑了但没跑新类型」的形式静悄悄留着。
 5. **`ZHS16GBK` 路径测不到**（ADR-0005 上线前复验第 3 项）。fixture 里的中文用例走的是
    台架的 `AL32UTF8` 路径。
 
@@ -219,6 +242,9 @@ fixture 因此给 `DATE` 的 `input` 写成 `{y, mo, d, h, mi, s}` 而不是字�
 
 - **ADR-0003**：「必须有专门的、覆盖边界值的测试套件」这句由本 ADR 兑现；
   `canon_number` 的 `RE_CANON` 由 §7 给出具体文法。
+  **2026-08-16（[#105](https://github.com/liumingjian/db-qbs/issues/105)）**：ADR-0003
+  新增的「`TIMESTAMP` 的规范形式定长 6 位」一节持有**裁定**，本 ADR §12 持有**承载它的纯函数规格**，
+  分工与 `NUMBER` 那对（ADR-0003 定「校验不是重写」、本 ADR §7 定文法）逐字同构。
 - **ADR-0009**：本 ADR §6 明确把长度 / 精度 / 值域三件事**推给**预检，不与之重叠。
   §11（#35 增补）是唯一的例外，且不构成重叠：它判的是 `canon_date` 的**输入分量**合不合法，
   预检判的是**列元数据**——预检结构性看不见值，这条断言结构性看不见列。
@@ -279,3 +305,159 @@ fixture 因此给 `DATE` 的 `input` 写成 `{y, mo, d, h, mi, s}` 而不是字�
 理由与它的不精确处见 [ADR-0009 §10 增补](0009-m1-mapping-precheck-rules.md) 第 3 条。
 **`CanonError` 的变体不拆**——变体是本套件断言的形状，为一句人话动它不划算。
 `canon_date` 的**行为一字未改**：判据、报错时机、返回类型全部原样，改的只有错误信息的措辞。
+
+## §12 `canon_timestamp` 的规格（2026-08-16 增补，[#105](https://github.com/liumingjian/db-qbs/issues/105)）
+
+M3 放行 `TIMESTAMP(0..6)`（[ADR-0030](0030-m3-type-whitelist.md) §1 形态 9）。
+规范形式本身由 [ADR-0003](0003-numeric-as-string.md)「`TIMESTAMP` 的规范形式定长 6 位」一节裁定
+（**`TIMESTAMP(0)` → `...09.000000`，签名里没有 `n`**）；本节定的是**承载它的那个纯函数**。
+
+**这是本套件第一次为一个尚不存在的函数写规格**——`canon_number` / `canon_date` / `canon_text`
+都是先有实现后有 ADR。因此本节写的每一条都是**验收条件**，不是事后描述。
+
+### 12.1 签名与三条输入断言
+
+```
+canon_timestamp(year: i32, month, day, hour, minute, second, nanosecond: u32) -> Result<String, CanonError>
+```
+
+输出 `YYYY-MM-DD HH:MM:SS.ffffff`，匹配 fixture `_grammar.TIMESTAMP_OUTPUT`。
+除日历/时分秒合法性（走 `chrono`，与 `canon_date` 同）外，**三条输入断言**：
+
+| # | 断言 | 违反时它在报什么 |
+|---|---|---|
+| **T1** | `1 <= year <= 9999` | **纪元丢失防线**，与 §11 逐字相同。见 12.2 |
+| **T2** | `nanosecond < 1_000_000_000` | 分量本身越界（驱动漂移） |
+| **T3** | `nanosecond % 1000 == 0` | **`TIMESTAMP(n>6)` 的值绕过了预检**，或驱动漂移。见 12.3 |
+
+**全部报错，不静默修正、不截断、不钳位**——与 §11 和 `canon_number` 的「宁可停机也不要猜」同源。
+
+### 12.2 T1 是纪元防线的第二道，不是防御性重复
+
+§11 增补把 `canon_date` 的年份域断言定为「**V1 唯一**挡住 Oracle 公元前日期搬进 MySQL 的东西」。
+**M3 放行 `TIMESTAMP` 之后，日期值有了第二个入口。** [#98](https://github.com/liumingjian/db-qbs/issues/98)
+实测的是驱动对 **`DATE`** 的公元前值给负年（spike §7.12）——那是**驱动的时间类型行为**，
+`TIMESTAMP` 走同一套 `oracle::sql_type::Timestamp`，没有任何理由两样。
+
+因此 **`canon_timestamp` 不带 T1 = 在刚封上的防线旁边开一个同款的洞**：
+上游没有预检（[ADR-0009 §10 增补](0009-m1-mapping-precheck-rules.md) 已裁定不为它开预检扫描，
+且预检看列元数据、看不见值），下游没有兜底（V1 无行 checksum）。
+**「唯一防线」的表述因此改成「两条防线各守一个入口」，删改任意一条都等于重开
+[#99](https://github.com/liumingjian/db-qbs/issues/99)。**
+
+这条洞是本票查出来的：#105 票正文只列了「`canon_timestamp` 不存在」这一格活，
+**没有列出「它必须带什么断言」**——照票正文实现，洞就成了。
+
+### 12.3 T3 为什么值钱：`n > 6` 那道结构性拒绝的值层第二道见证
+
+[ADR-0003](0003-numeric-as-string.md)「TIMESTAMP 的标度上限」与 ADR-0030 §2 都靠**预检读 describe**
+拒掉 `n > 6`。那是**元数据层**的一道判定，判错/漏判时没有第二处会发现——而它的失效模式是
+**静默丢 3 位小数秒**（值落进 `DATETIME(6)`，行数照样相等，ADR-0006 无兜底）。
+
+T3 把同一件事在**值层**再判一次：`n <= 6` 的值，纳秒必然是 1000 的倍数；不是，就说明
+「这一列的 `n` 与预检以为的不同」。成本是一次取模，落在纯函数层、进 §8 那条 CI 流水线**天天跑**——
+与 §11 那条年份域断言「成本近乎为零、买到错误离原因更近」是同一笔账。
+
+> **一条明写的前提（本票是规格票，不跑代码）**：T3 要求驱动暴露**纳秒**分量。
+> 若实现期发现 `oracle::sql_type::Timestamp` 只给到微秒，T3 **无处安放**，
+> 本节需回炉——那时 `n > 6` 就只剩预检一道判定，代价要重新记账。
+> **不藏这个前提**：藏起来的话，实现者会顺手把 T3 删掉，而删掉的理由不会有人记下来。
+
+### 12.4 错误变体：新增 `CanonError::InvalidTimestamp`，不复用 `InvalidDate`
+
+§11 增补定过「**为一句人话**不拆变体」。**T2/T3 不是人话问题**：它们的失效**原因**与年份域完全不同——
+T1 指向「源库有公元前日期」，T3 指向「预检漏了一列 `n > 6`」，排障要去的地方是两个。
+合并会让后者读到一条 `year must be within 0001..9999`，**指向错误的方向**。
+
+**协议面一个字不动**：`FailureKind` 仍是 `SOURCE_VALUE`，
+[ADR-0010](0010-http-protocol-contract.md) 的错误码闭集与 [ADR-0029](0029-failure-classification.md) §2
+对照表**不受影响**——`CanonError` 的变体是本套件断言的形状，不是协议面。
+
+### 12.5 fixture 新增用例清单——按「新函数 vs 复用函数」不对称给量
+
+**这是本节最容易被做小的一格**，故把不对称的理由写在前面：
+
+> `canon_timestamp` 是**新函数**，`canon_date` 那组语义边界在它上面**一条都没被证明过**，
+> 故**整组复刻**；`canon_number` / `canon_text` 是**复用**，函数本身的边界已由现有
+> 20 条 `NUMBER` + 4 条 `VARCHAR2` 用例证过，新形态在 canon 层的**全部新意**只是
+> 「驱动给出的串仍落进同一条文法」，**一个代表值就是完整见证**。
+
+**取值纪律**：`NUMBER` / 字符族的新值**全部取自 [ADR-0032](0032-m3-acceptance-criteria-and-rig-extension.md)
+§4.1 的 B1 边界值矩阵**，不新造。两层用同一批值，台架 FAIL 时能一眼分辨锅在哪
+（同值纯函数层绿 → 锅在链路）；各选一套则两层永远无法互证。ADR-0032 §4.1
+「每个值须指回一个 spike 小节号」那条纪律**原样继承**。
+
+#### A. `TIMESTAMP`（新函数，整组复刻 + 小数秒自己的边界）
+
+`type = "TIMESTAMP"`、`kind = "format"`、`tier = "m3"`。
+**`input` 的小数秒字段从 `us` 改为 `ns`**（T3 要判 1000 的倍数，微秒表示不出违例），
+既有两条用例 `ts-frac` / `ts-zero-frac` 随之改写（`us: 120000` → `ns: 120000000`，`us: 0` → `ns: 0`）。
+
+| 用例 | input 要点 | expect / verdict | 复刻自 |
+|---|---|---|---|
+| `ts-frac` | `ns = 120000000` | `...09.120000` | 既有，改字段名 |
+| `ts-zero-frac` | `ns = 0` | `...09.000000` | 既有，改字段名。**ADR-0003 定长 6 位的见证** |
+| `ts-frac-max` | `ns = 999999000` | `...09.999999` | 小数秒域上端 |
+| `ts-midnight` | `00:00:00`，`ns = 0` | `...00:00:00.000000` | `date-midnight` |
+| `ts-century-last` | `1999-12-31 23:59:59` | 对应值 | `date-century-last` |
+| `ts-century-first` | `2000-01-01 00:00:00` | 对应值 | `date-century-first` |
+| `ts-leap-day` | `2024-02-29` | 对应值 | `date-leap-day` |
+| `ts-leap-century` | `2000-02-29` | 对应值 | `date-leap-century` |
+| `ts-min` | `y = 1` | `0001-01-01 00:00:00.000000` | `date-min` |
+| `ts-max` | `y = 9999`，`ns = 999999000` | `9999-12-31 23:59:59.999999` | `date-max` |
+| `ts-ad-44` | `y = 44` | `0044-...` | **#99 / spike §7.12** |
+| `ts-ad-999` | `y = 999` | `0999-...` | **同上** |
+| `ts-reject-year-zero` | `y = 0` | `reject`（T1） | `date-reject-year-zero` |
+| `ts-reject-year-negative` | `y = -4712` | `reject`（T1） | `date-reject-year-negative`；**#98 实测的生产形态** |
+| `ts-reject-year-overflow` | `y = 10000` | `reject`（T1） | `date-reject-year-overflow` |
+| `ts-reject-sub-micro` | `ns = 1500` | `reject`（T3） | **本节新增，无对应 `DATE` 用例** |
+
+`ts-ad-44` / `ts-ad-999` **不许省**：理由与 ADR-0032 §4.1 读法第 3 条逐字相同——
+**三位数年份的补零是独立的一段**，看见 `0001` 能过就以为覆盖了是最常见的误读，
+而 #99 判的「公元 1–999 原样搬不改」是那四条裁定里最容易被后来者当疏漏改掉的一条。
+
+#### B. `NUMBER` 三种新形态（复用 `canon_number`，`RE_CANON` 一字不改）
+
+`type = "NUMBER"`、`kind = "validate"`、`verdict = "accept"`、`tier = "m3"`。
+复用依据：[#104](https://github.com/liumingjian/db-qbs/issues/104) 实测（spike §7.11）
+**驱动直出即规范形式**——`|x| < 1` 的 `0.` 前导驱动自带，负标度无小数点。
+
+| 用例 | 输入 = 期望 | 形态 | 出处 |
+|---|---|---|---|
+| `num-pure-frac-min` | `0.000001` | 2 纯小数 | §7.11 组 1 |
+| `num-pure-frac-min-neg` | `-0.000001` | 2 | §7.11 组 1（**符号一起丢**那条的正向见证） |
+| `num-pure-frac-max` | `0.009999` | 2 | §7.11 组 1 |
+| `num-neg-scale-rounded` | `12300` | 3 负标度 | §7.11 组 2（**源端已舍入，规范形式如实反映**） |
+| `num-neg-scale-max` | `9999999900` | 3 | §7.11 组 2 |
+| `num-neg-scale-max-neg` | `-9999999900` | 3 | §7.11 组 2 |
+| `num-bare-frac` | `1.2345` | 4 裸 `NUMBER` | ADR-0032 §4.1 形态 4 |
+| `num-bare-config-full` | `-99999999999999.9999` | 4 | 同上（撑满配置 `DECIMAL(20,4)`） |
+
+**不为形态 4 加任何「配置装不装得下」的用例**：那是 ADR-0003 全量值域校核与逐值兜底的职责，
+§6 第 2 条已把「精度装不装得下」整类推给预检，本套件不越线。
+
+#### C. 字符族三种（复用 `canon_text`，恒等 passthrough）
+
+`kind = "passthrough"`、`tier = "m3"`。复用依据：spike §2.2 实测驱动给出 `"AB        "`，
+**尾空格保留是「不做处理」而非新逻辑**。既有三条（`nvc-cn` / `char-pad` / `nchar-pad`）保留，补三条：
+
+| 用例 | 输入 = 期望 | 出处 |
+|---|---|---|
+| `nvc-trailing-space` | `"甲乙"` + 8 空格 | ADR-0032 §4.1 形态 6 |
+| `char-all-space` | 10 个空格 | §7.8 组 4（**碰撞面的正向见证**） |
+| `nchar-cn` | `"甲乙丙丁戊己庚辛壬癸"` | ADR-0032 §4.1 形态 7 |
+
+**不加 `*-empty-string`**——§5 增补已把「Oracle 把空串存成 NULL」扩到全部字符类型，
+那种用例是假用例。
+
+### 12.6 本票不落盘 fixture，落盘归 M3 实现票
+
+**#105 是规格票，不动 `docs/spikes/fixtures/canon-golden.json`，也不动 `crates/`。**
+12.5 的清单是**验收那张实现票的规格**，fixture 仍是 §1 那个唯一权威。
+
+**两者不构成双权威**，关系与 §7 的「文法 vs 反例清单」逐字同构：规格持有**选值规则与裁定**，
+fixture 持有**见证**；实现票落盘后，12.5 降级为「读得懂的例子」。
+
+实现票要动的三处（本票不动）：新增 `canon_timestamp` 与 `CanonError::InvalidTimestamp`；
+fixture 加 A/B/C 三组、改 `us` → `ns`；`canon_golden.rs` 去掉 `tier == "m1"` 过滤
+并改那三行硬编码计数。**代价见「已知代价」第 4 条**——窗口期内 `m3` 那批仍是有 fixture 无人跑。
