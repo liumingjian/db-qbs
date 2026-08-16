@@ -500,3 +500,54 @@ M1 报文定稿，**`/v1` 前缀就是它的时效声明**。最可能触发复�
   后人不得拿本增补当先例去推那条。
 - §3.1「逐列类型判定集中在 sink」**因本增补而更牢**：`fsp` 正是为了让 sink 判得下去才加的。
 - §3.3 列序、§5 重跑语义、载荷形状与 64 MiB 上限**全部原样**。
+
+## 2026-08-16 增补二：两处新增字段（`PrecheckIssue.suggestion` / `SourceColumn.support`），封条仍不解
+
+**来源**：[#102](https://github.com/liumingjian/db-qbs/issues/102)，地图 [#94](https://github.com/liumingjian/db-qbs/issues/94)。
+**关联**：[ADR-0031](0031-number-predicate-lower-bound.md)（下界式判定 + 推导形状建议值）、
+[ADR-0030](0030-m3-type-whitelist.md)（九行白名单）、
+[ADR-0027](0027-target-ddl-generation-and-cross-end-metadata.md) 2026-08-16 增补 A3/A4/A8。
+**产物**：原型 [`docs/prototypes/0102-m3-ui-increments.html`](../prototypes/0102-m3-ui-increments.html)。
+**本增补只定协议形状，不含实现**——实现归 M3 实现票。
+
+### 1. `PrecheckIssue` 新增 `suggestion`：判定式不得复制进 TypeScript
+
+映射预检报告的表从四列变五列（`列 | 源端 | 目标端 | 规则 | 建议`），
+第五列的值由 **sink 侧算**，随 issue 一起过线。三段同形结构一起加：
+`PrecheckIssue`（`crates/sink/src/lib.rs:72`）→ `SinkPrecheckIssue`（`crates/source/src/protocol.rs:109`）
+→ `MappingIssue`（`web/src/api.ts:45`）。
+
+**为什么不让 web 侧自己算**：建议值是「推导形状」——`NUMBER` 族四种推导式、
+`p' > 65 || s' > 30` 的前置判定（ADR-0027 A5）、下界式与推导式的分工（ADR-0031）
+全在里面。web 侧要算就得把这套判定复制一份进 TypeScript，
+那是 ADR-0027 §1 早就点名的「两份实现必然漂移」，且漂移面正是 A9 记的九行。
+**判定与建议同源，两者都只有 sink 一份。**
+
+**值一律是动作、不是纯类型**（如「改为 `DECIMAL(12,2)`」「在目标表加列 …」
+「无合法目标形状，需改源 SQL 或 `CAST` 收窄」），**不留空格子**——
+17 行起步的表里，空格子是噪音不是信息。这条是文案约定，不是协议约束。
+
+### 2. `SourceColumn` 新增 `support`：三值闭集，且**sink 不得读它做判定**
+
+`support ∈ { ok, needs_precision, unsupported }`，由 source 侧 describe 时产出，
+承载取列卡的三档标记（ADR-0027 2026-08-16 增补二 §1）。`/api/columns` 直接序列化
+`Vec<SourceColumn>`（`crates/source/src/server_main.rs:903`），故 web 的 `FetchedColumn`
+同步多这一个字段。
+
+**产出方必须是「生成侧与判定侧共用的那个函数」**，不是第三份白名单实现——
+web 侧自判会造出第三份，`support` 这个字段存在的全部理由就是免掉它。
+
+**硬约束：`sink` 不得读 `support` 做任何判定。** 它随 `POST /runs` 的 `source_columns`
+一起过线只是因为两侧共用同一个结构，**它是 describe 面的展示提示，不是预检裁决**。
+sink 照旧按 §3.1 自己判逐列类型——`support` 一旦被当成判定输入，
+判定就悄悄搬回 source 侧了，那正是 §3.1 判死的形态。
+
+### 3. 明确**没有**变的
+
+- **五个端点不变**，**错误码闭集不增码**，**`/v1/` 前缀不动**。
+- ADR-0027 §3 那条「不属于任何 run 的元数据查询」端点的**封条不解**，
+  「重开条件」一节一个字不改。**加字段与开端点是两个量级**（A8 已判过一次，
+  本增补是第二次援引同一条判例，不是把它放宽成惯例）。
+- §3.1「逐列类型判定集中在 sink」因本增补**更牢**：`suggestion` 由 sink 算是它的直接推论，
+  `support` 的「sink 不得读」是它的护栏。
+- 载荷形状、64 MiB 上限、§3.3 列序、§5 重跑语义**全部原样**。
