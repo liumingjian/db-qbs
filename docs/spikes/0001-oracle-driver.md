@@ -528,7 +528,8 @@ M0 从"两个候选择优"塌缩成"ODPI-C 单点验证"——所以下面每一
 | `NUMBER`（无精度声明） | 同上 | **必须人工指定 `DECIMAL(p,s)`** | M3 | 不设 `(65,30)` 默认值；目标列须与配置逐位相等，预检全量验值且搬运逐值兜底，见 7.4 第 2 条 / [ADR-0003](../adr/0003-numeric-as-string.md) |
 | `DATE` | `YYYY-MM-DD HH:MM:SS` | **`DATETIME`**（即 `DATETIME(0)`） | **M1 生效** | **不能用 `TIMESTAMP`**，见 7.4 第 3 条；往返已实测（§7.8 组 3） |
 | `TIMESTAMP(n)`，`0 ≤ n ≤ 6` | `YYYY-MM-DD HH:MM:SS.ffffff`（定长 6 位） | `DATETIME(6)` | M3 | `n > 6` **映射预检拒绝**（[#12](https://github.com/liumingjian/db-qbs/issues/12) 已定案），见 7.4 第 4 条；**写进 `DATETIME(0)` 会静默舍掉小数秒**（§7.8 组 3） |
-| `VARCHAR2(n CHAR)` / `NVARCHAR2(n)` | 原样 UTF-8 | `VARCHAR(n)` | **M1 生效** | `n` 已是字符数，直接对齐 |
+| `VARCHAR2(n CHAR)` | 原样 UTF-8 | `VARCHAR(n)` | **M1 生效** | `n` 已是字符数，直接对齐 |
+| `NVARCHAR2(n)` | 原样 UTF-8 | `VARCHAR(n)` | M3 | 判定式与 `VARCHAR2` 逐字相同；**2026-08-16 订正**：原与 `VARCHAR2` 合并在一行标「M1 生效」是**笔误**，ADR-0009 §4 的三类型白名单与 M1 实现（`describe_column` 只认 `Number`/`Varchar2`/`Date`）都拒它，[ADR-0030](../adr/0030-m3-type-whitelist.md) §7 收编 |
 | `VARCHAR2(n BYTE)` | 原样 UTF-8 | `VARCHAR(n)` | **M1 生效** | 字节语义：`ZHS16GBK` 下 `n` 字节至多 `n` 个字符，故 `VARCHAR(n)` **必然够**（偏松，不会截断） |
 | `CHAR(n)` / `NCHAR(n)` | 原样 UTF-8，**保留尾部空格** | **`VARCHAR(n)`** | M3 | **不能用 `CHAR(n)`**——已实测（§7.8 组 1），见 7.4 第 5 条 |
 | `NULL`（任意列上的空值） | 专用标记，与空串区分 | 目标列**必须可空** | **M1 生效** | MySQL 区分 `NULL` 与 `''`；预检不得给目标列自动加 `NOT NULL` |
