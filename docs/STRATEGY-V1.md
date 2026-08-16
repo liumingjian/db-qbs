@@ -108,6 +108,19 @@ MySQL → Oracle 反向、自动建目标表、鉴权、定时调度、多表事
 
 ### M3 — 映射预检与目标表辅助
 
+逐条规格由地图 [M3 搬运语义放宽——类型完备性与映射规则规格](https://github.com/liumingjian/db-qbs/issues/94)
+定稿（2026-08-16 收图，9 票），本节只划里程碑边界。
+
+**范围已按实况重画（2026-08-16，见地图 Destination）**：下面三项里，第三项「生成建表 DDL」
+已由 M2 的 [#57](https://github.com/liumingjian/db-qbs/issues/57) / [ADR-0027](adr/0027-target-ddl-generation-and-cross-end-metadata.md)
+**提前兑现**，第一项是 M1 [ADR-0009](adr/0009-m1-mapping-precheck-rules.md) §8 的现货。
+M3 的真身是**类型白名单从三种扩到有依据的 N 种**、**映射恒等与逐位相等两条约束的去留**、
+以及 **`DATE` 值域那个明文缺口（ADR-0009 §10）收口**——一句话：
+**M2 买的是可操作性，M3 买的是「能搬的东西变多」。**
+第二项（列名映射）在地图 [#100](https://github.com/liumingjian/db-qbs/issues/100) 单开一票，
+**允许判「不做、用 `AS` 别名兜住」**；下面的验收措辞在
+[#103](https://github.com/liumingjian/db-qbs/issues/103) 重写（那三种情况 M1 就已经拦得住）。
+
 - 任务启动前预检：源查询结果列 vs 目标表结构，列名、类型、精度逐项比对，
   不匹配直接拒绝启动并指出具体哪一列。**尤其是 `DECIMAL(p,s)` 标度不足**（ADR-0003 已知坑）。
 - 列名映射策略：Oracle 大写带引号 → MySQL 小写，允许用户覆盖。
