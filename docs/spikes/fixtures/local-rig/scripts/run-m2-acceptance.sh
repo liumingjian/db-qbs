@@ -34,8 +34,13 @@ REPO_ROOT=$(cd "$RIG_ROOT/../../../.." && pwd)
 ACCEPTANCE_ROOT="$RIG_ROOT/acceptance"
 WORK_ROOT=$(mktemp -d)
 REPORT=${M2_REPORT:-"$RIG_ROOT/m2-acceptance-$(date -u +%Y%m%dT%H%M%SZ).md"}
-SOURCE_BIN="$REPO_ROOT/target/release/db-qbs-source"
-REAL_SOURCE_BIN="$REPO_ROOT/target/release/db-qbs-source-run"
+# The host half runs natively unless M2_HOST_CARGO_TARGET names a triple. On an arm64 mac it
+# must: Oracle ships no arm64 macOS Instant Client, so db-qbs-source has to be an
+# x86_64-apple-darwin build running under Rosetta to load libclntsh.dylib at all.
+HOST_TARGET=${M2_HOST_CARGO_TARGET:-}
+HOST_BIN_DIR="$REPO_ROOT/target${HOST_TARGET:+/$HOST_TARGET}/release"
+SOURCE_BIN="$HOST_BIN_DIR/db-qbs-source"
+REAL_SOURCE_BIN="$HOST_BIN_DIR/db-qbs-source-run"
 SINK_BIN=/usr/local/bin/db-qbs-sink
 SOURCE_CONFIG="$WORK_ROOT/source.toml"
 SOURCE_DATA="$WORK_ROOT/source-data"
@@ -47,6 +52,9 @@ SOURCE_URL=http://127.0.0.1:18088
 SINK_URL=http://127.0.0.1:18080
 PROXY_URL=http://127.0.0.1:18081
 BIZ_DATE=2026-08-14
+# M2_KEEP_RIG=1 leaves the rig, the host source and the accumulated run history up after the
+# last scenario, so the manual render walkthrough can reuse the states the run just produced.
+KEEP_RIG=${M2_KEEP_RIG:-}
 RESULTS=()
 SOURCE_PID=""
 PROXY_PID=""
@@ -145,11 +153,29 @@ stop_source() {
   SOURCE_PID=""
 }
 
+# A run is `live` from POST /api/runs onward, but the child writes its pid file only after
+# it is exec'd, so scenarios that gate on bare `.live == true` can reach stop_child first.
+wait_for_child_pid() {
+  local attempt
+  for (( attempt = 1; attempt <= 200; attempt++ )); do
+    if [[ -s "$WORK_ROOT/child.pid" ]]; then
+      cat "$WORK_ROOT/child.pid"
+      return 0
+    fi
+    sleep 0.05
+  done
+  fail "run child never published $WORK_ROOT/child.pid"
+}
+
 stop_child() {
-  local pid
+  local pid attempt
   [[ -f "$WORK_ROOT/child.pid" ]] || return 0
   pid=$(cat "$WORK_ROOT/child.pid")
   kill -TERM "$pid" 2>/dev/null || true
+  for (( attempt = 1; attempt <= 100; attempt++ )); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.05
+  done
   rm -f "$WORK_ROOT/child.pid"
 }
 
@@ -180,7 +206,7 @@ start_source() {
   M2_REAL_SOURCE_BIN="$REAL_SOURCE_BIN" \
   M2_CHILD_PID_FILE="$WORK_ROOT/child.pid" \
   M2_CHILD_RELEASE_FILE="$WORK_ROOT/release-child" \
-    "$SOURCE_BIN" --config "$SOURCE_CONFIG" > "$SOURCE_LOG" 2>&1 &
+    nohup "$SOURCE_BIN" --config "$SOURCE_CONFIG" > "$SOURCE_LOG" 2>&1 &
   SOURCE_PID=$!
   wait_for_source
 }
@@ -466,6 +492,7 @@ scenario_a14() {
   wait_for_run "$record" '.live == true' || return 1
   A14_LIVE=$API_BODY
   assert_eq "live detail address" "$record" "$(jq -r '.run_record_id' <<<"$A14_LIVE")" || return 1
+  wait_for_child_pid >/dev/null || return 1
   stop_child
   wait_for_run "$record" '.live == false' || return 1
   A14_HISTORY=$API_BODY
@@ -550,7 +577,7 @@ prepare_rig() {
     -v qbs-cargo-registry:/usr/local/cargo/registry \
     rust:1-bookworm cargo build --release --workspace || return 1
   docker cp "$REPO_ROOT/target/release/db-qbs-sink" qbs-client:"$SINK_BIN" || return 1
-  cargo build --release -p db-qbs-source || return 1
+  cargo build --release ${HOST_TARGET:+--target "$HOST_TARGET"} -p db-qbs-source || return 1
   compose exec -T client sqlplus -S spike/spike123@//oracle:1521/XE \
     @/workspace/docs/spikes/fixtures/local-rig/acceptance/oracle.sql || return 1
   compose exec -T mysql mysql -uspike -pspike123 qbs < "$ACCEPTANCE_ROOT/mysql.sql" || return 1
@@ -559,12 +586,38 @@ prepare_rig() {
 
 cleanup() {
   stop_proxy >/dev/null 2>&1 || true
+  if [[ -n "$KEEP_RIG" ]]; then
+    # m2-visual-walkthrough.md needs the same states this run just produced; the rig stays up
+    # with a live-capable source so the render surface can be walked by hand.
+    return 0
+  fi
   stop_source >/dev/null 2>&1 || true
   stop_child >/dev/null 2>&1 || true
   stop_sink >/dev/null 2>&1 || true
   rm -rf "$WORK_ROOT"
 }
 trap cleanup EXIT
+
+# Handing the rig to the visual walkthrough: a hang-streaming child keeps any UI-started run
+# parked in STREAMING, which is what V1 / V16 / V17 need to be observable at all.
+hand_over_rig() {
+  start_source hang-streaming >/dev/null || {
+    echo "failed to hand the rig over for the visual walkthrough" >&2
+    return 1
+  }
+  cat <<EOF
+
+==> rig kept for docs/spikes/fixtures/local-rig/m2-visual-walkthrough.md
+    web UI        : $SOURCE_URL
+    work root     : $WORK_ROOT
+    run history   : $SOURCE_DATA/db-qbs.sqlite3
+    child mode    : hang-streaming (a run started from the UI parks in STREAMING for V1/V16/V17)
+    source log    : $SOURCE_LOG
+    tear down with: kill $SOURCE_PID; docker compose -f $RIG_ROOT/docker-compose.yml exec -T client pkill db-qbs-sink; rm -rf $WORK_ROOT
+EOF
+  # The dispatching shell goes away when this script returns; the handed-over source must not.
+  disown "$SOURCE_PID" 2>/dev/null || true
+}
 
 echo "==> prepare M2 acceptance rig"
 prepare_rig || { echo "rig preparation failed" >&2; exit 1; }
@@ -586,6 +639,8 @@ run_scenario A14-detail-lifecycle scenario_a14
 
 write_report || { echo "failed to write report" >&2; exit 1; }
 echo "report: $REPORT"
+
+[[ -n "$KEEP_RIG" ]] && { hand_over_rig || exit 1; }
 
 failed=0
 for (( index = 0; index < ${#SCENARIOS[@]}; index++ )); do

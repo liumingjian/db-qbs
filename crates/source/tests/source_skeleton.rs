@@ -892,7 +892,7 @@ fn create_task(port: u16) -> String {
     let response = post(
         port,
         "/api/tasks",
-        r#"{"name":"holdings","source_sql":"SELECT ID, D_BIZ FROM HOLDINGS WHERE D_BIZ >= :biz_date AND D_BIZ < :biz_date + 1","source_date_col":"D_BIZ","target_table":"HOLDINGS","target_date_col":"D_BIZ"}"#,
+        r#"{"name":"holdings","source_sql":"SELECT ID, D_BIZ FROM HOLDINGS WHERE D_BIZ >= TO_DATE(:biz_date,'YYYY-MM-DD') AND D_BIZ < TO_DATE(:biz_date,'YYYY-MM-DD') + 1","source_date_col":"D_BIZ","target_table":"HOLDINGS","target_date_col":"D_BIZ"}"#,
     )
     .unwrap();
     assert_eq!(response.status, 201, "{}", response.body);
