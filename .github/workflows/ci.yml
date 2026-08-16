@@ -3,9 +3,27 @@ name: CI
 on: push
 
 jobs:
-  pure-functions:
+  rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Test shared pure-function layer
-        run: cargo test -p db-qbs-shared
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # crates/source 的 build.rs 会跑 `npm run build` 把 web/dist 嵌进二进制，
+      # 所以 Rust 这条也要先装前端依赖。web/dist 不在仓库里。
+      - run: npm ci
+      - run: cargo test --workspace
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
