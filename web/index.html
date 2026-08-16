@@ -4,6 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light" />
+    <!-- 内联图标：不声明的话浏览器每次都去要 /favicon.ico，控制台常驻一条 404，
+         真正的错误反而更难被看见。图案与侧栏的品牌标一致。 -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232C8AF0'/%3E%3Ctext x='16' y='23' font-family='ui-monospace,monospace' font-size='20' fill='%23FFFFFF' text-anchor='middle'%3EQ%3C/text%3E%3C/svg%3E"
+    />
     <title>db-qbs 调度台</title>
   </head>
   <body>

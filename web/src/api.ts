@@ -50,8 +50,21 @@ export interface MappingIssue {
   message: string | null;
 }
 
+/**
+ * `POST /api/columns` 回的列，字段名是 `type`——注意它和 `POST /api/builder/columns` 的
+ * `data_type` 不同名（服务端两个端点本来就不一致）。这里照实声明；照着 `BuilderColumn`
+ * 复用会读到 undefined，「describe 类型」那一列就会一直是空的。
+ */
+export interface FetchedColumn {
+  name: string;
+  type: string;
+  precision: number | null;
+  scale: number | null;
+  length: number | null;
+}
+
 export interface ColumnFetchResult {
-  columns: Omit<BuilderColumn, "nullable">[];
+  columns: FetchedColumn[];
   target_ddl: string;
 }
 

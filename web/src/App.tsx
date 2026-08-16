@@ -16,7 +16,7 @@ import {
   WandSparkles,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 
 import {
@@ -44,6 +44,7 @@ import type {
 import { messageFrom } from "./errors";
 import { HistoryScreen } from "./HistoryScreen";
 import { RunScreen } from "./RunScreen";
+import { shapeRuleDescription, shapeRuleLabel } from "./shape";
 import { StartRunDialog } from "./StartRunDialog";
 
 type DialogState =
@@ -163,6 +164,9 @@ export function App() {
     );
   }
 
+  // 运行详情不属于任何导航项——面包屑早就这么认了，导航高亮以前还停在上一页。
+  const navPage = activeRun !== null ? null : page;
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -172,9 +176,9 @@ export function App() {
         </div>
         <nav aria-label="主导航">
           <a
-            className={`nav-item ${page === "tasks" ? "is-active" : ""}`}
+            className={`nav-item ${navPage === "tasks" ? "is-active" : ""}`}
             href="#tasks"
-            aria-current={page === "tasks" ? "page" : undefined}
+            aria-current={navPage === "tasks" ? "page" : undefined}
             onClick={(event) => {
               event.preventDefault();
               navigate("tasks");
@@ -184,9 +188,9 @@ export function App() {
             任务
           </a>
           <a
-            className={`nav-item ${page === "history" ? "is-active" : ""}`}
+            className={`nav-item ${navPage === "history" ? "is-active" : ""}`}
             href="#history"
-            aria-current={page === "history" ? "page" : undefined}
+            aria-current={navPage === "history" ? "page" : undefined}
             onClick={(event) => {
               event.preventDefault();
               navigate("history");
@@ -214,17 +218,17 @@ export function App() {
           <span className="mobile-brand">db-qbs</span>
           <nav className="mobile-nav" aria-label="主导航">
             <button
-              className={page === "tasks" ? "is-active" : ""}
+              className={navPage === "tasks" ? "is-active" : ""}
               type="button"
-              aria-current={page === "tasks" ? "page" : undefined}
+              aria-current={navPage === "tasks" ? "page" : undefined}
               onClick={() => navigate("tasks")}
             >
               <Database size={14} aria-hidden="true" />任务
             </button>
             <button
-              className={page === "history" ? "is-active" : ""}
+              className={navPage === "history" ? "is-active" : ""}
               type="button"
-              aria-current={page === "history" ? "page" : undefined}
+              aria-current={navPage === "history" ? "page" : undefined}
               onClick={() => navigate("history")}
             >
               <Clock3 size={14} aria-hidden="true" />历史
@@ -257,6 +261,9 @@ export function App() {
               runRecordId={activeRun.runRecordId}
               onBack={() => setActiveRun(null)}
               onRelaunch={() => setDialog({ kind: "start", task: activeRun.task })}
+              onOpenColumnFetch={() =>
+                setDialog({ kind: "edit", task: activeRun.task })
+              }
             />
           )}
 
@@ -587,6 +594,13 @@ function TaskFormDialog({
     }
   }
 
+  // 角标说的是「你在这一屏改过它」：非空、不是构建器这次生成的、也不是打开时加载进来的那一段。
+  // 覆盖确认用的判断比它宽——加载进来的 SQL 同样值得保护，只是它不算「手改」，写上就是假话。
+  const sqlManuallyEdited =
+    input.source_sql.trim() !== "" &&
+    input.source_sql !== generatedSql &&
+    input.source_sql !== initial.source_sql;
+
   function openGuide() {
     const sqlIsProtected =
       input.source_sql.trim() !== "" && input.source_sql !== generatedSql;
@@ -668,7 +682,10 @@ function TaskFormDialog({
               onGenerated={applyGeneratedTask}
             />
           )}
-          <FormField label="source_sql">
+          <FormField
+            label="source_sql"
+            badge={sqlManuallyEdited ? "当前 SQL 已被手改" : undefined}
+          >
             <textarea
               autoFocus={editFieldsOnly}
               required
@@ -709,6 +726,10 @@ function TaskFormDialog({
               />
             </FormField>
           </div>
+          <p className="target-side-note">
+            目标端只给这两个文本框：不给目标表下拉、不给目标列列表，
+            <strong>是不画，不是没画完</strong>。目标表由你自己用下面的建表 SQL 建。
+          </p>
           <section className="column-fetch-section" aria-labelledby="column-fetch-title">
             <header>
               <div>
@@ -1060,7 +1081,8 @@ function ShapeFeedback({
       <strong>SQL 形状预检未通过</strong>
       {failures.map((check) => (
         <span key={check.rule}>
-          {shapeRuleLabel(check.rule)}：{check.message}
+          {shapeRuleLabel(check.rule)}：
+          {shapeRuleDescription(check.rule, check.message)}
         </span>
       ))}
     </div>
@@ -1102,6 +1124,9 @@ function ColumnFetchPanel({ state }: { state: ColumnFetchState }) {
 
   return (
     <div className="fetch-ready">
+      <p className="fetch-scope-note">
+        这份取列结果<strong>刷新即丢</strong>：不进任务定义、不进存储，只是这一次的查看。
+      </p>
       <div className="table-wrap">
         <table className="data-grid">
           <thead>
@@ -1115,7 +1140,7 @@ function ColumnFetchPanel({ state }: { state: ColumnFetchState }) {
             {state.result.columns.map((column) => (
               <tr key={column.name}>
                 <td className="mono">{column.name}</td>
-                <td className="mono">{column.data_type}</td>
+                <td className="mono">{column.type}</td>
                 <td className="mono">{columnShape(column)}</td>
               </tr>
             ))}
@@ -1136,7 +1161,9 @@ function ColumnFetchPanel({ state }: { state: ColumnFetchState }) {
           <Copy size={15} aria-hidden="true" />
         </button>
       </div>
-      <pre className="ddl-output">{state.result.target_ddl}</pre>
+      <pre className="ddl-output">
+        <DdlText ddl={state.result.target_ddl} />
+      </pre>
       <div className="row-size-warning">
         <strong>执行时若报 ERROR 1118 Row size too large</strong>
         <span>
@@ -1147,6 +1174,29 @@ function ColumnFetchPanel({ state }: { state: ColumnFetchState }) {
     </div>
   );
 }
+
+/**
+ * DDL 原样照给，只把 `<目标表名>` 这个占位符切出来单独标记。
+ * target_table 留空时 source 会在 DDL 里保留它（`crates/source/src/target_ddl.rs`），
+ * 以前整段是纯文本，占位符和普通 SQL 长得一模一样，看不出这里还没填。
+ */
+function DdlText({ ddl }: { ddl: string }) {
+  const segments = ddl.split(DDL_TABLE_PLACEHOLDER);
+  return (
+    <>
+      {segments.map((segment, index) => (
+        <Fragment key={index}>
+          {index > 0 && (
+            <span className="ddl-placeholder">{DDL_TABLE_PLACEHOLDER}</span>
+          )}
+          {segment}
+        </Fragment>
+      ))}
+    </>
+  );
+}
+
+const DDL_TABLE_PLACEHOLDER = "<目标表名>";
 
 function ShapeCheckTable({ checks }: { checks: ShapeCheck[] }) {
   return (
@@ -1168,7 +1218,7 @@ function ShapeCheckTable({ checks }: { checks: ShapeCheck[] }) {
                     <Check size={14} />通过
                   </>
                 ) : (
-                  check.message
+                  shapeRuleDescription(check.rule, check.message)
                 )}
               </td>
             </tr>
@@ -1229,19 +1279,6 @@ function columnShape(column: Pick<BuilderColumn, "precision" | "scale" | "length
     return "-";
   }
   return `(${column.length})`;
-}
-
-const SHAPE_RULE_LABELS: Readonly<Record<string, string>> = {
-  business_date_range: "业务日期半开区间",
-  no_additional_predicates: "WHERE 无额外谓词",
-  named_projection: "每列显式命名",
-  determinate_projection: "列精度可确定",
-  no_relative_time_functions: "无相对时间函数",
-  matching_date_columns: "源/目标日期列同名",
-};
-
-function shapeRuleLabel(rule: string): string {
-  return SHAPE_RULE_LABELS[rule] ?? rule;
 }
 
 function RenameDialog({
@@ -1449,10 +1486,21 @@ function ModalFooter({
   );
 }
 
-function FormField({ label, children }: { label: string; children: ReactNode }) {
+function FormField({
+  label,
+  badge,
+  children,
+}: {
+  label: string;
+  badge?: string;
+  children: ReactNode;
+}) {
   return (
     <label className="form-field">
-      <span>{label}</span>
+      <span className="field-label">
+        {label}
+        {badge !== undefined && <span className="field-badge">{badge}</span>}
+      </span>
       {children}
     </label>
   );

@@ -49,6 +49,7 @@ SINK_LOG=/tmp/m2-sink.jsonl
 WRAPPER="$ACCEPTANCE_ROOT/m2-source-run-wrapper.py"
 PROXY="$ACCEPTANCE_ROOT/commit-drop-proxy.py"
 SOURCE_URL=http://127.0.0.1:18088
+SOURCE_PORT=18088
 SINK_URL=http://127.0.0.1:18080
 PROXY_URL=http://127.0.0.1:18081
 BIZ_DATE=2026-08-14
@@ -195,10 +196,30 @@ history_retention_days = 90
 EOF
 }
 
+# 18088 是台架自己的端口。上一轮 M2_KEEP_RIG 留下的 source 还监听着时，本轮新起的 source 会以
+# 「Address already in use」当场退出，而 wait_for_source 只看 GET /api/tasks 是否 200 ——
+# 旧进程照样应答 200，于是本轮每一条断言都打在旧进程上：child mode 换不动、work root 对不上，
+# 现象千奇百怪，唯独看不出真正的原因。起之前先把端口清空，读到的 200 才一定是自己的。
+ensure_source_port_free() {
+  local pids attempt
+  pids=$(lsof -ti "tcp:$SOURCE_PORT" 2>/dev/null || true)
+  [[ -n "$pids" ]] || return 0
+  echo "==> 收掉占着 $SOURCE_PORT 的残留进程：$(echo "$pids" | tr '\n' ' ')"
+  # shellcheck disable=SC2086
+  kill -KILL $pids 2>/dev/null || true
+  for (( attempt = 1; attempt <= 100; attempt++ )); do
+    lsof -ti "tcp:$SOURCE_PORT" >/dev/null 2>&1 || return 0
+    sleep 0.05
+  done
+  echo "端口 $SOURCE_PORT 迟迟没释放" >&2
+  return 1
+}
+
 start_source() {
   local mode=${1:-real} sink_url=${2:-$SINK_URL}
   stop_source || return 1
   stop_child || return 1
+  ensure_source_port_free || return 1
   rm -f "$WORK_ROOT/child.pid" "$WORK_ROOT/release-child"
   : > "$SOURCE_LOG"
   write_source_config "$sink_url" || return 1
@@ -208,7 +229,12 @@ start_source() {
   M2_CHILD_RELEASE_FILE="$WORK_ROOT/release-child" \
     nohup "$SOURCE_BIN" --config "$SOURCE_CONFIG" > "$SOURCE_LOG" 2>&1 &
   SOURCE_PID=$!
-  wait_for_source
+  wait_for_source || return 1
+  # 端口起前已清空，正常不会走到这里；留着是为了万一还有别的进程抢在中间，报错能说到点子上。
+  kill -0 "$SOURCE_PID" 2>/dev/null && return 0
+  cat "$SOURCE_LOG" >&2 || true
+  echo "刚起的 source 已经退出，$SOURCE_URL 上应答的是别的进程" >&2
+  return 1
 }
 
 stop_proxy() {
@@ -573,6 +599,8 @@ prepare_rig() {
     echo "M2_ORACLE_CLIENT_LIB_DIR must point to the host Oracle Instant Client directory" >&2
     return 1
   }
+  # 上一轮 M2_KEEP_RIG 留下的 source 会带着一串挂起的 child 一起赖着，child 不占端口但会堆成垃圾。
+  pkill -f "$WRAPPER" 2>/dev/null || true
   ./scripts/up.sh || return 1
   docker run --rm --platform linux/arm64 \
     -v "$REPO_ROOT:/workspace" -w /workspace \

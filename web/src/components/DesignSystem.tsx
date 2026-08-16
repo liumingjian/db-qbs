@@ -54,15 +54,16 @@ export function ErrorCodeTag({
     httpStatus === undefined || httpStatus >= 500
       ? "is-internal"
       : "is-rejected";
+  // 设计系统 §64「码名右边永远跟一句中文人话结论」：标签在前，结论在右。
   return (
     <span className="error-summary">
-      <span>{conclusion}</span>
       <span className={`error-code ${category}`}>
         {code}
         {httpStatus !== undefined && (
           <span className="http-code">HTTP {httpStatus}</span>
         )}
       </span>
+      <span>{conclusion}</span>
     </span>
   );
 }
