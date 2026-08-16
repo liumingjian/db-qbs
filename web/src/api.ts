@@ -95,6 +95,11 @@ export interface RunHistory {
   column: string | null;
   value: string | null;
   message: string | null;
+  /**
+   * 失败分类闭集（source 侧 `FailureKind`，见 ADR-0029）。成功、进行中、
+   * 以及本功能之前落盘的老历史行都是 `null`——读到 `null` 不是错误。
+   */
+  failure_kind: string | null;
   unknown_reason: "PROCESS_DISAPPEARED" | "SERVICE_RESTARTED" | null;
   seq: number;
   rows_pushed: number;

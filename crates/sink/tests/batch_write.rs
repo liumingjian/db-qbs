@@ -107,7 +107,7 @@ fn value_errors_name_the_column_and_value_as_data_problems() {
 
         let error = service.write_batch(RUN_ID, payload(1, 1, 3)).unwrap_err();
 
-        assert_eq!((error.status, error.code), (400, "BAD_REQUEST"));
+        assert_eq!((error.status, error.code), (400, "DATA_REJECTED"));
         assert_eq!(error.details["mysql_code"], mysql_code);
         assert_eq!(error.details["column"], "C_1");
         assert_eq!(error.details["value"], "bad-value");
@@ -158,7 +158,7 @@ fn error_1153_points_to_environment_configuration_not_data() {
 
     let error = service.write_batch(RUN_ID, payload(1, 1, 3)).unwrap_err();
 
-    assert_eq!((error.status, error.code), (500, "SWAP_FAILED"));
+    assert_eq!((error.status, error.code), (500, "SINK_ENVIRONMENT"));
     assert!(
         error.message.contains("max_allowed_packet"),
         "{}",
@@ -264,6 +264,8 @@ fn sub_statement_failure_commits_nothing_and_does_not_advance_sequence() {
         .unwrap_err();
 
     assert!(error.message.contains("第 1 批"), "{}", error.message);
+    // 写暂存表失败不得再借用 SWAP_FAILED——那是切换那一步的码，两者混用会让排障从第一行走错方向。
+    assert_eq!((error.status, error.code), (500, "BATCH_WRITE_FAILED"));
     assert!(destination.committed_rows.lock().unwrap().is_empty());
     *destination.fail_chunk.lock().unwrap() = None;
     assert!(service.write_batch(RUN_ID, payload(1, 1_000, 70)).is_ok());

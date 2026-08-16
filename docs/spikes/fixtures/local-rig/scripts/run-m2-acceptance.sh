@@ -363,6 +363,7 @@ scenario_a4() {
   assert_eq "Oracle failure status" 502 "$API_STATUS" || return 1
   assert_eq "Oracle failure kind" oracle "$(jq -r '.kind' <<<"$API_BODY")" || return 1
   assert_eq "Oracle missing table code" 942 "$(jq -r '.oracle_code' <<<"$API_BODY")" || return 1
+  assert_eq "Oracle failure category" SOURCE_QUERY "$(jq -r '.failure_kind' <<<"$API_BODY")" || return 1
   assert_eq "Oracle failure run_id absent" false "$(jq 'has("run_id")' <<<"$API_BODY")" || return 1
   after_history=$(history_count) || return 1
   assert_eq "Oracle failure history unchanged" "$before_history" "$after_history" || return 1
@@ -380,6 +381,7 @@ scenario_a5() {
   touch "$WORK_ROOT/release-child" || return 1
   wait_for_run "$run_record_id" '.live == false' || return 1
   assert_eq "terminal effect" SWAPPED "$(jq -r '.target_table_effect' <<<"$API_BODY")" || return 1
+  assert_eq "success has no failure category" null "$(jq -r '.failure_kind' <<<"$API_BODY")" || return 1
   assert_eq "source rows" 100000 "$(jq -r '.source_rows' <<<"$API_BODY")" || return 1
   run_id=$(jq -r '.run_id' <<<"$API_BODY") || return 1
   history_projection=$(jq -c '{stage,seq,rows_pushed,bytes,ms,last_ts}' <<<"$API_BODY") || return 1
@@ -404,6 +406,7 @@ scenario_a6() {
   assert_eq "run_id is null" null "$(jq -r '.run_id' <<<"$API_BODY")" || return 1
   assert_eq "run shape check count" 6 "$(jq '.shape_checks | length' <<<"$API_BODY")" || return 1
   assert_eq "run shape report has failure" true "$(jq '[.shape_checks[].passed] | any(. == false)' <<<"$API_BODY")" || return 1
+  assert_eq "shape failure category" SHAPE_PRECHECK "$(jq -r '.failure_kind' <<<"$API_BODY")" || return 1
   api GET "/api/runs?task_id=$task_id" || return 1
   assert_eq "history row present" true "$(jq --arg record "$run_record_id" 'any(.[]; .run_record_id == $record)' <<<"$API_BODY")" || return 1
   after_sink_records=$(sink_log_record_count) || return 1
@@ -419,6 +422,7 @@ scenario_a7() {
   wait_for_run "$record" '.live == false' || return 1
   assert_eq "mapping run_id exists" true "$(jq '.run_id != null' <<<"$API_BODY")" || return 1
   assert_eq "mapping code" PRECHECK_FAILED "$(jq -r '.sink_code' <<<"$API_BODY")" || return 1
+  assert_eq "mapping failure category" MAPPING_PRECHECK "$(jq -r '.failure_kind' <<<"$API_BODY")" || return 1
   assert_eq "mapping has no terminal block" true "$(jq '.target_table_effect == "DISCARDED" and .staging_table == null' <<<"$API_BODY")" || return 1
   assert_eq "mapping issue total" true "$(jq '.mapping_issues | length > 0' <<<"$API_BODY")" || return 1
   echo "actual response: $API_BODY"
@@ -432,6 +436,7 @@ scenario_a8() {
   record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == false' || return 1
   assert_eq "verification code" VERIFY_FAILED "$(jq -r '.sink_code' <<<"$API_BODY")" || return 1
+  assert_eq "verification failure category" VERIFY_FAILED "$(jq -r '.failure_kind' <<<"$API_BODY")" || return 1
   assert_eq "verification terminal" DISCARDED "$(jq -r '.target_table_effect' <<<"$API_BODY")" || return 1
   echo "actual response: $API_BODY"
   stop_proxy
@@ -444,6 +449,7 @@ scenario_a9() {
   record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == false' || return 1
   assert_eq "escape code" INTERNAL_PRECHECK_ESCAPE "$(jq -r '.sink_code' <<<"$API_BODY")" || return 1
+  assert_eq "escape is a defect not a run failure" DEFECT "$(jq -r '.failure_kind' <<<"$API_BODY")" || return 1
   assert_eq "escape column" V_TEXT "$(jq -r '.column' <<<"$API_BODY")" || return 1
   assert_eq "escape value" 真实业务值-1265 "$(jq -r '.value' <<<"$API_BODY")" || return 1
   echo "actual response: $API_BODY"
@@ -492,6 +498,7 @@ scenario_a12() {
   wait_for_run "$record" '.live == false' || return 1
   assert_eq "kill -KILL unknown reason" PROCESS_DISAPPEARED "$(jq -r '.unknown_reason' <<<"$API_BODY")" || return 1
   assert_eq "kill -KILL error codes absent" true "$(jq '.source_code == null and .sink_code == null' <<<"$API_BODY")" || return 1
+  assert_eq "kill -KILL failure category" UNKNOWN "$(jq -r '.failure_kind' <<<"$API_BODY")" || return 1
   echo "killed host source pid: $killed_pid"
   stop_child
 }
@@ -507,6 +514,7 @@ scenario_a13() {
   wait_for_run "$record" '.live == false' || return 1
   assert_eq "SIGTERM unknown reason" SERVICE_RESTARTED "$(jq -r '.unknown_reason' <<<"$API_BODY")" || return 1
   assert_eq "SIGTERM error codes absent" true "$(jq '.source_code == null and .sink_code == null' <<<"$API_BODY")" || return 1
+  assert_eq "SIGTERM failure category" UNKNOWN "$(jq -r '.failure_kind' <<<"$API_BODY")" || return 1
   stop_child
 }
 

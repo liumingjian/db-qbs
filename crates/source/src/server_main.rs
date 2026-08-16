@@ -856,6 +856,9 @@ fn oracle_failure(error: db_qbs_source::SourceReadError) -> HttpResponse {
             "kind": "oracle",
             "message": error.user_message(),
             "oracle_code": error.oracle_code,
+            // 取列失败不是一次 run，进不了运行历史；分类仍照实给出，
+            // 否则「连不上 Oracle」与「dblink 不可用」在这个面上又只能靠人话反推。
+            "failure_kind": error.kind.as_str(),
         }),
     )
 }
@@ -892,16 +895,7 @@ fn handle_column_fetch(request: &mut Request, config: &SourceConfig) -> HttpResp
 
     let columns = match OracleRowSource::describe(config, &task) {
         Ok(columns) => columns,
-        Err(error) => {
-            return json_response(
-                502,
-                &json!({
-                    "kind": "oracle",
-                    "message": error.user_message(),
-                    "oracle_code": error.oracle_code,
-                }),
-            )
-        }
+        Err(error) => return oracle_failure(error),
     };
     match generate_target_ddl(&columns, &task.target_table, &task.target_date_col) {
         Ok(target_ddl) => json_response(

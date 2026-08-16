@@ -5,8 +5,8 @@ use chrono::Utc;
 use rand::RngCore;
 
 use crate::{
-    BatchPayload, OpenRunRequest, RunResponse, SinkClient, SinkError, SinkErrorKind, SourceColumn,
-    Terminal,
+    BatchPayload, FailureKind, OpenRunRequest, RunResponse, SinkClient, SinkError, SinkErrorKind,
+    SourceColumn, Terminal,
 };
 
 pub const FETCH_ARRAY_SIZE: u32 = 100;
@@ -40,15 +40,33 @@ pub struct SourceReadError {
     pub oracle_code: Option<i32>,
     pub column: Option<String>,
     pub value: Option<String>,
+    /// 成因分类。**在出错的那一步定下**，不靠事后从人话或错误码反推——
+    /// 同一个 Oracle 码在建连接与取数两步上指的不是同一件事（ADR-0029 §2）。
+    pub kind: FailureKind,
 }
 
 impl SourceReadError {
+    /// 会话已建立之后的读取失败。dblink 与本地查询由 [`crate::oracle_kind`] 按码区分。
     pub fn new(message: impl Into<String>, oracle_code: Option<i32>) -> Self {
+        Self::with_kind(message, oracle_code, crate::oracle_kind(oracle_code, false))
+    }
+
+    /// 建连接那一步的失败：Instant Client 初始化、监听器、登录。
+    pub fn connecting(message: impl Into<String>, oracle_code: Option<i32>) -> Self {
+        Self::with_kind(message, oracle_code, crate::oracle_kind(oracle_code, true))
+    }
+
+    pub fn with_kind(
+        message: impl Into<String>,
+        oracle_code: Option<i32>,
+        kind: FailureKind,
+    ) -> Self {
         Self {
             message: message.into(),
             oracle_code,
             column: None,
             value: None,
+            kind,
         }
     }
 
@@ -122,6 +140,8 @@ pub enum TransferEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransferFailure {
     pub stage: RunStage,
+    /// 成因分类，见 [`FailureKind`]。每个构造点都必须显式给出——没有「默认档」。
+    pub kind: FailureKind,
     pub message: String,
     pub source_code: Option<i32>,
     pub sink_code: Option<String>,
@@ -152,12 +172,14 @@ impl std::error::Error for TransferFailure {}
 impl TransferFailure {
     pub fn new(
         stage: RunStage,
+        kind: FailureKind,
         message: impl Into<String>,
         source_rows: u64,
         total_batches: u64,
     ) -> Self {
         Self {
             stage,
+            kind,
             message: message.into(),
             source_code: None,
             sink_code: None,
@@ -184,7 +206,13 @@ impl TransferFailure {
         source_rows: u64,
         total_batches: u64,
     ) -> Self {
-        let mut failure = Self::new(stage, error.user_message(), source_rows, total_batches);
+        let mut failure = Self::new(
+            stage,
+            error.kind,
+            error.user_message(),
+            source_rows,
+            total_batches,
+        );
         failure.source_code = error.oracle_code;
         failure.column = error.column;
         failure.value = error.value;
@@ -263,6 +291,7 @@ pub fn run_transfer(
             &mut observe,
             TransferFailure::new(
                 RunStage::Preparing,
+                FailureKind::Defect,
                 "目标端开任务响应的 run_id 与请求不一致",
                 0,
                 0,
@@ -324,6 +353,7 @@ pub fn run_transfer(
                 &mut observe,
                 TransferFailure::new(
                     RunStage::Streaming,
+                    FailureKind::Defect,
                     format!(
                         "源端行宽断言失败：describe 有 {expected_columns} 列，当前行有 {} 个值",
                         row.len()
@@ -445,6 +475,7 @@ pub fn run_transfer(
         return Err(Box::new(
             TransferFailure::new(
                 RunStage::Committing,
+                FailureKind::VerifyFailed,
                 format!(
                     "目标端 commit 响应行数断言失败：source_rows={} staged_rows={} swapped_rows={}",
                     committed.source_rows, committed.staged_rows, committed.swapped_rows
@@ -595,6 +626,7 @@ fn sink_failure(
     commit_diagnostic: Option<String>,
 ) -> TransferFailure {
     let SinkError {
+        kind,
         code,
         message,
         column,
@@ -602,8 +634,16 @@ fn sink_failure(
         gate,
         ..
     } = error;
+    // 传输层断了就是网络，谈不上目标端报了什么；只有拿到响应才有码可分类。
+    let failure_kind = match kind {
+        SinkErrorKind::Transport => FailureKind::Network,
+        SinkErrorKind::Response => code
+            .as_deref()
+            .map_or(FailureKind::Defect, FailureKind::from_sink_code),
+    };
     let mut failure = TransferFailure::new(
         stage,
+        failure_kind,
         format!("目标端：{message}"),
         source_rows,
         total_batches,

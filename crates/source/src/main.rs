@@ -7,8 +7,8 @@ use std::process::ExitCode;
 use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
 use db_qbs_source::{
     generate_run_id, load_source_config, load_task_config, parse_biz_date, precheck_sql,
-    run_transfer, HttpSinkClient, OracleRowSource, RunStage, TransferEvent, TransferFailure,
-    TransferRequest, TransferSummary,
+    run_transfer, FailureKind, HttpSinkClient, OracleRowSource, RunStage, TransferEvent,
+    TransferFailure, TransferRequest, TransferSummary,
 };
 use serde_json::{json, Map, Value};
 
@@ -30,7 +30,10 @@ fn run() -> bool {
                 LogLevel::Error,
                 LogEvent::CliFailed,
                 task_hint.as_deref(),
-                [("message", json!(message))],
+                [
+                    ("message", json!(message)),
+                    ("failure_kind", json!(FailureKind::Config.as_str())),
+                ],
             );
             return false;
         }
@@ -58,6 +61,7 @@ fn run() -> bool {
             [
                 ("message", json!(message)),
                 ("value", json!(arguments.biz_date)),
+                ("failure_kind", json!(FailureKind::Config.as_str())),
             ],
         );
         return false;
@@ -70,7 +74,10 @@ fn run() -> bool {
                 LogLevel::Error,
                 LogEvent::SourceConfigFailed,
                 Some(&task_path),
-                [("message", json!(error.to_string()))],
+                [
+                    ("message", json!(error.to_string())),
+                    ("failure_kind", json!(FailureKind::Config.as_str())),
+                ],
             );
             return false;
         }
@@ -82,7 +89,10 @@ fn run() -> bool {
                 LogLevel::Error,
                 LogEvent::TaskConfigFailed,
                 Some(&task_path),
-                [("message", json!(error.to_string()))],
+                [
+                    ("message", json!(error.to_string())),
+                    ("failure_kind", json!(FailureKind::Config.as_str())),
+                ],
             );
             return false;
         }
@@ -102,6 +112,7 @@ fn run() -> bool {
                     )),
                 ),
                 ("problems", json!(problems)),
+                ("failure_kind", json!(FailureKind::ShapePrecheck.as_str())),
             ],
         );
         return false;
@@ -160,7 +171,8 @@ fn run() -> bool {
                     ("message", json!("sink client preparation failed")),
                 ],
             );
-            let failure = TransferFailure::new(RunStage::Preparing, message, 0, 0);
+            let failure =
+                TransferFailure::new(RunStage::Preparing, FailureKind::Config, message, 0, 0);
             emit_failed_run(&failure, &run_id, &task_path);
             return false;
         }
@@ -198,6 +210,7 @@ fn emit_successful_run(summary: &TransferSummary, run_id: &str, task: &Path) {
             ("terminal", json!(RunStage::Succeeded.as_str())),
             ("stage", json!(RunStage::Succeeded.as_str())),
             ("message", json!("run completed successfully")),
+            ("failure_kind", Value::Null),
             ("source_code", Value::Null),
             ("sink_code", Value::Null),
             ("column", Value::Null),
@@ -317,6 +330,7 @@ fn emit_failed_run(failure: &TransferFailure, run_id: &str, task: &Path) {
             ("terminal", json!(RunStage::Failed.as_str())),
             ("stage", json!(failure.stage.as_str())),
             ("message", json!(failure.message)),
+            ("failure_kind", json!(failure.kind.as_str())),
             ("source_code", json!(failure.source_code)),
             ("sink_code", json!(failure.sink_code)),
             ("column", json!(failure.column)),

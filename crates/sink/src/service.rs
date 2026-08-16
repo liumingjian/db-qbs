@@ -522,6 +522,12 @@ fn verify_failed_error(
     }
 }
 
+/// 写批次失败的三个成因各占一个码（ADR-0010 闭集 12 → 15、ADR-0029 §1）。
+///
+/// 早先三者共用两个别处的码：数据被 MySQL 逐值拒绝报 `BAD_REQUEST`（本义是「请求不合法」），
+/// 写暂存表失败与 `max_allowed_packet` 环境错都报 `SWAP_FAILED`（本义是「切换失败」）。
+/// 人话虽然分得清，但**码上分不清**，排障与失败分类只能靠匹配文字。
+/// 状态码与报文形状不动，只把 `code` 拆开。
 fn write_batch_api_error(run_id: &str, seq: u64, error: WriteBatchError) -> ApiError {
     match error {
         WriteBatchError::DataValue {
@@ -530,7 +536,7 @@ fn write_batch_api_error(run_id: &str, seq: u64, error: WriteBatchError) -> ApiE
             value,
         } => ApiError {
             status: 400,
-            code: "BAD_REQUEST",
+            code: "DATA_REJECTED",
             message: mysql_data_value_message(seq, mysql_code, &column, value.as_deref()),
             run_id: Some(run_id.to_owned()),
             details: json!({
@@ -560,7 +566,7 @@ fn write_batch_api_error(run_id: &str, seq: u64, error: WriteBatchError) -> ApiE
         },
         WriteBatchError::Environment { mysql_code } => ApiError {
             status: 500,
-            code: "SWAP_FAILED",
+            code: "SINK_ENVIRONMENT",
             message: format!(
                 "第 {seq} 批写入被 MySQL ERROR {mysql_code} 拒绝：max_allowed_packet 低于开连接仪式要求或运行期被改小；这是目标端环境配置错误，请恢复到至少 64 MiB，不要排查业务数据"
             ),
@@ -569,7 +575,7 @@ fn write_batch_api_error(run_id: &str, seq: u64, error: WriteBatchError) -> ApiE
         },
         WriteBatchError::Other(message) => ApiError {
             status: 500,
-            code: "SWAP_FAILED",
+            code: "BATCH_WRITE_FAILED",
             message: format!(
                 "第 {seq} 批写入暂存表失败，整批事务已回滚：{message}；这是目标端故障，目标表未被改动"
             ),

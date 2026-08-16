@@ -220,6 +220,9 @@ M1 分类码闭集：
 | `INTERNAL_ASSERTION_FAILED` | 500 | 2026-08-15 增补，见下 |
 | `PAYLOAD_TOO_LARGE` | 413 | |
 | `BAD_REQUEST` | 400 | `Content-Type` 非 `application/json` 为 **415** |
+| `DATA_REJECTED` | 400 | 2026-08-16 增补，见下（[ADR-0029](0029-failure-classification.md)） |
+| `SINK_ENVIRONMENT` | 500 | 同上 |
+| `BATCH_WRITE_FAILED` | 500 | 同上 |
 
 **`INTERNAL_PRECHECK_ESCAPE` 是专为哨兵加的。** ADR-0009 说 `Note 1265`
 （预检漏网的静默舍入）一旦出现**属于 P0 缺陷而非运行故障**。这个区分必须在协议上可见，
@@ -234,6 +237,15 @@ M1 分类码闭集：
 > 共用一个码会让排障从第一行就走错方向。故新增 `INTERNAL_ASSERTION_FAILED` 承接后一类，
 > `INTERNAL_PRECHECK_ESCAPE` 回归 `Note 1265` 哨兵本义。
 > **闭集字段只增不删**：这是首次增码，增码必须像本条一样写回本表。
+
+> **2026-08-16 增补：`DATA_REJECTED` / `SINK_ENVIRONMENT` / `BATCH_WRITE_FAILED`，闭集 12 → 15
+> （[ADR-0029](0029-failure-classification.md) §1）。**
+> 写批次的三个成因此前借用了两个别处的码：MySQL 逐值拒绝业务数据报 `BAD_REQUEST`
+> （本义是「请求不合法」），`max_allowed_packet` 一类环境配置错与写暂存表失败都报 `SWAP_FAILED`
+> （本义是「切换失败」）。人话分得清，**码上分不清**——排障与失败分类只能靠匹配文字，
+> 而 STRATEGY-V1 成功标准第 4 条要的正是「不需要翻日志猜」。故三个成因各占一个码。
+> **HTTP 状态码与报文形状一字不改**：`DATA_REJECTED` 仍是 400（与「请求不合法」共用状态，
+> 分辨靠码不靠状态），另两个仍是 500。**闭集只增不删**，本次是第三次增码。
 
 > **2026-08-15 增补：`SWAP_TARGET_BUSY`，闭集 11 → 12（[ADR-0022](0022-concurrent-run-mutual-exclusion.md)）。**
 > 切换事务里的 `DELETE` 会锁住目标表当日范围（目标表业务日期列无索引时锁全表），

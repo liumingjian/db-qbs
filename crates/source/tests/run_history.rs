@@ -31,7 +31,7 @@ fn json_lines_fold_into_one_history_row_with_event_scoped_terminals() {
         r#"{"ts":"2026-08-15T10:00:04.000Z","event":"batch_pushed","run_id":"run-7","seq":1,"rows":3,"bytes":100,"ms":10}"#,
         r#"{"ts":"2026-08-15T10:00:05.000Z","event":"stage_changed","run_id":"run-7","stage":"COMMITTING"}"#,
         r#"{"ts":"2026-08-15T10:00:06.000Z","event":"commit_diagnosed","run_id":"run-7","terminal":"DISCARDED","message":"sink tombstone"}"#,
-        r#"{"ts":"2026-08-15T10:00:07.000Z","event":"run_finished","run_id":"run-7","terminal":"FAILED","stage":"COMMITTING","source_code":null,"sink_code":"VERIFY_FAILED","column":"AMOUNT","value":"secret","message":"counts differ","source_rows":3,"source_batches":1,"staged_rows":3,"received_batches":1,"sink_reported_rows":2,"purged_rows":0,"fetch_ms":4,"push_ms":10,"commit_ms":6,"count_ms":2,"cursor_ms":1}"#,
+        r#"{"ts":"2026-08-15T10:00:07.000Z","event":"run_finished","run_id":"run-7","terminal":"FAILED","stage":"COMMITTING","source_code":null,"sink_code":"VERIFY_FAILED","column":"AMOUNT","value":"secret","message":"counts differ","failure_kind":"VERIFY_FAILED","source_rows":3,"source_batches":1,"staged_rows":3,"received_batches":1,"sink_reported_rows":2,"purged_rows":0,"fetch_ms":4,"push_ms":10,"commit_ms":6,"count_ms":2,"cursor_ms":1}"#,
     ];
 
     let history =
@@ -61,6 +61,7 @@ fn json_lines_fold_into_one_history_row_with_event_scoped_terminals() {
     assert_eq!(history.column.as_deref(), Some("AMOUNT"));
     assert_eq!(history.value.as_deref(), Some("secret"));
     assert_eq!(history.message.as_deref(), Some("counts differ"));
+    assert_eq!(history.failure_kind.as_deref(), Some("VERIFY_FAILED"));
     assert_eq!(history.seq, 1);
     assert_eq!(history.rows_pushed, 3);
     assert_eq!(history.bytes, 100);
@@ -109,7 +110,7 @@ fn shape_precheck_failure_keeps_parent_identity_without_inventing_a_run_id() {
     let accepted_at = Utc.with_ymd_and_hms(2026, 8, 15, 9, 59, 59).unwrap();
     let lines = [
         r#"{"ts":"2026-08-15T10:00:00.000Z","event":"source_started","run_id":null,"biz_date":"2026-08-14"}"#,
-        r#"{"ts":"2026-08-15T10:00:01.000Z","event":"sql_shape_precheck_failed","run_id":null,"message":"two checks failed"}"#,
+        r#"{"ts":"2026-08-15T10:00:01.000Z","event":"sql_shape_precheck_failed","run_id":null,"message":"two checks failed","failure_kind":"SHAPE_PRECHECK"}"#,
     ];
 
     let history =
@@ -122,6 +123,21 @@ fn shape_precheck_failure_keeps_parent_identity_without_inventing_a_run_id() {
     assert_eq!(history.message.as_deref(), Some("two checks failed"));
     assert_eq!(history.source_code, None);
     assert_eq!(history.sink_code, None);
+    assert_eq!(history.failure_kind.as_deref(), Some("SHAPE_PRECHECK"));
+}
+
+#[test]
+fn a_log_line_without_a_category_leaves_the_history_row_unclassified() {
+    // 本功能之前落盘的历史行没有 failure_kind；读到缺席是「当时没记」，不是错误。
+    let accepted_at = Utc.with_ymd_and_hms(2026, 8, 15, 9, 59, 59).unwrap();
+    let lines = [
+        r#"{"ts":"2026-08-15T10:00:02.000Z","event":"run_finished","run_id":"run-9","terminal":"FAILED","stage":"COMMITTING","source_code":null,"sink_code":"VERIFY_FAILED","column":null,"value":null,"message":"counts differ","source_rows":3,"source_batches":1,"staged_rows":2,"received_batches":1,"sink_reported_rows":3,"purged_rows":0,"fetch_ms":1,"push_ms":1,"commit_ms":1,"count_ms":1,"cursor_ms":1}"#,
+    ];
+
+    let history =
+        fold_history_lines("record-9", "task-1", "2026-08-14", accepted_at, &lines).unwrap();
+
+    assert_eq!(history.failure_kind, None);
 }
 
 #[test]
@@ -164,6 +180,8 @@ fn sqlite_writes_lazily_remove_expired_rows_and_startup_seals_incomplete_rows() 
     let sealed = store.get("current").unwrap().unwrap();
     assert_eq!(sealed.outcome.as_deref(), Some("FAILED"));
     assert_eq!(sealed.unknown_reason.as_deref(), Some("SERVICE_RESTARTED"));
+    // 启动清扫封的是「结局未知」，分类必须跟着落，否则历史行上只有人话说得清这一点。
+    assert_eq!(sealed.failure_kind.as_deref(), Some("UNKNOWN"));
     assert_eq!(sealed.source_code, None);
     assert_eq!(sealed.sink_code, None);
     assert_eq!(sealed.target_table_effect, None);
