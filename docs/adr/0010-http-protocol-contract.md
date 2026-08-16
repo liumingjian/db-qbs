@@ -454,3 +454,49 @@ M1 报文定稿，**`/v1` 前缀就是它的时效声明**。最可能触发复�
 [#15](https://github.com/liumingjian/db-qbs/issues/15) 的延迟重推由
 [ADR-0018](0018-delayed-batch-retry-model.md) 另行定义；它需要幂等替换与重挂接语义，
 不得把本 ADR `/v1` 的 `retry = 0` 原地改义。
+
+---
+
+## 2026-08-16 增补：`SourceColumn` 新增可选 `fsp`，闭集与端点不变
+
+**来源**：[#101](https://github.com/liumingjian/db-qbs/issues/101)，地图 [#94](https://github.com/liumingjian/db-qbs/issues/94)。
+**关联**：[ADR-0030](0030-m3-type-whitelist.md)（九行形态，`TIMESTAMP(0..6)` 收编、`n > 6` 拒绝）、
+[ADR-0027](0027-target-ddl-generation-and-cross-end-metadata.md) 2026-08-16 增补 A8。
+
+### 1. 报文形状：`SourceColumn` 从五字段变成五 + 一可选
+
+`POST /runs` 的 `columns[]` 元素新增一个**可选字段 `fsp`**，承载 `TIMESTAMP(n)` 的 `n`。
+非 `TIMESTAMP` 列不带它。
+
+**为什么非加不可**：`TIMESTAMP(n)` 的推导形状恒为 `DATETIME(6)`、**不随 `n` 走**
+（ADR-0030 §3），所以生成侧不需要 `n`；但 **`n > 6` 要拒**（ADR-0030 §2），
+而 §3.1 定死逐列类型判定集中在 `sink`——**sink 要判 `n > 6` 就必须拿到 `n`**，
+而现有五个字段一个都装不下（`describe_column` 现在把 `TIMESTAMP` 落进兜底分支，
+`precision`/`scale`/`length` 三个全填 `None`）。
+
+**不取「把 `n > 6` 的拒绝留在 source 侧」**：那会让 `n > 6` 的列在 source 拒、
+其余列的类型问题在 sink 拒，人跑两趟才看全——正是 §3.1 与 ADR-0009 §8
+「一次报全部列」当初禁掉的形态。
+
+**不取「复用 `scale` 装 `fsp`」**：`scale` 会在同一字段里指两件事，
+判定式读起来要先按类型分支。ADR-0030 已把 `NUMBER` 撑到四形态，不该再往 `scale` 上叠一层。
+
+### 2. 跨版本兼容：不产生新账
+
+`sink` 侧 `SourceColumn` 带 `#[serde(deny_unknown_fields)]`，
+故「新 source 发 `fsp` + 老 sink」= 报文当场被拒。**这不是本增补开的账**：
+§「版本」早已定死「两个二进制**永远同版本部署**，版本只在 `/v1/` 前缀、不进 body、
+装错就是 404、零协商成本」。本增补只是把那种「装了半套」的情形从 404 换成一个反序列化错误。
+**`/v1/` 前缀不动，不引入 body 版本协商。**
+
+### 3. 明确**没有**变的
+
+- **五个端点不变。**
+- **错误码闭集不增码。** `fsp > 6` 走既有的预检拒绝分类——它就是一条逐列类型判定不通过，
+  与 ADR-0030 §4.3 对 `invalid_rows > 0` 的处理同一口径。闭集「只增不删」是单向门，
+  不为一个已有归属的失败开门。
+- **`ADR-0027` §3 那条「不属于任何 run 的元数据查询」端点的封条不解**，
+  其「重开条件」一节一个字不改。**加一个可选字段和开一类新端点是两个量级**——
+  后人不得拿本增补当先例去推那条。
+- §3.1「逐列类型判定集中在 sink」**因本增补而更牢**：`fsp` 正是为了让 sink 判得下去才加的。
+- §3.3 列序、§5 重跑语义、载荷形状与 64 MiB 上限**全部原样**。
