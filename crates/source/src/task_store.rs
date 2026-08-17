@@ -328,10 +328,7 @@ mod tests {
         drop(connection);
 
         let store = TaskStore::open(&directory).unwrap();
-        assert_eq!(
-            store.get("legacy").unwrap().unwrap().column_precision,
-            None
-        );
+        assert_eq!(store.get("legacy").unwrap().unwrap().column_precision, None);
 
         let connection = Connection::open(database).unwrap();
         let has_column: bool = connection
