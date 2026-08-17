@@ -23,7 +23,10 @@ impl fmt::Display for CanonError {
             Self::NonCanonicalNumber => {
                 formatter.write_str("driver emitted a non-canonical NUMBER")
             }
-            Self::InvalidDate => formatter.write_str("invalid DATE components"),
+            Self::InvalidDate => formatter.write_str(
+                "invalid DATE components: year must be within 0001..9999 \
+                 (Oracle BC dates are not supported)",
+            ),
         }
     }
 }

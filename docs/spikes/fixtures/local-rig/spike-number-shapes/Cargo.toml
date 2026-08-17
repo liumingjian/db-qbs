@@ -1,0 +1,18 @@
+[workspace]
+
+[package]
+name = "spike-number-shapes"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+db-qbs-shared = { path = "../../../../../crates/shared" }
+oracle = "0.6"
+
+[[bin]]
+name = "spike-number-shapes"
+path = "src/main.rs"
+
+[profile.release]
+debug = false

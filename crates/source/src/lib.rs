@@ -14,6 +14,7 @@ use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer};
 
+mod failure_kind;
 mod oracle_source;
 mod protocol;
 mod run_history;
@@ -24,11 +25,12 @@ mod transfer;
 mod web_assets;
 
 pub use db_qbs_shared::BatchPayload;
+pub use failure_kind::{oracle_kind, FailureKind};
 pub use oracle_source::OracleRowSource;
 pub use protocol::{
-    BatchResponse, CommitResponse, HttpSinkClient, OpenRunRequest, OpenRunResponse, RunResponse,
-    SinkClient, SinkError, SinkErrorKind, SinkGateDetails, SinkPrecheckIssue, SourceColumn,
-    Terminal,
+    BatchResponse, ColumnSupport, CommitResponse, HttpSinkClient, OpenRunRequest, OpenRunResponse,
+    RangeCheckColumn, RangeCheckResult, RunResponse, SinkClient, SinkError, SinkErrorKind,
+    SinkGateDetails, SinkPrecheckIssue, SourceColumn, Terminal,
 };
 pub use run_history::{
     expired_history_indices, fold_history_lines, HistoryChange, HistoryStore, RunHistory,

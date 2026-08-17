@@ -39,7 +39,7 @@ spike §7.4 把这条链拉出来的硬约束有六条。M1 开工前，为把�
 | MySQL `CHAR` 读取时剥掉尾部空格 | **映射规则**：目标列建成 `VARCHAR(n)` | spike §7.4 第 5 条 / [#13](https://github.com/liumingjian/db-qbs/issues/13) |
 | `DATE` 落进 MySQL `TIMESTAMP`，按会话时区改值 | **映射规则**：目标列建成 `DATETIME` | spike §7.4 第 3 条 |
 | 白名单外类型被按某种默认形式搬过去 | **映射预检**：类型白名单，报错拒绝 | ADR-0003 |
-| **Oracle 公元前 `DATE` 被 `canon_date` 丢掉纪元，变成同数字的公元日期** | **无防线**（见下方 2026-08-13 增补二） | spike §7.9 / [#35](https://github.com/liumingjian/db-qbs/issues/35) |
+| ~~Oracle 公元前 `DATE` 被 `canon_date` 丢掉纪元，变成同数字的公元日期~~ **已撤销** | **不成立**：驱动给负年，`canon_date` 当场炸（见下方增补三） | spike §7.12 / [#98](https://github.com/liumingjian/db-qbs/issues/98) |
 
 前六条**全是系统性的错**：一旦发生，每一行都错，第一次运行就暴露。
 用每次运行都算一遍的行 checksum 去等一个只会在第一次出现的错，是把成本放错了位置。
@@ -58,7 +58,7 @@ spike §7.4 把这条链拉出来的硬约束有六条。M1 开工前，为把�
   ADR-0003 那句「正确性的单点上，宁可停机也不要猜」，全部重量压到预检上。
   因此预检**必须是硬门禁**：不通过不许发起运行。
 - 行数相等但内容不同的情形，V1 抓不到。已知能造成这种情形的，上表前六条
-  各自有预检或映射规则挡着，**第七条没有**（见下方增补二）；**未知路径**（排序规则漂移、驱动换版本、字符集意外）
+  各自有预检或映射规则挡着（**第七条已于 2026-08-16 撤销，见增补三：它不是静默路径**）；**未知路径**（排序规则漂移、驱动换版本、字符集意外）
   V1 不再有兜底——这是本决策明面上买的风险。
 - **`ZHS16GBK` 中文往返**（[#2](https://github.com/liumingjian/db-qbs/issues/2) 复验清单第 3 项）
   原本指望 checksum 在上线时抓出来。现在不行了，它必须在 #2 复验时**显式逐值比对**。
@@ -71,6 +71,10 @@ spike §7.4 把这条链拉出来的硬约束有六条。M1 开工前，为把�
 > **`source_rows` 是 source 自报的，门禁不覆盖「源库 → source 累加器」这一段。**
 
 > **2026-08-13 增补二（[#35](https://github.com/liumingjian/db-qbs/issues/35)）——静默清单添了第七行，且它的防线栏是空的。**
+>
+> **⚠️ 本增补加的第七行已由下面的「增补三」撤销（2026-08-16，[#99](https://github.com/liumingjian/db-qbs/issues/99)）**：
+> [#98](https://github.com/liumingjian/db-qbs/issues/98) 实测驱动给**负年**，纪元没丢，
+> 下面这段推演的前提不成立。读到这里请连增补三一起读。
 >
 > #35 去查「Oracle `DATE` 域比 MySQL `DATETIME` 域宽，越界怎么办」，实测（spike §7.9）
 > **推翻了「越界会被静默写进去」这个前提**：`STRICT_ALL_TABLES` 下公元 1–9999 全域
@@ -115,3 +119,35 @@ spike §7.4 把这条链拉出来的硬约束有六条。M1 开工前，为把�
   V1 只比行数，这条同样成立，已写进 ADR-0002。
 - 详细推演见已关闭的地图 [#14](https://github.com/liumingjian/db-qbs/issues/14) 与
   [#16](https://github.com/liumingjian/db-qbs/issues/16)。
+
+## 增补三（2026-08-16，[#99](https://github.com/liumingjian/db-qbs/issues/99)）：静默清单第七行撤销，六行全部有防线
+
+**增补二加的第七行（公元前日期丢纪元）经取证不成立，本增补把它从静默清单撤下。**
+
+[#98](https://github.com/liumingjian/db-qbs/issues/98) 在台架上走**生产同款取数路径**
+（`oracle_source.rs::read_date` 的 `row.get::<_, Option<Timestamp>>()` → `canon_date`）
+实测了四个公元前用例（spike §7.12，探针 `docs/spikes/fixtures/local-rig/spike-bc-date/`）：
+
+- **驱动给负年，纪元没丢**：`Timestamp::year()` 一律为负（`-4712` / `-1` / `-44`），
+  公元前 44 与公元 44 在驱动侧是 `-44` 与 `44`，**可分**。
+- 负年撞上 [ADR-0014 §11](0014-canonical-form-boundary-test-suite.md) 的年份域断言
+  `1 <= year <= 9999`，**当场 `Err(CanonError::InvalidDate)`**，走 `SourceReadError`
+  （`FailureKind::SOURCE_VALUE`，带列名与原值）→ 整 run 失败，目标表不动。
+- 增补二设想的「公元前 4712 → `4712-01-01`」那个**假公元日期在这套驱动上根本产不出来**。
+  增补二那句「§11 的年份域断言同样挡不住」是基于「驱动可能给正年」这个**未验证前提**写的，
+  前提不成立——**那条断言恰恰是防线本身**。
+
+**因此第七行不是静默路径，它的失效模式是「当场炸」。** 它留在静默清单上会稀释这张表的判读
+价值：清单的语义是「值被改掉且没人发现的路径」，而本 ADR 全篇的重量都压在
+「这张表是完整的」这个断言上。**撤销之后，静默清单回到六行，且六行的「挡在哪里」栏全部非空——
+V1 已知的、无兜底的静默失效路径清零。** 这是撤销这一行真正买到的东西。
+
+**撤销 ≠ 删干净。** 增补二那段推演的价值在于它勘出了「`canon_date` 从时间分量格式化」
+这条链，取证路径与探针留在原地可重跑。后来者读到增补二时，**必须连本增补一起读**。
+
+**收口的其余三处（本 ADR 不承载，指针在此）**：公元 1–999 维持「原样搬，不拦不改不警告」、
+公元前日期维持运行期判不上预检、`invalid DATE components` 人话点名 BC——
+裁定与理由见 [ADR-0009 §10 增补](0009-m1-mapping-precheck-rules.md)
+与 [ADR-0014 §11 增补](0014-canonical-form-boundary-test-suite.md)。
+**不增 sink 码、不增 `failure_kind`**：`SOURCE_VALUE` 的定义（ADR-0029 §2「源值过不了规范形式」）
+逐字对上，ADR-0010 与 ADR-0029 一字未动。

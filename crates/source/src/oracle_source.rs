@@ -3,8 +3,9 @@ use oracle::sql_type::{OracleType, Timestamp};
 use oracle::{Connection, InitParams, ResultSet, Row};
 
 use crate::{
-    builder_column_query, builder_table_query, BuilderColumn, BuilderTable, RowSource,
-    SourceColumn, SourceConfig, SourceReadError, TaskConfig, FETCH_ARRAY_SIZE,
+    builder_column_query, builder_table_query, BuilderColumn, BuilderTable, ColumnSupport,
+    FailureKind, RowSource, SourceColumn, SourceConfig, SourceReadError, TaskConfig,
+    FETCH_ARRAY_SIZE,
 };
 
 const DESCRIBE_BIZ_DATE: &str = "0001-01-01";
@@ -51,8 +52,8 @@ impl OracleRowSource {
         config: &SourceConfig,
         dblink: Option<&str>,
     ) -> Result<Vec<BuilderTable>, SourceReadError> {
-        let query =
-            builder_table_query(dblink).map_err(|error| SourceReadError::new(error, None))?;
+        let query = builder_table_query(dblink)
+            .map_err(|error| SourceReadError::with_kind(error, None, FailureKind::Config))?;
         let connection = open_connection(config)?;
         let rows = connection.query(&query, &[]).map_err(oracle_error)?;
         let mut tables = Vec::new();
@@ -72,8 +73,8 @@ impl OracleRowSource {
         owner: &str,
         table: &str,
     ) -> Result<Vec<BuilderColumn>, SourceReadError> {
-        let query =
-            builder_column_query(dblink).map_err(|error| SourceReadError::new(error, None))?;
+        let query = builder_column_query(dblink)
+            .map_err(|error| SourceReadError::with_kind(error, None, FailureKind::Config))?;
         let connection = open_connection(config)?;
         let rows = connection
             .query(&query, &[&owner, &table])
@@ -122,14 +123,14 @@ fn open_connection(config: &SourceConfig) -> Result<Connection, SourceReadError>
     init.oracle_client_lib_dir(&config.oracle_client_lib_dir)
         .and_then(|params| params.default_driver_name("db-qbs-source : 0.1.0"))
         .and_then(|params| params.init())
-        .map_err(oracle_error)?;
+        .map_err(oracle_connect_error)?;
 
     Connection::connect(
         &config.oracle_username,
         &config.oracle_password,
         &config.oracle_connect_string,
     )
-    .map_err(oracle_error)
+    .map_err(oracle_connect_error)
 }
 
 fn describe_columns(infos: &[oracle::ColumnInfo]) -> (Vec<SourceColumn>, Vec<ValueKind>) {
@@ -210,6 +211,7 @@ fn invalid_value(message: String, column: &str, value: String) -> SourceReadErro
         oracle_code: None,
         column: Some(column.to_owned()),
         value: Some(value),
+        kind: FailureKind::SourceValue,
     }
 }
 
@@ -241,14 +243,25 @@ fn describe_column(name: &str, oracle_type: &OracleType) -> (SourceColumn, Value
             precision,
             scale,
             length,
+            // 语义留空：`fsp` 归子票 ③（describe 扩九行形态），`support` 归 ③/⑤ 的推导函数。
+            // 本票只把字段加齐、序列化通，行为零变化（#107）。
+            fsp: None,
+            support: Some(ColumnSupport::Ok),
         },
         value_kind,
     )
 }
 
+/// 会话已经建起来之后撞上的 Oracle 错误：可能是本地查询，也可能是 dblink 那一头。
 fn oracle_error(error: oracle::Error) -> SourceReadError {
-    SourceReadError::new(
-        error.to_string(),
-        error.db_error().map(|database_error| database_error.code()),
-    )
+    SourceReadError::new(error.to_string(), oracle_code(&error))
+}
+
+/// 建连接那一步撞上的 Oracle 错误——同样的码在这一步指的是**本地**库。
+fn oracle_connect_error(error: oracle::Error) -> SourceReadError {
+    SourceReadError::connecting(error.to_string(), oracle_code(&error))
+}
+
+fn oracle_code(error: &oracle::Error) -> Option<i32> {
+    error.db_error().map(|database_error| database_error.code())
 }

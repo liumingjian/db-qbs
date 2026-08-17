@@ -63,6 +63,8 @@ def fake_run(mode):
             terminal="FAILED",
             stage="STREAMING",
             message="目标端：预检哨兵逃逸，请报 issue",
+            # 哨兵逃逸是 P0 缺陷不是运行故障，分类跟着真实子进程的口径给 DEFECT。
+            failure_kind="DEFECT",
             source_code=None,
             sink_code="INTERNAL_PRECHECK_ESCAPE",
             column="V_TEXT",

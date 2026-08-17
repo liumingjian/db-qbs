@@ -133,9 +133,18 @@ start_sink() {
   compose exec -T client rm -f /tmp/m1-sink.pid /tmp/m1-sink.jsonl || return 1
   compose exec -T -d client sh -c \
     "echo \$\$ > /tmp/m1-sink.pid; exec $SINK_BIN --config $SINK_CONFIG > /tmp/m1-sink.jsonl 2>&1" || return 1
-  wait_for_endpoint "$SINK_URL/v1/runs/not-a-run" && return 0
+  if ! wait_for_endpoint "$SINK_URL/v1/runs/not-a-run"; then
+    compose exec -T client cat /tmp/m1-sink.jsonl >&2 || true
+    fail "sink did not become ready"
+    return 1
+  fi
+  # 端口上有人应答，不等于应答的就是刚起的这个。容器里若残留着上一轮的 sink，新起的这个会以
+  # 「监听 0.0.0.0:18080 失败：Address already in use」当场退出，而 wait_for_endpoint 被残留的
+  # 那个骗过去，门禁一路往下跑，直到 sink-kill 场景拿着已死的 pid 去 kill 才暴露——报出来的还是
+  # 一句看不出所以然的「sink was already gone」。这里当场认出来。
+  compose exec -T client sh -c 'kill -0 "$(cat /tmp/m1-sink.pid)" 2>/dev/null' && return 0
   compose exec -T client cat /tmp/m1-sink.jsonl >&2 || true
-  fail "sink did not become ready"
+  fail "刚起的 sink 已经退出，$SINK_URL 上应答的是别的进程"
 }
 
 drop_orphan_staging() {
@@ -178,6 +187,23 @@ prepare_rig() {
   compose exec -T mysql mysql -uspike -pspike123 qbs \
     < "$ACCEPTANCE_ROOT/mysql.sql" || return 1
   drop_orphan_staging || return 1
+  # 上一轮跑残的 sink 会一直占着 18080，让本轮起的每个 sink 都当场 bind 失败。
+  # client 容器是台架专用的，这里把残留的 sink 一律收掉再开工。
+  # 镜像里既没有 ps 也没有 pkill（kill 只是 shell 内建），只能自己翻 /proc。
+  compose exec -T client sh -c '
+    # 跳过自己：这段脚本自身的 cmdline 里就带着下面那个匹配串，不跳就先把自己 kill 了。
+    self=$$
+    for entry in /proc/[0-9]*; do
+      pid=${entry#/proc/}
+      test "$pid" != "$self" || continue
+      cmdline=$(tr "\0" " " < "$entry/cmdline" 2>/dev/null) || continue
+      case "$cmdline" in
+        *db-qbs-sink*) kill -KILL "$pid" 2>/dev/null || true ;;
+      esac
+    done
+    exit 0
+  ' || return 1
+  compose exec -T client rm -f /tmp/m1-sink.pid || return 1
   start_sink
 }
 
@@ -530,7 +556,9 @@ write_report() {
     echo "# M1 rig acceptance report"
     echo
     echo "- Generated (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "- Git commit: $(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown (workspace is not a git checkout)")"
+    # 台架常常是 rsync 过去的、不带 .git 的工作区，那时 rev-parse 读不到 SHA。
+    # 派发的一方用 DB_QBS_GIT_COMMIT 把源端的 HEAD 传进来，报告就不会再写 unknown。
+    echo "- Git commit: ${DB_QBS_GIT_COMMIT:-$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown（工作区不是 git checkout，且没传 DB_QBS_GIT_COMMIT）")}"
     echo "- Business date: $BIZ_DATE"
     echo
     echo "## Scenarios"

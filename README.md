@@ -10,11 +10,44 @@
 
 ## 状态
 
-项目处于初始阶段，尚无代码。技术栈、接口形式、任务调度方式待定。
+M1（一次性进程跑通一趟导入）与 M2（source 常驻服务 + Web UI）**已实现并通过验收**，
+验收记录在 `docs/spikes/fixtures/local-rig/`。M3/M4 尚未开工（完整映射预检、列名映射策略、
+延迟重推、孤儿暂存表回收、错误分类、连续跑一周）。**尚未在生产环境部署过。**
+
+两端都是 Rust（`crates/`），Web UI 是 React + Vite（`web/`），构建时由 `crates/source/build.rs`
+调 `npm run build` 打包并嵌进 `db-qbs-source` 可执行文件。决策依据见 `CONTEXT.md` 与 `docs/adr/`。
 
 ## 快速开始
 
-待补充（依赖安装、配置数据源连接、启动服务）。
+三个可执行文件：
+
+| 可执行文件 | 位置 | 作用 |
+| --- | --- | --- |
+| `db-qbs-sink` | 目标端 | 长驻服务，写 MySQL |
+| `db-qbs-source` | 源端 | 长驻服务，Web UI + 任务编排（M2） |
+| `db-qbs-source-run` | 源端 | 一次性进程，跑一趟导入（由 `db-qbs-source` 拉起，也可单独跑） |
+
+前提：源端装好 **Oracle Instant Client 19c Basic 包**（`oracle_client_lib_dir` 指向它），
+目标端有 **MySQL 8.0**；构建机需要 Rust 1.80+ 与 Node.js 22+（node 16 编不过 `npm run build`）。
+
+```sh
+cargo build --release
+
+# 目标端
+cp config/sink.toml.example sink.toml && chmod 0600 sink.toml   # 填 mysql_dsn / database / listen
+./target/release/db-qbs-sink --config sink.toml
+
+# 源端
+cp config/source.toml.example source.toml && chmod 0600 source.toml
+./target/release/db-qbs-source --config source.toml            # 浏览器打开配置里的 listen
+```
+
+两处 `listen` **都没有鉴权**，默认只绑回环；要多人访问得自己在前面放反向代理做鉴权与 TLS
+（ADR-0024 §1、§4）。不经 UI 直接跑一趟：
+
+```sh
+db-qbs-source-run --config source.toml --task task.toml --biz-date 2026-08-14
+```
 
 ## 运行日志
 
@@ -31,7 +64,18 @@ chmod 0600 run.jsonl
 
 ## 开发
 
-待补充（构建、测试、本地运行）。
+```sh
+cargo test --workspace   # Rust 单元与集成测试
+npm install              # 首次
+npm run typecheck        # tsc --noEmit
+npm test                 # vitest run
+npm run dev              # 只调前端时用（vite dev server）
+```
+
+台架验收（M1 9 条、M2 A1–A14）与 M2 渲染走查是**带触发条件的手工门禁，不进 CI**
+（ADR-0014 §8）：脚本在 `docs/spikes/fixtures/local-rig/scripts/`，走查清单在
+`docs/spikes/fixtures/local-rig/m2-visual-walkthrough.md`。改 `docs/design-system/` 必须
+重跑整份走查并记录实际观察。
 
 ## Agent 配置
 

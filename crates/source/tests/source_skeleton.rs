@@ -24,10 +24,8 @@ const TASK_FIELDS: [&str; 6] = [
 #[test]
 fn task_crud_persists_stable_identity_without_exposing_credentials() {
     let directory = temp_directory();
-    let port = unused_port();
-    let config = write_config(&directory, &format!("127.0.0.1:{port}"));
-    let mut child = start_source(&config);
-    wait_for_tasks(port, &mut child);
+    let (port, config, child, _ready) =
+        start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
 
     let created = request(
         port,
@@ -107,10 +105,8 @@ fn task_crud_persists_stable_identity_without_exposing_credentials() {
 #[test]
 fn task_writes_reject_client_identity_and_incomplete_definitions() {
     let directory = temp_directory();
-    let port = unused_port();
-    let config = write_config(&directory, &format!("127.0.0.1:{port}"));
-    let mut child = start_source(&config);
-    wait_for_tasks(port, &mut child);
+    let (port, _config, child, _ready) =
+        start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
 
     let client_identity = request(
         port,
@@ -145,7 +141,6 @@ fn task_writes_reject_client_identity_and_incomplete_definitions() {
 #[test]
 fn run_launch_materializes_task_and_aggregates_child_output_until_exit() {
     let directory = temp_directory();
-    let port = unused_port();
     let release = directory.join("release-child");
     let invocation = directory.join("child-args");
     let fake_child = write_fake_child(
@@ -166,9 +161,8 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
             release.display(),
         ),
     );
-    let config = write_run_config(&directory, port, &fake_child);
-    let mut source = start_source(&config);
-    wait_for_tasks(port, &mut source);
+    let (port, config, source, _ready) =
+        start_source_ready(|port| write_run_config(&directory, port, &fake_child));
     let task_id = create_task(port);
     let audit = rusqlite::Connection::open(directory.join("db-qbs.sqlite3")).unwrap();
     audit
@@ -299,11 +293,9 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
 #[test]
 fn silent_child_disappearance_evicts_projection_and_removes_task_file() {
     let directory = temp_directory();
-    let port = unused_port();
     let fake_child = write_fake_child(&directory, "exit 1\n");
-    let config = write_run_config(&directory, port, &fake_child);
-    let mut source = start_source(&config);
-    wait_for_tasks(port, &mut source);
+    let (port, _config, source, _ready) =
+        start_source_ready(|port| write_run_config(&directory, port, &fake_child));
     let task_id = create_task(port);
 
     let run_record_id = start_run(port, &task_id);
@@ -325,7 +317,6 @@ fn silent_child_disappearance_evicts_projection_and_removes_task_file() {
 #[test]
 fn restart_cleanup_distinguishes_graceful_restart_from_process_disappearance() {
     let directory = temp_directory();
-    let port = unused_port();
     let fake_child = write_fake_child(
         &directory,
         r#"printf '%s\n' '{"ts":"2026-08-15T12:00:00.000Z","level":"info","event":"source_started","run_id":null,"task":null,"biz_date":"2026-08-14"}'
@@ -333,9 +324,8 @@ printf '%s\n' '{"ts":"2026-08-15T12:00:01.000Z","level":"info","event":"stage_ch
 sleep 2
 "#,
     );
-    let config = write_run_config(&directory, port, &fake_child);
-    let mut source = start_source(&config);
-    wait_for_tasks(port, &mut source);
+    let (port, config, source, _ready) =
+        start_source_ready(|port| write_run_config(&directory, port, &fake_child));
     let task_id = create_task(port);
 
     let graceful_record_id = start_run(port, &task_id);
@@ -344,8 +334,7 @@ sleep 2
     });
     assert_success(&terminate(source));
 
-    let mut restarted = start_source(&config);
-    wait_for_tasks(port, &mut restarted);
+    let restarted = restart_source(&config, port);
     let graceful = json_body(&get(port, &format!("/api/runs/{graceful_record_id}")).unwrap());
     assert_eq!(graceful["live"], false);
     assert_eq!(graceful["unknown_reason"], "SERVICE_RESTARTED");
@@ -362,8 +351,7 @@ sleep 2
     let killed = kill_source(restarted, "-KILL");
     assert!(!killed.status.success(), "{}", output_text(&killed));
 
-    let mut after_kill = start_source(&config);
-    wait_for_tasks(port, &mut after_kill);
+    let after_kill = restart_source(&config, port);
     let disappeared = json_body(&get(port, &format!("/api/runs/{disappeared_record_id}")).unwrap());
     assert_eq!(disappeared["live"], false);
     assert_eq!(disappeared["unknown_reason"], "PROCESS_DISAPPEARED");
@@ -379,7 +367,6 @@ sleep 2
 #[test]
 fn child_hanging_mid_run_remains_live_and_accepted_is_not_preparing() {
     let directory = temp_directory();
-    let port = unused_port();
     let emit = directory.join("emit-lines");
     let release = directory.join("release-child");
     let fake_child = write_fake_child(
@@ -395,9 +382,8 @@ while [ ! -f '{}' ]; do sleep 0.02; done
             release.display(),
         ),
     );
-    let config = write_run_config(&directory, port, &fake_child);
-    let mut source = start_source(&config);
-    wait_for_tasks(port, &mut source);
+    let (port, _config, source, _ready) =
+        start_source_ready(|port| write_run_config(&directory, port, &fake_child));
     let task_id = create_task(port);
 
     let run_record_id = start_run(port, &task_id);
@@ -444,7 +430,6 @@ while [ ! -f '{}' ]; do sleep 0.02; done
 #[test]
 fn run_launch_rejects_only_the_same_task_and_business_date_until_child_reap() {
     let directory = temp_directory();
-    let port = unused_port();
     let release = directory.join("release-children");
     let fake_child = write_fake_child(
         &directory,
@@ -453,9 +438,8 @@ fn run_launch_rejects_only_the_same_task_and_business_date_until_child_reap() {
             release.display()
         ),
     );
-    let config = write_run_config(&directory, port, &fake_child);
-    let mut source = start_source(&config);
-    wait_for_tasks(port, &mut source);
+    let (port, _config, source, _ready) =
+        start_source_ready(|port| write_run_config(&directory, port, &fake_child));
     let first_task_id = create_task(port);
     let second_task_id = create_task(port);
 
@@ -495,7 +479,6 @@ fn run_launch_rejects_only_the_same_task_and_business_date_until_child_reap() {
 #[test]
 fn cancel_signals_preparing_and_streaming_but_rejects_committing() {
     let directory = temp_directory();
-    let port = unused_port();
     let canceled = directory.join("canceled-dates");
     let release_committing = directory.join("release-committing");
     let fake_child = write_fake_child(
@@ -519,9 +502,8 @@ fi
             release_committing.display(),
         ),
     );
-    let config = write_run_config(&directory, port, &fake_child);
-    let mut source = start_source(&config);
-    wait_for_tasks(port, &mut source);
+    let (port, _config, source, _ready) =
+        start_source_ready(|port| write_run_config(&directory, port, &fake_child));
     let task_id = create_task(port);
 
     for (biz_date, stage) in [("2026-08-14", "PREPARING"), ("2026-08-15", "STREAMING")] {
@@ -565,11 +547,8 @@ fi
 #[test]
 fn tasks_endpoint_is_ready_and_sigterm_allows_same_port_restart() {
     let directory = temp_directory();
-    let port = unused_port();
-    let config = write_config(&directory, &format!("127.0.0.1:{port}"));
-
-    let mut first = start_source(&config);
-    let response = wait_for_tasks(port, &mut first);
+    let (port, config, first, response) =
+        start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
     assert_eq!(response.status, 200);
     assert_eq!(response.body, "[]");
     assert_eq!(get(port, "/health").unwrap().status, 404);
@@ -608,11 +587,8 @@ fn empty_listen_fails_with_a_readable_reason() {
 #[test]
 fn non_loopback_listen_emits_the_required_warning() {
     let directory = temp_directory();
-    let port = unused_port();
-    let config = write_config(&directory, &format!("0.0.0.0:{port}"));
-
-    let mut child = start_source(&config);
-    let response = wait_for_tasks(port, &mut child);
+    let (port, _config, child, response) =
+        start_source_ready(|port| write_config(&directory, &format!("0.0.0.0:{port}")));
     assert_eq!(response.status, 200);
     let output = terminate(child);
     let lines = json_lines(&output.stdout);
@@ -638,10 +614,8 @@ fn non_loopback_listen_emits_the_required_warning() {
 #[test]
 fn column_fetch_shape_failure_reports_all_checks_without_a_run_code() {
     let directory = temp_directory();
-    let port = unused_port();
-    let config = write_config(&directory, &format!("127.0.0.1:{port}"));
-    let mut child = start_source(&config);
-    wait_for_tasks(port, &mut child);
+    let (port, _config, child, _ready) =
+        start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
 
     let response = post(
         port,
@@ -678,10 +652,8 @@ fn column_fetch_shape_failure_reports_all_checks_without_a_run_code() {
 #[test]
 fn builder_generation_is_transient_and_its_sql_passes_all_shape_checks() {
     let directory = temp_directory();
-    let port = unused_port();
-    let config = write_config(&directory, &format!("127.0.0.1:{port}"));
-    let mut child = start_source(&config);
-    wait_for_tasks(port, &mut child);
+    let (port, _config, child, _ready) =
+        start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
 
     let generated = post(
         port,
@@ -735,10 +707,8 @@ fn builder_generation_is_transient_and_its_sql_passes_all_shape_checks() {
 #[test]
 fn builder_rejects_an_invalid_dblink_before_connecting_to_oracle() {
     let directory = temp_directory();
-    let port = unused_port();
-    let config = write_config(&directory, &format!("127.0.0.1:{port}"));
-    let mut child = start_source(&config);
-    wait_for_tasks(port, &mut child);
+    let (port, _config, child, _ready) =
+        start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
 
     let response = post(port, "/api/builder/tables", r#"{"dblink":"FA WHERE 1=1"}"#).unwrap();
 
@@ -756,18 +726,17 @@ fn builder_rejects_an_invalid_dblink_before_connecting_to_oracle() {
 #[test]
 fn column_fetch_oracle_failure_does_not_create_a_run_touch_sink_or_write_storage() {
     let directory = temp_directory();
-    let port = unused_port();
     let sink = TcpListener::bind("127.0.0.1:0").unwrap();
     sink.set_nonblocking(true).unwrap();
     let sink_url = format!("http://{}", sink.local_addr().unwrap());
-    let config = write_config_with_oracle(
-        &directory,
-        &format!("127.0.0.1:{port}"),
-        &sink_url,
-        "/db-qbs-missing-oracle-client",
-    );
-    let mut child = start_source(&config);
-    wait_for_tasks(port, &mut child);
+    let (port, _config, child, _ready) = start_source_ready(|port| {
+        write_config_with_oracle(
+            &directory,
+            &format!("127.0.0.1:{port}"),
+            &sink_url,
+            "/db-qbs-missing-oracle-client",
+        )
+    });
     let files_before = directory_entries(&directory);
 
     let response = post(
@@ -817,16 +786,83 @@ fn kill_source(child: Child, signal: &str) -> Output {
     child.wait_with_output().unwrap()
 }
 
+/// 起一个 source 并等它就绪；端口被别人占走就换个号从头再来。
+///
+/// 端口没法在测试里真正预定：`unused_port()` 把探测用的 listener 交还，到 source 走完启动前的
+/// 磁盘活（开两个 SQLite store、seal_incomplete、clean_run_tasks）真正 bind，中间是一段空窗。
+/// 空窗里抢号的有三路：同一个测试二进制里并行跑的其它测试发出的 HTTP 请求（`TcpStream::connect`
+/// 的本地端口同样从临时端口池里取）、上一轮跑残下来还在监听的 source 进程、以及被 SIGKILL 的
+/// source 留下的、还没释放干净的监听套接字。三路的症状是同一句
+/// 「监听 … 失败：Address already in use」、退出码 1，不是「5 秒没等到」——所以修法是换号重来，
+/// 拉长等待没有用。
+fn start_source_ready(
+    build_config: impl Fn(u16) -> PathBuf,
+) -> (u16, PathBuf, Child, HttpResponse) {
+    for attempt in 0..8 {
+        let port = unused_port();
+        let config = build_config(port);
+        let mut child = start_source(&config);
+        match try_wait_for_tasks(port, &mut child) {
+            Ok(response) => return (port, config, child, response),
+            Err(error) if error.contains("Address already in use") => assert!(
+                attempt < 7,
+                "连续 8 个端口都在 source bind 之前被占走：{error}"
+            ),
+            Err(error) => panic!("{error}"),
+        }
+    }
+    unreachable!()
+}
+
+/// 同端口重启 source。被 SIGKILL 的上一个 source 偶尔会把监听套接字多留一会儿，
+/// 这里只等它释放，不换端口——换了端口就测不到「重启后接着读同一份历史」这件事。
+fn restart_source(config: &Path, port: u16) -> Child {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut child = start_source(config);
+        match try_wait_for_tasks(port, &mut child) {
+            Ok(_) => return child,
+            Err(error) if error.contains("Address already in use") => assert!(
+                Instant::now() < deadline,
+                "端口迟迟没释放，同端口重启失败：{error}"
+            ),
+            Err(error) => panic!("{error}"),
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn wait_for_tasks(port: u16, child: &mut Child) -> HttpResponse {
+    match try_wait_for_tasks(port, child) {
+        Ok(response) => response,
+        Err(error) => panic!("{error}"),
+    }
+}
+
+/// source 起来没有；起不来时把它的诊断信息带回去，好让调用方决定换号重试还是直接判失败。
+fn try_wait_for_tasks(port: u16, child: &mut Child) -> Result<HttpResponse, String> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(status) = child.try_wait().unwrap() {
-            panic!("source exited before readiness with {status}");
+            // source 的失败原因走 emit()，落在 stdout 上，stderr 通常是空的。
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stdout.take() {
+                let _ = pipe.read_to_string(&mut stdout);
+            }
+            if let Some(mut pipe) = child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            return Err(format!(
+                "source exited before readiness with {status}; stdout={stdout} stderr={stderr}"
+            ));
         }
         if let Ok(response) = get(port, "/api/tasks") {
-            return response;
+            return Ok(response);
         }
-        assert!(Instant::now() < deadline, "source did not become ready");
+        if Instant::now() >= deadline {
+            return Err(format!("source did not become ready on port {port}"));
+        }
         thread::sleep(Duration::from_millis(20));
     }
 }
@@ -892,7 +928,7 @@ fn create_task(port: u16) -> String {
     let response = post(
         port,
         "/api/tasks",
-        r#"{"name":"holdings","source_sql":"SELECT ID, D_BIZ FROM HOLDINGS WHERE D_BIZ >= :biz_date AND D_BIZ < :biz_date + 1","source_date_col":"D_BIZ","target_table":"HOLDINGS","target_date_col":"D_BIZ"}"#,
+        r#"{"name":"holdings","source_sql":"SELECT ID, D_BIZ FROM HOLDINGS WHERE D_BIZ >= TO_DATE(:biz_date,'YYYY-MM-DD') AND D_BIZ < TO_DATE(:biz_date,'YYYY-MM-DD') + 1","source_date_col":"D_BIZ","target_table":"HOLDINGS","target_date_col":"D_BIZ"}"#,
     )
     .unwrap();
     assert_eq!(response.status, 201, "{}", response.body);

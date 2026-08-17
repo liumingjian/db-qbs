@@ -75,6 +75,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .task-name { font-weight: var(--weight-em); white-space: nowrap; }
 .task-id { color: var(--mute); font-family: var(--font-num); font-size: var(--size-cap); }
 .mono, .sql-cell { font-family: var(--font-num); font-size: var(--size-meta); }
+/* tokens.css 把 tabular-nums 挂在 .num / td.n 上，应用里用的却是 .mono / .numeric-column，
+   于是列表屏的行数、耗时、时间戳全是比例数字。在应用侧对齐 token 的意图。 */
+.mono, .numeric-column, .history-link { font-variant-numeric: tabular-nums; }
 .sql-cell { max-width: 360px; overflow: hidden; color: var(--dim); text-overflow: ellipsis; white-space: nowrap; }
 .action-column { width: 126px; }
 .row-actions { display: flex; gap: 8px; }
@@ -84,9 +87,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .filter-field select, .filter-field input { height: var(--ctl-h); padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-size: 13px; }
 .filter-field select:focus, .filter-field input:focus { border-color: var(--brand); outline: 0; box-shadow: 0 0 0 2px var(--brand-dim); }
 .history-error { padding: 10px var(--pad); border-bottom: 1px solid var(--crit-bd); background: var(--crit-bg); color: var(--crit); }
-.history-grid { min-width: 1180px; }
+.history-grid { min-width: 1260px; }
 .history-grid .numeric-column { text-align: right; }
 .history-grid .expand-column { width: 40px; }
+.history-grid .run-id-cell { color: var(--dim); }
+/* #86：列宽不够时终态块被挤成竖排，整行行高被拉垮。给「结局」列留够一行的宽度。 */
+.history-grid .outcome-column { min-width: 176px; }
 .history-grid tr.is-expanded > td { background: var(--brand-dim); }
 .history-link { max-width: 210px; overflow: hidden; padding: 0; border: 0; background: transparent; color: var(--brand); font-family: var(--font-num); text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .missing-run-id { max-width: 230px; color: var(--mute); font-size: var(--size-meta); line-height: 1.35; }
@@ -145,6 +151,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .field-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .form-field { display: flex; flex-direction: column; gap: 5px; color: var(--dim); font-size: 13px; }
 .form-field > span { font-family: var(--font-num); font-size: var(--size-meta); }
+.field-label { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.field-badge { margin-left: auto; padding: 1px 7px; border: 1px solid var(--warn-bd); border-radius: var(--badge-radius); background: var(--warn-bg); color: var(--warn); font-family: var(--font-cn); font-size: var(--size-cap); }
+.target-side-note { max-width: 68ch; margin: -4px 0 0; color: var(--mute); font-size: var(--size-meta); line-height: var(--lh-copy); }
+.target-side-note strong { color: var(--dim); font-weight: var(--weight-em); }
 .form-field input, .form-field textarea { width: 100%; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); }
 .form-field input { height: var(--ctl-h); padding: 0 10px; }
 .form-field textarea { resize: vertical; min-height: 132px; padding: 9px 10px; font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.65; }
@@ -181,11 +191,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .fetch-failure strong { font-weight: var(--weight-em); }
 .fetch-failure .table-wrap { border: 1px solid var(--crit-bd); }
 .fetch-ready { display: flex; flex-direction: column; gap: 12px; padding: 12px; }
+.fetch-scope-note { margin: 0; color: var(--mute); font-size: var(--size-meta); line-height: var(--lh-copy); }
+.fetch-scope-note strong { color: var(--dim); font-weight: var(--weight-em); }
 .fetch-ready > .table-wrap { border: 1px solid var(--line); border-radius: var(--radius); }
 .shape-grid .shape-pass { display: flex; align-items: center; gap: 5px; color: var(--ok); }
 .shape-grid .shape-fail { color: var(--crit); }
 .ddl-header { padding-top: 2px; }
 .ddl-output { max-height: 280px; overflow: auto; margin: 0; padding: 12px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--mute-bg); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ddl-placeholder { padding: 0 3px; border: 1px dashed var(--warn-bd); border-radius: 2px; background: var(--warn-bg); color: var(--warn); }
 .row-size-warning { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border: 1px solid var(--warn-bd); border-radius: var(--radius); background: var(--warn-bg); color: var(--dim); font-size: var(--size-meta); }
 .row-size-warning strong { color: var(--warn); font-weight: var(--weight-em); }
 .confirm-backdrop { position: fixed; z-index: 60; inset: 0; display: grid; place-items: center; padding: 20px; background: color-mix(in srgb, var(--text) 34%, transparent); }
@@ -197,6 +210,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .modal-context { display: block; margin-top: 2px; color: var(--mute); font-size: var(--size-cap); }
 .stale-run-hint { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border-left: 3px solid var(--warn); background: var(--warn-bg); color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-copy); }
 .stale-run-hint strong { color: var(--warn); font-weight: var(--weight-em); }
+.stale-run-hint .mono { color: var(--dim); }
 
 .run-card { overflow: hidden; }
 .run-header > div { min-width: 0; }
@@ -230,9 +244,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .precheck-reports header strong { font-size: 13px; font-weight: var(--weight-em); }
 .precheck-reports header span, .precheck-reports small { color: var(--mute); font-size: var(--size-cap); }
 .precheck-reports p { margin: 0; color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-copy); }
+.precheck-reports code { font-family: var(--font-num); }
 .precheck-reports .is-failed { border-top: 3px solid var(--crit); }
 .precheck-reports .is-passed { border-top: 3px solid var(--ok); }
 .precheck-reports .is-skipped { border-top: 3px solid var(--mute); background: var(--mute-bg); }
+.precheck-exit { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 12px; padding: 11px 13px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--mute-bg); color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-copy); }
+.precheck-exit code { font-family: var(--font-num); }
 .diagnostic-table-wrap { overflow-x: auto; border: 1px solid var(--line); }
 .diagnostic-table { width: 100%; border-collapse: collapse; font-size: var(--size-cap); }
 .diagnostic-table th, .diagnostic-table td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
@@ -251,9 +268,13 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .phase-item.is-current { color: var(--text); font-weight: var(--weight-em); }
 .phase-item.is-current .phase-dot { background: var(--info); box-shadow: 0 0 0 3px var(--info-bg); }
 .phase-label, .phase-after, .phase-arrow { color: var(--mute); font-family: var(--font-cn); font-size: var(--size-meta); }
-.terminal-block { display: inline-flex; align-items: center; gap: 7px; padding: 3px 9px; border: 1px solid var(--line-strong); border-radius: var(--badge-radius); font-family: var(--font-num); font-size: var(--size-meta); }
-.terminal-block.is-swapped { border-color: var(--ok-bd); background: var(--ok-bg); color: var(--ok); }
-.terminal-block.is-discarded { background: var(--mute-bg); color: var(--dim); }
+.terminal-block { display: inline-flex; align-items: center; gap: 7px; padding: 3px 9px; border: 1px solid var(--line-strong); border-radius: var(--badge-radius); font-family: var(--font-num); font-size: var(--size-meta); white-space: nowrap; }
+.terminal-block.is-swapped { border-color: var(--ok-bd); background: var(--ok-fill); color: var(--ok-ink); }
+/* V5：DISCARDED 是描边——无底色 + 1px 边。有底色的话它和实心的 SWAPPED 在灰度打印下
+   都是「带边框的填充块」，§8 承诺的「实心块 vs 描边块」就落空了。
+   #89：反过来那半边也要成立——SWAPPED 的填充用 --ok-fill 而不是 --ok-bg，
+   后者灰度下只比白底深 3.1%，「实心」这半边等于没画。 */
+.terminal-block.is-discarded { background: transparent; border-color: var(--line-strong); color: var(--dim); }
 .terminal-copy { color: var(--dim); font-family: var(--font-cn); }
 .error-summary { flex-wrap: wrap; gap: 8px; }
 .error-code { display: inline-flex; align-items: center; gap: 8px; padding: 2px 8px; border: 1px dashed var(--crit-bd); border-radius: var(--badge-radius); background: var(--crit-bg); color: var(--crit); font-family: var(--font-num); font-size: var(--size-meta); }

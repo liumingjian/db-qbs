@@ -286,7 +286,8 @@ describe("SQL builder API", () => {
     };
     const checks = [{ rule: "business_date_range", passed: false, message: "bad range" }];
     const columns = {
-      columns: [{ name: "D_BIZ", data_type: "DATE", precision: null, scale: null, length: null }],
+      // /api/columns 回的是 type，不是 builder 那个端点的 data_type
+      columns: [{ name: "D_BIZ", type: "DATE", precision: null, scale: null, length: null }],
       target_ddl: "CREATE TABLE `ORDERS` (...)",
     };
     const fetchMock = vi

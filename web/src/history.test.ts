@@ -30,6 +30,7 @@ const baseHistory: RunHistory = {
   column: "AMOUNT",
   value: "secret",
   message: "目标端：门禁计数不一致",
+  failure_kind: "VERIFY_FAILED",
   unknown_reason: null,
   seq: 1,
   rows_pushed: 3,
@@ -72,7 +73,7 @@ describe("run history presentation", () => {
   it("presents a protocol failure with its terminal effect and HTTP status", () => {
     expect(historyPresentation(baseHistory)).toEqual({
       kind: "failed",
-      conclusion: "目标端：门禁计数不一致",
+      conclusion: "[校验门禁] 目标端：门禁计数不一致",
       terminalEffect: "DISCARDED",
       error: { code: "VERIFY_FAILED", httpStatus: 409 },
     });
@@ -103,6 +104,69 @@ describe("run history presentation", () => {
       expect(historyPresentation(history(overrides)).terminalEffect).toBeNull();
     },
   );
+
+  it("authors the success conclusion locally instead of echoing the English message", () => {
+    expect(
+      historyPresentation(
+        history({
+          outcome: "SUCCEEDED",
+          target_table_effect: "SWAPPED",
+          sink_code: null,
+          sink_reported_rows: 100000,
+          message: "run completed successfully",
+        }),
+      ),
+    ).toEqual({
+      kind: "succeeded",
+      conclusion: "目标端：运行成功：已推送 100,000 行，暂存表已切换为目标表。",
+      terminalEffect: "SWAPPED",
+      error: null,
+    });
+  });
+
+  it("does not claim a swap the sink never reported", () => {
+    expect(
+      historyPresentation(
+        history({
+          outcome: "SUCCEEDED",
+          target_table_effect: "UNKNOWN",
+          sink_code: null,
+          sink_reported_rows: null,
+          staged_rows: 7,
+          message: "run completed successfully",
+        }),
+      ).conclusion,
+    ).toBe("目标端：运行成功：已推送 7 行。");
+  });
+
+  it.each([
+    ["SOURCE_CONNECT", "[Oracle 连接] 源端：ORA-12541"],
+    ["SOURCE_DBLINK", "[dblink] 源端：ORA-12541"],
+    ["NETWORK", "[网络中断] 源端：ORA-12541"],
+    ["SINK_WRITE", "[MySQL 写入] 源端：ORA-12541"],
+  ] as const)("tags a %s failure with its category", (kind, conclusion) => {
+    expect(
+      historyPresentation(
+        history({ failure_kind: kind, message: "源端：ORA-12541" }),
+      ).conclusion,
+    ).toBe(conclusion);
+  });
+
+  it("shows an unknown category code as-is instead of swallowing it", () => {
+    expect(
+      historyPresentation(
+        history({ failure_kind: "SOMETHING_NEW", message: "目标端：坏了" }),
+      ).conclusion,
+    ).toBe("[SOMETHING_NEW] 目标端：坏了");
+  });
+
+  it("leaves an unclassified old history row untagged", () => {
+    expect(
+      historyPresentation(
+        history({ failure_kind: null, message: "目标端：门禁计数不一致" }),
+      ).conclusion,
+    ).toBe("目标端：门禁计数不一致");
+  });
 
   it("explains a missing run id", () => {
     expect(runIdPresentation(history({ run_id: null }))).toBe(

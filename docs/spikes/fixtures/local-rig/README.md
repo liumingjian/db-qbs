@@ -19,6 +19,8 @@ cd docs/spikes/fixtures/local-rig
 ./scripts/run-bulk-probe.sh              # 跑 #5 的内存形状探针（19 组配置矩阵）
 REPS=7 ./scripts/run-cpu-probe.sh        # 跑 #5 的客户端每行 CPU 探针（每档取中位数）
 ./scripts/run-mysql-roundtrip-probe.sh   # 跑 #13 的目标端往返实测（只起 MySQL，不用 Oracle）
+./scripts/run-number-shapes-probe.sh     # 跑 #104 的 NUMBER 纯小数/负标度端到端往返实测
+./scripts/run-bc-date-probe.sh           # 跑 #98 的公元前日期驱动年份符号取证（只用 Oracle）
 ./scripts/sqlplus.sh   # 进 sqlplus
 ./scripts/down.sh      # 拆掉，连卷一起删
 ```
@@ -249,6 +251,35 @@ M2_ORACLE_CLIENT_LIB_DIR=/path/to/instantclient \
 
 M2 入口会在宿主机拉起 `db-qbs-source`，并把 A1–A14 的 PASS/FAIL 与每条断言实际值写进报告；
 它不会代跑 M1，也不会创建 `/health`。
+
+#### arm64 mac：宿主那半必须是 x86_64 + Rosetta
+
+ADR-0028 要求 source 跑在**宿主机**（杀进程本身是被测对象），而 **Oracle 没有出过 macOS arm64 的
+Instant Client**，最后一版是 19.16 x86_64。所以 arm64 mac 上宿主那半只能编成 `x86_64-apple-darwin`
+让 Rosetta 跑，否则 `libclntsh.dylib` 根本加载不了。一次性准备：
+
+```bash
+rustup target add x86_64-apple-darwin
+# 19.8 x64，免登录直链
+curl -LO https://download.oracle.com/otn_software/mac/instantclient/198000/instantclient-basic-macos.x64-19.8.0.0.0dbru.zip
+unzip instantclient-basic-macos.x64-19.8.0.0.0dbru.zip -d ~/oracle
+```
+
+之后每次这样跑（`M2_HOST_CARGO_TARGET` 只影响宿主那半，容器那半仍是 arm64 原生）：
+
+```bash
+M2_ORACLE_CLIENT_LIB_DIR="$HOME/oracle/instantclient_19_8" \
+M2_HOST_CARGO_TARGET=x86_64-apple-darwin \
+  ./scripts/run-m2-acceptance.sh
+```
+
+#### 把台架留给渲染走查：`M2_KEEP_RIG=1`
+
+加上 `M2_KEEP_RIG=1`，最后一条场景跑完后台架不拆：容器、sink、宿主 source 与这一轮累积的运行历史
+全部留着，入口会打印 web UI 地址与拆台架命令。这样 [`m2-visual-walkthrough.md`](m2-visual-walkthrough.md)
+要看的终态**就是 A1–A14 刚造出来的那批**，不必另造一套编排。交接时 source 停在 `hang-streaming`
+模式，于是从 UI 发起的 run 会停在 `STREAMING` 不走 —— 走查里 V1 / V16 / V17 这三条要的「进行中」
+靠的就是它。
 
 ### M2 手工门禁
 

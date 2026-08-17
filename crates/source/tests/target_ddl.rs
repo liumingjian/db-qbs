@@ -1,4 +1,4 @@
-use db_qbs_source::{generate_target_ddl, SourceColumn};
+use db_qbs_source::{generate_target_ddl, ColumnSupport, SourceColumn};
 
 #[test]
 fn target_ddl_is_derived_from_describe_columns() {
@@ -49,5 +49,7 @@ fn source_column(
         precision,
         scale,
         length,
+        fsp: None,
+        support: Some(ColumnSupport::Ok),
     }
 }

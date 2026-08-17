@@ -34,8 +34,13 @@ REPO_ROOT=$(cd "$RIG_ROOT/../../../.." && pwd)
 ACCEPTANCE_ROOT="$RIG_ROOT/acceptance"
 WORK_ROOT=$(mktemp -d)
 REPORT=${M2_REPORT:-"$RIG_ROOT/m2-acceptance-$(date -u +%Y%m%dT%H%M%SZ).md"}
-SOURCE_BIN="$REPO_ROOT/target/release/db-qbs-source"
-REAL_SOURCE_BIN="$REPO_ROOT/target/release/db-qbs-source-run"
+# The host half runs natively unless M2_HOST_CARGO_TARGET names a triple. On an arm64 mac it
+# must: Oracle ships no arm64 macOS Instant Client, so db-qbs-source has to be an
+# x86_64-apple-darwin build running under Rosetta to load libclntsh.dylib at all.
+HOST_TARGET=${M2_HOST_CARGO_TARGET:-}
+HOST_BIN_DIR="$REPO_ROOT/target${HOST_TARGET:+/$HOST_TARGET}/release"
+SOURCE_BIN="$HOST_BIN_DIR/db-qbs-source"
+REAL_SOURCE_BIN="$HOST_BIN_DIR/db-qbs-source-run"
 SINK_BIN=/usr/local/bin/db-qbs-sink
 SOURCE_CONFIG="$WORK_ROOT/source.toml"
 SOURCE_DATA="$WORK_ROOT/source-data"
@@ -44,9 +49,13 @@ SINK_LOG=/tmp/m2-sink.jsonl
 WRAPPER="$ACCEPTANCE_ROOT/m2-source-run-wrapper.py"
 PROXY="$ACCEPTANCE_ROOT/commit-drop-proxy.py"
 SOURCE_URL=http://127.0.0.1:18088
+SOURCE_PORT=18088
 SINK_URL=http://127.0.0.1:18080
 PROXY_URL=http://127.0.0.1:18081
 BIZ_DATE=2026-08-14
+# M2_KEEP_RIG=1 leaves the rig, the host source and the accumulated run history up after the
+# last scenario, so the manual render walkthrough can reuse the states the run just produced.
+KEEP_RIG=${M2_KEEP_RIG:-}
 RESULTS=()
 SOURCE_PID=""
 PROXY_PID=""
@@ -145,11 +154,29 @@ stop_source() {
   SOURCE_PID=""
 }
 
+# A run is `live` from POST /api/runs onward, but the child writes its pid file only after
+# it is exec'd, so scenarios that gate on bare `.live == true` can reach stop_child first.
+wait_for_child_pid() {
+  local attempt
+  for (( attempt = 1; attempt <= 200; attempt++ )); do
+    if [[ -s "$WORK_ROOT/child.pid" ]]; then
+      cat "$WORK_ROOT/child.pid"
+      return 0
+    fi
+    sleep 0.05
+  done
+  fail "run child never published $WORK_ROOT/child.pid"
+}
+
 stop_child() {
-  local pid
+  local pid attempt
   [[ -f "$WORK_ROOT/child.pid" ]] || return 0
   pid=$(cat "$WORK_ROOT/child.pid")
   kill -TERM "$pid" 2>/dev/null || true
+  for (( attempt = 1; attempt <= 100; attempt++ )); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.05
+  done
   rm -f "$WORK_ROOT/child.pid"
 }
 
@@ -169,10 +196,30 @@ history_retention_days = 90
 EOF
 }
 
+# 18088 是台架自己的端口。上一轮 M2_KEEP_RIG 留下的 source 还监听着时，本轮新起的 source 会以
+# 「Address already in use」当场退出，而 wait_for_source 只看 GET /api/tasks 是否 200 ——
+# 旧进程照样应答 200，于是本轮每一条断言都打在旧进程上：child mode 换不动、work root 对不上，
+# 现象千奇百怪，唯独看不出真正的原因。起之前先把端口清空，读到的 200 才一定是自己的。
+ensure_source_port_free() {
+  local pids attempt
+  pids=$(lsof -ti "tcp:$SOURCE_PORT" 2>/dev/null || true)
+  [[ -n "$pids" ]] || return 0
+  echo "==> 收掉占着 $SOURCE_PORT 的残留进程：$(echo "$pids" | tr '\n' ' ')"
+  # shellcheck disable=SC2086
+  kill -KILL $pids 2>/dev/null || true
+  for (( attempt = 1; attempt <= 100; attempt++ )); do
+    lsof -ti "tcp:$SOURCE_PORT" >/dev/null 2>&1 || return 0
+    sleep 0.05
+  done
+  echo "端口 $SOURCE_PORT 迟迟没释放" >&2
+  return 1
+}
+
 start_source() {
   local mode=${1:-real} sink_url=${2:-$SINK_URL}
   stop_source || return 1
   stop_child || return 1
+  ensure_source_port_free || return 1
   rm -f "$WORK_ROOT/child.pid" "$WORK_ROOT/release-child"
   : > "$SOURCE_LOG"
   write_source_config "$sink_url" || return 1
@@ -180,9 +227,14 @@ start_source() {
   M2_REAL_SOURCE_BIN="$REAL_SOURCE_BIN" \
   M2_CHILD_PID_FILE="$WORK_ROOT/child.pid" \
   M2_CHILD_RELEASE_FILE="$WORK_ROOT/release-child" \
-    "$SOURCE_BIN" --config "$SOURCE_CONFIG" > "$SOURCE_LOG" 2>&1 &
+    nohup "$SOURCE_BIN" --config "$SOURCE_CONFIG" > "$SOURCE_LOG" 2>&1 &
   SOURCE_PID=$!
-  wait_for_source
+  wait_for_source || return 1
+  # 端口起前已清空，正常不会走到这里；留着是为了万一还有别的进程抢在中间，报错能说到点子上。
+  kill -0 "$SOURCE_PID" 2>/dev/null && return 0
+  cat "$SOURCE_LOG" >&2 || true
+  echo "刚起的 source 已经退出，$SOURCE_URL 上应答的是别的进程" >&2
+  return 1
 }
 
 stop_proxy() {
@@ -311,6 +363,7 @@ scenario_a4() {
   assert_eq "Oracle failure status" 502 "$API_STATUS" || return 1
   assert_eq "Oracle failure kind" oracle "$(jq -r '.kind' <<<"$API_BODY")" || return 1
   assert_eq "Oracle missing table code" 942 "$(jq -r '.oracle_code' <<<"$API_BODY")" || return 1
+  assert_eq "Oracle failure category" SOURCE_QUERY "$(jq -r '.failure_kind' <<<"$API_BODY")" || return 1
   assert_eq "Oracle failure run_id absent" false "$(jq 'has("run_id")' <<<"$API_BODY")" || return 1
   after_history=$(history_count) || return 1
   assert_eq "Oracle failure history unchanged" "$before_history" "$after_history" || return 1
@@ -328,6 +381,7 @@ scenario_a5() {
   touch "$WORK_ROOT/release-child" || return 1
   wait_for_run "$run_record_id" '.live == false' || return 1
   assert_eq "terminal effect" SWAPPED "$(jq -r '.target_table_effect' <<<"$API_BODY")" || return 1
+  assert_eq "success has no failure category" null "$(jq -r '.failure_kind' <<<"$API_BODY")" || return 1
   assert_eq "source rows" 100000 "$(jq -r '.source_rows' <<<"$API_BODY")" || return 1
   run_id=$(jq -r '.run_id' <<<"$API_BODY") || return 1
   history_projection=$(jq -c '{stage,seq,rows_pushed,bytes,ms,last_ts}' <<<"$API_BODY") || return 1
@@ -352,6 +406,7 @@ scenario_a6() {
   assert_eq "run_id is null" null "$(jq -r '.run_id' <<<"$API_BODY")" || return 1
   assert_eq "run shape check count" 6 "$(jq '.shape_checks | length' <<<"$API_BODY")" || return 1
   assert_eq "run shape report has failure" true "$(jq '[.shape_checks[].passed] | any(. == false)' <<<"$API_BODY")" || return 1
+  assert_eq "shape failure category" SHAPE_PRECHECK "$(jq -r '.failure_kind' <<<"$API_BODY")" || return 1
   api GET "/api/runs?task_id=$task_id" || return 1
   assert_eq "history row present" true "$(jq --arg record "$run_record_id" 'any(.[]; .run_record_id == $record)' <<<"$API_BODY")" || return 1
   after_sink_records=$(sink_log_record_count) || return 1
@@ -367,6 +422,7 @@ scenario_a7() {
   wait_for_run "$record" '.live == false' || return 1
   assert_eq "mapping run_id exists" true "$(jq '.run_id != null' <<<"$API_BODY")" || return 1
   assert_eq "mapping code" PRECHECK_FAILED "$(jq -r '.sink_code' <<<"$API_BODY")" || return 1
+  assert_eq "mapping failure category" MAPPING_PRECHECK "$(jq -r '.failure_kind' <<<"$API_BODY")" || return 1
   assert_eq "mapping has no terminal block" true "$(jq '.target_table_effect == "DISCARDED" and .staging_table == null' <<<"$API_BODY")" || return 1
   assert_eq "mapping issue total" true "$(jq '.mapping_issues | length > 0' <<<"$API_BODY")" || return 1
   echo "actual response: $API_BODY"
@@ -380,6 +436,7 @@ scenario_a8() {
   record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == false' || return 1
   assert_eq "verification code" VERIFY_FAILED "$(jq -r '.sink_code' <<<"$API_BODY")" || return 1
+  assert_eq "verification failure category" VERIFY_FAILED "$(jq -r '.failure_kind' <<<"$API_BODY")" || return 1
   assert_eq "verification terminal" DISCARDED "$(jq -r '.target_table_effect' <<<"$API_BODY")" || return 1
   echo "actual response: $API_BODY"
   stop_proxy
@@ -392,6 +449,7 @@ scenario_a9() {
   record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == false' || return 1
   assert_eq "escape code" INTERNAL_PRECHECK_ESCAPE "$(jq -r '.sink_code' <<<"$API_BODY")" || return 1
+  assert_eq "escape is a defect not a run failure" DEFECT "$(jq -r '.failure_kind' <<<"$API_BODY")" || return 1
   assert_eq "escape column" V_TEXT "$(jq -r '.column' <<<"$API_BODY")" || return 1
   assert_eq "escape value" 真实业务值-1265 "$(jq -r '.value' <<<"$API_BODY")" || return 1
   echo "actual response: $API_BODY"
@@ -440,6 +498,7 @@ scenario_a12() {
   wait_for_run "$record" '.live == false' || return 1
   assert_eq "kill -KILL unknown reason" PROCESS_DISAPPEARED "$(jq -r '.unknown_reason' <<<"$API_BODY")" || return 1
   assert_eq "kill -KILL error codes absent" true "$(jq '.source_code == null and .sink_code == null' <<<"$API_BODY")" || return 1
+  assert_eq "kill -KILL failure category" UNKNOWN "$(jq -r '.failure_kind' <<<"$API_BODY")" || return 1
   echo "killed host source pid: $killed_pid"
   stop_child
 }
@@ -455,6 +514,7 @@ scenario_a13() {
   wait_for_run "$record" '.live == false' || return 1
   assert_eq "SIGTERM unknown reason" SERVICE_RESTARTED "$(jq -r '.unknown_reason' <<<"$API_BODY")" || return 1
   assert_eq "SIGTERM error codes absent" true "$(jq '.source_code == null and .sink_code == null' <<<"$API_BODY")" || return 1
+  assert_eq "SIGTERM failure category" UNKNOWN "$(jq -r '.failure_kind' <<<"$API_BODY")" || return 1
   stop_child
 }
 
@@ -466,6 +526,7 @@ scenario_a14() {
   wait_for_run "$record" '.live == true' || return 1
   A14_LIVE=$API_BODY
   assert_eq "live detail address" "$record" "$(jq -r '.run_record_id' <<<"$A14_LIVE")" || return 1
+  wait_for_child_pid >/dev/null || return 1
   stop_child
   wait_for_run "$record" '.live == false' || return 1
   A14_HISTORY=$API_BODY
@@ -508,7 +569,9 @@ write_report() {
     echo "# M2 rig acceptance report"
     echo
     echo "- Generated (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "- Git commit: $(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+    # 台架常常是 rsync 过去的、不带 .git 的工作区，那时 rev-parse 读不到 SHA。
+    # 派发的一方用 DB_QBS_GIT_COMMIT 把源端的 HEAD 传进来，报告就不会再写 unknown。
+    echo "- Git commit: ${DB_QBS_GIT_COMMIT:-$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown（工作区不是 git checkout，且没传 DB_QBS_GIT_COMMIT）")}"
     echo "- Visual walkthrough: required separately by m2-visual-walkthrough.md"
     echo
     echo "## Scenarios"
@@ -544,13 +607,15 @@ prepare_rig() {
     echo "M2_ORACLE_CLIENT_LIB_DIR must point to the host Oracle Instant Client directory" >&2
     return 1
   }
+  # 上一轮 M2_KEEP_RIG 留下的 source 会带着一串挂起的 child 一起赖着，child 不占端口但会堆成垃圾。
+  pkill -f "$WRAPPER" 2>/dev/null || true
   ./scripts/up.sh || return 1
   docker run --rm --platform linux/arm64 \
     -v "$REPO_ROOT:/workspace" -w /workspace \
     -v qbs-cargo-registry:/usr/local/cargo/registry \
     rust:1-bookworm cargo build --release --workspace || return 1
   docker cp "$REPO_ROOT/target/release/db-qbs-sink" qbs-client:"$SINK_BIN" || return 1
-  cargo build --release -p db-qbs-source || return 1
+  cargo build --release ${HOST_TARGET:+--target "$HOST_TARGET"} -p db-qbs-source || return 1
   compose exec -T client sqlplus -S spike/spike123@//oracle:1521/XE \
     @/workspace/docs/spikes/fixtures/local-rig/acceptance/oracle.sql || return 1
   compose exec -T mysql mysql -uspike -pspike123 qbs < "$ACCEPTANCE_ROOT/mysql.sql" || return 1
@@ -559,12 +624,38 @@ prepare_rig() {
 
 cleanup() {
   stop_proxy >/dev/null 2>&1 || true
+  if [[ -n "$KEEP_RIG" ]]; then
+    # m2-visual-walkthrough.md needs the same states this run just produced; the rig stays up
+    # with a live-capable source so the render surface can be walked by hand.
+    return 0
+  fi
   stop_source >/dev/null 2>&1 || true
   stop_child >/dev/null 2>&1 || true
   stop_sink >/dev/null 2>&1 || true
   rm -rf "$WORK_ROOT"
 }
 trap cleanup EXIT
+
+# Handing the rig to the visual walkthrough: a hang-streaming child keeps any UI-started run
+# parked in STREAMING, which is what V1 / V16 / V17 need to be observable at all.
+hand_over_rig() {
+  start_source hang-streaming >/dev/null || {
+    echo "failed to hand the rig over for the visual walkthrough" >&2
+    return 1
+  }
+  cat <<EOF
+
+==> rig kept for docs/spikes/fixtures/local-rig/m2-visual-walkthrough.md
+    web UI        : $SOURCE_URL
+    work root     : $WORK_ROOT
+    run history   : $SOURCE_DATA/db-qbs.sqlite3
+    child mode    : hang-streaming (a run started from the UI parks in STREAMING for V1/V16/V17)
+    source log    : $SOURCE_LOG
+    tear down with: kill $SOURCE_PID; docker compose -f $RIG_ROOT/docker-compose.yml exec -T client pkill db-qbs-sink; rm -rf $WORK_ROOT
+EOF
+  # The dispatching shell goes away when this script returns; the handed-over source must not.
+  disown "$SOURCE_PID" 2>/dev/null || true
+}
 
 echo "==> prepare M2 acceptance rig"
 prepare_rig || { echo "rig preparation failed" >&2; exit 1; }
@@ -586,6 +677,8 @@ run_scenario A14-detail-lifecycle scenario_a14
 
 write_report || { echo "failed to write report" >&2; exit 1; }
 echo "report: $REPORT"
+
+[[ -n "$KEEP_RIG" ]] && { hand_over_rig || exit 1; }
 
 failed=0
 for (( index = 0; index < ${#SCENARIOS[@]}; index++ )); do

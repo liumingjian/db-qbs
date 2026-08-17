@@ -8,6 +8,8 @@ use rusqlite::{named_params, params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::FailureKind;
+
 const DATABASE_FILE: &str = "db-qbs.sqlite3";
 
 macro_rules! history_params {
@@ -41,6 +43,7 @@ macro_rules! history_params {
             ":value": $history.value,
             ":message": $history.message,
             ":unknown_reason": $history.unknown_reason,
+            ":failure_kind": $history.failure_kind,
             ":seq": $history.seq,
             ":rows_pushed": $history.rows_pushed,
             ":bytes": $history.bytes,
@@ -110,6 +113,9 @@ pub struct RunHistory {
     pub value: Option<String>,
     pub message: Option<String>,
     pub unknown_reason: Option<String>,
+    /// 失败分类（[`crate::FailureKind`] 的 `as_str`）。成功、进行中、以及 M2 之前落盘的
+    /// 老历史行都是 `None`——消费者读到缺席不得报错（与 ADR-0017 §2 `component` 同一口径）。
+    pub failure_kind: Option<String>,
     pub seq: u64,
     pub rows_pushed: u64,
     pub bytes: u64,
@@ -156,6 +162,7 @@ impl RunHistory {
             value: None,
             message: None,
             unknown_reason: None,
+            failure_kind: None,
             seq: 0,
             rows_pushed: 0,
             bytes: 0,
@@ -245,6 +252,7 @@ impl RunHistory {
                 self.finished_at = owned_text(log, "ts");
                 self.message = owned_text(log, "message");
                 self.value = owned_text(log, "value");
+                self.failure_kind = owned_text(log, "failure_kind");
                 HistoryChange::Terminal
             }
             _ => HistoryChange::MemoryOnly,
@@ -261,6 +269,7 @@ impl RunHistory {
         self.value = None;
         self.message = Some(reason.message().to_owned());
         self.unknown_reason = Some(reason.as_str().to_owned());
+        self.failure_kind = Some(FailureKind::Unknown.as_str().to_owned());
     }
 
     pub fn mark_parent_failure(&mut self, message: String, at: DateTime<Utc>) {
@@ -268,6 +277,7 @@ impl RunHistory {
         self.target_table_effect = Some("DISCARDED".to_owned());
         self.finished_at = Some(at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
         self.message = Some(message);
+        self.failure_kind = Some(FailureKind::Orchestrator.as_str().to_owned());
     }
 
     fn finish_from_log(&mut self, log: &Value) {
@@ -303,6 +313,7 @@ impl RunHistory {
         self.column = owned_text(log, "column");
         self.value = owned_text(log, "value");
         self.message = owned_text(log, "message");
+        self.failure_kind = owned_text(log, "failure_kind");
     }
 }
 
@@ -360,6 +371,7 @@ impl HistoryStore {
                     [value]             TEXT,
                     message             TEXT,
                     unknown_reason      TEXT,
+                    failure_kind        TEXT,
                     seq                 INTEGER NOT NULL,
                     rows_pushed         INTEGER NOT NULL,
                     bytes               INTEGER NOT NULL,
@@ -374,6 +386,7 @@ impl HistoryStore {
             .map_err(|error| format!("初始化 SQLite 运行历史表失败：{error}"))?;
         ensure_json_column(&connection, "shape_checks")?;
         ensure_json_column(&connection, "mapping_issues")?;
+        ensure_nullable_text_column(&connection, "failure_kind")?;
         Ok(store)
     }
 
@@ -397,15 +410,16 @@ impl HistoryStore {
                     source_rows, staged_rows, sink_reported_rows, purged_rows, source_batches,
                     received_batches, fetch_ms, push_ms, commit_ms, count_ms, cursor_ms,
                     source_code, sink_code, [column], [value], message, unknown_reason,
-                    seq, rows_pushed, bytes, ms, last_ts, shape_checks, mapping_issues
+                    failure_kind, seq, rows_pushed, bytes, ms, last_ts, shape_checks,
+                    mapping_issues
                  ) VALUES (
                     :run_record_id, :run_id, :task_id, :biz_date, :staging_table, :started_at,
                     :started_at_ms, :finished_at, :outcome, :target_table_effect, :stage,
                     :source_rows, :staged_rows, :sink_reported_rows, :purged_rows,
                     :source_batches, :received_batches, :fetch_ms, :push_ms, :commit_ms,
                     :count_ms, :cursor_ms, :source_code, :sink_code, :column, :value,
-                    :message, :unknown_reason, :seq, :rows_pushed, :bytes, :ms, :last_ts,
-                    :shape_checks, :mapping_issues
+                    :message, :unknown_reason, :failure_kind, :seq, :rows_pushed, :bytes, :ms,
+                    :last_ts, :shape_checks, :mapping_issues
                  )",
                 history_params!(history, shape_checks, mapping_issues),
             )
@@ -441,7 +455,8 @@ impl HistoryStore {
                     fetch_ms=:fetch_ms, push_ms=:push_ms, commit_ms=:commit_ms,
                     count_ms=:count_ms, cursor_ms=:cursor_ms, source_code=:source_code,
                     sink_code=:sink_code, [column]=:column, [value]=:value, message=:message,
-                    unknown_reason=:unknown_reason, seq=:seq, rows_pushed=:rows_pushed,
+                    unknown_reason=:unknown_reason, failure_kind=:failure_kind, seq=:seq,
+                    rows_pushed=:rows_pushed,
                     bytes=:bytes, ms=:ms, last_ts=:last_ts, shape_checks=:shape_checks,
                     mapping_issues=:mapping_issues
                   WHERE run_record_id=:run_record_id",
@@ -503,9 +518,15 @@ impl HistoryStore {
                 "UPDATE run_history
                     SET outcome = 'FAILED', target_table_effect = NULL, finished_at = ?1,
                         source_code = NULL, sink_code = NULL, [column] = NULL,
-                        [value] = NULL, message = ?2, unknown_reason = ?3
+                        [value] = NULL, message = ?2, unknown_reason = ?3,
+                        failure_kind = ?4
                   WHERE outcome IS NULL",
-                params![finished_at, reason.message(), reason.as_str()],
+                params![
+                    finished_at,
+                    reason.message(),
+                    reason.as_str(),
+                    FailureKind::Unknown.as_str()
+                ],
             )
             .map_err(|error| format!("封口 SQLite 非终态运行历史失败：{error}"))?;
         cleanup_transaction(&transaction, now, retention_days)?;
@@ -597,6 +618,28 @@ fn ensure_json_column(connection: &Connection, name: &str) -> Result<(), String>
     Ok(())
 }
 
+/// 补一列可空 TEXT。M2 之前建的库没有这一列，老历史行补出来就是 `NULL`——
+/// 与 `ensure_json_column` 同一条路子，区别只在没有默认值可给：分类是**当时没记**，不是空集。
+fn ensure_nullable_text_column(connection: &Connection, name: &str) -> Result<(), String> {
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('run_history') WHERE name = ?1)",
+            [name],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("检查 SQLite 运行历史列 {name} 失败：{error}"))?;
+    if exists {
+        return Ok(());
+    }
+    connection
+        .execute(
+            &format!("ALTER TABLE run_history ADD COLUMN {name} TEXT"),
+            [],
+        )
+        .map_err(|error| format!("迁移 SQLite 运行历史列 {name} 失败：{error}"))?;
+    Ok(())
+}
+
 fn json_array_text(values: &[Value]) -> Result<String, String> {
     serde_json::to_string(values).map_err(|error| format!("序列化运行历史诊断失败：{error}"))
 }
@@ -618,7 +661,8 @@ const HISTORY_SELECT: &str = "SELECT
     finished_at, outcome, target_table_effect, stage, source_rows, staged_rows,
     sink_reported_rows, purged_rows, source_batches, received_batches, fetch_ms, push_ms,
     commit_ms, count_ms, cursor_ms, source_code, sink_code, [column], [value],
-    message, unknown_reason, seq, rows_pushed, bytes, ms, last_ts, shape_checks, mapping_issues
+    message, unknown_reason, failure_kind, seq, rows_pushed, bytes, ms, last_ts,
+    shape_checks, mapping_issues
   FROM run_history";
 
 fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunHistory> {
@@ -651,6 +695,7 @@ fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunHistory> {
         value: row.get("value")?,
         message: row.get("message")?,
         unknown_reason: row.get("unknown_reason")?,
+        failure_kind: row.get("failure_kind")?,
         seq: row.get("seq")?,
         rows_pushed: row.get("rows_pushed")?,
         bytes: row.get("bytes")?,

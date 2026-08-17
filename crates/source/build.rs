@@ -25,12 +25,28 @@ fn main() {
     }
 
     let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
-    let status = Command::new(npm)
+    let status = match Command::new(npm)
         .args(["run", "build", "--silent"])
         .current_dir(workspace_dir)
         .status()
-        .unwrap_or_else(|error| {
-            panic!("could not run the web build; run `npm install` first: {error}")
-        });
+    {
+        Ok(status) => status,
+        // The M1 rig builds the workspace inside `rust:1-bookworm`, which has no npm. That
+        // build only needs db-qbs-source-run and db-qbs-sink, neither of which serves the
+        // web assets — so an already-built dist is enough to let the crate compile.
+        Err(error) => {
+            let prebuilt = workspace_dir.join("web/dist/index.html");
+            assert!(
+                prebuilt.is_file(),
+                "could not run the web build ({error}) and {} is missing; \
+                 run `npm install && npm run build` on a host that has npm first",
+                prebuilt.display()
+            );
+            println!(
+                "cargo:warning=npm is unavailable ({error}); reusing the existing web/dist"
+            );
+            return;
+        }
+    };
     assert!(status.success(), "web build failed with status {status}");
 }
