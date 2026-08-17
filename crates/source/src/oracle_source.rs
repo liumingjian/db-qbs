@@ -2,12 +2,12 @@ use db_qbs_shared::{canon_date, canon_number, canon_text, canon_timestamp};
 use oracle::sql_type::{OracleType, Timestamp};
 use oracle::{Connection, InitParams, ResultSet, Row};
 
+use crate::target_ddl::{derive_number_shape, is_supported_decimal_shape};
 use crate::{
     builder_column_query, builder_table_query, BuilderColumn, BuilderTable, ColumnSupport,
     FailureKind, RowSource, SourceColumn, SourceConfig, SourceReadError, TaskConfig,
     FETCH_ARRAY_SIZE,
 };
-use crate::target_ddl::{derive_number_shape, is_supported_decimal_shape};
 
 const DESCRIBE_BIZ_DATE: &str = "0001-01-01";
 

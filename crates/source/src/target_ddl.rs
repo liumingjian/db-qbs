@@ -30,7 +30,11 @@ impl fmt::Display for TargetDdlError {
 
 impl fmt::Display for TargetDdlColumnError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{} ({}): {}", self.column, self.source, self.message)
+        write!(
+            formatter,
+            "{} ({}): {}",
+            self.column, self.source, self.message
+        )
     }
 }
 
@@ -48,7 +52,7 @@ pub fn generate_target_ddl(
 
     for column in columns {
         if needs_precision_placeholder(column, column_precision) {
-            precision_placeholders.push(column.name.clone());
+            precision_placeholders.push(column.name.escape_debug().to_string());
         }
 
         match target_column_type(column, column_precision) {
@@ -215,11 +219,7 @@ fn column_error(column: &SourceColumn, message: impl Into<String>) -> TargetDdlC
     named_error(&column.name, source_type(column), message)
 }
 
-fn named_error(
-    column: &str,
-    source: String,
-    message: impl Into<String>,
-) -> TargetDdlColumnError {
+fn named_error(column: &str, source: String, message: impl Into<String>) -> TargetDdlColumnError {
     TargetDdlColumnError {
         column: column.to_owned(),
         source,

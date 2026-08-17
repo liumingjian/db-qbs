@@ -1,6 +1,4 @@
-use db_qbs_source::{
-    generate_target_ddl, ColumnPrecision, ColumnSupport, SourceColumn,
-};
+use db_qbs_source::{generate_target_ddl, ColumnPrecision, ColumnSupport, SourceColumn};
 
 #[test]
 fn target_ddl_is_derived_from_describe_columns() {
@@ -55,13 +53,7 @@ fn target_ddl_uses_all_m3_source_shapes() {
     let mut precision = ColumnPrecision::new();
     precision.insert("N_RAW".to_owned(), [12, 2]);
 
-    let ddl = generate_target_ddl(
-        &columns,
-        "T_POSITION",
-        "D_BIZ",
-        Some(&precision),
-    )
-    .unwrap();
+    let ddl = generate_target_ddl(&columns, "T_POSITION", "D_BIZ", Some(&precision)).unwrap();
 
     for expected in [
         "`N_REGULAR` DECIMAL(18,4) NULL",
@@ -77,8 +69,8 @@ fn target_ddl_uses_all_m3_source_shapes() {
     ] {
         assert!(ddl.contains(expected), "missing {expected} in {ddl}");
     }
-    assert!(!ddl.contains("CHAR(30)"));
-    assert!(!ddl.contains("NCHAR(20)"));
+    assert!(!ddl.contains("`C_CHAR` CHAR(30) NULL"));
+    assert!(!ddl.contains("`C_NCHAR` NCHAR(20) NULL"));
 }
 
 #[test]
@@ -95,6 +87,19 @@ fn target_ddl_leaves_unconfigured_number_shapes_as_placeholders() {
         "-- N_RAW、N_EXPR 列的精度 describe 给不出，请在任务定义的 [column_precision] 字段为它们配 (p,s)。"
     ));
     assert_eq!(ddl.matches("DECIMAL(<p>,<s>)").count(), 2);
+}
+
+#[test]
+fn target_ddl_escapes_placeholder_names_inside_the_sql_comment() {
+    let columns = vec![
+        source_column("N_RAW\nDROP TABLE `T_AUDIT`;", "NUMBER", None, None, None),
+        source_column("D_BIZ", "DATE", None, None, None),
+    ];
+
+    let ddl = generate_target_ddl(&columns, "T_POSITION", "D_BIZ", None).unwrap();
+
+    assert!(ddl.contains("-- N_RAW\\nDROP TABLE `T_AUDIT`; 列的精度"));
+    assert!(!ddl.contains("\nDROP TABLE `T_AUDIT`;"));
 }
 
 #[test]
