@@ -15,6 +15,7 @@ static CANONICAL_NUMBER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 pub enum CanonError {
     NonCanonicalNumber,
     InvalidDate,
+    InvalidTimestamp,
 }
 
 impl fmt::Display for CanonError {
@@ -27,6 +28,7 @@ impl fmt::Display for CanonError {
                 "invalid DATE components: year must be within 0001..9999 \
                  (Oracle BC dates are not supported)",
             ),
+            Self::InvalidTimestamp => formatter.write_str("invalid TIMESTAMP components"),
         }
     }
 }
@@ -58,6 +60,31 @@ pub fn canon_date(
         .ok_or(CanonError::InvalidDate)?;
 
     Ok(date_time.format("%Y-%m-%d %H:%M:%S").to_string())
+}
+
+pub fn canon_timestamp(
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    nanosecond: u32,
+) -> Result<String, CanonError> {
+    if !(1..=9999).contains(&year) || nanosecond >= 1_000_000_000 || nanosecond % 1000 != 0 {
+        return Err(CanonError::InvalidTimestamp);
+    }
+
+    let date = NaiveDate::from_ymd_opt(year, month, day).ok_or(CanonError::InvalidTimestamp)?;
+    let date_time = date
+        .and_hms_nano_opt(hour, minute, second, nanosecond)
+        .ok_or(CanonError::InvalidTimestamp)?;
+
+    Ok(format!(
+        "{}.{:06}",
+        date_time.format("%Y-%m-%d %H:%M:%S"),
+        nanosecond / 1000
+    ))
 }
 
 pub fn canon_text(value: &str) -> &str {

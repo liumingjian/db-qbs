@@ -1,5 +1,5 @@
 {
-  "_comment": "ADR-0014 的黄金 fixture —— 规范形式（ADR-0003）边界值测试套件的唯一权威。台架表 t_canon_expected 不是权威（ADR-0014 §1、§8）。每条用例有 kind（该类型的规范化属于哪种操作）与 tier（m1 = 门禁必须绿；m3 = 类型未进 M1，挂起不跑）。kind=validate 的 input 是驱动给出的字符串，verdict=accept 表示恒等放行、verdict=reject 表示必须报错且不得静默修正；kind=format 的 input 是结构化时间分量（驱动给的是时间类型不是字符串，见 ADR-0003），expect 是格式化输出；kind=format 也可带 verdict=reject，表示该组分量越出年份域、canon_date 必须报错且不得静默修正（ADR-0014 §11）；kind=passthrough 表示 canon 层恒等、长度与字符集归 ADR-0009 预检；kind=bypass 表示该值根本不进 canon_* 函数。",
+  "_comment": "ADR-0014 的黄金 fixture —— 规范形式（ADR-0003）边界值测试套件的唯一权威。台架表 t_canon_expected 不是权威（ADR-0014 §1、§8）。每条用例有 kind（该类型的规范化属于哪种操作）与 tier（m1 = 门禁必须绿；m3 = M3 起门禁必须绿）。kind=validate 的 input 是驱动给出的字符串，verdict=accept 表示恒等放行、verdict=reject 表示必须报错且不得静默修正；kind=format 的 input 是结构化时间分量（驱动给的是时间类型不是字符串，见 ADR-0003），expect 是格式化输出；kind=format 也可带 verdict=reject，表示该组分量越出年份域或小数秒约束、canon_date/canon_timestamp 必须报错且不得静默修正（ADR-0014 §11、§12）；kind=passthrough 表示 canon 层恒等、长度与字符集归 ADR-0009 预检；kind=bypass 表示该值根本不进 canon_* 函数。",
   "_grammar": {
     "NUMBER": "^(0|-?[1-9][0-9]*(\\.[0-9]*[1-9])?|-?0\\.[0-9]*[1-9])$",
     "_grammar_note": "三支：零 / |x|>=1 / |x|<1。-0 与 0.000 落不进任何一支，故必被拒。位数上限（38 位）不进文法——长度是类型的性质，归 ADR-0009 预检。",
@@ -50,10 +50,37 @@
 
     { "id": "null-bypass",           "type": "*",          "tier": "m1", "kind": "bypass",      "input": null, "expect": null, "basis": "结构性断言：NULL 不进 canon_*，直接落成 JSON null（ADR-0011 §2）。错法是「图省事让 NULL 也走一遍 canon_*、返回空串」——那会当场作废 ADR-0011「攻击面在构造上归零」这句话，而行数校验永远发现不了。", "note": "M1 源端不存在空串 VARCHAR2 值：Oracle 把空串存成 NULL（03-boundary-rows.sql 第 6 行已实测）。任何声称测到源端空串的用例都是假用例。" },
 
-    { "id": "ts-frac",               "type": "TIMESTAMP",  "tier": "m3", "kind": "format",      "input": { "y": 2026, "mo": 8, "d": 13, "h": 14, "mi": 35, "s": 9, "us": 120000 }, "expect": "2026-08-13 14:35:09.120000", "basis": "ADR-0003：固定 6 位不足补零 —— 与 NUMBER 的去尾零相反，两条写在一起才看得出这不是自相矛盾" },
-    { "id": "ts-zero-frac",          "type": "TIMESTAMP",  "tier": "m3", "kind": "format",      "input": { "y": 2026, "mo": 8, "d": 13, "h": 14, "mi": 35, "s": 9, "us": 0 },      "expect": "2026-08-13 14:35:09.000000", "basis": "小数秒为零时仍补满 6 位" },
-    { "id": "nvc-cn",                "type": "NVARCHAR2",  "tier": "m3", "kind": "passthrough", "input": "资产净值合计", "expect": "资产净值合计", "basis": "ADR-0003：与 VARCHAR2 同" },
-    { "id": "char-pad",              "type": "CHAR",       "tier": "m3", "kind": "passthrough", "input": "AB        ", "expect": "AB        ", "basis": "ADR-0003：CHAR 保留尾部空格（CHAR(10) 共 10 字符）" },
-    { "id": "nchar-pad",             "type": "NCHAR",      "tier": "m3", "kind": "passthrough", "input": "甲乙        ", "expect": "甲乙        ", "basis": "同 CHAR" }
+    { "id": "ts-frac",               "type": "TIMESTAMP",  "tier": "m3", "kind": "format",      "input": { "y": 2026, "mo": 8, "d": 13, "h": 14, "mi": 35, "s": 9, "ns": 120000000 }, "expect": "2026-08-13 14:35:09.120000", "basis": "ADR-0003：固定 6 位不足补零 —— 与 NUMBER 的去尾零相反，两条写在一起才看得出这不是自相矛盾" },
+    { "id": "ts-zero-frac",          "type": "TIMESTAMP",  "tier": "m3", "kind": "format",      "input": { "y": 2026, "mo": 8, "d": 13, "h": 14, "mi": 35, "s": 9, "ns": 0 },         "expect": "2026-08-13 14:35:09.000000", "basis": "小数秒为零时仍补满 6 位" },
+    { "id": "ts-frac-max",           "type": "TIMESTAMP",  "tier": "m3", "kind": "format",      "input": { "y": 2026, "mo": 8, "d": 13, "h": 14, "mi": 35, "s": 9, "ns": 999999000 }, "expect": "2026-08-13 14:35:09.999999", "basis": "小数秒域上端" },
+    { "id": "ts-midnight",           "type": "TIMESTAMP",  "tier": "m3", "kind": "format",      "input": { "y": 2026, "mo": 8, "d": 13, "h": 0,  "mi": 0,  "s": 0, "ns": 0 },         "expect": "2026-08-13 00:00:00.000000", "basis": "date-midnight 的 TIMESTAMP 复刻；时分秒段必须恒在" },
+    { "id": "ts-century-last",       "type": "TIMESTAMP",  "tier": "m3", "kind": "format",      "input": { "y": 1999, "mo": 12, "d": 31, "h": 23, "mi": 59, "s": 59, "ns": 0 }, "expect": "1999-12-31 23:59:59.000000", "basis": "date-century-last 的 TIMESTAMP 复刻" },
+    { "id": "ts-century-first",      "type": "TIMESTAMP",  "tier": "m3", "kind": "format",      "input": { "y": 2000, "mo": 1,  "d": 1,  "h": 0,  "mi": 0,  "s": 0, "ns": 0 },   "expect": "2000-01-01 00:00:00.000000", "basis": "date-century-first 的 TIMESTAMP 复刻" },
+    { "id": "ts-leap-day",            "type": "TIMESTAMP",  "tier": "m3", "kind": "format",      "input": { "y": 2024, "mo": 2,  "d": 29, "h": 12, "mi": 0,  "s": 0, "ns": 0 },  "expect": "2024-02-29 12:00:00.000000", "basis": "date-leap-day 的 TIMESTAMP 复刻" },
+    { "id": "ts-leap-century",        "type": "TIMESTAMP",  "tier": "m3", "kind": "format",      "input": { "y": 2000, "mo": 2,  "d": 29, "h": 0,  "mi": 0,  "s": 0, "ns": 0 },   "expect": "2000-02-29 00:00:00.000000", "basis": "date-leap-century 的 TIMESTAMP 复刻" },
+    { "id": "ts-min",                 "type": "TIMESTAMP",  "tier": "m3", "kind": "format",      "input": { "y": 1,    "mo": 1,  "d": 1,  "h": 0,  "mi": 0,  "s": 0, "ns": 0 },   "expect": "0001-01-01 00:00:00.000000", "basis": "date-min 的 TIMESTAMP 复刻；年份必须补零到四位" },
+    { "id": "ts-max",                 "type": "TIMESTAMP",  "tier": "m3", "kind": "format",      "input": { "y": 9999, "mo": 12, "d": 31, "h": 23, "mi": 59, "s": 59, "ns": 999999000 }, "expect": "9999-12-31 23:59:59.999999", "basis": "date-max 的 TIMESTAMP 复刻；值域上端" },
+    { "id": "ts-ad-44",              "type": "TIMESTAMP",  "tier": "m3", "kind": "format",      "input": { "y": 44,   "mo": 3,  "d": 15, "h": 0,  "mi": 0,  "s": 0, "ns": 0 },   "expect": "0044-03-15 00:00:00.000000", "basis": "#99 / spike §7.12：公元 1–999 原样搬不改" },
+    { "id": "ts-ad-999",              "type": "TIMESTAMP",  "tier": "m3", "kind": "format",      "input": { "y": 999,  "mo": 12, "d": 31, "h": 23, "mi": 59, "s": 59, "ns": 0 }, "expect": "0999-12-31 23:59:59.000000", "basis": "#99 / spike §7.12：公元 1–999 原样搬不改" },
+    { "id": "ts-reject-year-zero",    "type": "TIMESTAMP",  "tier": "m3", "kind": "format",      "verdict": "reject", "input": { "y": 0,     "mo": 1, "d": 1, "h": 0, "mi": 0, "s": 0, "ns": 0 }, "basis": "T1：canon_timestamp 断言 1 <= year <= 9999" },
+    { "id": "ts-reject-year-negative", "type": "TIMESTAMP", "tier": "m3", "kind": "format",      "verdict": "reject", "input": { "y": -4712, "mo": 1, "d": 1, "h": 0, "mi": 0, "s": 0, "ns": 0 }, "basis": "T1：Oracle 公元前日期的生产形态在 TIMESTAMP 入口也必须被拦" },
+    { "id": "ts-reject-year-overflow", "type": "TIMESTAMP", "tier": "m3", "kind": "format",      "verdict": "reject", "input": { "y": 10000, "mo": 1, "d": 1, "h": 0, "mi": 0, "s": 0, "ns": 0 }, "basis": "T1：五位年上溢" },
+    { "id": "ts-reject-sub-micro",    "type": "TIMESTAMP",  "tier": "m3", "kind": "format",      "verdict": "reject", "input": { "y": 2026, "mo": 8, "d": 13, "h": 14, "mi": 35, "s": 9, "ns": 1500 }, "basis": "T3：nanosecond 不是 1000 的倍数，说明 TIMESTAMP(n>6) 的值绕过了预检" },
+
+    { "id": "num-pure-frac-min",       "type": "NUMBER", "tier": "m3", "kind": "validate", "verdict": "accept", "input": "0.000001",              "expect": "0.000001",              "basis": "ADR-0032 §4.1 形态 2：§7.11 组 1" },
+    { "id": "num-pure-frac-min-neg",   "type": "NUMBER", "tier": "m3", "kind": "validate", "verdict": "accept", "input": "-0.000001",             "expect": "-0.000001",             "basis": "ADR-0032 §4.1 形态 2：§7.11 组 1，负号正向见证" },
+    { "id": "num-pure-frac-max",       "type": "NUMBER", "tier": "m3", "kind": "validate", "verdict": "accept", "input": "0.009999",               "expect": "0.009999",               "basis": "ADR-0032 §4.1 形态 2：§7.11 组 1" },
+    { "id": "num-neg-scale-rounded",   "type": "NUMBER", "tier": "m3", "kind": "validate", "verdict": "accept", "input": "12300",                  "expect": "12300",                  "basis": "ADR-0032 §4.1 形态 3：§7.11 组 2，源端已舍入" },
+    { "id": "num-neg-scale-max",       "type": "NUMBER", "tier": "m3", "kind": "validate", "verdict": "accept", "input": "9999999900",             "expect": "9999999900",             "basis": "ADR-0032 §4.1 形态 3：§7.11 组 2" },
+    { "id": "num-neg-scale-max-neg",   "type": "NUMBER", "tier": "m3", "kind": "validate", "verdict": "accept", "input": "-9999999900",            "expect": "-9999999900",            "basis": "ADR-0032 §4.1 形态 3：§7.11 组 2" },
+    { "id": "num-bare-frac",            "type": "NUMBER", "tier": "m3", "kind": "validate", "verdict": "accept", "input": "1.2345",                 "expect": "1.2345",                 "basis": "ADR-0032 §4.1 形态 4：裸 NUMBER" },
+    { "id": "num-bare-config-full",    "type": "NUMBER", "tier": "m3", "kind": "validate", "verdict": "accept", "input": "-99999999999999.9999", "expect": "-99999999999999.9999", "basis": "ADR-0032 §4.1 形态 4：撑满配置 DECIMAL(20,4)" },
+
+    { "id": "nvc-cn",                 "type": "NVARCHAR2",  "tier": "m3", "kind": "passthrough", "input": "资产净值合计",       "expect": "资产净值合计",       "basis": "ADR-0003：与 VARCHAR2 同" },
+    { "id": "char-pad",              "type": "CHAR",       "tier": "m3", "kind": "passthrough", "input": "AB        ",         "expect": "AB        ",         "basis": "ADR-0003：CHAR 保留尾部空格（CHAR(10) 共 10 字符）" },
+    { "id": "nchar-pad",             "type": "NCHAR",      "tier": "m3", "kind": "passthrough", "input": "甲乙        ",         "expect": "甲乙        ",         "basis": "同 CHAR" },
+    { "id": "nvc-trailing-space",    "type": "NVARCHAR2",  "tier": "m3", "kind": "passthrough", "input": "甲乙        ",         "expect": "甲乙        ",         "basis": "ADR-0032 §4.1 形态 6：NVARCHAR2 尾空格" },
+    { "id": "char-all-space",        "type": "CHAR",       "tier": "m3", "kind": "passthrough", "input": "          ",             "expect": "          ",             "basis": "spike §7.8 组 4：全空格碰撞面的正向见证" },
+    { "id": "nchar-cn",              "type": "NCHAR",      "tier": "m3", "kind": "passthrough", "input": "甲乙丙丁戊己庚辛壬癸", "expect": "甲乙丙丁戊己庚辛壬癸", "basis": "ADR-0032 §4.1 形态 7：NCHAR 中文值" }
   ]
 }
