@@ -61,6 +61,7 @@ pub fn generate_builder_task(input: BuilderTaskInput) -> Result<TaskConfig, Stri
         source_date_col,
         target_table,
         target_date_col,
+        column_precision: None,
     })
 }
 

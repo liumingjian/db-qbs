@@ -163,7 +163,14 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
     );
     let (port, config, source, _ready) =
         start_source_ready(|port| write_run_config(&directory, port, &fake_child));
-    let task_id = create_task(port);
+    let created = post(
+        port,
+        "/api/tasks",
+        r#"{"name":"holdings","source_sql":"SELECT a.ID AS ID,\n       a.N_AMT AS N_AMT,\n       a.N_RATE AS N_RATE,\n       a.D_BIZ AS D_BIZ\n  FROM HOLDINGS a\n WHERE a.D_BIZ >= TO_DATE(:biz_date,'YYYY-MM-DD')\n   AND a.D_BIZ <  TO_DATE(:biz_date,'YYYY-MM-DD') + 1","source_date_col":"D_BIZ","target_table":"HOLDINGS","target_date_col":"D_BIZ","column_precision":{"N_AMT":[20,4],"N_RATE":[38,-30]}}"#,
+    )
+    .unwrap();
+    assert_eq!(created.status, 201, "{}", created.body);
+    let task_id = json_body(&created)["task_id"].as_str().unwrap().to_owned();
     let audit = rusqlite::Connection::open(directory.join("db-qbs.sqlite3")).unwrap();
     audit
         .execute_batch(
@@ -231,6 +238,9 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
     for secret in ["name", "task_id", "oracle_password", "secret"] {
         assert!(!task_toml.contains(secret), "{task_toml}");
     }
+    assert!(task_toml.contains("[column_precision]"), "{task_toml}");
+    assert!(task_toml.contains("N_AMT = [20, 4]"), "{task_toml}");
+    assert!(task_toml.contains("N_RATE = [38, -30]"), "{task_toml}");
 
     let args = fs::read_to_string(invocation).unwrap();
     assert_eq!(
@@ -253,11 +263,14 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
     assert_eq!(history["run_id"], "run-7");
     assert_eq!(history["task_id"], task_id);
     assert_eq!(history["shape_checks"].as_array().unwrap().len(), 6);
-    assert!(history["shape_checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|check| check["passed"] == true));
+    assert!(
+        history["shape_checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|check| check["passed"] == true),
+        "{history:#}"
+    );
     assert_eq!(history["biz_date"], "2026-08-14");
     assert_eq!(history["outcome"], "SUCCEEDED");
     assert_eq!(history["target_table_effect"], "SWAPPED");

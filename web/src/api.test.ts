@@ -144,6 +144,27 @@ describe("task API", () => {
       target_date_col: task.target_date_col,
     });
   });
+
+  it("preserves optional column precision when projecting a stored task", () => {
+    const task = {
+      task_id: "task-01",
+      name: "持仓明细",
+      source_sql: "SELECT ID, N_AMT, D_BIZ FROM HOLDINGS",
+      source_date_col: "D_BIZ",
+      target_table: "HOLDINGS",
+      target_date_col: "D_BIZ",
+      column_precision: { N_AMT: [20, 4] as [number, number] },
+    };
+
+    expect(taskInputFrom(task)).toEqual({
+      name: task.name,
+      source_sql: task.source_sql,
+      source_date_col: task.source_date_col,
+      target_table: task.target_table,
+      target_date_col: task.target_date_col,
+      column_precision: task.column_precision,
+    });
+  });
 });
 
 describe("run history API", () => {

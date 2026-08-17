@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::ops::ControlFlow;
@@ -92,7 +93,13 @@ pub struct TaskConfig {
     pub source_date_col: String,
     pub target_table: String,
     pub target_date_col: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_precision: Option<ColumnPrecision>,
 }
+
+/// This is not the #100 column-mapping table: a wrong mapping can go unnoticed,
+/// while these precision hints are checked by the full value-domain validation.
+pub type ColumnPrecision = BTreeMap<String, [i64; 2]>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigError {

@@ -563,6 +563,7 @@ fn task_config_from_task(task: &Task) -> TaskConfig {
         source_date_col: task.source_date_col.clone(),
         target_table: task.target_table.clone(),
         target_date_col: task.target_date_col.clone(),
+        column_precision: task.column_precision.clone(),
     }
 }
 
