@@ -133,6 +133,8 @@ impl RowSource for FakeSource {
                 precision: Some(8),
                 scale: Some(0),
                 length: None,
+                fsp: None,
+                support: Some(db_qbs_source::ColumnSupport::Ok),
             }]
         });
         &COLUMNS

@@ -388,6 +388,8 @@ fn golden_columns() -> (Vec<SourceColumn>, Vec<TargetColumn>) {
                 _ => None,
             },
             length: *length,
+            fsp: None,
+            support: None,
         })
         .collect();
     let targets = specs
@@ -426,6 +428,8 @@ fn source_column(name: &str, data_type: &str, length: Option<u64>) -> SourceColu
         precision: None,
         scale: None,
         length,
+        fsp: None,
+        support: None,
     }
 }
 

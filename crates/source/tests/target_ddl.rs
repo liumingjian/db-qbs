@@ -49,5 +49,7 @@ fn source_column(
         precision,
         scale,
         length,
+        fsp: None,
+        support: Some(db_qbs_source::ColumnSupport::Ok),
     }
 }

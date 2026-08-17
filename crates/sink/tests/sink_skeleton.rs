@@ -23,6 +23,8 @@ fn source_column(
         precision,
         scale,
         length,
+        fsp: None,
+        support: None,
     }
 }
 

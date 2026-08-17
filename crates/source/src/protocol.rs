@@ -12,6 +12,14 @@ const NORMAL_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const ABORT_TIMEOUT: Duration = Duration::from_secs(30);
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColumnSupport {
+    Ok,
+    NeedsPrecision,
+    Unsupported,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceColumn {
@@ -21,6 +29,10 @@ pub struct SourceColumn {
     pub precision: Option<i64>,
     pub scale: Option<i64>,
     pub length: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fsp: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub support: Option<ColumnSupport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

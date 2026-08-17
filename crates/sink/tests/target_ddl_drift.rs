@@ -42,6 +42,8 @@ fn generated_target_ddl_stays_compatible_with_sink_precheck_for_m1_types() {
                     precision: column.precision,
                     scale: column.scale,
                     length: column.length,
+                    fsp: column.fsp,
+                    support: None,
                 })
                 .collect::<Vec<_>>();
 
@@ -155,5 +157,7 @@ fn source_column(
         precision,
         scale,
         length,
+        fsp: None,
+        support: None,
     }
 }
