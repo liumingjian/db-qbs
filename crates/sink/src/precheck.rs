@@ -362,9 +362,11 @@ fn missing_target_suggestion(source: &SourceColumn) -> String {
     }
 }
 
-fn derive_number_shape(precision: i64, scale: i64) -> (i64, i64) {
+fn derive_number_shape(precision: i64, scale: i64) -> (i128, i128) {
+    let precision = i128::from(precision);
+    let scale = i128::from(scale);
     if scale < 0 {
-        (precision + scale.abs(), 0)
+        (precision - scale, 0)
     } else if scale > precision {
         (scale, scale)
     } else {
@@ -372,7 +374,7 @@ fn derive_number_shape(precision: i64, scale: i64) -> (i64, i64) {
     }
 }
 
-fn is_supported_decimal_shape(precision: i64, scale: i64) -> bool {
+fn is_supported_decimal_shape(precision: i128, scale: i128) -> bool {
     (1..=65).contains(&precision) && (0..=30).contains(&scale) && scale <= precision
 }
 

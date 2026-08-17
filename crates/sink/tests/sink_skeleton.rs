@@ -352,6 +352,85 @@ fn precheck_uses_derived_number_lower_bounds_and_actionable_suggestions() {
 }
 
 #[test]
+fn precheck_accepts_wider_number_targets_that_satisfy_lower_bounds() {
+    let sources = vec![
+        source_column("N_REGULAR", "NUMBER", Some(12), Some(2), None),
+        source_column("N_FRACTION", "NUMBER", Some(4), Some(6), None),
+        source_column("N_NEGATIVE", "NUMBER", Some(8), Some(-2), None),
+    ];
+    let targets = vec![
+        target_column(
+            "N_REGULAR",
+            "decimal(14,3)",
+            "decimal",
+            Some(14),
+            Some(3),
+            None,
+            None,
+            true,
+            None,
+            1,
+        ),
+        target_column(
+            "N_FRACTION",
+            "decimal(20,6)",
+            "decimal",
+            Some(20),
+            Some(6),
+            None,
+            None,
+            true,
+            None,
+            2,
+        ),
+        target_column(
+            "N_NEGATIVE",
+            "decimal(12,1)",
+            "decimal",
+            Some(12),
+            Some(1),
+            None,
+            None,
+            true,
+            None,
+            3,
+        ),
+    ];
+
+    assert_eq!(precheck("T_POSITION", &sources, &targets), []);
+}
+
+#[test]
+fn precheck_rejects_overflowing_number_metadata_without_panicking() {
+    let sources = vec![source_column(
+        "N_OVERFLOW",
+        "NUMBER",
+        Some(i64::MAX),
+        Some(i64::MIN),
+        None,
+    )];
+    let targets = vec![target_column(
+        "N_OVERFLOW",
+        "decimal(65,30)",
+        "decimal",
+        Some(65),
+        Some(30),
+        None,
+        None,
+        true,
+        None,
+        1,
+    )];
+
+    let issues = precheck("T_POSITION", &sources, &targets);
+
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert_eq!(issues[0].column, "N_OVERFLOW");
+    assert!(issues[0].rule.contains("MySQL DECIMAL"), "{issues:?}");
+    assert!(issues[0].suggestion.is_some(), "{issues:?}");
+}
+
+#[test]
 fn precheck_rejects_target_names_over_37_characters_with_actionable_text() {
     let (sources, targets) = valid_columns();
     let issues = precheck(
