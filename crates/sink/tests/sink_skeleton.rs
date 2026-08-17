@@ -206,7 +206,149 @@ fn precheck_reports_every_invalid_column_in_one_result() {
             "missing {column} in {issues:?}"
         );
     }
+    assert!(
+        issues.iter().all(|issue| issue.suggestion.is_some()),
+        "every precheck issue needs an action: {issues:?}"
+    );
     assert!(issues.len() >= 5, "{issues:?}");
+}
+
+#[test]
+fn precheck_uses_derived_number_lower_bounds_and_actionable_suggestions() {
+    let sources = vec![
+        source_column("N_INTEGER", "NUMBER", Some(12), Some(2), None),
+        source_column("N_SCALE", "NUMBER", Some(4), Some(6), None),
+        source_column("N_NEGATIVE", "NUMBER", Some(8), Some(-2), None),
+        source_column("N_TOO_WIDE", "NUMBER", Some(38), Some(-30), None),
+        SourceColumn {
+            name: "T_TOO_PRECISE".to_owned(),
+            data_type: "TIMESTAMP".to_owned(),
+            precision: None,
+            scale: None,
+            length: None,
+            fsp: Some(9),
+            support: None,
+        },
+        SourceColumn {
+            name: "T_NARROW".to_owned(),
+            data_type: "TIMESTAMP".to_owned(),
+            precision: None,
+            scale: None,
+            length: None,
+            fsp: Some(3),
+            support: None,
+        },
+    ];
+    let targets = vec![
+        target_column(
+            "N_INTEGER",
+            "decimal(8,2)",
+            "decimal",
+            Some(8),
+            Some(2),
+            None,
+            None,
+            true,
+            None,
+            1,
+        ),
+        target_column(
+            "N_SCALE",
+            "decimal(6,4)",
+            "decimal",
+            Some(6),
+            Some(4),
+            None,
+            None,
+            true,
+            None,
+            2,
+        ),
+        target_column(
+            "N_NEGATIVE",
+            "decimal(9,0)",
+            "decimal",
+            Some(9),
+            Some(0),
+            None,
+            None,
+            true,
+            None,
+            3,
+        ),
+        target_column(
+            "N_TOO_WIDE",
+            "decimal(38,0)",
+            "decimal",
+            Some(38),
+            Some(0),
+            None,
+            None,
+            true,
+            None,
+            4,
+        ),
+        target_column(
+            "T_TOO_PRECISE",
+            "datetime(6)",
+            "datetime",
+            None,
+            None,
+            None,
+            Some(6),
+            true,
+            None,
+            5,
+        ),
+        target_column(
+            "T_NARROW",
+            "datetime(3)",
+            "datetime",
+            None,
+            None,
+            None,
+            Some(3),
+            true,
+            None,
+            6,
+        ),
+    ];
+
+    let issues = precheck("T_POSITION", &sources, &targets);
+    let issue_for = |column: &str| {
+        issues
+            .iter()
+            .find(|issue| issue.column == column)
+            .unwrap_or_else(|| panic!("missing {column} in {issues:?}"))
+    };
+
+    let integer_issue = issue_for("N_INTEGER");
+    assert!(integer_issue.rule.contains("整数位不足"));
+    assert_eq!(
+        integer_issue.suggestion.as_deref(),
+        Some("改为 DECIMAL(12,2)")
+    );
+
+    let scale_issue = issue_for("N_SCALE");
+    assert!(scale_issue.rule.contains("目标标度不足"));
+    assert_eq!(scale_issue.suggestion.as_deref(), Some("改为 DECIMAL(6,6)"));
+
+    assert_eq!(
+        issue_for("N_NEGATIVE").suggestion.as_deref(),
+        Some("改为 DECIMAL(10,0)")
+    );
+    assert_eq!(
+        issue_for("N_TOO_WIDE").suggestion.as_deref(),
+        Some("无合法目标形状，需改源 SQL 或 CAST 收窄")
+    );
+    assert_eq!(
+        issue_for("T_TOO_PRECISE").suggestion.as_deref(),
+        Some("改源 SQL 加 CAST 收窄到 TIMESTAMP(6)")
+    );
+    assert_eq!(
+        issue_for("T_NARROW").suggestion.as_deref(),
+        Some("改为 DATETIME(6)")
+    );
 }
 
 #[test]
@@ -379,8 +521,43 @@ fn open_rejects_a_target_date_column_mapped_from_a_non_date_source() {
         .iter()
         .any(|issue| {
             issue["column"] == "C_NAME"
-                && issue["rule"] == "target_date_col 必须对应同名的 Oracle DATE 源列"
+                && issue["rule"]
+                    == "target_date_col 必须对应同名的 Oracle DATE 或 TIMESTAMP(0..6) 源列"
         }));
+}
+
+#[test]
+fn open_accepts_a_supported_timestamp_business_date_column() {
+    let sources = vec![SourceColumn {
+        name: "D_BIZ".to_owned(),
+        data_type: "TIMESTAMP".to_owned(),
+        precision: None,
+        scale: None,
+        length: None,
+        fsp: Some(3),
+        support: None,
+    }];
+    let targets = vec![target_column(
+        "D_BIZ",
+        "datetime(6)",
+        "datetime",
+        None,
+        None,
+        None,
+        Some(6),
+        true,
+        None,
+        1,
+    )];
+    let destination = Arc::new(FakeDestination {
+        columns: targets,
+        ..FakeDestination::default()
+    });
+    let service = SinkService::new("qbs", destination);
+
+    let opened = service.open(open_request(sources)).unwrap();
+
+    assert_eq!(opened.columns_checked, 1);
 }
 
 #[test]
