@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{PrecheckIssue, SourceColumn, TargetColumn};
+use crate::{PrecheckIssue, RangeCheckColumn, SourceColumn, TargetColumn};
 
 pub fn precheck(
     target_table: &str,
@@ -22,6 +22,34 @@ pub(crate) fn precheck_with_date_column(
         source_columns,
         target_columns,
     )
+}
+
+pub(crate) fn range_check_columns(
+    source_columns: &[SourceColumn],
+    target_columns: &[TargetColumn],
+) -> Vec<RangeCheckColumn> {
+    let targets: HashMap<String, &TargetColumn> = target_columns
+        .iter()
+        .map(|column| (column.name.to_uppercase(), column))
+        .collect();
+
+    source_columns
+        .iter()
+        .filter(|source| {
+            source.data_type.eq_ignore_ascii_case("NUMBER")
+                && source.precision.is_none()
+                && source.scale.is_none()
+        })
+        .filter_map(|source| {
+            let target = targets.get(&source.name.to_uppercase()).copied()?;
+            let (precision, scale) = target_decimal_shape(target)?;
+            Some(RangeCheckColumn {
+                column: source.name.clone(),
+                precision,
+                scale,
+            })
+        })
+        .collect()
 }
 
 fn precheck_inner(
@@ -148,6 +176,25 @@ fn validate_number(
 ) {
     let (precision, scale) = match (source.precision, source.scale) {
         (Some(precision), Some(scale)) => (precision, scale),
+        (None, None) => {
+            match target {
+                Some(target) if !target.data_type.eq_ignore_ascii_case("decimal") => {
+                    issues.push(issue(source, Some(target), "NUMBER 的目标类型必须是 DECIMAL"));
+                }
+                Some(target) if target_decimal_shape(target).is_none() => issues.push(issue(
+                    source,
+                    Some(target),
+                    "裸 NUMBER / 数值表达式列的目标 DECIMAL 必须具有有效的 precision 和 scale",
+                )),
+                Some(_) => {}
+                None => issues.push(issue(
+                    source,
+                    target,
+                    "NUMBER 必须同时具有可判定的 precision 和 scale，裸 NUMBER 与表达式列需要目标 DECIMAL 形状",
+                )),
+            }
+            return;
+        }
         _ => {
             issues.push(issue(
                 source,
@@ -193,6 +240,22 @@ fn validate_number(
             ));
         }
     }
+}
+
+pub(crate) fn range_check_issue(
+    source: &SourceColumn,
+    target: &TargetColumn,
+    range_column: &RangeCheckColumn,
+    invalid_rows: u64,
+) -> PrecheckIssue {
+    issue(
+        source,
+        Some(target),
+        &format!(
+            "值域校核失败：{invalid_rows} 行无法无损写入 DECIMAL({}, {})",
+            range_column.precision, range_column.scale
+        ),
+    )
 }
 
 fn validate_varchar(
@@ -284,4 +347,17 @@ fn source_display(column: &SourceColumn) -> String {
 
 fn target_display(column: &TargetColumn) -> String {
     column.column_type.to_uppercase()
+}
+
+fn target_decimal_shape(column: &TargetColumn) -> Option<(u32, u32)> {
+    if !column.data_type.eq_ignore_ascii_case("decimal") {
+        return None;
+    }
+    let precision = u32::try_from(column.precision?).ok()?;
+    let scale = u32::try_from(column.scale?).ok()?;
+    (1..=65)
+        .contains(&precision)
+        .then_some(())
+        .filter(|_| scale <= 30 && scale <= precision)
+        .map(|_| (precision, scale))
 }

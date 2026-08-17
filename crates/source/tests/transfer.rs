@@ -1,8 +1,8 @@
 use db_qbs_source::{
     generate_run_id, run_transfer, BatchPayload, BatchResponse, ColumnSupport, CommitResponse,
-    FailureKind, OpenRunRequest, OpenRunResponse, RowSource, RunResponse, SinkClient, SinkError,
-    SinkErrorKind, SinkPrecheckIssue, SourceColumn, SourceReadError, Terminal, TransferEvent,
-    TransferRequest, BATCH_BYTE_BUDGET,
+    FailureKind, OpenRunRequest, OpenRunResponse, RangeCheckColumn, RangeCheckResult, RowSource,
+    RunResponse, SinkClient, SinkError, SinkErrorKind, SinkPrecheckIssue, SourceColumn,
+    SourceReadError, Terminal, TransferEvent, TransferRequest, BATCH_BYTE_BUDGET,
 };
 
 const RUN_ID: &str = "20260814153000_a3f19c";
@@ -170,6 +170,67 @@ fn empty_result_commits_without_sending_a_batch() {
 }
 
 #[test]
+fn range_check_runs_between_two_open_requests_and_emits_scan_event() {
+    let mut source = FakeSource::new(vec![]);
+    source.range_check = Some((
+        vec![RangeCheckResult {
+            column: "ID".to_owned(),
+            invalid_rows: 0,
+        }],
+        7,
+    ));
+    let mut sink = RecordingSink {
+        range_check_columns: Some(vec![RangeCheckColumn {
+            column: "ID".to_owned(),
+            precision: 8,
+            scale: 0,
+        }]),
+        ..RecordingSink::default()
+    };
+    let mut events = Vec::new();
+
+    run_transfer(
+        &mut source,
+        &mut sink,
+        TransferRequest {
+            run_id: RUN_ID.to_owned(),
+            target_table: "ORDERS".to_owned(),
+            target_date_col: "BIZ_DAY".to_owned(),
+            biz_date: "2026-08-14".to_owned(),
+        },
+        |event| events.push(event),
+    )
+    .unwrap();
+
+    assert_eq!(sink.calls, vec!["open", "open", "commit"]);
+    assert_eq!(sink.range_check_requests.len(), 2);
+    assert!(sink.range_check_requests[0].is_none());
+    assert_eq!(
+        sink.range_check_requests[1],
+        Some(vec![RangeCheckResult {
+            column: "ID".to_owned(),
+            invalid_rows: 0,
+        }])
+    );
+    assert_eq!(
+        source.range_check_requests,
+        vec![vec![RangeCheckColumn {
+            column: "ID".to_owned(),
+            precision: 8,
+            scale: 0,
+        }]]
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        TransferEvent::RangeCheckExecuted {
+            columns,
+            scanned_rows: 7,
+            ..
+        } if columns == &vec!["ID".to_owned()]
+    )));
+}
+
+#[test]
 fn fetch_failure_aborts_and_does_not_commit() {
     let mut source = FailingSource {
         inner: FakeSource::new(vec![vec![Some("1".to_owned())]]),
@@ -328,6 +389,8 @@ fn abort_failure_is_reported_before_the_failed_stage() {
 struct FakeSource {
     columns: Vec<SourceColumn>,
     rows: std::vec::IntoIter<Vec<Option<String>>>,
+    range_check: Option<(Vec<RangeCheckResult>, u64)>,
+    range_check_requests: Vec<Vec<RangeCheckColumn>>,
 }
 
 impl FakeSource {
@@ -343,6 +406,8 @@ impl FakeSource {
                 support: Some(ColumnSupport::Ok),
             }],
             rows: rows.into_iter(),
+            range_check: None,
+            range_check_requests: Vec::new(),
         }
     }
 }
@@ -354,6 +419,17 @@ impl RowSource for FakeSource {
 
     fn next_row(&mut self) -> Result<Option<Vec<Option<String>>>, SourceReadError> {
         Ok(self.rows.next())
+    }
+
+    fn range_check(
+        &mut self,
+        columns: &[RangeCheckColumn],
+        _biz_date: &str,
+    ) -> Result<(Vec<RangeCheckResult>, u64), SourceReadError> {
+        self.range_check_requests.push(columns.to_vec());
+        self.range_check.clone().ok_or_else(|| {
+            SourceReadError::with_kind("range check was not configured", None, FailureKind::Defect)
+        })
     }
 }
 
@@ -384,13 +460,27 @@ struct RecordingSink {
     calls: Vec<&'static str>,
     batch_rows: Vec<usize>,
     commit_counts: Option<(u64, u64)>,
+    range_check_columns: Option<Vec<RangeCheckColumn>>,
+    range_check_requests: Vec<Option<Vec<RangeCheckResult>>>,
     wrong_batch_count: bool,
     abort_error: bool,
 }
 
 impl SinkClient for RecordingSink {
-    fn open(&mut self, _request: &OpenRunRequest) -> Result<OpenRunResponse, SinkError> {
+    fn open(&mut self, request: &OpenRunRequest) -> Result<OpenRunResponse, SinkError> {
         self.calls.push("open");
+        self.range_check_requests
+            .push(request.range_check_results.clone());
+        if request.range_check_results.is_none() {
+            if let Some(range_check_columns) = &self.range_check_columns {
+                return Ok(OpenRunResponse {
+                    run_id: RUN_ID.to_owned(),
+                    staging_table: String::new(),
+                    columns_checked: 1,
+                    range_check_columns: Some(range_check_columns.clone()),
+                });
+            }
+        }
         Ok(OpenRunResponse {
             run_id: RUN_ID.to_owned(),
             staging_table: format!("ORDERS__stg_{RUN_ID}"),

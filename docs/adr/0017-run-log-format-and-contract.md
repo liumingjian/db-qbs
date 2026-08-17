@@ -191,6 +191,7 @@ jq -c 'select(.run_id == $run_id and (.event == "run_opened" or .event == "run_f
 | `sql_shape_precheck_passed` | source | `message` |
 | `stage_changed` | source | `stage`, `message` |
 | `mapping_precheck_failed` | source（sink 成文后透传） | `column`, `source`, `target`, `rule`, `message` |
+| `range_check_executed` | source | `columns`, `scanned_rows`, `ms` |
 | `run_opened` | source（`POST /runs` 成功后） | `staging_table`, `columns_checked`, `message` |
 | `batch_pushed` | source | `seq`, `rows`, `source_rows`, `bytes`, `written`, `ms` |
 | `commit_diagnosed` | source | `terminal`, `message` |

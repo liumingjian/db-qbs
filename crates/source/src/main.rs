@@ -300,6 +300,21 @@ fn emit_transfer_event(event: TransferEvent, run_id: &str, task: &Path) {
                 ("rule", json!(rule)),
             ],
         ),
+        TransferEvent::RangeCheckExecuted {
+            columns,
+            scanned_rows,
+            ms,
+        } => emit_with_run(
+            LogLevel::Info,
+            LogEvent::RangeCheckExecuted,
+            Some(run_id),
+            Some(task),
+            [
+                ("columns", json!(columns)),
+                ("scanned_rows", json!(scanned_rows)),
+                ("ms", json!(ms)),
+            ],
+        ),
         TransferEvent::CommitDiagnosed { terminal, message } => emit_with_run(
             LogLevel::Warn,
             LogEvent::CommitDiagnosed,

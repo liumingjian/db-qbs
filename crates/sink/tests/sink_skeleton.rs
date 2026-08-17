@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use db_qbs_sink::{
     build_staging_ddl, check_connection_settings, precheck, AtomicSwapError, AtomicSwapRequest,
     AtomicSwapResult, CreateStagingError, Destination, DropStagingError, OpenRunRequest,
-    SinkConfig, SinkService, SourceColumn, TargetColumn, WriteBatchError,
+    RangeCheckColumn, RangeCheckResult, SinkConfig, SinkService, SourceColumn, TargetColumn,
+    WriteBatchError,
 };
 
 const RUN_ID: &str = "20260814091530_a3f19c";
@@ -357,6 +358,125 @@ fn open_creates_staging_then_abort_is_idempotent() {
             .staging_dropped
     );
     assert_eq!(destination.dropped.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn bare_number_range_check_delays_staging_and_rejects_invalid_rows() {
+    let sources = vec![
+        source_column("N_RAW", "NUMBER", None, None, None),
+        source_column("D_BIZ", "DATE", None, None, None),
+    ];
+    let targets = vec![
+        target_column(
+            "N_RAW",
+            "decimal(10,2)",
+            "decimal",
+            Some(10),
+            Some(2),
+            None,
+            None,
+            true,
+            None,
+            1,
+        ),
+        target_column(
+            "D_BIZ",
+            "datetime",
+            "datetime",
+            None,
+            None,
+            None,
+            Some(0),
+            true,
+            None,
+            2,
+        ),
+    ];
+    let destination = Arc::new(FakeDestination {
+        columns: targets,
+        ..FakeDestination::default()
+    });
+    let service = SinkService::new("qbs", destination.clone());
+
+    let first = service.open(open_request(sources.clone())).unwrap();
+
+    assert_eq!(first.staging_table, "");
+    assert_eq!(first.columns_checked, 2);
+    assert_eq!(
+        first.range_check_columns,
+        Some(vec![RangeCheckColumn {
+            column: "N_RAW".to_owned(),
+            precision: 10,
+            scale: 2,
+        }])
+    );
+    assert!(destination.created.lock().unwrap().is_empty());
+
+    let mut second_request = open_request(sources);
+    second_request.range_check_results = Some(vec![RangeCheckResult {
+        column: "N_RAW".to_owned(),
+        invalid_rows: 3,
+    }]);
+    let error = service.open(second_request).unwrap_err();
+
+    assert_eq!(error.code, "PRECHECK_FAILED");
+    assert_eq!(error.details["issues"][0]["column"], "N_RAW");
+    assert!(error.details["issues"][0]["rule"]
+        .as_str()
+        .unwrap()
+        .contains("3"));
+    assert!(destination.created.lock().unwrap().is_empty());
+}
+
+#[test]
+fn bare_number_range_check_with_no_invalid_rows_creates_staging() {
+    let sources = vec![
+        source_column("N_RAW", "NUMBER", None, None, None),
+        source_column("D_BIZ", "DATE", None, None, None),
+    ];
+    let targets = vec![
+        target_column(
+            "N_RAW",
+            "decimal(10,2)",
+            "decimal",
+            Some(10),
+            Some(2),
+            None,
+            None,
+            true,
+            None,
+            1,
+        ),
+        target_column(
+            "D_BIZ",
+            "datetime",
+            "datetime",
+            None,
+            None,
+            None,
+            Some(0),
+            true,
+            None,
+            2,
+        ),
+    ];
+    let destination = Arc::new(FakeDestination {
+        columns: targets,
+        ..FakeDestination::default()
+    });
+    let service = SinkService::new("qbs", destination.clone());
+
+    service.open(open_request(sources.clone())).unwrap();
+    let mut second_request = open_request(sources);
+    second_request.range_check_results = Some(vec![RangeCheckResult {
+        column: "N_RAW".to_owned(),
+        invalid_rows: 0,
+    }]);
+
+    let opened = service.open(second_request).unwrap();
+
+    assert_eq!(opened.range_check_columns, None);
+    assert_eq!(destination.created.lock().unwrap().len(), 1);
 }
 
 #[test]
