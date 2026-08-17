@@ -32,7 +32,8 @@ fn generated_target_ddl_stays_compatible_with_sink_precheck_for_m1_types() {
 
     for case in cases {
         for source_columns in source_columns_for(case) {
-            let ddl = generate_target_ddl(&source_columns, "T_GENERATED", "D_BIZ").unwrap();
+            let ddl =
+                generate_target_ddl(&source_columns, "T_GENERATED", "D_BIZ", None).unwrap();
             let target_columns = parse_target_columns(&ddl);
             let sink_source_columns = source_columns
                 .iter()

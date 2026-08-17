@@ -7,6 +7,7 @@ use crate::{
     FailureKind, RowSource, SourceColumn, SourceConfig, SourceReadError, TaskConfig,
     FETCH_ARRAY_SIZE,
 };
+use crate::target_ddl::{derive_number_shape, is_supported_decimal_shape};
 
 const DESCRIBE_BIZ_DATE: &str = "0001-01-01";
 
@@ -346,17 +347,10 @@ fn describe_column(name: &str, oracle_type: &OracleType) -> (SourceColumn, Value
 }
 
 fn number_support(precision: u8, scale: i8) -> ColumnSupport {
-    let precision = i64::from(precision);
-    let scale = i64::from(scale);
-    let (target_precision, target_scale) = if scale < 0 {
-        (precision + scale.abs(), 0)
-    } else if scale > precision {
-        (scale, scale)
-    } else {
-        (precision, scale)
-    };
+    let (target_precision, target_scale) =
+        derive_number_shape(i64::from(precision), i64::from(scale));
 
-    if target_precision <= 65 && target_scale <= 30 {
+    if is_supported_decimal_shape(target_precision, target_scale) {
         ColumnSupport::Ok
     } else {
         ColumnSupport::Unsupported

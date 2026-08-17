@@ -898,19 +898,28 @@ fn handle_column_fetch(request: &mut Request, config: &SourceConfig) -> HttpResp
         Ok(columns) => columns,
         Err(error) => return oracle_failure(error),
     };
-    match generate_target_ddl(&columns, &task.target_table, &task.target_date_col) {
+    match generate_target_ddl(
+        &columns,
+        &task.target_table,
+        &task.target_date_col,
+        task.column_precision.as_ref(),
+    ) {
         Ok(target_ddl) => json_response(
             200,
             &json!({ "columns": columns, "target_ddl": target_ddl }),
         ),
-        Err(error) => json_response(
-            422,
-            &json!({
-                "kind": "target_ddl",
-                "message": error.message,
-                "column": error.column,
-            }),
-        ),
+        Err(error) => {
+            let message = error.to_string();
+            let columns = error.columns;
+            json_response(
+                422,
+                &json!({
+                    "kind": "target_ddl",
+                    "message": message,
+                    "columns": columns,
+                }),
+            )
+        }
     }
 }
 fn emit(level: LogLevel, event: LogEvent, fields: serde_json::Value) {

@@ -41,7 +41,7 @@ pub use sql_builder::{
     builder_column_query, builder_table_query, generate_builder_task, validate_builder_dblink,
     BuilderColumn, BuilderTable, BuilderTaskInput,
 };
-pub use target_ddl::{generate_target_ddl, TargetDdlError};
+pub use target_ddl::{generate_target_ddl, TargetDdlColumnError, TargetDdlError};
 pub use task_store::{Task, TaskInput, TaskStore};
 pub use transfer::{
     generate_run_id, run_transfer, RowSource, RunStage, SourceReadError, TransferEvent,
