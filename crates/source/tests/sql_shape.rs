@@ -8,6 +8,7 @@ fn precheck_reports_all_shape_violations_together() {
         source_date_col: "BIZ_DAY".to_owned(),
         target_table: "ORDERS".to_owned(),
         target_date_col: "OTHER_DAY".to_owned(),
+        column_precision: None,
     };
 
     let problems = precheck_sql(&task).unwrap_err();
@@ -139,5 +140,6 @@ fn task(sql: &str) -> TaskConfig {
         source_date_col: "BIZ_DAY".to_owned(),
         target_table: "ORDERS".to_owned(),
         target_date_col: "biz_day".to_owned(),
+        column_precision: None,
     }
 }

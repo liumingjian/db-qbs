@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use db_qbs_source::{load_source_config, load_task_config, parse_biz_date};
+use db_qbs_source::{load_source_config, load_task_config, parse_biz_date, ColumnPrecision};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -81,6 +81,36 @@ fn business_date_is_an_exact_timezone_free_calendar_day() {
     ] {
         assert!(parse_biz_date(invalid).is_err(), "accepted {invalid}");
     }
+}
+
+#[test]
+fn task_precision_subtable_is_optional_and_preserves_negative_scale() {
+    let directory = temp_directory();
+    let legacy = write(&directory, "legacy-task.toml", valid_task());
+    let configured = write(
+        &directory,
+        "configured-task.toml",
+        &format!(
+            "{}\n[column_precision]\nN_AMT = [20, 4]\nN_RATE = [38, -30]\n",
+            valid_task()
+        ),
+    );
+
+    assert_eq!(load_task_config(&legacy).unwrap().column_precision, None);
+
+    let mut expected = ColumnPrecision::new();
+    expected.insert("N_AMT".to_owned(), [20, 4]);
+    expected.insert("N_RATE".to_owned(), [38, -30]);
+    assert_eq!(
+        load_task_config(&configured).unwrap().column_precision,
+        Some(expected)
+    );
+    let loaded = load_task_config(&configured).unwrap();
+    let serialized = toml::to_string(&loaded).unwrap();
+    assert!(serialized.contains("[column_precision]"));
+    assert!(serialized.contains("N_RATE = [38, -30]"));
+
+    fs::remove_dir_all(directory).unwrap();
 }
 
 fn valid_source() -> &'static str {

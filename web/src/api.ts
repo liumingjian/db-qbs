@@ -1,9 +1,12 @@
+export type ColumnPrecision = Record<string, [number, number]>;
+
 export interface TaskInput {
   name: string;
   source_sql: string;
   source_date_col: string;
   target_table: string;
   target_date_col: string;
+  column_precision?: ColumnPrecision;
 }
 
 export interface Task extends TaskInput {
@@ -133,6 +136,9 @@ export function taskInputFrom(
     source_date_col: task.source_date_col,
     target_table: task.target_table,
     target_date_col: task.target_date_col,
+    ...(task.column_precision === undefined
+      ? {}
+      : { column_precision: task.column_precision }),
     ...overrides,
   };
 }

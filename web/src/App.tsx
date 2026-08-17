@@ -1185,6 +1185,9 @@ function taskDefinitionFrom(input: TaskInput): TaskDefinition {
     source_date_col: input.source_date_col,
     target_table: input.target_table,
     target_date_col: input.target_date_col,
+    ...(input.column_precision === undefined
+      ? {}
+      : { column_precision: input.column_precision }),
   };
 }
 
