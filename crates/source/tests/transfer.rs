@@ -1,8 +1,8 @@
 use db_qbs_source::{
-    generate_run_id, run_transfer, BatchPayload, BatchResponse, CommitResponse, FailureKind,
-    OpenRunRequest, OpenRunResponse, RowSource, RunResponse, SinkClient, SinkError, SinkErrorKind,
-    SinkPrecheckIssue, SourceColumn, SourceReadError, Terminal, TransferEvent, TransferRequest,
-    BATCH_BYTE_BUDGET,
+    generate_run_id, run_transfer, BatchPayload, BatchResponse, ColumnSupport, CommitResponse,
+    FailureKind, OpenRunRequest, OpenRunResponse, RowSource, RunResponse, SinkClient, SinkError,
+    SinkErrorKind, SinkPrecheckIssue, SourceColumn, SourceReadError, Terminal, TransferEvent,
+    TransferRequest, BATCH_BYTE_BUDGET,
 };
 
 const RUN_ID: &str = "20260814153000_a3f19c";
@@ -339,6 +339,8 @@ impl FakeSource {
                 precision: Some(8),
                 scale: Some(0),
                 length: None,
+                fsp: None,
+                support: Some(ColumnSupport::Ok),
             }],
             rows: rows.into_iter(),
         }
@@ -393,6 +395,7 @@ impl SinkClient for RecordingSink {
             run_id: RUN_ID.to_owned(),
             staging_table: format!("ORDERS__stg_{RUN_ID}"),
             columns_checked: 1,
+            range_check_columns: None,
         })
     }
 
@@ -464,6 +467,7 @@ impl SinkClient for RejectingOpenSink {
             source: "NUMBER(8,0)".to_owned(),
             target: "decimal(7,0)".to_owned(),
             rule: "precision differs".to_owned(),
+            suggestion: None,
         }]);
         Err(error)
     }
@@ -529,6 +533,7 @@ impl SinkClient for CommitDisconnectSink {
             run_id: RUN_ID.to_owned(),
             staging_table: format!("ORDERS__stg_{RUN_ID}"),
             columns_checked: 1,
+            range_check_columns: None,
         })
     }
 

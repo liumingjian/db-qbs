@@ -109,7 +109,10 @@ fn open_request_for(run_id: &str) -> OpenRunRequest {
             precision: None,
             scale: None,
             length: None,
+            fsp: None,
+            support: None,
         }],
+        range_check_results: None,
     }
 }
 

@@ -38,6 +38,7 @@ fn precheck_inner(
             target: target_table.to_owned(),
             rule: "目标表名最多 37 个字符，否则暂存表名会超过 MySQL 64 字符上限；请缩短目标表名"
                 .to_owned(),
+            suggestion: None,
         });
     }
 
@@ -81,6 +82,7 @@ fn precheck_inner(
                 source: "<missing>".to_owned(),
                 target: target_display(target),
                 rule: "源端结果缺少同名列，源端与目标端列名集合必须完全相等".to_owned(),
+                suggestion: None,
             });
         }
     }
@@ -118,6 +120,7 @@ fn validate_date_column(
             .map(|column| target_display(column))
             .unwrap_or_else(|| "<missing>".to_owned()),
         rule: "target_date_col 必须对应同名的 Oracle DATE 源列".to_owned(),
+        suggestion: None,
     });
 }
 
@@ -259,6 +262,8 @@ fn issue(source: &SourceColumn, target: Option<&TargetColumn>, rule: &str) -> Pr
             .map(target_display)
             .unwrap_or_else(|| "<missing>".to_owned()),
         rule: rule.to_owned(),
+        // `suggestion` 归子票 ⑥（sink 预检扩九行 + 下界式）；本票只加字段，恒 `None`（#107）。
+        suggestion: None,
     }
 }
 

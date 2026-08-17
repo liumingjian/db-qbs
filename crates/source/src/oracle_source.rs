@@ -3,8 +3,9 @@ use oracle::sql_type::{OracleType, Timestamp};
 use oracle::{Connection, InitParams, ResultSet, Row};
 
 use crate::{
-    builder_column_query, builder_table_query, BuilderColumn, BuilderTable, FailureKind, RowSource,
-    SourceColumn, SourceConfig, SourceReadError, TaskConfig, FETCH_ARRAY_SIZE,
+    builder_column_query, builder_table_query, BuilderColumn, BuilderTable, ColumnSupport,
+    FailureKind, RowSource, SourceColumn, SourceConfig, SourceReadError, TaskConfig,
+    FETCH_ARRAY_SIZE,
 };
 
 const DESCRIBE_BIZ_DATE: &str = "0001-01-01";
@@ -242,6 +243,10 @@ fn describe_column(name: &str, oracle_type: &OracleType) -> (SourceColumn, Value
             precision,
             scale,
             length,
+            // 语义留空：`fsp` 归子票 ③（describe 扩九行形态），`support` 归 ③/⑤ 的推导函数。
+            // 本票只把字段加齐、序列化通，行为零变化（#107）。
+            fsp: None,
+            support: Some(ColumnSupport::Ok),
         },
         value_kind,
     )

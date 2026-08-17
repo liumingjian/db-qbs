@@ -104,6 +104,8 @@ impl<D: Destination> SinkService<D> {
             run_id: request.run_id,
             staging_table,
             columns_checked: target_columns.len(),
+            // 3.5 步归子票 ⑦；本票只加字段，恒 `None`（#107）。
+            range_check_columns: None,
         })
     }
 

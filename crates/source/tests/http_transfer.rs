@@ -3,8 +3,8 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 
 use db_qbs_source::{
-    run_transfer, HttpSinkClient, OpenRunRequest, RowSource, SinkClient, SinkErrorKind,
-    SourceColumn, SourceReadError, TransferRequest,
+    run_transfer, ColumnSupport, HttpSinkClient, OpenRunRequest, RowSource, SinkClient,
+    SinkErrorKind, SourceColumn, SourceReadError, TransferRequest,
 };
 use serde_json::{json, Value};
 
@@ -108,6 +108,7 @@ fn error_response_preserves_sink_diagnostics() {
             target_date_col: "BIZ_DAY".to_owned(),
             biz_date: "2026-08-14".to_owned(),
             source_columns: Vec::new(),
+            range_check_results: None,
         })
         .unwrap_err();
 
@@ -133,6 +134,8 @@ impl RowSource for FakeSource {
                 precision: Some(8),
                 scale: Some(0),
                 length: None,
+                fsp: None,
+                support: Some(ColumnSupport::Ok),
             }]
         });
         &COLUMNS

@@ -551,3 +551,60 @@ sink 照旧按 §3.1 自己判逐列类型——`support` 一旦被当成判定�
 - §3.1「逐列类型判定集中在 sink」因本增补**更牢**：`suggestion` 由 sink 算是它的直接推论，
   `support` 的「sink 不得读」是它的护栏。
 - 载荷形状、64 MiB 上限、§3.3 列序、§5 重跑语义**全部原样**。
+
+## 2026-08-17 增补三：3.5 步值域校核的两个可选字段，封条仍不解
+
+**来源**：[#106](https://github.com/liumingjian/db-qbs/issues/106) 裁定 Q15，实现票
+[#107](https://github.com/liumingjian/db-qbs/issues/107)。
+**关联**：[ADR-0030](0030-m3-type-whitelist.md) §4.3（预检固定顺序的 3.5 步）。
+**本增补只定协议形状，不含实现**——3.5 步的语义归 M3 子票 ⑦（[#113](https://github.com/liumingjian/db-qbs/issues/113)）。
+
+### 1. 为什么协议里非有它不可
+
+ADR-0030 §4.3 把值域校核写成「预检固定顺序」的第 3.5 步，读起来像单进程五步。
+实际不是：`precheck()`（`crates/sink/src/precheck.rs`）是纯函数，没有数据库句柄、
+也拿不到源端 SQL 文本；而校核 SQL 必须扫 **Oracle 源表**，sink 连的是 MySQL。
+所以 3.5 步横跨两个进程，落地形状是 `sink(1–3) → source(3.5 执行) → sink(3.5 判定 + 4)` 一次往返，
+这一趟要过线的东西必须有字段装。
+
+### 2. 报文形状：两个新可选字段
+
+| 字段 | 方向 | 落点 | 承载 |
+|---|---|---|---|
+| `range_check_columns` | sink → source | `OpenRunResponse` | 哪几列要校核 + 每列**推导出的目标形状** `(p', s')` |
+| `range_check_results` | source → sink | `OpenRunRequest` | 每列的 `invalid_rows` |
+
+元素形状：
+
+```
+range_check_columns[] = { column: string, precision: u32, scale: u32 }
+range_check_results[]  = { column: string, invalid_rows: u64 }
+```
+
+`precision` / `scale` 是**推导形状**不是源端 `(p,s)`，推导形状的标度恒非负（ADR-0030 §1 形态 3
+的 `s < 0` 推导成 `DECIMAL(p+|s|,0)`），故用无符号——**这个类型选择本身就是一道断言**，
+谁想往里塞源端负标度会在编译期撞墙。
+
+**`range_check_results` 落在 `OpenRunRequest` 上，不新开端点。** 五端点不变这条不松动，
+那一趟往返是对 `POST /v1/runs` 的第二次调用（同 `run_id`）。
+
+### 3. 判定仍然只有 sink 一份
+
+`source` 回的是**事实**（`invalid_rows` 的计数），不是结论。
+`PrecheckIssue` 由 sink 生成、与 1–3 步的结果合并进同一张报告，然后才走第 4 步建暂存表。
+§3.1「逐列类型判定集中在 sink」因本增补**更牢**而不是被削弱。
+
+已评估否决的两条：
+- **让 source 全包**（自己判哪些列要校核、自己生成不合规记录）——判定搬回 source，直接撞 §3.1。
+- **把源端 SQL 文本发给 sink 走 dblink 反向扫**——要给 sink 开一条全新的跨端能力，
+  正是 ADR-0027 §3 封条挡住的那类事，且性能面零实测。
+
+### 4. 明确**没有**变的
+
+- **五个端点不变**，**错误码闭集不增码**（`invalid_rows > 0` 复用既有的预检失败分类），
+  **`/v1/` 前缀不动**。
+- **两个字段永久保持可选**（#106 裁定 Q14，与增补一 / 增补二的三个字段同一条）。
+  收紧成必填 = 老 source 发的报文被新 sink 拒 = 破坏性变更，封条不解。
+- ADR-0027 §3「不属于任何 run 的元数据查询端点」的**封条不解**，「重开条件」一节一个字不改。
+  **加字段与开端点是两个量级**——本增补是第三次援引同一条判例，仍不是把它放宽成惯例。
+- 载荷形状、64 MiB 上限、§3.3 列序、§5 重跑语义**全部原样**。

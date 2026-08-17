@@ -43,6 +43,20 @@ impl SinkConfig {
     }
 }
 
+/// 取列面的三档支持标记（ADR-0010 2026-08-16 增补二 §2）。
+///
+/// **`sink` 不得读它做任何判定。** 它随 `POST /runs` 的 `source_columns` 一起过线，
+/// 只是因为两端共用同一个结构形状；逐列类型判定按 ADR-0010 §3.1 集中在 sink，
+/// 由 sink 自己按 `type` / `precision` / `scale` / `length` / `fsp` 判。
+/// 一旦被当成判定输入，判定就悄悄搬回 source 侧了。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColumnSupport {
+    Ok,
+    NeedsPrecision,
+    Unsupported,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceColumn {
@@ -52,6 +66,34 @@ pub struct SourceColumn {
     pub precision: Option<i64>,
     pub scale: Option<i64>,
     pub length: Option<u64>,
+    /// `TIMESTAMP(n)` 的 `n`。非 `TIMESTAMP` 列不带它（ADR-0010 2026-08-16 增补一）。
+    /// **永久可选**，不设收紧成必填的计划（#106 裁定 Q14）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fsp: Option<u32>,
+    /// 见 [`ColumnSupport`]——展示提示，**不是预检裁决**。同样永久可选。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub support: Option<ColumnSupport>,
+}
+
+/// 3.5 步值域校核：sink 跑完 1–3 步后告诉 source「哪几列要校核 + 推导出的目标形状」。
+///
+/// `precision` / `scale` 是**推导出的目标形状** `(p', s')`，不是源端 `(p, s)`；
+/// 推导形状的标度恒非负，故用无符号（#106「预检顺序加 3.5 步」）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RangeCheckColumn {
+    pub column: String,
+    pub precision: u32,
+    pub scale: u32,
+}
+
+/// 3.5 步值域校核：source 执行完聚合 SQL 后回发的每列不合规行数。
+/// **判定仍由 sink 做**（ADR-0010 §3.1）——source 只回事实，不回结论。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RangeCheckResult {
+    pub column: String,
+    pub invalid_rows: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +116,10 @@ pub struct PrecheckIssue {
     pub source: String,
     pub target: String,
     pub rule: String,
+    /// 动作型建议，**由 sink 侧算**（ADR-0010 2026-08-16 增补二 §1）——
+    /// web 不得把判定式复制进 TypeScript 重算一遍。永久可选。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -84,6 +130,9 @@ pub struct OpenRunRequest {
     pub target_date_col: String,
     pub biz_date: String,
     pub source_columns: Vec<SourceColumn>,
+    /// 3.5 步：source 回发的值域校核结果。永久可选（#106 裁定 Q14/Q15）。
+    #[serde(default)]
+    pub range_check_results: Option<Vec<RangeCheckResult>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -91,6 +140,9 @@ pub struct OpenRunResponse {
     pub run_id: String,
     pub staging_table: String,
     pub columns_checked: usize,
+    /// 3.5 步：sink 告诉 source「哪几列要跑值域校核」。永久可选（#106 裁定 Q14/Q15）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_check_columns: Option<Vec<RangeCheckColumn>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

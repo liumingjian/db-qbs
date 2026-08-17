@@ -261,6 +261,8 @@ pub fn run_transfer(
         target_date_col: request.target_date_col,
         biz_date: request.biz_date,
         source_columns: source.columns().to_vec(),
+        // 3.5 步归子票 ⑦；本票只加字段，恒 `None`（#107）。
+        range_check_results: None,
     };
     let opened = match sink.open(&open_request) {
         Ok(opened) => opened,

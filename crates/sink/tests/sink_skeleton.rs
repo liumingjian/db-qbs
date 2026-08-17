@@ -23,6 +23,8 @@ fn source_column(
         precision,
         scale,
         length,
+        fsp: None,
+        support: None,
     }
 }
 
@@ -323,6 +325,7 @@ fn open_request(source_columns: Vec<SourceColumn>) -> OpenRunRequest {
         target_date_col: "D_BIZ".to_owned(),
         biz_date: "2026-08-14".to_owned(),
         source_columns,
+        range_check_results: None,
     }
 }
 
