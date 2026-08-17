@@ -164,7 +164,7 @@ function HistoryResults({
             <th>RUN_ID</th>
             <th>任务</th>
             <th>业务日期</th>
-            <th>结局</th>
+            <th className="outcome-column">结局</th>
             <th>错误码</th>
             <th className="numeric-column">行数</th>
             <th className="numeric-column">耗时</th>
@@ -219,7 +219,7 @@ function HistoryTableRow({
             {row.run_record_id}
           </button>
         </td>
-        <td className={row.run_id === null ? "missing-run-id" : "mono"}>
+        <td className={row.run_id === null ? "missing-run-id" : "mono run-id-cell"}>
           {runIdPresentation(row)}
         </td>
         <td>
@@ -227,7 +227,7 @@ function HistoryTableRow({
           <span className="task-id">{row.task_id}</span>
         </td>
         <td className="mono">{row.biz_date}</td>
-        <td>
+        <td className="outcome-column">
           <HistoryOutcome row={row} presentation={presentation} />
         </td>
         <td>

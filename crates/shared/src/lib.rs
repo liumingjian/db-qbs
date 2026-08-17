@@ -24,7 +24,10 @@ impl fmt::Display for CanonError {
             Self::NonCanonicalNumber => {
                 formatter.write_str("driver emitted a non-canonical NUMBER")
             }
-            Self::InvalidDate => formatter.write_str("invalid DATE components"),
+            Self::InvalidDate => formatter.write_str(
+                "invalid DATE components: year must be within 0001..9999 \
+                 (Oracle BC dates are not supported)",
+            ),
             Self::InvalidTimestamp => formatter.write_str("invalid TIMESTAMP components"),
         }
     }
@@ -68,16 +71,13 @@ pub fn canon_timestamp(
     second: u32,
     nanosecond: u32,
 ) -> Result<String, CanonError> {
-    if !(1..=9999).contains(&year)
-        || nanosecond >= 1_000_000_000
-        || nanosecond % 1000 != 0
-    {
+    if !(1..=9999).contains(&year) || nanosecond >= 1_000_000_000 || nanosecond % 1000 != 0 {
         return Err(CanonError::InvalidTimestamp);
     }
 
     let date = NaiveDate::from_ymd_opt(year, month, day).ok_or(CanonError::InvalidTimestamp)?;
     let date_time = date
-        .and_hms_opt(hour, minute, second)
+        .and_hms_nano_opt(hour, minute, second, nanosecond)
         .ok_or(CanonError::InvalidTimestamp)?;
 
     Ok(format!(

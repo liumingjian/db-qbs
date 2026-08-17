@@ -112,6 +112,7 @@ fn open_request_for(run_id: &str) -> OpenRunRequest {
             fsp: None,
             support: None,
         }],
+        range_check_results: None,
     }
 }
 

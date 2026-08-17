@@ -46,6 +46,7 @@ fn invalid_shape_reports_all_problems_without_network_access() {
     assert!(codes.contains(&"additional_where_predicate"));
     assert!(codes.contains(&"unnamed_projection"));
     assert!(codes.contains(&"date_column_mismatch"));
+    assert_eq!(failure["failure_kind"], "SHAPE_PRECHECK");
 
     fs::remove_dir_all(directory).unwrap();
 }
@@ -83,7 +84,11 @@ fn valid_shape_attempts_oracle_describe_before_sink() {
         .iter()
         .find(|line| line["event"] == "run_finished")
         .unwrap();
+    // 分类必须在终态行上，排障不该靠读人话反推是哪一侧坏了（V1 成功标准第 4 条）。
+    // Oracle 客户端在台架外根本起不来，这一步撞的必然是「连不上 Oracle」。
+    assert_eq!(terminal["failure_kind"], "SOURCE_CONNECT");
     for field in [
+        "failure_kind",
         "source_rows",
         "source_batches",
         "staged_rows",

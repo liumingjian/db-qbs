@@ -195,10 +195,17 @@ jq -c 'select(.run_id == $run_id and (.event == "run_opened" or .event == "run_f
 | `batch_pushed` | source | `seq`, `rows`, `source_rows`, `bytes`, `written`, `ms` |
 | `commit_diagnosed` | source | `terminal`, `message` |
 | `abort_failed` | source | `message` |
-| `run_finished` | source | `terminal`, `stage`, `message`, `source_code`, `sink_code`, `column`, `value`, `source_rows`, `source_batches`, `staged_rows`, `received_batches`, `sink_reported_rows`, `purged_rows`, `fetch_ms`, `push_ms`, `commit_ms`, `count_ms`, `cursor_ms` |
+| `run_finished` | source | `terminal`, `stage`, `message`, `failure_kind`, `source_code`, `sink_code`, `column`, `value`, `source_rows`, `source_batches`, `staged_rows`, `received_batches`, `sink_reported_rows`, `purged_rows`, `fetch_ms`, `push_ms`, `commit_ms`, `count_ms`, `cursor_ms` |
 | `sink_started` | sink | `listen`, `message` |
 | `sink_unavailable` | sink | `message` |
 | `http_response_failed` | sink | `message` |
+
+> **2026-08-16 增补：新字段 `failure_kind`（[ADR-0029](0029-failure-classification.md) §3）。**
+> `run_finished` 与 `cli_failed` / `business_date_invalid` / `source_config_failed` /
+> `task_config_failed` / `sql_shape_precheck_failed` 五条各增一个 `failure_kind`，取
+> ADR-0029 §2 的 16 值闭集之一。**成功的 `run_finished` 显式为 `null`**——与第 2 节
+> `run_id` 用显式 `null` 表达「这个东西还不存在」同一种手法。既有字段一字未动，
+> 本次只增（第 5 节演进规则）。消费者读到该字段缺席时按「当时没记」处理，不得报错。
 
 > **2026-08-15（[#62](https://github.com/liumingjian/db-qbs/issues/62)）增补：**
 > 闭集只增 `sink_started`；它在 sink 启动时无条件以 `warn` 写出，`listen` 与 `message`

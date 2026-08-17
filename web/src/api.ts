@@ -48,10 +48,39 @@ export interface MappingIssue {
   target: string | null;
   rule: string | null;
   message: string | null;
+  /**
+   * 动作型建议，**由 sink 侧算**（ADR-0010 2026-08-16 增补二 §1）。判定式不得复制进
+   * TypeScript 重算一遍——建议与判定同源，两者都只有 sink 一份。M3 子票 ⑥ 才开始有值，
+   * 在那之前恒缺省。
+   */
+  suggestion?: string | null;
+}
+
+/**
+ * 取列面的三档支持标记（ADR-0010 2026-08-16 增补二 §2）。由 source 侧 describe 产出，
+ * web 只负责显示，**不得自判**——自判会造出第三份白名单实现。
+ */
+export type ColumnSupport = 'ok' | 'needs_precision' | 'unsupported';
+
+/**
+ * `POST /api/columns` 回的列，字段名是 `type`——注意它和 `POST /api/builder/columns` 的
+ * `data_type` 不同名（服务端两个端点本来就不一致）。这里照实声明；照着 `BuilderColumn`
+ * 复用会读到 undefined，「describe 类型」那一列就会一直是空的。
+ */
+export interface FetchedColumn {
+  name: string;
+  type: string;
+  precision: number | null;
+  scale: number | null;
+  length: number | null;
+  /** `TIMESTAMP(n)` 的 `n`（ADR-0010 2026-08-16 增补一）。非 `TIMESTAMP` 列不带它。 */
+  fsp?: number | null;
+  /** 见 {@link ColumnSupport}。M3 子票 ③ 之前恒 `ok`。 */
+  support?: ColumnSupport | null;
 }
 
 export interface ColumnFetchResult {
-  columns: Omit<BuilderColumn, "nullable">[];
+  columns: FetchedColumn[];
   target_ddl: string;
 }
 
@@ -82,6 +111,11 @@ export interface RunHistory {
   column: string | null;
   value: string | null;
   message: string | null;
+  /**
+   * 失败分类闭集（source 侧 `FailureKind`，见 ADR-0029）。成功、进行中、
+   * 以及本功能之前落盘的老历史行都是 `null`——读到 `null` 不是错误。
+   */
+  failure_kind: string | null;
   unknown_reason: "PROCESS_DISAPPEARED" | "SERVICE_RESTARTED" | null;
   seq: number;
   rows_pushed: number;

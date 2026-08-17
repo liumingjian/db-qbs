@@ -1,5 +1,5 @@
 use db_qbs_sink::{precheck, SourceColumn as SinkSourceColumn, TargetColumn};
-use db_qbs_source::{generate_target_ddl, SourceColumn as DdlSourceColumn};
+use db_qbs_source::{generate_target_ddl, ColumnSupport, SourceColumn as DdlSourceColumn};
 use serde::Deserialize;
 use sqlparser::ast::{CharacterLength, ColumnOption, DataType, ExactNumberInfo, Statement};
 use sqlparser::dialect::MySqlDialect;
@@ -43,6 +43,7 @@ fn generated_target_ddl_stays_compatible_with_sink_precheck_for_m1_types() {
                     scale: column.scale,
                     length: column.length,
                     fsp: column.fsp,
+                    // sink 不得读 `support` 做判定（ADR-0010 增补二 §2），故不搬运。
                     support: None,
                 })
                 .collect::<Vec<_>>();
@@ -158,6 +159,6 @@ fn source_column(
         scale,
         length,
         fsp: None,
-        support: None,
+        support: Some(ColumnSupport::Ok),
     }
 }

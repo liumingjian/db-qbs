@@ -53,6 +53,10 @@ services:
       dockerfile: Dockerfile.client
     platform: linux/arm64
     container_name: qbs-client
+    ports:
+      # M2 runs db-qbs-source on the host and the sink here, so the sink port has to leave
+      # the container. Bound to the host loopback only.
+      - "127.0.0.1:18080:18080"
     depends_on:
       oracle:
         condition: service_healthy

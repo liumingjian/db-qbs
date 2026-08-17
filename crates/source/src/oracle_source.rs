@@ -3,8 +3,9 @@ use oracle::sql_type::{OracleType, Timestamp};
 use oracle::{Connection, InitParams, ResultSet, Row};
 
 use crate::{
-    builder_column_query, builder_table_query, BuilderColumn, BuilderTable, RowSource,
-    ColumnSupport, SourceColumn, SourceConfig, SourceReadError, TaskConfig, FETCH_ARRAY_SIZE,
+    builder_column_query, builder_table_query, BuilderColumn, BuilderTable, ColumnSupport,
+    FailureKind, RowSource, SourceColumn, SourceConfig, SourceReadError, TaskConfig,
+    FETCH_ARRAY_SIZE,
 };
 
 const DESCRIBE_BIZ_DATE: &str = "0001-01-01";
@@ -15,7 +16,7 @@ pub struct OracleRowSource {
     value_kinds: Vec<ValueKind>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ValueKind {
     Number,
     Date,
@@ -52,8 +53,8 @@ impl OracleRowSource {
         config: &SourceConfig,
         dblink: Option<&str>,
     ) -> Result<Vec<BuilderTable>, SourceReadError> {
-        let query =
-            builder_table_query(dblink).map_err(|error| SourceReadError::new(error, None))?;
+        let query = builder_table_query(dblink)
+            .map_err(|error| SourceReadError::with_kind(error, None, FailureKind::Config))?;
         let connection = open_connection(config)?;
         let rows = connection.query(&query, &[]).map_err(oracle_error)?;
         let mut tables = Vec::new();
@@ -73,8 +74,8 @@ impl OracleRowSource {
         owner: &str,
         table: &str,
     ) -> Result<Vec<BuilderColumn>, SourceReadError> {
-        let query =
-            builder_column_query(dblink).map_err(|error| SourceReadError::new(error, None))?;
+        let query = builder_column_query(dblink)
+            .map_err(|error| SourceReadError::with_kind(error, None, FailureKind::Config))?;
         let connection = open_connection(config)?;
         let rows = connection
             .query(&query, &[&owner, &table])
@@ -123,14 +124,14 @@ fn open_connection(config: &SourceConfig) -> Result<Connection, SourceReadError>
     init.oracle_client_lib_dir(&config.oracle_client_lib_dir)
         .and_then(|params| params.default_driver_name("db-qbs-source : 0.1.0"))
         .and_then(|params| params.init())
-        .map_err(oracle_error)?;
+        .map_err(oracle_connect_error)?;
 
     Connection::connect(
         &config.oracle_username,
         &config.oracle_password,
         &config.oracle_connect_string,
     )
-    .map_err(oracle_error)
+    .map_err(oracle_connect_error)
 }
 
 fn describe_columns(infos: &[oracle::ColumnInfo]) -> (Vec<SourceColumn>, Vec<ValueKind>) {
@@ -237,6 +238,7 @@ fn invalid_value(message: String, column: &str, value: String) -> SourceReadErro
         oracle_code: None,
         column: Some(column.to_owned()),
         value: Some(value),
+        kind: FailureKind::SourceValue,
     }
 }
 
@@ -361,11 +363,18 @@ fn number_support(precision: u8, scale: i8) -> ColumnSupport {
     }
 }
 
+/// 会话已经建起来之后撞上的 Oracle 错误：可能是本地查询，也可能是 dblink 那一头。
 fn oracle_error(error: oracle::Error) -> SourceReadError {
-    SourceReadError::new(
-        error.to_string(),
-        error.db_error().map(|database_error| database_error.code()),
-    )
+    SourceReadError::new(error.to_string(), oracle_code(&error))
+}
+
+/// 建连接那一步撞上的 Oracle 错误——同样的码在这一步指的是**本地**库。
+fn oracle_connect_error(error: oracle::Error) -> SourceReadError {
+    SourceReadError::connecting(error.to_string(), oracle_code(&error))
+}
+
+fn oracle_code(error: &oracle::Error) -> Option<i32> {
+    error.db_error().map(|database_error| database_error.code())
 }
 
 #[cfg(test)]
@@ -374,86 +383,85 @@ mod tests {
 
     fn assert_describe(
         oracle_type: OracleType,
+        expected_column: SourceColumn,
+        expected_kind: ValueKind,
+    ) {
+        let (column, value_kind) = describe_column("VALUE", &oracle_type);
+        assert_eq!(column, expected_column);
+        assert_eq!(value_kind, expected_kind);
+    }
+
+    fn expected_column(
         data_type: &str,
         precision: Option<i64>,
         scale: Option<i64>,
         length: Option<u64>,
         fsp: Option<u32>,
         support: ColumnSupport,
-    ) -> ValueKind {
-        let (column, value_kind) = describe_column("VALUE", &oracle_type);
-        assert_eq!(column.name, "VALUE");
-        assert_eq!(column.data_type, data_type);
-        assert_eq!(column.precision, precision);
-        assert_eq!(column.scale, scale);
-        assert_eq!(column.length, length);
-        assert_eq!(column.fsp, fsp);
-        assert_eq!(column.support, Some(support));
-        value_kind
+    ) -> SourceColumn {
+        SourceColumn {
+            name: "VALUE".to_owned(),
+            data_type: data_type.to_owned(),
+            precision,
+            scale,
+            length,
+            fsp,
+            support: Some(support),
+        }
     }
 
     #[test]
     fn describe_column_reports_all_number_shapes_and_support() {
-        assert!(matches!(
-            assert_describe(
+        for (oracle_type, precision, scale, support) in [
+            (
                 OracleType::Number(18, 4),
-                "NUMBER",
                 Some(18),
                 Some(4),
-                None,
-                None,
                 ColumnSupport::Ok,
             ),
-            ValueKind::Number
-        ));
-        assert!(matches!(
-            assert_describe(
+            (
                 OracleType::Number(4, 6),
-                "NUMBER",
                 Some(4),
                 Some(6),
-                None,
-                None,
                 ColumnSupport::Ok,
             ),
-            ValueKind::Number
-        ));
-        assert!(matches!(
-            assert_describe(
+            (
                 OracleType::Number(8, -2),
-                "NUMBER",
                 Some(8),
                 Some(-2),
-                None,
-                None,
                 ColumnSupport::Ok,
             ),
-            ValueKind::Number
-        ));
-        assert!(matches!(
-            assert_describe(
-                OracleType::Number(0, 0),
-                "NUMBER",
-                None,
-                None,
+            (
+                OracleType::Number(0, -127),
                 None,
                 None,
                 ColumnSupport::NeedsPrecision,
             ),
-            ValueKind::Number
-        ));
-        assert!(matches!(
-            assert_describe(
-                OracleType::Number(38, -30),
-                "NUMBER",
+            (
+                OracleType::Number(38, -27),
                 Some(38),
-                Some(-30),
-                None,
-                None,
+                Some(-27),
+                ColumnSupport::Ok,
+            ),
+            (
+                OracleType::Number(38, -28),
+                Some(38),
+                Some(-28),
                 ColumnSupport::Unsupported,
             ),
-            ValueKind::Number
-        ));
+            (
+                OracleType::Number(4, 35),
+                Some(4),
+                Some(35),
+                ColumnSupport::Unsupported,
+            ),
+        ] {
+            assert_describe(
+                oracle_type,
+                expected_column("NUMBER", precision, scale, None, None, support),
+                ValueKind::Number,
+            );
+        }
     }
 
     #[test]
@@ -464,82 +472,56 @@ mod tests {
             (OracleType::Char(32), "CHAR", 32),
             (OracleType::NChar(32), "NCHAR", 32),
         ] {
-            assert!(matches!(
-                assert_describe(
-                    oracle_type,
-                    data_type,
-                    None,
-                    None,
-                    Some(length),
-                    None,
-                    ColumnSupport::Ok,
-                ),
-                ValueKind::Text
-            ));
+            assert_describe(
+                oracle_type,
+                expected_column(data_type, None, None, Some(length), None, ColumnSupport::Ok),
+                ValueKind::Text,
+            );
         }
 
-        assert!(matches!(
+        assert_describe(
+            OracleType::Date,
+            expected_column("DATE", None, None, None, None, ColumnSupport::Ok),
+            ValueKind::Date,
+        );
+
+        for (fsp, support) in [
+            (0, ColumnSupport::Ok),
+            (6, ColumnSupport::Ok),
+            (7, ColumnSupport::Unsupported),
+            (9, ColumnSupport::Unsupported),
+        ] {
             assert_describe(
-                OracleType::Date,
-                "DATE",
-                None,
-                None,
-                None,
-                None,
-                ColumnSupport::Ok,
-            ),
-            ValueKind::Date
-        ));
-        assert!(matches!(
-            assert_describe(
-                OracleType::Timestamp(0),
-                "TIMESTAMP",
-                None,
-                None,
-                None,
-                Some(0),
-                ColumnSupport::Ok,
-            ),
-            ValueKind::Timestamp
-        ));
-        assert!(matches!(
-            assert_describe(
-                OracleType::Timestamp(6),
-                "TIMESTAMP",
-                None,
-                None,
-                None,
-                Some(6),
-                ColumnSupport::Ok,
-            ),
-            ValueKind::Timestamp
-        ));
-        assert!(matches!(
-            assert_describe(
-                OracleType::Timestamp(9),
-                "TIMESTAMP",
-                None,
-                None,
-                None,
-                Some(9),
-                ColumnSupport::Unsupported,
-            ),
-            ValueKind::Timestamp
-        ));
+                OracleType::Timestamp(fsp),
+                expected_column("TIMESTAMP", None, None, None, Some(u32::from(fsp)), support),
+                ValueKind::Timestamp,
+            );
+        }
     }
 
     #[test]
     fn describe_column_marks_out_of_scope_types_unsupported() {
-        let value_kind = assert_describe(
+        for oracle_type in [
+            OracleType::Float(126),
+            OracleType::BinaryFloat,
             OracleType::BinaryDouble,
-            "BINARY_DOUBLE",
-            None,
-            None,
-            None,
-            None,
-            ColumnSupport::Unsupported,
-        );
-        assert!(matches!(value_kind, ValueKind::Text));
+            OracleType::TimestampTZ(6),
+            OracleType::TimestampLTZ(6),
+        ] {
+            let data_type = oracle_type.to_string();
+            assert_describe(
+                oracle_type,
+                expected_column(
+                    &data_type,
+                    None,
+                    None,
+                    None,
+                    None,
+                    ColumnSupport::Unsupported,
+                ),
+                ValueKind::Text,
+            );
+        }
     }
 
     #[test]

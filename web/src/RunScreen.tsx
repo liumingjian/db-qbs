@@ -1,4 +1,4 @@
-import { ArrowLeft, Ban, Play, RefreshCw } from "lucide-react";
+import { ArrowLeft, Ban, Play, RefreshCw, TableProperties } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { cancelRun, fetchRun } from "./api";
@@ -10,6 +10,11 @@ import {
   TerminalBlock,
 } from "./components/DesignSystem";
 import { messageFrom } from "./errors";
+import {
+  failedShapeRuleCount,
+  shapeRuleDescription,
+  shapeRuleLabel,
+} from "./shape";
 import { runPresentation } from "./run";
 import type { RunPresentation, RunPresentationKind } from "./run";
 
@@ -25,11 +30,13 @@ export function RunScreen({
   runRecordId,
   onBack,
   onRelaunch,
+  onOpenColumnFetch,
 }: {
   task: Task;
   runRecordId: string;
   onBack: () => void;
   onRelaunch: () => void;
+  onOpenColumnFetch: () => void;
 }) {
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -165,7 +172,11 @@ export function RunScreen({
           {detail.live ? (
             <LiveRun detail={detail} presentation={presentation} />
           ) : (
-            <FinishedRun detail={detail} presentation={presentation} />
+            <FinishedRun
+              detail={detail}
+              presentation={presentation}
+              onOpenColumnFetch={onOpenColumnFetch}
+            />
           )}
         </div>
       )}
@@ -220,9 +231,11 @@ function LiveRun({
 function FinishedRun({
   detail,
   presentation,
+  onOpenColumnFetch,
 }: {
   detail: RunDetail & { live: false };
   presentation: RunPresentation;
+  onOpenColumnFetch: () => void;
 }) {
   const precheckKind =
     presentation.kind === "shape-failed" || presentation.kind === "mapping-failed"
@@ -244,6 +257,19 @@ function FinishedRun({
 
       {precheckKind !== null && (
         <PrecheckReports detail={detail} kind={precheckKind} />
+      )}
+
+      {precheckKind === "mapping-failed" && (
+        <div className="precheck-exit">
+          <span>
+            目标表和这段 SQL 对不上。建表 SQL 在取列那一步现取，这屏不重给——
+            免得你拿着旧的去撞 <code>ERROR 1050</code>。
+          </span>
+          <button className="button is-ghost" type="button" onClick={onOpenColumnFetch}>
+            <TableProperties size={15} aria-hidden="true" />
+            回到取列拿建表 SQL
+          </button>
+        </div>
       )}
 
       <dl className="run-metrics is-finished">
@@ -306,6 +332,12 @@ function PrecheckReports({
   kind: PrecheckKind;
 }) {
   const shapeFailed = kind === "shape-failed";
+  // 副标题不复述结论条：卡头已经说了这是哪一段预检，结论条已经说了「未向 sink 发出请求」，
+  // 这里只报「六条里几条没过」，与通过态那句同句式。source 回的 `detail.message`
+  // 是英文原文（`source-local SQL shape precheck found N problem(s)`），属于 API 语义不动它。
+  const shapeSubtitle = shapeFailed
+    ? `六条形状规则中 ${failedShapeRuleCount(detail.shape_checks)} 条未通过。`
+    : "六条形状规则已通过。";
   return (
     <div className="precheck-reports">
       <section className={shapeFailed ? "is-failed" : "is-passed"}>
@@ -313,13 +345,13 @@ function PrecheckReports({
           <strong>SQL 形状预检</strong>
           <span>source 本地</span>
         </header>
-        <p>{shapeFailed ? detail.message : "六条形状规则已通过。"}</p>
+        <p>{shapeSubtitle}</p>
         <DiagnosticTable
           columns={["规则", "结果", "说明"]}
           rows={detail.shape_checks.map((check) => [
-            check.rule,
+            shapeRuleLabel(check.rule),
             check.passed ? "通过" : "未通过",
-            check.message,
+            shapeRuleDescription(check.rule, check.message),
           ])}
         />
         {shapeFailed && <small>六条规则一次报告；本次未向 sink 发出请求。</small>}
@@ -330,7 +362,9 @@ function PrecheckReports({
           <span>sink</span>
         </header>
         {shapeFailed ? (
-          <p>未执行</p>
+          <p>
+            未执行——没跑到这一段，<code>sink</code> 不知道存在这个运行。
+          </p>
         ) : (
           <>
             <p>{detail.message ?? "目标端映射预检未通过。"}</p>
