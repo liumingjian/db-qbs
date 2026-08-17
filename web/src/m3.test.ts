@@ -45,19 +45,19 @@ describe("M3 web presentation helpers", () => {
   it("parses a target-DDL rejection without losing the describe list", () => {
     const columns = [
       {
-        name: "PAYLOAD",
-        type: "CLOB",
+        name: "N_RAW",
+        type: "NUMBER",
         precision: null,
         scale: null,
         length: null,
-        support: "unsupported" as const,
+        support: "needs_precision" as const,
       },
     ];
     const issues = [
       {
-        column: "PAYLOAD",
-        source: "CLOB",
-        message: "source type is outside the target DDL whitelist",
+        column: "N_RAW",
+        source: "NUMBER",
+        message: "configured DECIMAL(66,0) is outside MySQL DECIMAL(65,30)",
       },
     ];
     const parsed = targetDdlFailureFrom(

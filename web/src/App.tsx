@@ -636,7 +636,7 @@ function TaskFormDialog({
       } else {
         const targetDdlFailure = targetDdlFailureFrom(fetchError);
         if (targetDdlFailure !== null) {
-          setColumnFetch({ kind: "unsupported", ...targetDdlFailure });
+          setColumnFetch({ kind: "target-ddl-failed", ...targetDdlFailure });
         } else {
           setColumnFetch({ kind: "oracle-failed", message: messageFrom(fetchError) });
         }
@@ -819,7 +819,7 @@ type ColumnFetchState =
   | { kind: "loading" }
   | { kind: "shape-failed"; checks: ShapeCheck[] }
   | { kind: "oracle-failed"; message: string }
-  | { kind: "unsupported"; columns: FetchedColumn[]; issues: TargetDdlIssue[] }
+  | { kind: "target-ddl-failed"; columns: FetchedColumn[]; issues: TargetDdlIssue[] }
   | { kind: "ready"; result: ColumnFetchResult };
 
 function SqlBuilderGuide({
@@ -1192,14 +1192,14 @@ function ColumnFetchPanel({ state }: { state: ColumnFetchState }) {
         </>
       ) : (
         <div className="row-size-warning is-crit">
-          <strong>白名单外列存在，整份建表 SQL 不给。</strong>
+          <strong>这些列无法生成目标表定义，整份建表 SQL 不给。</strong>
           {state.issues.map((issue, index) => (
             <span key={`${issue.column}-${index}`}>
               <span className="mono">{issue.column}</span>（
               <span className="mono">{issue.source}</span>）：{issue.message}
             </span>
           ))}
-          <span>请改源 SQL 或加 CAST 后重新取列。</span>
+          <span>请按逐列原因修正后重新取列。</span>
         </div>
       )}
     </div>

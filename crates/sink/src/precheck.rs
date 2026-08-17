@@ -185,18 +185,25 @@ fn validate_number(
         (None, None) => {
             match target {
                 Some(target) if !target.data_type.eq_ignore_ascii_case("decimal") => {
-                    issues.push(issue(source, Some(target), "NUMBER 的目标类型必须是 DECIMAL"));
+                    issues.push(issue_with_suggestion(
+                        source,
+                        Some(target),
+                        "NUMBER 的目标类型必须是 DECIMAL",
+                        Some("在任务定义为该列配 (p,s)，并将目标列改为对应 DECIMAL".to_owned()),
+                    ));
                 }
-                Some(target) if target_decimal_shape(target).is_none() => issues.push(issue(
+                Some(target) if target_decimal_shape(target).is_none() => issues.push(issue_with_suggestion(
                     source,
                     Some(target),
                     "裸 NUMBER / 数值表达式列的目标 DECIMAL 必须具有有效的 precision 和 scale",
+                    Some("将目标列改为具有有效 (p,s) 的 DECIMAL".to_owned()),
                 )),
                 Some(_) => {}
-                None => issues.push(issue(
+                None => issues.push(issue_with_suggestion(
                     source,
                     target,
                     "NUMBER 必须同时具有可判定的 precision 和 scale，裸 NUMBER 与表达式列需要目标 DECIMAL 形状",
+                    Some("在任务定义为该列配 (p,s)，再在目标表补出对应 DECIMAL 列".to_owned()),
                 )),
             }
             return;
@@ -252,13 +259,14 @@ pub(crate) fn range_check_issue(
     range_column: &RangeCheckColumn,
     invalid_rows: u64,
 ) -> PrecheckIssue {
-    issue(
+    issue_with_suggestion(
         source,
         Some(target),
         &format!(
             "值域校核失败：{invalid_rows} 行无法无损写入 DECIMAL({}, {})",
             range_column.precision, range_column.scale
         ),
+        Some("调整任务定义和目标 DECIMAL 的 (p,s)，或改源 SQL / CAST 收窄值域".to_owned()),
     )
 }
 

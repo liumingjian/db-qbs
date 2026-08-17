@@ -157,6 +157,7 @@ fn startup_warns_about_the_unauthenticated_write_surface_before_connecting() {
 fn precheck_reports_every_invalid_column_in_one_result() {
     let sources = vec![
         source_column("N_AMOUNT", "NUMBER", Some(18), Some(2), None),
+        source_column("N_RAW", "NUMBER", None, None, None),
         source_column("C_NAME", "VARCHAR2", None, None, Some(50)),
         source_column("D_BIZ", "DATE", None, None, None),
     ];
@@ -201,7 +202,7 @@ fn precheck_reports_every_invalid_column_in_one_result() {
 
     let issues = precheck("T_POSITION", &sources, &targets);
 
-    for column in ["N_AMOUNT", "C_NAME", "D_BIZ"] {
+    for column in ["N_AMOUNT", "N_RAW", "C_NAME", "D_BIZ"] {
         assert!(
             issues.iter().any(|issue| issue.column == column),
             "missing {column} in {issues:?}"
@@ -646,6 +647,10 @@ fn bare_number_range_check_delays_staging_and_rejects_invalid_rows() {
         .as_str()
         .unwrap()
         .contains("3"));
+    assert_eq!(
+        error.details["issues"][0]["suggestion"],
+        "调整任务定义和目标 DECIMAL 的 (p,s)，或改源 SQL / CAST 收窄值域"
+    );
     assert!(destination.created.lock().unwrap().is_empty());
 }
 
