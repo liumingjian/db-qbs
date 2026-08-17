@@ -1,6 +1,6 @@
 use chrono::DateTime;
-use db_qbs_shared::{write_log_line, LogEvent, LogLevel};
-use serde_json::Value;
+use db_qbs_shared::{write_log_line, write_log_line_with_fields, LogEvent, LogLevel};
+use serde_json::{json, Value};
 
 #[test]
 fn emitter_writes_one_json_line_with_all_common_fields() {
@@ -48,6 +48,31 @@ fn emitter_serializes_absent_optional_fields_as_json_null() {
 }
 
 #[test]
+fn range_check_event_serializes_its_scan_facts() {
+    let mut output = Vec::new();
+
+    write_log_line_with_fields(
+        &mut output,
+        LogLevel::Info,
+        LogEvent::RangeCheckExecuted,
+        Some("20260814091530_a3f19c"),
+        None,
+        json!({
+            "columns": ["N_RAW", "N_EXPR"],
+            "scanned_rows": 37,
+            "ms": 12,
+        }),
+    )
+    .unwrap();
+
+    let line: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(line["event"], "range_check_executed");
+    assert_eq!(line["columns"], json!(["N_RAW", "N_EXPR"]));
+    assert_eq!(line["scanned_rows"], 37);
+    assert_eq!(line["ms"], 12);
+}
+
+#[test]
 fn event_vocabulary_is_closed_and_stable() {
     assert_eq!(
         LogEvent::ALL.map(LogEvent::as_str),
@@ -61,6 +86,7 @@ fn event_vocabulary_is_closed_and_stable() {
             "sql_shape_precheck_passed",
             "stage_changed",
             "mapping_precheck_failed",
+            "range_check_executed",
             "run_opened",
             "batch_pushed",
             "commit_diagnosed",

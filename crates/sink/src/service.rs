@@ -1,16 +1,17 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use chrono::NaiveDate;
 use regex::Regex;
 use serde_json::json;
 
-use crate::precheck::precheck_with_date_column;
+use crate::precheck::{precheck_with_date_column, range_check_columns, range_check_issue};
 use crate::{
     AbortResponse, ActiveRun, ApiError, AtomicSwapError, AtomicSwapRequest, BatchPayload,
     BatchResponse, CommitResponse, CreateStagingError, Destination, DropStagingError,
-    OpenRunRequest, OpenRunResponse, RunResponse, SinkService, TargetColumn, Terminal,
-    WriteBatchError, MAX_PREPARED_STATEMENT_PLACEHOLDERS, TOMBSTONE_LIMIT,
+    OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn, RangeCheckResult,
+    RunResponse, SinkService, SourceColumn, TargetColumn, Terminal, WriteBatchError,
+    MAX_PREPARED_STATEMENT_PLACEHOLDERS, TOMBSTONE_LIMIT,
 };
 
 static RUN_ID_RE: LazyLock<Regex> =
@@ -41,12 +42,31 @@ impl<D: Destination> SinkService<D> {
                 run_id: Some(request.run_id.clone()),
                 details: json!({ "kind": "OTHER" }),
             })?;
-        let issues = precheck_with_date_column(
+        let mut issues = precheck_with_date_column(
             &request.target_table,
             &request.target_date_col,
             &request.source_columns,
             &target_columns,
         );
+        let range_columns = range_check_columns(&request.source_columns, &target_columns);
+        if !range_columns.is_empty() {
+            let Some(results) = request.range_check_results.as_deref() else {
+                return Ok(OpenRunResponse {
+                    run_id: request.run_id,
+                    staging_table: String::new(),
+                    columns_checked: target_columns.len(),
+                    range_check_columns: Some(range_columns),
+                });
+            };
+            append_range_check_issues(
+                &request.run_id,
+                &request.source_columns,
+                &target_columns,
+                &range_columns,
+                results,
+                &mut issues,
+            )?;
+        }
         if !issues.is_empty() {
             let total = issues.len();
             return Err(ApiError {
@@ -104,7 +124,6 @@ impl<D: Destination> SinkService<D> {
             run_id: request.run_id,
             staging_table,
             columns_checked: target_columns.len(),
-            // 3.5 步归子票 ⑦；本票只加字段，恒 `None`（#107）。
             range_check_columns: None,
         })
     }
@@ -437,6 +456,74 @@ impl<D: Destination> SinkService<D> {
             tombstones.pop_front();
         }
         tombstones.push_back(tombstone);
+    }
+}
+
+fn append_range_check_issues(
+    run_id: &str,
+    source_columns: &[SourceColumn],
+    target_columns: &[TargetColumn],
+    range_columns: &[RangeCheckColumn],
+    results: &[RangeCheckResult],
+    issues: &mut Vec<PrecheckIssue>,
+) -> Result<(), ApiError> {
+    let expected: HashMap<String, &RangeCheckColumn> = range_columns
+        .iter()
+        .map(|column| (column.column.to_uppercase(), column))
+        .collect();
+    let sources: HashMap<String, &SourceColumn> = source_columns
+        .iter()
+        .map(|column| (column.name.to_uppercase(), column))
+        .collect();
+    let targets: HashMap<String, &TargetColumn> = target_columns
+        .iter()
+        .map(|column| (column.name.to_uppercase(), column))
+        .collect();
+    let mut seen = HashSet::new();
+
+    for result in results {
+        let key = result.column.to_uppercase();
+        let Some(range_column) = expected.get(&key).copied() else {
+            return Err(range_check_results_error(
+                run_id,
+                format!("值域校核结果包含未请求的列 {}", result.column),
+            ));
+        };
+        if !seen.insert(key.clone()) {
+            return Err(range_check_results_error(
+                run_id,
+                format!("值域校核结果重复包含列 {}", result.column),
+            ));
+        }
+        if result.invalid_rows == 0 {
+            continue;
+        }
+        let source = sources.get(&key).copied().expect("range column has source");
+        let target = targets.get(&key).copied().expect("range column has target");
+        issues.push(range_check_issue(
+            source,
+            target,
+            range_column,
+            result.invalid_rows,
+        ));
+    }
+
+    if seen.len() != expected.len() {
+        return Err(range_check_results_error(
+            run_id,
+            "值域校核结果没有逐列覆盖 sink 请求的列".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn range_check_results_error(run_id: &str, message: String) -> ApiError {
+    ApiError {
+        status: 400,
+        code: "BAD_REQUEST",
+        message,
+        run_id: Some(run_id.to_owned()),
+        details: json!({}),
     }
 }
 

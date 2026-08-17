@@ -117,6 +117,7 @@ pub enum LogEvent {
     SqlShapePrecheckPassed,
     StageChanged,
     MappingPrecheckFailed,
+    RangeCheckExecuted,
     RunOpened,
     BatchPushed,
     CommitDiagnosed,
@@ -128,7 +129,7 @@ pub enum LogEvent {
 }
 
 impl LogEvent {
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::CliFailed,
         Self::SourceStarted,
         Self::BusinessDateInvalid,
@@ -138,6 +139,7 @@ impl LogEvent {
         Self::SqlShapePrecheckPassed,
         Self::StageChanged,
         Self::MappingPrecheckFailed,
+        Self::RangeCheckExecuted,
         Self::RunOpened,
         Self::BatchPushed,
         Self::CommitDiagnosed,
@@ -159,6 +161,7 @@ impl LogEvent {
             Self::SqlShapePrecheckPassed => "sql_shape_precheck_passed",
             Self::StageChanged => "stage_changed",
             Self::MappingPrecheckFailed => "mapping_precheck_failed",
+            Self::RangeCheckExecuted => "range_check_executed",
             Self::RunOpened => "run_opened",
             Self::BatchPushed => "batch_pushed",
             Self::CommitDiagnosed => "commit_diagnosed",

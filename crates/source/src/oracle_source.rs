@@ -5,8 +5,8 @@ use oracle::{Connection, InitParams, ResultSet, Row};
 use crate::target_ddl::{derive_number_shape, is_supported_decimal_shape};
 use crate::{
     builder_column_query, builder_table_query, BuilderColumn, BuilderTable, ColumnSupport,
-    FailureKind, RowSource, SourceColumn, SourceConfig, SourceReadError, TaskConfig,
-    FETCH_ARRAY_SIZE,
+    FailureKind, RangeCheckColumn, RangeCheckResult, RowSource, SourceColumn, SourceConfig,
+    SourceReadError, TaskConfig, FETCH_ARRAY_SIZE,
 };
 
 const DESCRIBE_BIZ_DATE: &str = "0001-01-01";
@@ -15,6 +15,8 @@ pub struct OracleRowSource {
     rows: ResultSet<'static, Row>,
     columns: Vec<SourceColumn>,
     value_kinds: Vec<ValueKind>,
+    config: SourceConfig,
+    source_sql: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +40,8 @@ impl OracleRowSource {
             rows,
             columns,
             value_kinds,
+            config: config.clone(),
+            source_sql: task.source_sql.clone(),
         })
     }
 
@@ -100,6 +104,79 @@ impl OracleRowSource {
         }
         Ok(columns)
     }
+
+    fn execute_range_check(
+        &self,
+        columns: &[RangeCheckColumn],
+        biz_date: &str,
+    ) -> Result<(Vec<RangeCheckResult>, u64), SourceReadError> {
+        let query = build_range_check_query(&self.source_sql, columns);
+        let connection = open_connection(&self.config)?;
+        let statement = connection.statement(&query).build().map_err(oracle_error)?;
+        let mut rows = statement
+            .into_result_set_named(&[("biz_date", &biz_date)])
+            .map_err(oracle_error)?;
+        let row = rows
+            .next()
+            .ok_or_else(|| {
+                SourceReadError::with_kind(
+                    "range check aggregate returned no row",
+                    None,
+                    FailureKind::Defect,
+                )
+            })?
+            .map_err(oracle_error)?;
+
+        let scanned_rows = aggregate_count(&row, 0, "scanned_rows")?;
+        let results = columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                Ok(RangeCheckResult {
+                    column: column.column.clone(),
+                    invalid_rows: aggregate_count(&row, index + 1, &column.column)?,
+                })
+            })
+            .collect::<Result<Vec<_>, SourceReadError>>()?;
+        Ok((results, scanned_rows))
+    }
+}
+
+fn build_range_check_query(source_sql: &str, columns: &[RangeCheckColumn]) -> String {
+    let checks = columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            let name = quote_oracle_identifier(&column.column);
+            let integer_digits = column.precision.saturating_sub(column.scale);
+            format!(
+                "NVL(SUM(CASE WHEN {name} IS NOT NULL AND ({name} <> TRUNC({name}, {}) OR ABS({name}) >= POWER(10, {integer_digits})) THEN 1 ELSE 0 END), 0) AS INVALID_{index}",
+                column.scale
+            )
+        })
+        .collect::<Vec<_>>();
+    let source_sql = source_sql.trim().trim_end_matches(';').trim();
+    let checks = if checks.is_empty() {
+        String::new()
+    } else {
+        format!(", {}", checks.join(", "))
+    };
+    format!("SELECT COUNT(*) AS SCANNED_ROWS{checks} FROM ({source_sql}) RANGE_CHECK_SOURCE")
+}
+
+fn quote_oracle_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn aggregate_count(row: &Row, index: usize, label: &str) -> Result<u64, SourceReadError> {
+    let value: i64 = row.get(index).map_err(oracle_error)?;
+    u64::try_from(value).map_err(|_| {
+        SourceReadError::with_kind(
+            format!("range check aggregate {label} returned a negative count"),
+            None,
+            FailureKind::Defect,
+        )
+    })
 }
 
 fn open_result_set(
@@ -145,6 +222,14 @@ fn describe_columns(infos: &[oracle::ColumnInfo]) -> (Vec<SourceColumn>, Vec<Val
 impl RowSource for OracleRowSource {
     fn columns(&self) -> &[SourceColumn] {
         &self.columns
+    }
+
+    fn range_check(
+        &mut self,
+        columns: &[RangeCheckColumn],
+        biz_date: &str,
+    ) -> Result<(Vec<RangeCheckResult>, u64), SourceReadError> {
+        self.execute_range_check(columns, biz_date)
     }
 
     fn next_row(&mut self) -> Result<Option<Vec<Option<String>>>, SourceReadError> {
@@ -535,5 +620,35 @@ mod tests {
             "2026-08-17 14:35:09.120000"
         );
         assert!(canon_timestamp(2026, 8, 17, 14, 35, 9, 120_000_001).is_err());
+    }
+
+    #[test]
+    fn range_check_query_scans_once_and_applies_the_full_domain_predicate() {
+        let query = build_range_check_query(
+            "SELECT N_RAW, N_EXPR FROM source_table WHERE D_BIZ = :biz_date;",
+            &[
+                RangeCheckColumn {
+                    column: "N_RAW".to_owned(),
+                    precision: 10,
+                    scale: 2,
+                },
+                RangeCheckColumn {
+                    column: "N_EXPR".to_owned(),
+                    precision: 18,
+                    scale: 4,
+                },
+            ],
+        );
+
+        assert_eq!(query.matches("SUM(CASE").count(), 2);
+        assert!(query.contains("COUNT(*) AS SCANNED_ROWS"));
+        assert!(query.contains("\"N_RAW\" <> TRUNC(\"N_RAW\", 2)"));
+        assert!(query.contains("ABS(\"N_RAW\") >= POWER(10, 8)"));
+        assert!(query.contains("\"N_EXPR\" <> TRUNC(\"N_EXPR\", 4)"));
+        assert!(query.contains("ABS(\"N_EXPR\") >= POWER(10, 14)"));
+        assert!(
+            query.contains("FROM (SELECT N_RAW, N_EXPR FROM source_table WHERE D_BIZ = :biz_date)")
+        );
+        assert!(!query.contains("; )"));
     }
 }
