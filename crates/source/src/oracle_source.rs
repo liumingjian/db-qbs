@@ -1,4 +1,4 @@
-use db_qbs_shared::{canon_date, canon_number, canon_text};
+use db_qbs_shared::{canon_date, canon_number, canon_text, canon_timestamp};
 use oracle::sql_type::{OracleType, Timestamp};
 use oracle::{Connection, InitParams, ResultSet, Row};
 
@@ -16,10 +16,11 @@ pub struct OracleRowSource {
     value_kinds: Vec<ValueKind>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ValueKind {
     Number,
     Date,
+    Timestamp,
     Text,
 }
 
@@ -157,6 +158,7 @@ impl RowSource for OracleRowSource {
             let value = match kind {
                 ValueKind::Number => read_number(&row, index, column)?,
                 ValueKind::Date => read_date(&row, index, column)?,
+                ValueKind::Timestamp => read_timestamp(&row, index, column)?,
                 ValueKind::Text => read_text(&row, index)?,
             };
             values.push(value);
@@ -199,6 +201,31 @@ fn read_date(row: &Row, index: usize, column: &str) -> Result<Option<String>, So
     .map_err(|error| invalid_value(error.to_string(), column, timestamp.to_string()))
 }
 
+fn read_timestamp(
+    row: &Row,
+    index: usize,
+    column: &str,
+) -> Result<Option<String>, SourceReadError> {
+    let Some(timestamp) = row
+        .get::<usize, Option<Timestamp>>(index)
+        .map_err(oracle_error)?
+    else {
+        return Ok(None);
+    };
+
+    canon_timestamp(
+        timestamp.year(),
+        timestamp.month(),
+        timestamp.day(),
+        timestamp.hour(),
+        timestamp.minute(),
+        timestamp.second(),
+        timestamp.nanosecond(),
+    )
+    .map(Some)
+    .map_err(|error| invalid_value(error.to_string(), column, timestamp.to_string()))
+}
+
 fn read_text(row: &Row, index: usize) -> Result<Option<String>, SourceReadError> {
     row.get::<usize, Option<String>>(index)
         .map(|value| value.map(|value| canon_text(&value).to_owned()))
@@ -216,13 +243,23 @@ fn invalid_value(message: String, column: &str, value: String) -> SourceReadErro
 }
 
 fn describe_column(name: &str, oracle_type: &OracleType) -> (SourceColumn, ValueKind) {
-    let (data_type, precision, scale, length, value_kind) = match oracle_type {
-        OracleType::Number(0, _) => ("NUMBER".to_owned(), None, None, None, ValueKind::Number),
+    let (data_type, precision, scale, length, fsp, support, value_kind) = match oracle_type {
+        OracleType::Number(0, _) => (
+            "NUMBER".to_owned(),
+            None,
+            None,
+            None,
+            None,
+            Some(ColumnSupport::NeedsPrecision),
+            ValueKind::Number,
+        ),
         OracleType::Number(precision, scale) => (
             "NUMBER".to_owned(),
             Some(i64::from(*precision)),
             Some(i64::from(*scale)),
             None,
+            None,
+            Some(number_support(*precision, *scale)),
             ValueKind::Number,
         ),
         OracleType::Varchar2(length) => (
@@ -230,10 +267,68 @@ fn describe_column(name: &str, oracle_type: &OracleType) -> (SourceColumn, Value
             None,
             None,
             Some(u64::from(*length)),
+            None,
+            Some(ColumnSupport::Ok),
             ValueKind::Text,
         ),
-        OracleType::Date => ("DATE".to_owned(), None, None, None, ValueKind::Date),
-        other => (other.to_string(), None, None, None, ValueKind::Text),
+        OracleType::NVarchar2(length) => (
+            "NVARCHAR2".to_owned(),
+            None,
+            None,
+            Some(u64::from(*length)),
+            None,
+            Some(ColumnSupport::Ok),
+            ValueKind::Text,
+        ),
+        OracleType::Char(length) => (
+            "CHAR".to_owned(),
+            None,
+            None,
+            Some(u64::from(*length)),
+            None,
+            Some(ColumnSupport::Ok),
+            ValueKind::Text,
+        ),
+        OracleType::NChar(length) => (
+            "NCHAR".to_owned(),
+            None,
+            None,
+            Some(u64::from(*length)),
+            None,
+            Some(ColumnSupport::Ok),
+            ValueKind::Text,
+        ),
+        OracleType::Timestamp(fsp) => (
+            "TIMESTAMP".to_owned(),
+            None,
+            None,
+            None,
+            Some(u32::from(*fsp)),
+            Some(if *fsp <= 6 {
+                ColumnSupport::Ok
+            } else {
+                ColumnSupport::Unsupported
+            }),
+            ValueKind::Timestamp,
+        ),
+        OracleType::Date => (
+            "DATE".to_owned(),
+            None,
+            None,
+            None,
+            None,
+            Some(ColumnSupport::Ok),
+            ValueKind::Date,
+        ),
+        other => (
+            other.to_string(),
+            None,
+            None,
+            None,
+            None,
+            Some(ColumnSupport::Unsupported),
+            ValueKind::Text,
+        ),
     };
 
     (
@@ -243,13 +338,29 @@ fn describe_column(name: &str, oracle_type: &OracleType) -> (SourceColumn, Value
             precision,
             scale,
             length,
-            // 语义留空：`fsp` 归子票 ③（describe 扩九行形态），`support` 归 ③/⑤ 的推导函数。
-            // 本票只把字段加齐、序列化通，行为零变化（#107）。
-            fsp: None,
-            support: Some(ColumnSupport::Ok),
+            fsp,
+            support,
         },
         value_kind,
     )
+}
+
+fn number_support(precision: u8, scale: i8) -> ColumnSupport {
+    let precision = i64::from(precision);
+    let scale = i64::from(scale);
+    let (target_precision, target_scale) = if scale < 0 {
+        (precision + scale.abs(), 0)
+    } else if scale > precision {
+        (scale, scale)
+    } else {
+        (precision, scale)
+    };
+
+    if target_precision <= 65 && target_scale <= 30 {
+        ColumnSupport::Ok
+    } else {
+        ColumnSupport::Unsupported
+    }
 }
 
 /// 会话已经建起来之后撞上的 Oracle 错误：可能是本地查询，也可能是 dblink 那一头。
@@ -264,4 +375,171 @@ fn oracle_connect_error(error: oracle::Error) -> SourceReadError {
 
 fn oracle_code(error: &oracle::Error) -> Option<i32> {
     error.db_error().map(|database_error| database_error.code())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_describe(
+        oracle_type: OracleType,
+        expected_column: SourceColumn,
+        expected_kind: ValueKind,
+    ) {
+        let (column, value_kind) = describe_column("VALUE", &oracle_type);
+        assert_eq!(column, expected_column);
+        assert_eq!(value_kind, expected_kind);
+    }
+
+    fn expected_column(
+        data_type: &str,
+        precision: Option<i64>,
+        scale: Option<i64>,
+        length: Option<u64>,
+        fsp: Option<u32>,
+        support: ColumnSupport,
+    ) -> SourceColumn {
+        SourceColumn {
+            name: "VALUE".to_owned(),
+            data_type: data_type.to_owned(),
+            precision,
+            scale,
+            length,
+            fsp,
+            support: Some(support),
+        }
+    }
+
+    #[test]
+    fn describe_column_reports_all_number_shapes_and_support() {
+        for (oracle_type, precision, scale, support) in [
+            (
+                OracleType::Number(18, 4),
+                Some(18),
+                Some(4),
+                ColumnSupport::Ok,
+            ),
+            (
+                OracleType::Number(4, 6),
+                Some(4),
+                Some(6),
+                ColumnSupport::Ok,
+            ),
+            (
+                OracleType::Number(8, -2),
+                Some(8),
+                Some(-2),
+                ColumnSupport::Ok,
+            ),
+            (
+                OracleType::Number(0, -127),
+                None,
+                None,
+                ColumnSupport::NeedsPrecision,
+            ),
+            (
+                OracleType::Number(38, -27),
+                Some(38),
+                Some(-27),
+                ColumnSupport::Ok,
+            ),
+            (
+                OracleType::Number(38, -28),
+                Some(38),
+                Some(-28),
+                ColumnSupport::Unsupported,
+            ),
+            (
+                OracleType::Number(4, 35),
+                Some(4),
+                Some(35),
+                ColumnSupport::Unsupported,
+            ),
+        ] {
+            assert_describe(
+                oracle_type,
+                expected_column("NUMBER", precision, scale, None, None, support),
+                ValueKind::Number,
+            );
+        }
+    }
+
+    #[test]
+    fn describe_column_reports_character_date_and_timestamp_shapes() {
+        for (oracle_type, data_type, length) in [
+            (OracleType::Varchar2(32), "VARCHAR2", 32),
+            (OracleType::NVarchar2(32), "NVARCHAR2", 32),
+            (OracleType::Char(32), "CHAR", 32),
+            (OracleType::NChar(32), "NCHAR", 32),
+        ] {
+            assert_describe(
+                oracle_type,
+                expected_column(data_type, None, None, Some(length), None, ColumnSupport::Ok),
+                ValueKind::Text,
+            );
+        }
+
+        assert_describe(
+            OracleType::Date,
+            expected_column("DATE", None, None, None, None, ColumnSupport::Ok),
+            ValueKind::Date,
+        );
+
+        for (fsp, support) in [
+            (0, ColumnSupport::Ok),
+            (6, ColumnSupport::Ok),
+            (7, ColumnSupport::Unsupported),
+            (9, ColumnSupport::Unsupported),
+        ] {
+            assert_describe(
+                OracleType::Timestamp(fsp),
+                expected_column("TIMESTAMP", None, None, None, Some(u32::from(fsp)), support),
+                ValueKind::Timestamp,
+            );
+        }
+    }
+
+    #[test]
+    fn describe_column_marks_out_of_scope_types_unsupported() {
+        for oracle_type in [
+            OracleType::Float(126),
+            OracleType::BinaryFloat,
+            OracleType::BinaryDouble,
+            OracleType::TimestampTZ(6),
+            OracleType::TimestampLTZ(6),
+        ] {
+            let data_type = oracle_type.to_string();
+            assert_describe(
+                oracle_type,
+                expected_column(
+                    &data_type,
+                    None,
+                    None,
+                    None,
+                    None,
+                    ColumnSupport::Unsupported,
+                ),
+                ValueKind::Text,
+            );
+        }
+    }
+
+    #[test]
+    fn timestamp_metadata_serializes_with_fsp_and_support() {
+        let (column, _) = describe_column("CREATED_AT", &OracleType::Timestamp(3));
+        let wire = serde_json::to_value(column).unwrap();
+
+        assert_eq!(wire["type"], "TIMESTAMP");
+        assert_eq!(wire["fsp"], 3);
+        assert_eq!(wire["support"], "ok");
+    }
+
+    #[test]
+    fn timestamp_values_use_fixed_six_digit_canonical_form() {
+        assert_eq!(
+            canon_timestamp(2026, 8, 17, 14, 35, 9, 120_000_000).unwrap(),
+            "2026-08-17 14:35:09.120000"
+        );
+        assert!(canon_timestamp(2026, 8, 17, 14, 35, 9, 120_000_001).is_err());
+    }
 }
