@@ -294,8 +294,16 @@ fn drop_failure_after_successful_swap_still_records_a_swapped_tombstone() {
 
     assert_eq!(error.status, 500);
     assert_eq!(error.code, "SWAP_FAILED");
-    assert!(error.message.contains("目标表已完成切换"), "{}", error.message);
-    assert!(error.message.contains("缺少 DROP 权限"), "{}", error.message);
+    assert!(
+        error.message.contains("目标表已完成切换"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains("缺少 DROP 权限"),
+        "{}",
+        error.message
+    );
 
     let status = serde_json::to_value(service.get(RUN_ID).unwrap()).unwrap();
     assert_eq!(status["terminal"], "SWAPPED");
@@ -349,7 +357,11 @@ fn drop_failure_after_swap_failure_keeps_swap_failed_and_discards_the_run() {
 
     assert_eq!(error.status, 500);
     assert_eq!(error.code, "SWAP_FAILED");
-    assert!(error.message.contains("duplicate target key"), "{}", error.message);
+    assert!(
+        error.message.contains("duplicate target key"),
+        "{}",
+        error.message
+    );
     assert!(error.message.contains("清理失败"), "{}", error.message);
     assert_eq!(
         serde_json::to_value(service.get(RUN_ID).unwrap()).unwrap()["terminal"],

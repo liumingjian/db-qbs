@@ -67,7 +67,11 @@ export function runPresentation(detail: RunDetail): RunPresentation {
       metrics,
     };
   }
-  if (detail.run_id === null) {
+  const oldShapeFailure =
+    detail.failure_kind === null &&
+    detail.run_id === null &&
+    failedShapeRuleCount(detail.shape_checks) > 0;
+  if (detail.failure_kind === "SHAPE_PRECHECK" || oldShapeFailure) {
     return {
       kind: "shape-failed",
       phase: null,

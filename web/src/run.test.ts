@@ -32,7 +32,7 @@ function terminal(overrides: Partial<RunDetail> = {}): RunDetail {
     value: null,
     message: "failed",
     failure_kind: "VERIFY_FAILED",
-  unknown_reason: null,
+    unknown_reason: null,
     seq: 0,
     rows_pushed: 0,
     bytes: 0,
@@ -93,10 +93,11 @@ describe("run detail presentation", () => {
   });
 
   it("does not invent terminal blocks for local shape, mapping, or unknown failures", () => {
-    expect(runPresentation(terminal({ run_id: null }))).toMatchObject({
-      kind: "shape-failed",
-      terminalEffect: null,
-    });
+    expect(
+      runPresentation(
+        terminal({ run_id: null, failure_kind: "SHAPE_PRECHECK" }),
+      ),
+    ).toMatchObject({ kind: "shape-failed", terminalEffect: null });
     expect(runPresentation(terminal({ sink_code: "PRECHECK_FAILED" }))).toMatchObject({
       kind: "mapping-failed",
       terminalEffect: null,
@@ -111,5 +112,35 @@ describe("run detail presentation", () => {
         }),
       ),
     ).toMatchObject({ kind: "unknown", terminalEffect: null, error: null });
+  });
+
+  it("does not mislabel a pre-run configuration failure as a shape failure", () => {
+    expect(
+      runPresentation(
+        terminal({
+          run_id: null,
+          staging_table: null,
+          failure_kind: "CONFIG",
+          message: "source.toml 无效",
+        }),
+      ),
+    ).toMatchObject({
+      kind: "failed",
+      conclusion: "[配置] source.toml 无效",
+      terminalEffect: null,
+    });
+  });
+
+  it("recognizes an unclassified legacy shape failure from its failed checks", () => {
+    expect(
+      runPresentation(
+        terminal({
+          run_id: null,
+          staging_table: null,
+          failure_kind: null,
+          shape_checks: [{ rule: "named_projection", passed: false, message: "bad" }],
+        }),
+      ),
+    ).toMatchObject({ kind: "shape-failed", terminalEffect: null });
   });
 });

@@ -391,12 +391,14 @@ impl<D: Destination> SinkService<D> {
     fn drop_after_discard(&self, staging_table: &str, error: &mut ApiError) {
         if let Err(drop_error) = self.destination.drop_staging(staging_table) {
             let reason = match drop_error {
-                DropStagingError::PermissionDenied => {
-                    "sink 的 MySQL 账号缺少 DROP 权限".to_owned()
-                }
+                DropStagingError::PermissionDenied => "sink 的 MySQL 账号缺少 DROP 权限".to_owned(),
                 DropStagingError::Other(message) => message,
             };
-            let separator = if error.message.ends_with('。') { "" } else { "；" };
+            let separator = if error.message.ends_with('。') {
+                ""
+            } else {
+                "；"
+            };
             error.message = format!(
                 "{}{separator}另外，暂存表 {staging_table} 清理失败：{reason}，需手工 DROP。",
                 error.message

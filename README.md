@@ -11,8 +11,9 @@
 ## 状态
 
 M1（一次性进程跑通一趟导入）与 M2（source 常驻服务 + Web UI）**已实现并通过验收**，
-验收记录在 `docs/spikes/fixtures/local-rig/`。M3/M4 尚未开工（完整映射预检、列名映射策略、
-延迟重推、孤儿暂存表回收、错误分类、连续跑一周）。**尚未在生产环境部署过。**
+验收记录在 `docs/spikes/fixtures/local-rig/`。M3 正在实现（协议字段形状与 canon 层已落地，
+完整映射预检尚未完成）；M4 尚未开工，但错误分类已提前实现。列名映射已明确不做，改名使用
+SQL `AS` 别名。**尚未在生产环境部署过。**
 
 两端都是 Rust（`crates/`），Web UI 是 React + Vite（`web/`），构建时由 `crates/source/build.rs`
 调 `npm run build` 打包并嵌进 `db-qbs-source` 可执行文件。决策依据见 `CONTEXT.md` 与 `docs/adr/`。

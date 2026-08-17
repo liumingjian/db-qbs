@@ -15,6 +15,9 @@ const ERROR_HTTP_STATUS: Readonly<Record<string, number>> = {
   VERIFY_FAILED: 409,
   SWAP_FAILED: 500,
   SWAP_TARGET_BUSY: 409,
+  DATA_REJECTED: 400,
+  SINK_ENVIRONMENT: 500,
+  BATCH_WRITE_FAILED: 500,
   INTERNAL_PRECHECK_ESCAPE: 500,
   INTERNAL_ASSERTION_FAILED: 500,
   PAYLOAD_TOO_LARGE: 413,
@@ -147,7 +150,11 @@ function succeededConclusion(
 function sinkTerminalEffect(
   history: RunHistory,
 ): HistoryPresentation["terminalEffect"] {
-  if (history.run_id === null || history.sink_code === "PRECHECK_FAILED") {
+  if (
+    history.run_id === null ||
+    history.staging_table === null ||
+    history.sink_code === "PRECHECK_FAILED"
+  ) {
     return null;
   }
 

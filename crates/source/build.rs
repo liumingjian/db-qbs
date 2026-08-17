@@ -42,9 +42,7 @@ fn main() {
                  run `npm install && npm run build` on a host that has npm first",
                 prebuilt.display()
             );
-            println!(
-                "cargo:warning=npm is unavailable ({error}); reusing the existing web/dist"
-            );
+            println!("cargo:warning=npm is unavailable ({error}); reusing the existing web/dist");
             return;
         }
     };

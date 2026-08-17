@@ -22,6 +22,7 @@ struct Case {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TimeParts {
     #[serde(rename = "y")]
     year: i32,
@@ -35,8 +36,8 @@ struct TimeParts {
     minute: u32,
     #[serde(rename = "s")]
     second: u32,
-    #[serde(default, rename = "ns")]
-    nanosecond: u32,
+    #[serde(rename = "ns")]
+    nanosecond: Option<u32>,
 }
 
 #[test]
@@ -85,6 +86,11 @@ fn check_case(case: &Case) {
         }
         ("DATE", "format") => {
             let parts: TimeParts = serde_json::from_value(case.input.clone()).unwrap();
+            assert!(
+                parts.nanosecond.is_none(),
+                "{}: DATE input must not contain ns",
+                case.id
+            );
             let result = canon_date(
                 parts.year,
                 parts.month,
@@ -105,6 +111,9 @@ fn check_case(case: &Case) {
         }
         ("TIMESTAMP", "format") => {
             let parts: TimeParts = serde_json::from_value(case.input.clone()).unwrap();
+            let nanosecond = parts
+                .nanosecond
+                .unwrap_or_else(|| panic!("{}: TIMESTAMP input must contain ns", case.id));
             let result = canon_timestamp(
                 parts.year,
                 parts.month,
@@ -112,7 +121,7 @@ fn check_case(case: &Case) {
                 parts.hour,
                 parts.minute,
                 parts.second,
-                parts.nanosecond,
+                nanosecond,
             );
             assert_eq!(result.is_err(), should_reject, "{}", case.id);
             if let Ok(actual) = result {

@@ -96,8 +96,24 @@ describe("run history presentation", () => {
   });
 
   it.each([
-    { run_id: null, sink_code: "VERIFY_FAILED" },
-    { run_id: "run-1", sink_code: "PRECHECK_FAILED" },
+    ["DATA_REJECTED", 400],
+    ["SINK_ENVIRONMENT", 500],
+    ["BATCH_WRITE_FAILED", 500],
+  ] as const)("preserves the HTTP status for %s", (code, httpStatus) => {
+    expect(historyPresentation(history({ sink_code: code })).error).toEqual({
+      code,
+      httpStatus,
+    });
+  });
+
+  it.each([
+    { run_id: null, sink_code: "VERIFY_FAILED", staging_table: null },
+    { run_id: "run-1", sink_code: "PRECHECK_FAILED", staging_table: null },
+    {
+      run_id: "run-1",
+      sink_code: "STAGING_CREATE_FAILED",
+      staging_table: null,
+    },
   ] satisfies Array<Partial<RunHistory>>)(
     "does not invent a sink tombstone for $sink_code without a created run",
     (overrides) => {
