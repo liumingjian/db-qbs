@@ -217,6 +217,7 @@ impl RunHistory {
                     "target": log.get("target").cloned().unwrap_or(Value::Null),
                     "rule": log.get("rule").cloned().unwrap_or(Value::Null),
                     "message": log.get("message").cloned().unwrap_or(Value::Null),
+                    "suggestion": log.get("suggestion").cloned().unwrap_or(Value::Null),
                 }));
                 HistoryChange::MemoryOnly
             }

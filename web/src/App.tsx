@@ -36,13 +36,20 @@ import type {
   BuilderColumn,
   BuilderTable,
   ColumnFetchResult,
+  FetchedColumn,
   ShapeCheck,
   Task,
   TaskDefinition,
   TaskInput,
+  TargetDdlIssue,
 } from "./api";
 import { messageFrom } from "./errors";
 import { HistoryScreen } from "./HistoryScreen";
+import {
+  ddlTextSegments,
+  fetchedColumnType,
+  targetDdlFailureFrom,
+} from "./m3";
 import { RunScreen } from "./RunScreen";
 import { shapeRuleDescription, shapeRuleLabel } from "./shape";
 import { StartRunDialog } from "./StartRunDialog";
@@ -627,7 +634,12 @@ function TaskFormDialog({
       if (checks !== null) {
         setColumnFetch({ kind: "shape-failed", checks });
       } else {
-        setColumnFetch({ kind: "oracle-failed", message: messageFrom(fetchError) });
+        const targetDdlFailure = targetDdlFailureFrom(fetchError);
+        if (targetDdlFailure !== null) {
+          setColumnFetch({ kind: "unsupported", ...targetDdlFailure });
+        } else {
+          setColumnFetch({ kind: "oracle-failed", message: messageFrom(fetchError) });
+        }
       }
     }
   }
@@ -807,6 +819,7 @@ type ColumnFetchState =
   | { kind: "loading" }
   | { kind: "shape-failed"; checks: ShapeCheck[] }
   | { kind: "oracle-failed"; message: string }
+  | { kind: "unsupported"; columns: FetchedColumn[]; issues: TargetDdlIssue[] }
   | { kind: "ready"; result: ColumnFetchResult };
 
 function SqlBuilderGuide({
@@ -1122,6 +1135,7 @@ function ColumnFetchPanel({ state }: { state: ColumnFetchState }) {
     );
   }
 
+  const columns = state.kind === "ready" ? state.result.columns : state.columns;
   return (
     <div className="fetch-ready">
       <p className="fetch-scope-note">
@@ -1137,10 +1151,10 @@ function ColumnFetchPanel({ state }: { state: ColumnFetchState }) {
             </tr>
           </thead>
           <tbody>
-            {state.result.columns.map((column) => (
+            {columns.map((column) => (
               <tr key={column.name}>
                 <td className="mono">{column.name}</td>
-                <td className="mono">{column.type}</td>
+                <td className="mono">{fetchedColumnType(column)}</td>
                 <td className="mono">{columnShape(column)}</td>
               </tr>
             ))}
@@ -1149,54 +1163,70 @@ function ColumnFetchPanel({ state }: { state: ColumnFetchState }) {
       </div>
       <div className="ddl-header">
         <strong>CREATE TABLE</strong>
-        <button
-          className="icon-button"
-          type="button"
-          title="复制建表 SQL"
-          aria-label="复制建表 SQL"
-          onClick={() =>
-            void navigator.clipboard.writeText(state.result.target_ddl)
-          }
-        >
-          <Copy size={15} aria-hidden="true" />
-        </button>
+        {state.kind === "ready" && (
+          <button
+            className="icon-button"
+            type="button"
+            title="复制建表 SQL"
+            aria-label="复制建表 SQL"
+            onClick={() =>
+              void navigator.clipboard.writeText(state.result.target_ddl)
+            }
+          >
+            <Copy size={15} aria-hidden="true" />
+          </button>
+        )}
       </div>
-      <pre className="ddl-output">
-        <DdlText ddl={state.result.target_ddl} />
-      </pre>
-      <div className="row-size-warning">
-        <strong>执行时若报 ERROR 1118 Row size too large</strong>
-        <span>
-          列宽合计超出 MySQL
-          单行上限，需缩窄字符列或拆表；这是静态提示，产品不预先判定行长。
-        </span>
-      </div>
+      {state.kind === "ready" ? (
+        <>
+          <pre className="ddl-output">
+            <DdlText ddl={state.result.target_ddl} />
+          </pre>
+          <div className="row-size-warning">
+            <strong>执行时若报 ERROR 1118 Row size too large</strong>
+            <span>
+              列宽合计超出 MySQL
+              单行上限，需缩窄字符列或拆表；这是静态提示，产品不预先判定行长。
+            </span>
+          </div>
+        </>
+      ) : (
+        <div className="row-size-warning is-crit">
+          <strong>白名单外列存在，整份建表 SQL 不给。</strong>
+          {state.issues.map((issue, index) => (
+            <span key={`${issue.column}-${index}`}>
+              <span className="mono">{issue.column}</span>（
+              <span className="mono">{issue.source}</span>）：{issue.message}
+            </span>
+          ))}
+          <span>请改源 SQL 或加 CAST 后重新取列。</span>
+        </div>
+      )}
     </div>
   );
 }
 
 /**
- * DDL 原样照给，只把 `<目标表名>` 这个占位符切出来单独标记。
+ * DDL 原样照给，只把待填写的占位符切出来单独标记。
  * target_table 留空时 source 会在 DDL 里保留它（`crates/source/src/target_ddl.rs`），
- * 以前整段是纯文本，占位符和普通 SQL 长得一模一样，看不出这里还没填。
+ * 裸 NUMBER 未配精度时也会保留 `DECIMAL(<p>,<s>)`。
  */
 function DdlText({ ddl }: { ddl: string }) {
-  const segments = ddl.split(DDL_TABLE_PLACEHOLDER);
+  const segments = ddlTextSegments(ddl);
   return (
     <>
       {segments.map((segment, index) => (
-        <Fragment key={index}>
-          {index > 0 && (
-            <span className="ddl-placeholder">{DDL_TABLE_PLACEHOLDER}</span>
+        <Fragment key={`${segment.kind}-${index}`}>
+          {segment.kind === "placeholder" ? (
+            <span className="ddl-placeholder">{segment.value}</span>
+          ) : (
+            segment.value
           )}
-          {segment}
         </Fragment>
       ))}
     </>
   );
 }
-
-const DDL_TABLE_PLACEHOLDER = "<目标表名>";
 
 function ShapeCheckTable({ checks }: { checks: ShapeCheck[] }) {
   return (

@@ -910,13 +910,14 @@ fn handle_column_fetch(request: &mut Request, config: &SourceConfig) -> HttpResp
         ),
         Err(error) => {
             let message = error.to_string();
-            let columns = error.columns;
+            let issues = error.columns;
             json_response(
                 422,
                 &json!({
                     "kind": "target_ddl",
                     "message": message,
-                    "columns": columns,
+                    "columns": issues,
+                    "described_columns": columns,
                 }),
             )
         }

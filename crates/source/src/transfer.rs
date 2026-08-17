@@ -139,6 +139,7 @@ pub enum TransferEvent {
         source: String,
         target: String,
         rule: String,
+        suggestion: Option<String>,
     },
     RangeCheckExecuted {
         columns: Vec<String>,
@@ -290,6 +291,7 @@ pub fn run_transfer(
                     source: issue.source.clone(),
                     target: issue.target.clone(),
                     rule: issue.rule.clone(),
+                    suggestion: issue.suggestion.clone(),
                 });
             }
             observe(TransferEvent::StageChanged(RunStage::Failed));
@@ -362,6 +364,7 @@ pub fn run_transfer(
                             source: issue.source.clone(),
                             target: issue.target.clone(),
                             rule: issue.rule.clone(),
+                            suggestion: issue.suggestion.clone(),
                         });
                     }
                     observe(TransferEvent::StageChanged(RunStage::Failed));

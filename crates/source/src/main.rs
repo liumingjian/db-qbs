@@ -287,6 +287,7 @@ fn emit_transfer_event(event: TransferEvent, run_id: &str, task: &Path) {
             source,
             target,
             rule,
+            suggestion,
         } => emit_with_run(
             LogLevel::Error,
             LogEvent::MappingPrecheckFailed,
@@ -298,6 +299,7 @@ fn emit_transfer_event(event: TransferEvent, run_id: &str, task: &Path) {
                 ("target", json!(target)),
                 ("message", json!(format!("目标端：{rule}"))),
                 ("rule", json!(rule)),
+                ("suggestion", json!(suggestion)),
             ],
         ),
         TransferEvent::RangeCheckExecuted {

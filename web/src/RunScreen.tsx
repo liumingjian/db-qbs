@@ -10,6 +10,7 @@ import {
   TerminalBlock,
 } from "./components/DesignSystem";
 import { messageFrom } from "./errors";
+import { mappingSuggestion } from "./m3";
 import {
   failedShapeRuleCount,
   shapeRuleDescription,
@@ -339,7 +340,9 @@ function PrecheckReports({
     ? `六条形状规则中 ${failedShapeRuleCount(detail.shape_checks)} 条未通过。`
     : "六条形状规则已通过。";
   return (
-    <div className="precheck-reports">
+    <div
+      className={shapeFailed ? "precheck-reports" : "precheck-reports is-map-failed"}
+    >
       <section className={shapeFailed ? "is-failed" : "is-passed"}>
         <header>
           <strong>SQL 形状预检</strong>
@@ -369,12 +372,13 @@ function PrecheckReports({
           <>
             <p>{detail.message ?? "目标端映射预检未通过。"}</p>
             <DiagnosticTable
-              columns={["列", "源端", "目标端", "规则"]}
+              columns={["列", "源端", "目标端", "规则", "建议"]}
               rows={detail.mapping_issues.map((issue) => [
                 issue.column ?? "—",
                 issue.source ?? "—",
                 issue.target ?? "—",
                 issue.rule ?? issue.message ?? "—",
+                mappingSuggestion(issue),
               ])}
             />
             <small>总计 {detail.mapping_issues.length} 项问题</small>

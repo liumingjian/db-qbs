@@ -101,8 +101,14 @@ fn open_failure_does_not_abort_before_staging_exists() {
     assert_eq!(sink.calls, vec!["open"]);
     assert!(events.iter().any(|event| matches!(
         event,
-        TransferEvent::MappingPrecheckFailed { column, rule, .. }
-            if column == "AMOUNT" && rule == "precision differs"
+        TransferEvent::MappingPrecheckFailed {
+            column,
+            rule,
+            suggestion,
+            ..
+        } if column == "AMOUNT"
+            && rule == "precision differs"
+            && suggestion.as_deref() == Some("改为 DECIMAL(8,0)")
     )));
     assert!(matches!(
         events.last(),
@@ -557,7 +563,7 @@ impl SinkClient for RejectingOpenSink {
             source: "NUMBER(8,0)".to_owned(),
             target: "decimal(7,0)".to_owned(),
             rule: "precision differs".to_owned(),
-            suggestion: None,
+            suggestion: Some("改为 DECIMAL(8,0)".to_owned()),
         }]);
         Err(error)
     }

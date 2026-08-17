@@ -77,7 +77,7 @@ fn json_lines_fold_into_one_history_row_with_event_scoped_terminals() {
 fn mapping_precheck_diagnostics_survive_the_terminal_fold() {
     let accepted_at = Utc.with_ymd_and_hms(2026, 8, 15, 9, 59, 59).unwrap();
     let lines = [
-        r#"{"ts":"2026-08-15T10:00:01.000Z","event":"mapping_precheck_failed","run_id":"run-7","column":"V_TEXT","source":"VARCHAR2(200)","target":"missing","rule":"目标表缺列"}"#,
+        r#"{"ts":"2026-08-15T10:00:01.000Z","event":"mapping_precheck_failed","run_id":"run-7","column":"V_TEXT","source":"VARCHAR2(200)","target":"missing","rule":"目标表缺列","suggestion":"在目标表加列 VARCHAR(200) NULL"}"#,
         r#"{"ts":"2026-08-15T10:00:02.000Z","event":"mapping_precheck_failed","run_id":"run-7","column":"D_BIZ","source":"DATE","target":"VARCHAR(20)","rule":"类型不兼容"}"#,
         r#"{"ts":"2026-08-15T10:00:03.000Z","event":"stage_changed","run_id":"run-7","stage":"FAILED"}"#,
         r#"{"ts":"2026-08-15T10:00:04.000Z","event":"run_finished","run_id":"run-7","terminal":"FAILED","stage":"PREPARING","source_code":null,"sink_code":"PRECHECK_FAILED","column":null,"value":null,"message":"映射预检未通过：一次发现 2 项问题","source_rows":0,"source_batches":0,"staged_rows":null,"received_batches":null,"sink_reported_rows":null,"purged_rows":null,"fetch_ms":0,"push_ms":0,"commit_ms":0,"count_ms":null,"cursor_ms":1}"#,
@@ -88,6 +88,10 @@ fn mapping_precheck_diagnostics_survive_the_terminal_fold() {
 
     assert_eq!(history.mapping_issues.len(), 2);
     assert_eq!(history.mapping_issues[0]["column"], "V_TEXT");
+    assert_eq!(
+        history.mapping_issues[0]["suggestion"],
+        "在目标表加列 VARCHAR(200) NULL"
+    );
     assert_eq!(history.mapping_issues[1]["rule"], "类型不兼容");
 }
 

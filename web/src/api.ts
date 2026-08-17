@@ -59,6 +59,12 @@ export interface MappingIssue {
   suggestion?: string | null;
 }
 
+export interface TargetDdlIssue {
+  column: string;
+  source: string;
+  message: string;
+}
+
 /**
  * 取列面的三档支持标记（ADR-0010 2026-08-16 增补二 §2）。由 source 侧 describe 产出，
  * web 只负责显示，**不得自判**——自判会造出第三份白名单实现。
