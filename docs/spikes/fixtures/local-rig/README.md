@@ -16,6 +16,8 @@ cd docs/spikes/fixtures/local-rig
 ./scripts/run-pagination-boundary-probe.sh # 跑 #21 的分页边界可复现性探针
 ./scripts/run-canon-gate.sh             # 跑 #43 的 M1 规范形式手工门禁
 ./scripts/run-m1-acceptance.sh           # 跑 #45 的九类 M1 验收并生成报告
+./scripts/run-m2-acceptance.sh           # 跑 #72 的 A1–A14 M2 验收并生成报告
+./scripts/run-m3-acceptance.sh           # 跑 #115 的 B1–B6 M3 验收并生成报告
 ./scripts/run-bulk-probe.sh              # 跑 #5 的内存形状探针（19 组配置矩阵）
 REPS=7 ./scripts/run-cpu-probe.sh        # 跑 #5 的客户端每行 CPU 探针（每档取中位数）
 ./scripts/run-mysql-roundtrip-probe.sh   # 跑 #13 的目标端往返实测（只起 MySQL，不用 Oracle）
@@ -287,3 +289,46 @@ M2_HOST_CARGO_TARGET=x86_64-apple-darwin \
 - **G2**：独立运行既有 `scripts/run-canon-gate.sh`，该入口一字不改。
 - **渲染走查**：每次 M2 验收必须跑 [`m2-visual-walkthrough.md`](m2-visual-walkthrough.md)。任何改动
   `docs/design-system/README.md` 或 `docs/design-system/tokens.css` 的变更，合并前也必须跑同一份走查并记录实际观察。
+
+## M3 的验收编排
+
+规格见 [ADR-0032](../../adr/0032-m3-acceptance-criteria-and-rig-extension.md)（决策票
+[#103](https://github.com/liumingjian/db-qbs/issues/103)）。M3 是第三个独立入口，前置要求是
+先跑绿 M1 与 M2；它不会修改或代跑另外两份验收。
+
+```bash
+PATH=/opt/homebrew/opt/node@22/bin:$PATH \
+M2_ORACLE_CLIENT_LIB_DIR=/path/to/instantclient \
+  ./scripts/run-m3-acceptance.sh
+```
+
+arm64 macOS 沿用上面的 `M2_HOST_CARGO_TARGET=x86_64-apple-darwin` 方式编译宿主 source；容器内的
+sink 仍使用 arm64 原生构建。Node 22 的 Homebrew 路径按本机实际安装位置调整。
+
+入口依次跑 B1–B6：九行形态逐值往返、全量映射拒绝、`TIMESTAMP(n>6)` 拒绝、裸 `NUMBER` 值域
+校核正面、无裸 `NUMBER` 的零扫描反面，以及公元前 `DATE` 的源值失败。B1 的字符族与日期族用
+`HEX()` 比对，`DECIMAL` 族按目标列标度补零后的读回值比对。B4 报告唯一的值域校核耗时与扫描行数；
+不采 M1 的通用性能数。
+
+M3 使用新建的 `acceptance/oracle-m3.sql` 与 `acceptance/mysql-m3.sql`，两份 fixture 都只触碰
+`M3_*` 表；台架仍由 `./scripts/up.sh` 自包含地启动，没有 `up-m3.sh`。source 在宿主机后台运行，
+sink 仍运行在 `qbs-client` 容器内。`--list` 只列 B1–B6，不启动台架。
+
+#### 把台架留给 M3 走查：`M3_KEEP_RIG=1`
+
+加上 `M3_KEEP_RIG=1` 后，入口会在 B1–B6 结束时重跑 B2 与 B4，留下两条失败历史，并打印
+run ID 与 W1–W6 的对应关系。这样 [`m3-visual-walkthrough.md`](m3-visual-walkthrough.md)
+可以直接观察刚生成的 B2/B4 终态；W3/W4/W5 只需使用入口打印的源 SQL 在构建器取列。
+
+报告默认写为 `m3-acceptance-<UTC>.md`（可用 `M3_REPORT=/path/report.md` 指定），内容是
+场景 × PASS/FAIL 与每条断言的实际值。报告不会把人工走查写成结果，W1–W6 的实际观察另写为
+`m3-visual-walkthrough-<UTC>.md`。
+
+### M3 手工门禁
+
+- **G1**：把生成的 DDL 真正交给 MySQL `describe`，再跑映射预检，覆盖 ADR-0030 §1 的九行形态。
+  `NUMBER(38,-30)` 必须在生成侧先拒绝，不能输出 `DECIMAL(68,0)` 后再让 MySQL 报错；把实际列形状、
+  预检报告和该拒绝点贴进本次 M3 报告。
+- **G2**：独立运行既有 `scripts/run-canon-gate.sh`，入口一字不改。
+- **W1–W6**：每次 M3 验收必须跑 [`m3-visual-walkthrough.md`](m3-visual-walkthrough.md)，逐条记录
+  1024/1440 布局、五列报告、取列标记、DDL 占位符、白名单外列态和 B4 值域记录的实际观察。

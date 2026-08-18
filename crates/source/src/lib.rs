@@ -337,7 +337,10 @@ fn check_projection(select: &Select, problems: &mut Vec<ShapeProblem>) {
                 has_unnamed_projection = true;
                 has_indeterminate_projection = true;
             }
-            SelectItem::ExprWithAlias { .. } => has_indeterminate_projection = true,
+            // M3 lets the sink decide whether an aliased expression has a supported
+            // source shape. The source parser cannot distinguish numeric arithmetic
+            // from a character expression without describing the Oracle cursor.
+            SelectItem::ExprWithAlias { .. } => {}
             SelectItem::QualifiedWildcard(_, _) | SelectItem::Wildcard(_) => {
                 has_unnamed_projection = true;
                 has_indeterminate_projection = true;

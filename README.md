@@ -10,9 +10,8 @@
 
 ## 状态
 
-M1（一次性进程跑通一趟导入）与 M2（source 常驻服务 + Web UI）**已实现并通过验收**，
-验收记录在 `docs/spikes/fixtures/local-rig/`。M3 正在实现（协议字段形状与 canon 层已落地，
-完整映射预检尚未完成）；M4 尚未开工，但错误分类已提前实现。列名映射已明确不做，改名使用
+M1（一次性进程跑通一趟导入）、M2（source 常驻服务 + Web UI）与 M3（九行形态、映射预检与值域校核）
+**已实现**，验收记录在 `docs/spikes/fixtures/local-rig/`。M4 尚未开工，但错误分类已提前实现。列名映射已明确不做，改名使用
 SQL `AS` 别名。**尚未在生产环境部署过。**
 
 两端都是 Rust（`crates/`），Web UI 是 React + Vite（`web/`），构建时由 `crates/source/build.rs`
@@ -73,10 +72,11 @@ npm test                 # vitest run
 npm run dev              # 只调前端时用（vite dev server）
 ```
 
-台架验收（M1 9 条、M2 A1–A14）与 M2 渲染走查是**带触发条件的手工门禁，不进 CI**
+台架验收（M1 9 条、M2 A1–A14、M3 B1–B6）与 M2/M3 渲染走查是**带触发条件的手工门禁，不进 CI**
 （ADR-0014 §8）：脚本在 `docs/spikes/fixtures/local-rig/scripts/`，走查清单在
-`docs/spikes/fixtures/local-rig/m2-visual-walkthrough.md`。改 `docs/design-system/` 必须
-重跑整份走查并记录实际观察。
+`docs/spikes/fixtures/local-rig/m2-visual-walkthrough.md` 与
+`docs/spikes/fixtures/local-rig/m3-visual-walkthrough.md`。改 `docs/design-system/` 必须
+重跑 M2 走查；改 M3 失败态布局或诊断表列结构必须重跑 M3 走查，并记录实际观察。
 
 ## Agent 配置
 

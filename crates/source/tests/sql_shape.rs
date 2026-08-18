@@ -45,6 +45,18 @@ fn valid_oracle_dblink_subquery_shape_passes() {
 }
 
 #[test]
+fn named_expressions_are_deferred_to_source_describe_and_mapping_precheck() {
+    let task = task(
+        "SELECT a.amount * 2 AS AMOUNT_TOTAL, a.note || a.note AS NOTE_TOTAL, a.biz_day AS BIZ_DAY \
+         FROM orders a \
+         WHERE a.biz_day >= TO_DATE(:biz_date,'YYYY-MM-DD') \
+         AND a.biz_day < TO_DATE(:biz_date,'YYYY-MM-DD') + 1",
+    );
+
+    assert_eq!(precheck_sql(&task), Ok(()));
+}
+
+#[test]
 fn shape_report_marks_uninspectable_rules_failed_in_stable_order() {
     let checks = sql_shape_report(&task(""));
     let results = checks
