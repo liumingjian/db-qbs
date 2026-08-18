@@ -64,6 +64,14 @@ assert_eq() {
   [[ "$actual" == "$expected" ]] || fail "$label expected=$expected actual=$actual"
 }
 
+assert_mapping_rule() {
+  local column=$1 expected=$2 actual
+  actual=$(jq --arg column "$column" --arg expected "$expected" \
+    '[.mapping_issues[] | select(.column == $column and (.rule | contains($expected)))] | length == 1' \
+    <<<"$API_BODY") || return 1
+  assert_eq "B2 rule $column" true "$actual"
+}
+
 mysql_exec() {
   compose exec -T mysql mysql -N -B -uspike -pspike123 qbs -e "$1" 2>/dev/null | tr -d '\r'
 }
@@ -188,6 +196,21 @@ stop_sink() {
   '
 }
 
+stop_all_sinks() {
+  compose exec -T client sh -c '
+    self=$$
+    for entry in /proc/[0-9]*; do
+      pid=${entry#/proc/}
+      test "$pid" != "$self" || continue
+      cmdline=$(tr "\0" " " < "$entry/cmdline" 2>/dev/null) || continue
+      case "$cmdline" in
+        *db-qbs-sink*) kill -KILL "$pid" 2>/dev/null || true ;;
+      esac
+    done
+    rm -f /tmp/m1-sink.pid /tmp/m2-sink.pid /tmp/m3-sink.pid
+  '
+}
+
 start_sink() {
   stop_sink || return 1
   compose exec -T client rm -f "$SINK_LOG" || return 1
@@ -195,9 +218,16 @@ start_sink() {
     "echo \$\$ > /tmp/m3-sink.pid; exec $SINK_BIN --config /workspace/docs/spikes/fixtures/local-rig/acceptance/sink.toml > $SINK_LOG 2>&1" || return 1
   local attempt
   for (( attempt = 1; attempt <= 100; attempt++ )); do
-    curl -sS -o /dev/null "$SINK_URL/v1/runs/not-a-run" 2>/dev/null && return 0
+    if curl -sS -o /dev/null "$SINK_URL/v1/runs/not-a-run" 2>/dev/null; then
+      if compose exec -T client sh -c 'kill -0 "$(cat /tmp/m3-sink.pid)" 2>/dev/null'; then
+        return 0
+      fi
+      compose exec -T client cat "$SINK_LOG" >&2 || true
+      return 1
+    fi
     sleep 0.1
   done
+  compose exec -T client cat "$SINK_LOG" >&2 || true
   fail "sink did not become ready"
 }
 
@@ -315,7 +345,7 @@ scenario_b1() {
 
 scenario_b2() {
   start_source || return 1
-  local task_id record total column
+  local task_id record total
   task_id=$(create_task "B2 一次报全" "$(b2_sql)" M3_B2) || return 1
   record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == false' || return 1
@@ -326,9 +356,16 @@ scenario_b2() {
   assert_eq "B2 staging table" null "$(jq -r '.staging_table' <<<"$API_BODY")" || return 1
   assert_eq "B2 target effect" DISCARDED "$(jq -r '.target_table_effect' <<<"$API_BODY")" || return 1
   [[ "$(jq -r '.message' <<<"$API_BODY")" == *"一次发现 $total 项问题"* ]] || fail "B2 message did not repeat total=$total: $API_BODY" || return 1
-  for column in BF BD PAYLOAD C_EXPR C_CHAR N_TOO_WIDE N_TOO_SCALE N_MISSING D_WRONG EXTRA; do
-    assert_eq "B2 issue $column" true "$(jq --arg column "$column" 'any(.mapping_issues[]; .column == $column)' <<<"$API_BODY")" || return 1
-  done
+  assert_mapping_rule BF '源类型不在 M3 九行白名单内' || return 1
+  assert_mapping_rule BD '源类型不在 M3 九行白名单内' || return 1
+  assert_mapping_rule PAYLOAD '源类型不在 M3 九行白名单内' || return 1
+  assert_mapping_rule C_EXPR '字符列必须具有可判定的 length' || return 1
+  assert_mapping_rule C_CHAR '字符族目标类型必须是 VARCHAR' || return 1
+  assert_mapping_rule N_TOO_WIDE 'MySQL DECIMAL 无法表达推导形状 DECIMAL(68,0)' || return 1
+  assert_mapping_rule N_TOO_SCALE 'MySQL DECIMAL 无法表达推导形状 DECIMAL(35,35)' || return 1
+  assert_mapping_rule N_MISSING '目标表缺少同名列' || return 1
+  assert_mapping_rule D_WRONG 'DATE 的目标类型必须是 DATETIME' || return 1
+  assert_mapping_rule EXTRA '源端结果缺少同名列' || return 1
   assert_eq "B2 staging tables" 0 "$(mysql_staging_count M3_B2)" || return 1
   echo "B2 mapping issues ($total): $(jq -c '.mapping_issues' <<<"$API_BODY")"
   B2_RECORD=$record
@@ -494,6 +531,7 @@ prepare_rig() {
     -v "$REPO_ROOT:/workspace" -w /workspace \
     -v qbs-cargo-registry:/usr/local/cargo/registry \
     rust:1-bookworm cargo build --release --workspace || return 1
+  stop_all_sinks || return 1
   docker cp "$REPO_ROOT/target/release/db-qbs-sink" qbs-client:"$SINK_BIN" || return 1
   if [[ -n "$HOST_TARGET" ]]; then
     cargo build --release --target "$HOST_TARGET" -p db-qbs-source || return 1
@@ -531,7 +569,7 @@ hand_over_rig() {
     W5 builder SQL       : use B2 source SQL and inspect the CLOB column from t_m3_b2
     source data/history : $SOURCE_DATA/db-qbs.sqlite3
     source log          : $SOURCE_LOG
-    tear down with      : kill $SOURCE_PID; docker compose -f $RIG_ROOT/docker-compose.yml exec -T client pkill db-qbs-sink; rm -rf $WORK_ROOT
+    tear down with      : kill $SOURCE_PID; docker compose -f $RIG_ROOT/docker-compose.yml exec -T client sh -c 'test ! -f /tmp/m3-sink.pid || { kill -TERM "\$(cat /tmp/m3-sink.pid)"; rm -f /tmp/m3-sink.pid; }'; rm -rf $WORK_ROOT
 EOF
   disown "$SOURCE_PID" 2>/dev/null || true
 }

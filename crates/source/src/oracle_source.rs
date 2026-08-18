@@ -1,6 +1,9 @@
 use db_qbs_shared::{canon_date, canon_number, canon_text, canon_timestamp};
 use oracle::sql_type::{OracleType, Timestamp};
 use oracle::{Connection, InitParams, ResultSet, Row};
+use sqlparser::ast::{Expr, SelectItem, SetExpr, Statement};
+use sqlparser::dialect::GenericDialect;
+use sqlparser::parser::Parser;
 
 use crate::target_ddl::{derive_number_shape, is_supported_decimal_shape};
 use crate::{
@@ -34,7 +37,8 @@ impl OracleRowSource {
         biz_date: &str,
     ) -> Result<Self, SourceReadError> {
         let rows = open_result_set(config, task, biz_date)?;
-        let (columns, value_kinds) = describe_columns(rows.column_info());
+        let (mut columns, value_kinds) = describe_columns(rows.column_info());
+        normalize_expression_metadata(&task.source_sql, &mut columns);
 
         Ok(Self {
             rows,
@@ -50,7 +54,8 @@ impl OracleRowSource {
         task: &TaskConfig,
     ) -> Result<Vec<SourceColumn>, SourceReadError> {
         let rows = open_result_set(config, task, DESCRIBE_BIZ_DATE)?;
-        let (columns, _) = describe_columns(rows.column_info());
+        let (mut columns, _) = describe_columns(rows.column_info());
+        normalize_expression_metadata(&task.source_sql, &mut columns);
         Ok(columns)
     }
 
@@ -217,6 +222,54 @@ fn describe_columns(infos: &[oracle::ColumnInfo]) -> (Vec<SourceColumn>, Vec<Val
         .iter()
         .map(|info| describe_column(info.name(), info.oracle_type()))
         .unzip()
+}
+
+fn normalize_expression_metadata(source_sql: &str, columns: &mut [SourceColumn]) {
+    let Ok(statements) = Parser::parse_sql(&GenericDialect, source_sql) else {
+        return;
+    };
+    let [Statement::Query(query)] = statements.as_slice() else {
+        return;
+    };
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return;
+    };
+    if select.projection.len() != columns.len() {
+        return;
+    }
+
+    for (item, column) in select.projection.iter().zip(columns) {
+        let SelectItem::ExprWithAlias { expr, .. } = item else {
+            continue;
+        };
+        let expression = strip_nested_expression(expr);
+        if matches!(
+            expression,
+            Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Cast { .. }
+        ) {
+            continue;
+        }
+
+        match column.data_type.to_uppercase().as_str() {
+            "NUMBER" => {
+                column.precision = None;
+                column.scale = None;
+                column.support = Some(ColumnSupport::NeedsPrecision);
+            }
+            "VARCHAR2" | "NVARCHAR2" | "CHAR" | "NCHAR" => {
+                column.length = None;
+                column.support = Some(ColumnSupport::Unsupported);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn strip_nested_expression(mut expression: &Expr) -> &Expr {
+    while let Expr::Nested(inner) = expression {
+        expression = inner;
+    }
+    expression
 }
 
 impl RowSource for OracleRowSource {
@@ -611,6 +664,66 @@ mod tests {
         assert_eq!(wire["type"], "TIMESTAMP");
         assert_eq!(wire["fsp"], 3);
         assert_eq!(wire["support"], "ok");
+    }
+
+    #[test]
+    fn uncast_expression_metadata_uses_the_m3_expression_rules() {
+        let column = |name: &str, data_type: &str, precision, scale, length, support| {
+            let mut column = expected_column(data_type, precision, scale, length, None, support);
+            column.name = name.to_owned();
+            column
+        };
+        let mut columns = vec![
+            column(
+                "N_EXPR",
+                "NUMBER",
+                Some(18),
+                Some(2),
+                None,
+                ColumnSupport::Ok,
+            ),
+            column(
+                "C_EXPR",
+                "VARCHAR2",
+                None,
+                None,
+                Some(20),
+                ColumnSupport::Ok,
+            ),
+            column(
+                "C_COLUMN",
+                "VARCHAR2",
+                None,
+                None,
+                Some(10),
+                ColumnSupport::Ok,
+            ),
+            column(
+                "C_CAST",
+                "VARCHAR2",
+                None,
+                None,
+                Some(20),
+                ColumnSupport::Ok,
+            ),
+        ];
+
+        normalize_expression_metadata(
+            "SELECT n.amount * 2 AS N_EXPR, n.note || n.note AS C_EXPR, \
+             n.note AS C_COLUMN, CAST(n.note || n.note AS VARCHAR2(20)) AS C_CAST \
+             FROM notes n",
+            &mut columns,
+        );
+
+        assert_eq!(columns[0].precision, None);
+        assert_eq!(columns[0].scale, None);
+        assert_eq!(columns[0].support, Some(ColumnSupport::NeedsPrecision));
+        assert_eq!(columns[1].length, None);
+        assert_eq!(columns[1].support, Some(ColumnSupport::Unsupported));
+        assert_eq!(columns[2].length, Some(10));
+        assert_eq!(columns[2].support, Some(ColumnSupport::Ok));
+        assert_eq!(columns[3].length, Some(20));
+        assert_eq!(columns[3].support, Some(ColumnSupport::Ok));
     }
 
     #[test]

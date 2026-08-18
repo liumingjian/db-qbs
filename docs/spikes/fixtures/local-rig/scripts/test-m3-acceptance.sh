@@ -74,6 +74,16 @@ grep -Fq 'run_executable = "$REAL_SOURCE_BIN"' "$runner" || {
   exit 1
 }
 
+start_sink_body=$(sed -n '/^start_sink()/,/^}/p' "$runner")
+grep -Fq 'kill -0 "$(cat /tmp/m3-sink.pid)"' <<<"$start_sink_body" || {
+  echo "M3 sink readiness must verify the process it just started" >&2
+  exit 1
+}
+grep -Fq 'stop_all_sinks || return 1' "$runner" || {
+  echo "M3 preparation must remove stale sinks from earlier acceptance runs" >&2
+  exit 1
+}
+
 for fixture in acceptance/oracle-m3.sql acceptance/mysql-m3.sql; do
   [[ -f "$fixture" ]] || { echo "missing $fixture" >&2; exit 1; }
 done
@@ -95,6 +105,21 @@ if grep -Fq 'acceptance/oracle.sql' "$runner" || grep -Fq 'acceptance/mysql.sql'
   echo "M3 must load standalone fixtures" >&2
   exit 1
 fi
+
+while IFS= read -r shape; do
+  precision=${shape#DECIMAL(}
+  precision=${precision%%,*}
+  scale=${shape##*,}
+  scale=${scale%)}
+  if (( precision > 65 || scale > 30 || scale > precision )); then
+    echo "M3 MySQL fixture contains an invalid $shape declaration" >&2
+    exit 1
+  fi
+done < <(grep -Eo 'DECIMAL\([0-9]+,[0-9]+\)' acceptance/mysql-m3.sql)
+grep -Eq '^[[:space:]]*C_EXPR[[:space:]]+VARCHAR\(20\)' acceptance/mysql-m3.sql || {
+  echo "B2 character-expression target must not add a second CHAR rejection reason" >&2
+  exit 1
+}
 
 for shape in \
   'NUMBER(38,2)' 'NUMBER(4,6)' 'NUMBER(8,-2)' 'n_bare       NUMBER' \
@@ -119,10 +144,22 @@ grep -Fq 'N_EXPR' "$runner"
 grep -Fq 'column_precision' "$runner"
 grep -Fq 'HEX(' "$runner"
 
-grep -Fq 'for column in BF BD PAYLOAD C_EXPR C_CHAR N_TOO_WIDE N_TOO_SCALE N_MISSING D_WRONG EXTRA; do' "$runner" || {
-  echo "B2 is missing one or more invalid-column assertions" >&2
-  exit 1
-}
+for mapping_rule in \
+  "BF '源类型不在 M3 九行白名单内'" \
+  "BD '源类型不在 M3 九行白名单内'" \
+  "PAYLOAD '源类型不在 M3 九行白名单内'" \
+  "C_EXPR '字符列必须具有可判定的 length'" \
+  "C_CHAR '字符族目标类型必须是 VARCHAR'" \
+  "N_TOO_WIDE 'MySQL DECIMAL 无法表达推导形状 DECIMAL(68,0)'" \
+  "N_TOO_SCALE 'MySQL DECIMAL 无法表达推导形状 DECIMAL(35,35)'" \
+  "N_MISSING '目标表缺少同名列'" \
+  "D_WRONG 'DATE 的目标类型必须是 DATETIME'" \
+  "EXTRA '源端结果缺少同名列'"; do
+  grep -Fq "assert_mapping_rule $mapping_rule" "$runner" || {
+    echo "B2 is missing its expected mapping rule: $mapping_rule" >&2
+    exit 1
+  }
+done
 grep -Fq '一次发现 $total 项问题' "$runner"
 grep -Fq 'B2 total issues' "$runner"
 grep -Fq 'staging tables' "$runner"
@@ -142,6 +179,11 @@ grep -Fq 'B2 / W1-W2 run' "$runner"
 grep -Fq 'B4 / W6 run' "$runner"
 grep -Fq 'W3-W4 builder SQL' "$runner"
 grep -Fq 'W5 builder SQL' "$runner"
+grep -Fq 'kill -TERM "\$(cat /tmp/m3-sink.pid)"' "$runner"
+if grep -Fq 'pkill db-qbs-sink' "$runner"; then
+  echo "M3 teardown must use tools available in the client image" >&2
+  exit 1
+fi
 grep -Fq 'm3-acceptance-' "$runner"
 grep -Fq 'G1:' "$runner"
 grep -Fq 'scripts/run-canon-gate.sh unchanged' "$runner"
