@@ -1,7 +1,7 @@
 use db_qbs_source::{
     generate_run_id, run_transfer, BatchPayload, BatchResponse, ColumnSupport, CommitResponse,
-    FailureKind, OpenRunRequest, OpenRunResponse, RangeCheckColumn, RangeCheckResult, RowSource,
-    RunResponse, SinkClient, SinkError, SinkErrorKind, SinkPrecheckIssue, SourceColumn,
+    FailureKind, OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn,
+    RangeCheckResult, RowSource, RunResponse, SinkClient, SinkError, SinkErrorKind, SourceColumn,
     SourceReadError, Terminal, TransferEvent, TransferRequest, BATCH_BYTE_BUDGET,
 };
 
@@ -558,7 +558,7 @@ impl SinkClient for RejectingOpenSink {
     fn open(&mut self, _request: &OpenRunRequest) -> Result<OpenRunResponse, SinkError> {
         self.calls.push("open");
         let mut error = SinkError::response(Some("PRECHECK_FAILED".to_owned()), "mapping rejected");
-        error.precheck_issues = Box::new(vec![SinkPrecheckIssue {
+        error.precheck_issues = Box::new(vec![PrecheckIssue {
             column: "AMOUNT".to_owned(),
             source: "NUMBER(8,0)".to_owned(),
             target: "decimal(7,0)".to_owned(),

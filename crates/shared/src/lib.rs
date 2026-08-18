@@ -4,7 +4,15 @@ use std::sync::LazyLock;
 
 use chrono::{NaiveDate, SecondsFormat, Utc};
 use regex::Regex;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Serialize, Serializer};
+
+mod protocol;
+
+pub use protocol::{
+    AbortResponse, BatchPayload, BatchResponse, ColumnSupport, CommitRequest, CommitResponse,
+    ErrorBody, ErrorEnvelope, OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn,
+    RangeCheckResult, RunResponse, SourceColumn, Terminal,
+};
 
 static CANONICAL_NUMBER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(0|-?[1-9][0-9]*(\.[0-9]*[1-9])?|-?0\.[0-9]*[1-9])$")
@@ -89,13 +97,6 @@ pub fn canon_timestamp(
 
 pub fn canon_text(value: &str) -> &str {
     value
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BatchPayload {
-    pub seq: u64,
-    pub rows: Vec<Vec<Option<String>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

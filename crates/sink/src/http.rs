@@ -247,7 +247,7 @@ fn not_found() -> ApiError {
 
 fn error_response(error: ApiError) -> HttpResponse {
     let status = error.status;
-    json_response(status, &json!({ "error": error }))
+    json_response(status, &error.into_envelope())
 }
 
 fn json_response(status: u16, value: &impl Serialize) -> HttpResponse {

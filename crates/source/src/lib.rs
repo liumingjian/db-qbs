@@ -25,14 +25,16 @@ mod task_store;
 mod transfer;
 mod web_assets;
 
-pub use db_qbs_shared::BatchPayload;
+// 报文形状的唯一定义在 `db-qbs-shared`（#124）。这里只保留门面，
+// crate 内部与既有测试的引用路径一个字不变。
+pub use db_qbs_shared::{
+    AbortResponse, BatchPayload, BatchResponse, ColumnSupport, CommitRequest, CommitResponse,
+    ErrorBody, ErrorEnvelope, OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn,
+    RangeCheckResult, RunResponse, SourceColumn, Terminal,
+};
 pub use failure_kind::{oracle_kind, FailureKind};
 pub use oracle_source::OracleRowSource;
-pub use protocol::{
-    BatchResponse, ColumnSupport, CommitResponse, HttpSinkClient, OpenRunRequest, OpenRunResponse,
-    RangeCheckColumn, RangeCheckResult, RunResponse, SinkClient, SinkError, SinkErrorKind,
-    SinkGateDetails, SinkPrecheckIssue, SourceColumn, Terminal,
-};
+pub use protocol::{HttpSinkClient, SinkClient, SinkError, SinkErrorKind, SinkGateDetails};
 pub use run_history::{
     expired_history_indices, fold_history_lines, HistoryChange, HistoryStore, RunHistory,
     UnknownReason,

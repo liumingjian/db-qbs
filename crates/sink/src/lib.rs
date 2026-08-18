@@ -9,10 +9,16 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 
-pub use db_qbs_shared::BatchPayload;
+// 报文形状的唯一定义在 `db-qbs-shared`（#124）。这里只保留门面，
+// crate 内部与既有测试的引用路径一个字不变。
+pub use db_qbs_shared::{
+    AbortResponse, BatchPayload, BatchResponse, ColumnSupport, CommitRequest, CommitResponse,
+    ErrorBody, ErrorEnvelope, OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn,
+    RangeCheckResult, RunResponse, SourceColumn, Terminal,
+};
 pub use http::serve;
 pub use mysql_destination::{check_connection_settings, MysqlDestination};
 pub use precheck::precheck;
@@ -43,59 +49,6 @@ impl SinkConfig {
     }
 }
 
-/// 取列面的三档支持标记（ADR-0010 2026-08-16 增补二 §2）。
-///
-/// **`sink` 不得读它做任何判定。** 它随 `POST /runs` 的 `source_columns` 一起过线，
-/// 只是因为两端共用同一个结构形状；逐列类型判定按 ADR-0010 §3.1 集中在 sink，
-/// 由 sink 自己按 `type` / `precision` / `scale` / `length` / `fsp` 判。
-/// 一旦被当成判定输入，判定就悄悄搬回 source 侧了。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ColumnSupport {
-    Ok,
-    NeedsPrecision,
-    Unsupported,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceColumn {
-    pub name: String,
-    #[serde(rename = "type")]
-    pub data_type: String,
-    pub precision: Option<i64>,
-    pub scale: Option<i64>,
-    pub length: Option<u64>,
-    /// `TIMESTAMP(n)` 的 `n`。非 `TIMESTAMP` 列不带它（ADR-0010 2026-08-16 增补一）。
-    /// **永久可选**，不设收紧成必填的计划（#106 裁定 Q14）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fsp: Option<u32>,
-    /// 见 [`ColumnSupport`]——展示提示，**不是预检裁决**。同样永久可选。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub support: Option<ColumnSupport>,
-}
-
-/// 3.5 步值域校核：sink 跑完 1–3 步后告诉 source「哪几列要校核 + 推导出的目标形状」。
-///
-/// `precision` / `scale` 是**推导出的目标形状** `(p', s')`，不是源端 `(p, s)`；
-/// 推导形状的标度恒非负，故用无符号（#106「预检顺序加 3.5 步」）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RangeCheckColumn {
-    pub column: String,
-    pub precision: u32,
-    pub scale: u32,
-}
-
-/// 3.5 步值域校核：source 执行完聚合 SQL 后回发的每列不合规行数。
-/// **判定仍由 sink 做**（ADR-0010 §3.1）——source 只回事实，不回结论。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RangeCheckResult {
-    pub column: String,
-    pub invalid_rows: u64,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetColumn {
     pub name: String,
@@ -108,92 +61,6 @@ pub struct TargetColumn {
     pub nullable: bool,
     pub character_set: Option<String>,
     pub ordinal: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PrecheckIssue {
-    pub column: String,
-    pub source: String,
-    pub target: String,
-    pub rule: String,
-    /// 动作型建议，**由 sink 侧算**（ADR-0010 2026-08-16 增补二 §1）——
-    /// web 不得把判定式复制进 TypeScript 重算一遍。永久可选。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub suggestion: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OpenRunRequest {
-    pub run_id: String,
-    pub target_table: String,
-    pub target_date_col: String,
-    pub biz_date: String,
-    pub source_columns: Vec<SourceColumn>,
-    /// 3.5 步：source 回发的值域校核结果。永久可选（#106 裁定 Q14/Q15）。
-    #[serde(default)]
-    pub range_check_results: Option<Vec<RangeCheckResult>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct OpenRunResponse {
-    pub run_id: String,
-    pub staging_table: String,
-    pub columns_checked: usize,
-    /// 3.5 步：sink 告诉 source「哪几列要跑值域校核」。永久可选（#106 裁定 Q14/Q15）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub range_check_columns: Option<Vec<RangeCheckColumn>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct AbortResponse {
-    pub run_id: String,
-    pub staging_dropped: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct BatchResponse {
-    pub seq: u64,
-    pub rows_written: u64,
-    pub next_seq: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CommitRequest {
-    pub total_batches: u64,
-    pub total_rows: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CommitResponse {
-    pub source_rows: u64,
-    pub staged_rows: u64,
-    pub purged_rows: u64,
-    pub swapped_rows: u64,
-    pub count_ms: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum Terminal {
-    Swapped,
-    Discarded,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RunResponse {
-    pub run_id: String,
-    pub staging_table: String,
-    pub batches_received: u64,
-    pub rows_written: u64,
-    pub sealed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub terminal: Option<Terminal>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub purged_rows: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub swapped_rows: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,14 +159,30 @@ pub struct SinkService<D: Destination> {
     tombstones: Mutex<VecDeque<RunResponse>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// sink 内部的错误模型。**它不是线上形状**——过线的是 [`ErrorEnvelope`]，
+/// 由 [`ApiError::into_envelope`] 在 HTTP 边界上转一次（#124）。
+/// 那一处转换是编译器盯着的唯一接缝：信封加字段，这里就编译不过。
+#[derive(Debug, Clone, PartialEq)]
 pub struct ApiError {
-    #[serde(skip)]
     pub status: u16,
     pub code: &'static str,
     pub message: String,
     pub run_id: Option<String>,
     pub details: Value,
+}
+
+impl ApiError {
+    /// 字段顺序即线上字节顺序，与 [`ErrorBody`] 的声明顺序一致，**不要重排**。
+    pub fn into_envelope(self) -> ErrorEnvelope {
+        ErrorEnvelope {
+            error: ErrorBody {
+                code: self.code.to_owned(),
+                message: self.message,
+                run_id: self.run_id,
+                details: self.details,
+            },
+        }
+    }
 }
 
 impl fmt::Display for ApiError {
