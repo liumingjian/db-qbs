@@ -14,9 +14,12 @@ CREATE TABLE M3_B1 (
   N_NEGATIVE DECIMAL(10,0) NULL,
   N_BARE     DECIMAL(20,4) NULL,
   N_EXPR     DECIMAL(20,4) NULL,
-  V_TEXT     VARCHAR(10) NULL,
+  -- V_TEXT / C_TEXT 建 40 而非 10：源 VARCHAR2(10 CHAR) / CHAR(10 CHAR) 的 describe
+  -- 长度由驱动按「字节」给出（AL32UTF8 下 = 40），而判定式 n' >= n 按字符比。
+  -- 第一版认下这份过严，见 ADR-0033。NV_TEXT / NC_TEXT 的 N 族驱动直接给字符数，仍是 10。
+  V_TEXT     VARCHAR(40) NULL,
   NV_TEXT    VARCHAR(10) NULL,
-  C_TEXT     VARCHAR(10) NULL,
+  C_TEXT     VARCHAR(40) NULL,
   NC_TEXT    VARCHAR(10) NULL,
   D_VALUE    DATETIME(0) NULL,
   TS0        DATETIME(6) NULL,
