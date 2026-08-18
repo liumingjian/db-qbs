@@ -184,3 +184,9 @@ INSERT INTO <target> (`c1`, …, `cN`) SELECT `c1`, …, `cN` FROM <stg>
 延迟批次重推与幂等接收由 [ADR-0018](0018-delayed-batch-retry-model.md) 定义：失败批次物化在
 source 本地，暂存表以内部列 `__batch_no` 做事务性 DELETE + INSERT。该模型显式升级表结构后
 才成立，不能从 M1「已有暂存表和批次序号」推导出重推能力。
+
+## 2026-08-18 订正指针（ADR-0035）
+
+**本 ADR 结尾那条硬约束「清除条件与源端 WHERE 必须由同一业务日期推导」已随写入模型换成主键 upsert
+而整条退役**——新模型没有清除条件。见 [ADR-0035](0035-upsert-write-model.md) §1 / §3。
+其余部分（暂存表、绝不 DROP 重建、事务内切换、失败即整 run 失败）**一字不动**。正文不删，作为历史保留。

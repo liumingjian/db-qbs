@@ -183,3 +183,10 @@ commit 报文已有 `total_batches`（source 自报推了几批），sink 自己
   直接加在 ADR-0010 那 30 分钟读超时的账上。并进 ADR-0010 已要求的「commit 实际耗时」一起测。
 - **必测场景**：人为丢掉一个批次（或截断一批的行），确认 §6 的五个数确实把两类失败分开了，
   且 §7 的人话确实打出来了。
+
+## 2026-08-18 订正指针（ADR-0035）
+
+切换段的行数断言由等式改为区间：MySQL 在 `ON DUPLICATE KEY UPDATE` 下 `affected_rows`
+**插入记 1、更新记 2**，原断言 `swapped_rows == staged_rows` 会把成功的任务全判成失败。
+新判据 `staged_rows ≤ affected_rows ≤ 2 × staged_rows`，门禁四数里的 `sink_reported_rows`
+**仍报 `staged_rows`**。见 [ADR-0035](0035-upsert-write-model.md) §4。
