@@ -5,11 +5,10 @@ use sqlparser::ast::{Expr, SelectItem, SetExpr, Statement};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
-use crate::target_ddl::{derive_number_shape, is_supported_decimal_shape};
 use crate::{
-    builder_column_query, builder_table_query, BuilderColumn, BuilderTable, ColumnSupport,
-    FailureKind, RangeCheckColumn, RangeCheckResult, RowSource, SourceColumn, SourceConfig,
-    SourceReadError, TaskConfig, FETCH_ARRAY_SIZE,
+    builder_column_query, builder_table_query, classify_column, column_support, BuilderColumn,
+    BuilderTable, FailureKind, RangeCheckColumn, RangeCheckResult, RowSource, SourceColumn,
+    SourceConfig, SourceReadError, TaskConfig, FETCH_ARRAY_SIZE,
 };
 
 const DESCRIBE_BIZ_DATE: &str = "0001-01-01";
@@ -254,14 +253,15 @@ fn normalize_expression_metadata(source_sql: &str, columns: &mut [SourceColumn])
             "NUMBER" => {
                 column.precision = None;
                 column.scale = None;
-                column.support = Some(ColumnSupport::NeedsPrecision);
             }
             "VARCHAR2" | "NVARCHAR2" | "CHAR" | "NCHAR" => {
                 column.length = None;
-                column.support = Some(ColumnSupport::Unsupported);
             }
-            _ => {}
+            _ => continue,
         }
+        // 精度 / 长度被抹掉之后重新分类：数值表达式列落「待配精度」、
+        // 字符表达式列落「不支持」，与手写标记逐条一致（#125 Q7）。
+        column.support = Some(column_support(classify_column(column)));
     }
 }
 
@@ -382,14 +382,14 @@ fn invalid_value(message: String, column: &str, value: String) -> SourceReadErro
 }
 
 fn describe_column(name: &str, oracle_type: &OracleType) -> (SourceColumn, ValueKind) {
-    let (data_type, precision, scale, length, fsp, support, value_kind) = match oracle_type {
+    // 三档标记不再逐类型手写：形状推导只有一份定义（#125），标记是它的三条出路。
+    let (data_type, precision, scale, length, fsp, value_kind) = match oracle_type {
         OracleType::Number(0, _) => (
             "NUMBER".to_owned(),
             None,
             None,
             None,
             None,
-            Some(ColumnSupport::NeedsPrecision),
             ValueKind::Number,
         ),
         OracleType::Number(precision, scale) => (
@@ -398,7 +398,6 @@ fn describe_column(name: &str, oracle_type: &OracleType) -> (SourceColumn, Value
             Some(i64::from(*scale)),
             None,
             None,
-            Some(number_support(*precision, *scale)),
             ValueKind::Number,
         ),
         OracleType::Varchar2(length) => (
@@ -407,7 +406,6 @@ fn describe_column(name: &str, oracle_type: &OracleType) -> (SourceColumn, Value
             None,
             Some(u64::from(*length)),
             None,
-            Some(ColumnSupport::Ok),
             ValueKind::Text,
         ),
         OracleType::NVarchar2(length) => (
@@ -416,7 +414,6 @@ fn describe_column(name: &str, oracle_type: &OracleType) -> (SourceColumn, Value
             None,
             Some(u64::from(*length)),
             None,
-            Some(ColumnSupport::Ok),
             ValueKind::Text,
         ),
         OracleType::Char(length) => (
@@ -425,7 +422,6 @@ fn describe_column(name: &str, oracle_type: &OracleType) -> (SourceColumn, Value
             None,
             Some(u64::from(*length)),
             None,
-            Some(ColumnSupport::Ok),
             ValueKind::Text,
         ),
         OracleType::NChar(length) => (
@@ -434,7 +430,6 @@ fn describe_column(name: &str, oracle_type: &OracleType) -> (SourceColumn, Value
             None,
             Some(u64::from(*length)),
             None,
-            Some(ColumnSupport::Ok),
             ValueKind::Text,
         ),
         OracleType::Timestamp(fsp) => (
@@ -443,56 +438,24 @@ fn describe_column(name: &str, oracle_type: &OracleType) -> (SourceColumn, Value
             None,
             None,
             Some(u32::from(*fsp)),
-            Some(if *fsp <= 6 {
-                ColumnSupport::Ok
-            } else {
-                ColumnSupport::Unsupported
-            }),
             ValueKind::Timestamp,
         ),
-        OracleType::Date => (
-            "DATE".to_owned(),
-            None,
-            None,
-            None,
-            None,
-            Some(ColumnSupport::Ok),
-            ValueKind::Date,
-        ),
-        other => (
-            other.to_string(),
-            None,
-            None,
-            None,
-            None,
-            Some(ColumnSupport::Unsupported),
-            ValueKind::Text,
-        ),
+        OracleType::Date => ("DATE".to_owned(), None, None, None, None, ValueKind::Date),
+        other => (other.to_string(), None, None, None, None, ValueKind::Text),
     };
 
-    (
-        SourceColumn {
-            name: name.to_owned(),
-            data_type,
-            precision,
-            scale,
-            length,
-            fsp,
-            support,
-        },
-        value_kind,
-    )
-}
+    let mut column = SourceColumn {
+        name: name.to_owned(),
+        data_type,
+        precision,
+        scale,
+        length,
+        fsp,
+        support: None,
+    };
+    column.support = Some(column_support(classify_column(&column)));
 
-fn number_support(precision: u8, scale: i8) -> ColumnSupport {
-    let (target_precision, target_scale) =
-        derive_number_shape(i64::from(precision), i64::from(scale));
-
-    if is_supported_decimal_shape(target_precision, target_scale) {
-        ColumnSupport::Ok
-    } else {
-        ColumnSupport::Unsupported
-    }
+    (column, value_kind)
 }
 
 /// 会话已经建起来之后撞上的 Oracle 错误：可能是本地查询，也可能是 dblink 那一头。
@@ -512,6 +475,7 @@ fn oracle_code(error: &oracle::Error) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ColumnSupport;
 
     fn assert_describe(
         oracle_type: OracleType,

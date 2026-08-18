@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{PrecheckIssue, RangeCheckColumn, SourceColumn, TargetColumn};
+use crate::{
+    classify_column, is_business_date_column, ColumnShape, PrecheckIssue, RangeCheckColumn,
+    ShapeRejection, SourceColumn, TargetColumn, TargetShape,
+};
 
 pub fn precheck(
     target_table: &str,
@@ -35,11 +38,7 @@ pub(crate) fn range_check_columns(
 
     source_columns
         .iter()
-        .filter(|source| {
-            source.data_type.eq_ignore_ascii_case("NUMBER")
-                && source.precision.is_none()
-                && source.scale.is_none()
-        })
+        .filter(|source| matches!(classify_column(source), ColumnShape::NeedsPrecision))
         .filter_map(|source| {
             let target = targets.get(&source.name.to_uppercase()).copied()?;
             let (precision, scale) = target_decimal_shape(target)?;
@@ -138,7 +137,7 @@ fn validate_date_column(
     let source = source_columns
         .iter()
         .find(|column| column.name.eq_ignore_ascii_case(date_column));
-    if source.is_some_and(is_supported_date_source) {
+    if source.is_some_and(|column| is_business_date_column(column)) {
         return;
     }
 
@@ -161,95 +160,123 @@ fn validate_source_type(
     target: Option<&TargetColumn>,
     issues: &mut Vec<PrecheckIssue>,
 ) {
-    match source.data_type.to_uppercase().as_str() {
-        "NUMBER" => validate_number(source, target, issues),
-        "VARCHAR2" | "NVARCHAR2" | "CHAR" | "NCHAR" => validate_varchar(source, target, issues),
-        "DATE" => validate_date(source, target, issues),
-        "TIMESTAMP" => validate_timestamp(source, target, issues),
-        _ => issues.push(issue_with_suggestion(
-            source,
-            target,
-            "源类型不在 M3 九行白名单内",
-            Some("改源 SQL 或加 CAST 到支持的类型".to_owned()),
-        )),
+    // 推导（源形态 → 目标形状、白名单成员）只有一份定义，在 `db-qbs-shared`（#125）。
+    // 下面全是**判定式**——「怎么比」按 ADR-0010 §3.1 归 sink，一行不外移。
+    match classify_column(source) {
+        ColumnShape::Rejected(rejection) => {
+            let (rule, suggestion) = rejection_issue(rejection);
+            issues.push(issue_with_suggestion(
+                source,
+                target,
+                &rule,
+                Some(suggestion),
+            ));
+        }
+        ColumnShape::NeedsPrecision => validate_unshaped_number(source, target, issues),
+        ColumnShape::Resolved(TargetShape::Decimal { precision, scale }) => {
+            validate_number(source, target, precision, scale, issues);
+        }
+        ColumnShape::Resolved(TargetShape::Varchar { length }) => {
+            validate_varchar(source, target, length, issues);
+        }
+        ColumnShape::Resolved(TargetShape::Datetime { fsp }) => {
+            validate_datetime(source, target, fsp, issues);
+        }
     }
 }
 
-fn validate_number(
+/// 推不出形状时的**措辞**。类型化的原因是共用的闭集，中文文字留在 sink（#125 Q6）。
+fn rejection_issue(rejection: ShapeRejection) -> (String, String) {
+    match rejection {
+        ShapeRejection::NumberPrecisionIncomplete => (
+            "任务定义未配置 (p,s)，NUMBER 无法判定".to_owned(),
+            "在任务定义为该列配 (p,s)".to_owned(),
+        ),
+        ShapeRejection::DecimalShapeUnrepresentable { precision, scale } => (
+            format!("MySQL DECIMAL 无法表达推导形状 DECIMAL({precision},{scale})"),
+            "无合法目标形状，需改源 SQL 或 CAST 收窄".to_owned(),
+        ),
+        ShapeRejection::CharacterLengthMissing => (
+            "字符列必须具有可判定的 length".to_owned(),
+            "改源 SQL 或 CAST 明确字符长度".to_owned(),
+        ),
+        ShapeRejection::TimestampFspMissing => (
+            "TIMESTAMP 必须具有可判定的 fsp".to_owned(),
+            "改源 SQL 或加 CAST 明确为 TIMESTAMP(0..6)".to_owned(),
+        ),
+        ShapeRejection::TimestampFspTooPrecise { .. } => (
+            "TIMESTAMP(n>6) 不在白名单".to_owned(),
+            "改源 SQL 加 CAST 收窄到 TIMESTAMP(6)".to_owned(),
+        ),
+        ShapeRejection::TypeNotWhitelisted => (
+            "源类型不在 M3 九行白名单内".to_owned(),
+            "改源 SQL 或加 CAST 到支持的类型".to_owned(),
+        ),
+    }
+}
+
+/// 裸 `NUMBER` / 数值表达式列：形状由任务定义配，判定基准取**目标** `DECIMAL` 的 `(p,s)`，
+/// 值本身由 ADR-0030 §4.3 第 3.5 步的全量值域校核兜住。
+fn validate_unshaped_number(
     source: &SourceColumn,
     target: Option<&TargetColumn>,
     issues: &mut Vec<PrecheckIssue>,
 ) {
-    let (precision, scale) = match (source.precision, source.scale) {
-        (Some(precision), Some(scale)) => (precision, scale),
-        (None, None) => {
-            match target {
-                Some(target) if !target.data_type.eq_ignore_ascii_case("decimal") => {
-                    issues.push(issue_with_suggestion(
-                        source,
-                        Some(target),
-                        "NUMBER 的目标类型必须是 DECIMAL",
-                        Some("在任务定义为该列配 (p,s)，并将目标列改为对应 DECIMAL".to_owned()),
-                    ));
-                }
-                Some(target) if target_decimal_shape(target).is_none() => issues.push(issue_with_suggestion(
-                    source,
-                    Some(target),
-                    "裸 NUMBER / 数值表达式列的目标 DECIMAL 必须具有有效的 precision 和 scale",
-                    Some("将目标列改为具有有效 (p,s) 的 DECIMAL".to_owned()),
-                )),
-                Some(_) => {}
-                None => issues.push(issue_with_suggestion(
-                    source,
-                    target,
-                    "NUMBER 必须同时具有可判定的 precision 和 scale，裸 NUMBER 与表达式列需要目标 DECIMAL 形状",
-                    Some("在任务定义为该列配 (p,s)，再在目标表补出对应 DECIMAL 列".to_owned()),
-                )),
-            }
-            return;
-        }
-        _ => {
-            issues.push(issue_with_suggestion(
-                source,
-                target,
-                "任务定义未配置 (p,s)，NUMBER 无法判定",
-                Some("在任务定义为该列配 (p,s)".to_owned()),
-            ));
-            return;
-        }
-    };
-
-    let (target_precision, target_scale) = derive_number_shape(precision, scale);
-    if !is_supported_decimal_shape(target_precision, target_scale) {
-        issues.push(issue_with_suggestion(
-            source,
-            target,
-            &format!("MySQL DECIMAL 无法表达推导形状 DECIMAL({target_precision},{target_scale})"),
-            Some("无合法目标形状，需改源 SQL 或 CAST 收窄".to_owned()),
-        ));
-        return;
-    }
-
-    if let Some(target) = target {
-        if !target.data_type.eq_ignore_ascii_case("decimal") {
+    match target {
+        Some(target) if !target.data_type.eq_ignore_ascii_case("decimal") => {
             issues.push(issue_with_suggestion(
                 source,
                 Some(target),
                 "NUMBER 的目标类型必须是 DECIMAL",
-                Some(format!("改为 DECIMAL({target_precision},{target_scale})")),
-            ));
-        } else if !target_satisfies_number_lower_bound(
-            target,
-            target_precision as u64,
-            target_scale as u64,
-        ) {
-            issues.push(issue_with_suggestion(
-                source,
-                Some(target),
-                &number_lower_bound_rule(target, target_precision as u64, target_scale as u64),
-                Some(format!("改为 DECIMAL({target_precision},{target_scale})")),
+                Some("在任务定义为该列配 (p,s)，并将目标列改为对应 DECIMAL".to_owned()),
             ));
         }
+        Some(target) if target_decimal_shape(target).is_none() => issues.push(issue_with_suggestion(
+            source,
+            Some(target),
+            "裸 NUMBER / 数值表达式列的目标 DECIMAL 必须具有有效的 precision 和 scale",
+            Some("将目标列改为具有有效 (p,s) 的 DECIMAL".to_owned()),
+        )),
+        Some(_) => {}
+        None => issues.push(issue_with_suggestion(
+            source,
+            target,
+            "NUMBER 必须同时具有可判定的 precision 和 scale，裸 NUMBER 与表达式列需要目标 DECIMAL 形状",
+            Some("在任务定义为该列配 (p,s)，再在目标表补出对应 DECIMAL 列".to_owned()),
+        )),
+    }
+}
+
+/// `NUMBER` 族的判定式：下界式（#97 / ADR-0031）。
+fn validate_number(
+    source: &SourceColumn,
+    target: Option<&TargetColumn>,
+    target_precision: i64,
+    target_scale: i64,
+    issues: &mut Vec<PrecheckIssue>,
+) {
+    let Some(target) = target else {
+        return;
+    };
+
+    if !target.data_type.eq_ignore_ascii_case("decimal") {
+        issues.push(issue_with_suggestion(
+            source,
+            Some(target),
+            "NUMBER 的目标类型必须是 DECIMAL",
+            Some(format!("改为 DECIMAL({target_precision},{target_scale})")),
+        ));
+    } else if !target_satisfies_number_lower_bound(
+        target,
+        target_precision as u64,
+        target_scale as u64,
+    ) {
+        issues.push(issue_with_suggestion(
+            source,
+            Some(target),
+            &number_lower_bound_rule(target, target_precision as u64, target_scale as u64),
+            Some(format!("改为 DECIMAL({target_precision},{target_scale})")),
+        ));
     }
 }
 
@@ -270,21 +297,13 @@ pub(crate) fn range_check_issue(
     )
 }
 
+/// 字符族的判定式：下界式 `n' >= n` + 目标字符集必须 `utf8mb4`（ADR-0009 §6）。
 fn validate_varchar(
     source: &SourceColumn,
     target: Option<&TargetColumn>,
+    length: u64,
     issues: &mut Vec<PrecheckIssue>,
 ) {
-    let Some(length) = source.length else {
-        issues.push(issue_with_suggestion(
-            source,
-            target,
-            "字符列必须具有可判定的 length",
-            Some("改源 SQL 或 CAST 明确字符长度".to_owned()),
-        ));
-        return;
-    };
-
     if let Some(target) = target {
         if !target.data_type.eq_ignore_ascii_case("varchar") {
             issues.push(issue_with_suggestion(
@@ -315,79 +334,36 @@ fn validate_varchar(
     }
 }
 
-fn validate_date(
+/// 日期族的判定式：严格相等（ADR-0030 §3 两边都严格）。
+///
+/// 措辞里的源族名按**推导出的小数秒位数**取：ADR-0030 §3 定死「一列一型」——
+/// `DATETIME(0)` 只来自 `DATE`、`DATETIME(6)` 只来自 `TIMESTAMP(0..6)`，
+/// 放宽任一边才会捅破它，而两边都严格正是本条判定式在守的东西。
+fn validate_datetime(
     source: &SourceColumn,
     target: Option<&TargetColumn>,
+    fsp: u32,
     issues: &mut Vec<PrecheckIssue>,
 ) {
-    if let Some(target) = target {
-        if !target.data_type.eq_ignore_ascii_case("datetime") {
-            issues.push(issue_with_suggestion(
-                source,
-                Some(target),
-                "DATE 的目标类型必须是 DATETIME",
-                Some("改为 DATETIME(0)".to_owned()),
-            ));
-        } else if target.datetime_precision != Some(0) {
-            issues.push(issue_with_suggestion(
-                source,
-                Some(target),
-                "DATE 的目标 DATETIME 小数秒精度必须严格等于 0",
-                Some("改为 DATETIME(0)".to_owned()),
-            ));
-        }
-    }
-}
-
-fn is_supported_date_source(source: &SourceColumn) -> bool {
-    match source.data_type.to_uppercase().as_str() {
-        "DATE" => true,
-        "TIMESTAMP" => source.fsp.is_some_and(|fsp| fsp <= 6),
-        _ => false,
-    }
-}
-
-fn validate_timestamp(
-    source: &SourceColumn,
-    target: Option<&TargetColumn>,
-    issues: &mut Vec<PrecheckIssue>,
-) {
-    let Some(fsp) = source.fsp else {
-        issues.push(issue_with_suggestion(
-            source,
-            target,
-            "TIMESTAMP 必须具有可判定的 fsp",
-            Some("改源 SQL 或加 CAST 明确为 TIMESTAMP(0..6)".to_owned()),
-        ));
+    let Some(target) = target else {
         return;
     };
+    let family = if fsp == 0 { "DATE" } else { "TIMESTAMP" };
 
-    if fsp > 6 {
+    if !target.data_type.eq_ignore_ascii_case("datetime") {
         issues.push(issue_with_suggestion(
             source,
-            target,
-            "TIMESTAMP(n>6) 不在白名单",
-            Some("改源 SQL 加 CAST 收窄到 TIMESTAMP(6)".to_owned()),
+            Some(target),
+            &format!("{family} 的目标类型必须是 DATETIME"),
+            Some(format!("改为 DATETIME({fsp})")),
         ));
-        return;
-    }
-
-    if let Some(target) = target {
-        if !target.data_type.eq_ignore_ascii_case("datetime") {
-            issues.push(issue_with_suggestion(
-                source,
-                Some(target),
-                "TIMESTAMP 的目标类型必须是 DATETIME",
-                Some("改为 DATETIME(6)".to_owned()),
-            ));
-        } else if target.datetime_precision != Some(6) {
-            issues.push(issue_with_suggestion(
-                source,
-                Some(target),
-                "TIMESTAMP 的目标 DATETIME 小数秒精度必须严格等于 6",
-                Some("改为 DATETIME(6)".to_owned()),
-            ));
-        }
+    } else if target.datetime_precision != Some(u64::from(fsp)) {
+        issues.push(issue_with_suggestion(
+            source,
+            Some(target),
+            &format!("{family} 的目标 DATETIME 小数秒精度必须严格等于 {fsp}"),
+            Some(format!("改为 DATETIME({fsp})")),
+        ));
     }
 }
 
@@ -409,44 +385,20 @@ fn issue_with_suggestion(
 }
 
 fn missing_target_suggestion(source: &SourceColumn) -> String {
-    match source.data_type.to_uppercase().as_str() {
-        "NUMBER" => match (source.precision, source.scale) {
-            (Some(precision), Some(scale)) => {
-                let (precision, scale) = derive_number_shape(precision, scale);
-                if is_supported_decimal_shape(precision, scale) {
-                    format!("在目标表加列 DECIMAL({precision},{scale}) NULL")
-                } else {
-                    "无合法目标形状，需改源 SQL 或 CAST 收窄".to_owned()
-                }
-            }
-            _ => "在任务定义为该列配 (p,s)，再在目标表补出对应 DECIMAL 列".to_owned(),
-        },
-        "VARCHAR2" | "NVARCHAR2" | "CHAR" | "NCHAR" => source
-            .length
-            .map(|length| format!("在目标表加列 VARCHAR({length}) NULL"))
-            .unwrap_or_else(|| "改源 SQL 或 CAST 明确字符长度".to_owned()),
-        "DATE" => "在目标表加列 DATETIME(0) NULL".to_owned(),
-        "TIMESTAMP" if source.fsp.is_some_and(|fsp| fsp <= 6) => {
-            "在目标表加列 DATETIME(6) NULL".to_owned()
+    match classify_column(source) {
+        ColumnShape::Resolved(shape) => format!("在目标表加列 {shape} NULL"),
+        ColumnShape::NeedsPrecision
+        | ColumnShape::Rejected(ShapeRejection::NumberPrecisionIncomplete) => {
+            "在任务定义为该列配 (p,s)，再在目标表补出对应 DECIMAL 列".to_owned()
         }
-        _ => "改源 SQL 移除该列，或在目标表补出兼容列".to_owned(),
+        ColumnShape::Rejected(ShapeRejection::DecimalShapeUnrepresentable { .. }) => {
+            "无合法目标形状，需改源 SQL 或 CAST 收窄".to_owned()
+        }
+        ColumnShape::Rejected(ShapeRejection::CharacterLengthMissing) => {
+            "改源 SQL 或 CAST 明确字符长度".to_owned()
+        }
+        ColumnShape::Rejected(_) => "改源 SQL 移除该列，或在目标表补出兼容列".to_owned(),
     }
-}
-
-fn derive_number_shape(precision: i64, scale: i64) -> (i128, i128) {
-    let precision = i128::from(precision);
-    let scale = i128::from(scale);
-    if scale < 0 {
-        (precision - scale, 0)
-    } else if scale > precision {
-        (scale, scale)
-    } else {
-        (precision, scale)
-    }
-}
-
-fn is_supported_decimal_shape(precision: i128, scale: i128) -> bool {
-    (1..=65).contains(&precision) && (0..=30).contains(&scale) && scale <= precision
 }
 
 fn target_satisfies_number_lower_bound(

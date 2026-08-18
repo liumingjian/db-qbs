@@ -2,7 +2,10 @@ use std::fmt;
 
 use serde::Serialize;
 
-use crate::{ColumnPrecision, SourceColumn};
+use crate::{
+    classify_column, is_business_date_column, is_supported_decimal_shape, ColumnPrecision,
+    ColumnShape, ShapeRejection, SourceColumn, TargetShape,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TargetDdlError {
@@ -68,7 +71,7 @@ pub fn generate_target_ddl(
     let target_date_column = columns
         .iter()
         .find(|column| column.name.eq_ignore_ascii_case(target_date_col));
-    if !target_date_column.is_some_and(is_supported_target_date_column)
+    if !target_date_column.is_some_and(|column| is_business_date_column(column))
         && !errors
             .iter()
             .any(|error| error.column.eq_ignore_ascii_case(target_date_col))
@@ -118,78 +121,46 @@ pub fn generate_target_ddl(
     ))
 }
 
-pub(crate) fn derive_number_shape(precision: i64, scale: i64) -> (i64, i64) {
-    if scale < 0 {
-        (precision + scale.abs(), 0)
-    } else if scale > precision {
-        (scale, scale)
-    } else {
-        (precision, scale)
-    }
-}
-
-pub(crate) fn is_supported_decimal_shape(precision: i64, scale: i64) -> bool {
-    (1..=65).contains(&precision) && (0..=30).contains(&scale) && scale <= precision
-}
-
 fn target_column_type(
     column: &SourceColumn,
     column_precision: Option<&ColumnPrecision>,
 ) -> Result<String, TargetDdlColumnError> {
-    match column.data_type.to_uppercase().as_str() {
-        "NUMBER" => match (column.precision, column.scale) {
-            (Some(precision), Some(scale)) => {
-                let (target_precision, target_scale) = derive_number_shape(precision, scale);
-                if is_supported_decimal_shape(target_precision, target_scale) {
-                    Ok(format!("DECIMAL({target_precision},{target_scale})"))
-                } else {
-                    Err(column_error(
-                        column,
-                        format!(
-                            "derived target shape DECIMAL({target_precision},{target_scale}) exceeds MySQL DECIMAL(65,30); change the source SQL or add a CAST"
-                        ),
-                    ))
-                }
+    match classify_column(column) {
+        ColumnShape::Resolved(shape) => Ok(shape.to_string()),
+        // 裸 `NUMBER` / 数值表达式列的形状由任务定义给（ADR-0030 §4）——
+        // 那是 source 侧的输入，共用的分类函数只看 describe。
+        ColumnShape::NeedsPrecision => match precision_hint(column, column_precision) {
+            Some([precision, scale]) if is_supported_decimal_shape(precision, scale) => {
+                Ok(TargetShape::Decimal { precision, scale }.to_string())
             }
-            (None, None) => match precision_hint(column, column_precision) {
-                Some([precision, scale]) if is_supported_decimal_shape(precision, scale) => {
-                    Ok(format!("DECIMAL({precision},{scale})"))
-                }
-                Some([precision, scale]) => Err(column_error(
-                    column,
-                    format!(
-                        "configured DECIMAL({precision},{scale}) is outside MySQL DECIMAL(65,30)"
-                    ),
-                )),
-                None => Ok("DECIMAL(<p>,<s>)".to_owned()),
-            },
-            _ => Err(column_error(
+            Some([precision, scale]) => Err(column_error(
                 column,
-                "NUMBER describe metadata must include both precision and scale",
+                format!("configured DECIMAL({precision},{scale}) is outside MySQL DECIMAL(65,30)"),
             )),
+            None => Ok("DECIMAL(<p>,<s>)".to_owned()),
         },
-        "VARCHAR2" | "NVARCHAR2" | "CHAR" | "NCHAR" => column
-            .length
-            .map(|length| format!("VARCHAR({length})"))
-            .ok_or_else(|| column_error(column, "character describe metadata has no length")),
-        "DATE" => Ok("DATETIME(0)".to_owned()),
-        "TIMESTAMP" if column.fsp.is_some_and(|fsp| fsp <= 6) => Ok("DATETIME(6)".to_owned()),
-        "TIMESTAMP" => Err(column_error(
-            column,
-            "TIMESTAMP describe metadata must have fsp in 0..=6; change the source SQL or add a CAST to TIMESTAMP(6)",
-        )),
-        _ => Err(column_error(
-            column,
-            "source type is outside the target DDL whitelist; change the source SQL or add a CAST",
-        )),
+        ColumnShape::Rejected(rejection) => Err(column_error(column, rejection_message(rejection))),
     }
 }
 
-fn is_supported_target_date_column(column: &SourceColumn) -> bool {
-    match column.data_type.to_uppercase().as_str() {
-        "DATE" => true,
-        "TIMESTAMP" => column.fsp.is_some_and(|fsp| fsp <= 6),
-        _ => false,
+fn rejection_message(rejection: ShapeRejection) -> String {
+    match rejection {
+        ShapeRejection::DecimalShapeUnrepresentable { precision, scale } => format!(
+            "derived target shape DECIMAL({precision},{scale}) exceeds MySQL DECIMAL(65,30); change the source SQL or add a CAST"
+        ),
+        ShapeRejection::NumberPrecisionIncomplete => {
+            "NUMBER describe metadata must include both precision and scale".to_owned()
+        }
+        ShapeRejection::CharacterLengthMissing => {
+            "character describe metadata has no length".to_owned()
+        }
+        ShapeRejection::TimestampFspMissing | ShapeRejection::TimestampFspTooPrecise { .. } => {
+            "TIMESTAMP describe metadata must have fsp in 0..=6; change the source SQL or add a CAST to TIMESTAMP(6)".to_owned()
+        }
+        ShapeRejection::TypeNotWhitelisted => {
+            "source type is outside the target DDL whitelist; change the source SQL or add a CAST"
+                .to_owned()
+        }
     }
 }
 
@@ -197,9 +168,7 @@ fn needs_precision_placeholder(
     column: &SourceColumn,
     column_precision: Option<&ColumnPrecision>,
 ) -> bool {
-    column.data_type.eq_ignore_ascii_case("NUMBER")
-        && column.precision.is_none()
-        && column.scale.is_none()
+    matches!(classify_column(column), ColumnShape::NeedsPrecision)
         && precision_hint(column, column_precision).is_none()
 }
 

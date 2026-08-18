@@ -19,6 +19,11 @@ pub use db_qbs_shared::{
     ErrorBody, ErrorEnvelope, OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn,
     RangeCheckResult, RunResponse, SourceColumn, Terminal,
 };
+// 九行形态的推导也只有一份定义（#125）——判定式仍两端各一份。
+pub use db_qbs_shared::{
+    classify_column, column_support, derive_number_shape, is_business_date_column,
+    is_supported_decimal_shape, ColumnShape, ShapeRejection, TargetShape,
+};
 pub use http::serve;
 pub use mysql_destination::{check_connection_settings, MysqlDestination};
 pub use precheck::precheck;

@@ -7,11 +7,16 @@ use regex::Regex;
 use serde::{Serialize, Serializer};
 
 mod protocol;
+mod target_shape;
 
 pub use protocol::{
     AbortResponse, BatchPayload, BatchResponse, ColumnSupport, CommitRequest, CommitResponse,
     ErrorBody, ErrorEnvelope, OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn,
     RangeCheckResult, RunResponse, SourceColumn, Terminal,
+};
+pub use target_shape::{
+    classify_column, column_support, derive_number_shape, is_business_date_column,
+    is_supported_decimal_shape, ColumnShape, ShapeRejection, TargetShape,
 };
 
 static CANONICAL_NUMBER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
