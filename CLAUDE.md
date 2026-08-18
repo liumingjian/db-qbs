@@ -26,6 +26,9 @@ Run `docs/spikes/fixtures/local-rig/m3-visual-walkthrough.md` (W1–W6) for ever
 Any change to the `.precheck-reports` layout in `web/src/app.css`, or to the `DiagnosticTable`
 column structure, must run the same walkthrough before merge and record the actual observations.
 M3 does **not** re-run the full V1–V25 walkthrough — #102 ruled it a zero design-system change.
+Acceptances whose changes touch no UI-affecting code (docs/ADR/fixture-only) may skip W1–W6,
+but the report must state "not run" and why — never claim a pass. Both visual-gate sections are
+slated for consolidation under issue #122.
 
 ## Commit trailer
 
