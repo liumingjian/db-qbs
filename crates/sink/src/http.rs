@@ -271,7 +271,7 @@ mod tests {
     use super::*;
     use crate::{
         AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, CreateStagingError, DropStagingError,
-        TargetColumn, WriteBatchError,
+        TargetColumn, TargetKey, WriteBatchError,
     };
 
     #[derive(Default)]
@@ -289,9 +289,17 @@ mod tests {
                 scale: None,
                 length: None,
                 datetime_precision: Some(0),
-                nullable: true,
+                // 主键列必须 NOT NULL（ADR-0035 §2 第 3 条）。
+                nullable: false,
                 character_set: None,
                 ordinal: 1,
+            }])
+        }
+
+        fn target_keys(&self, _target_table: &str) -> Result<Vec<TargetKey>, String> {
+            Ok(vec![TargetKey {
+                name: "PRIMARY".to_owned(),
+                columns: vec!["D_BIZ".to_owned()],
             }])
         }
 
@@ -358,7 +366,7 @@ mod tests {
         ));
         let run_id = "20260814091530_a3f19c";
         let open_body = format!(
-            r#"{{"run_id":"{run_id}","target_table":"T_POSITION","target_date_col":"D_BIZ","biz_date":"2026-08-14","source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
+            r#"{{"run_id":"{run_id}","target_table":"T_POSITION","primary_key":["D_BIZ"],"source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
         );
 
         let (status, opened) = exchange(service.clone(), "/v1/runs", &open_body);
@@ -395,7 +403,7 @@ mod tests {
         ));
         let run_id = "20260814091530_a3f19c";
         let open_body = format!(
-            r#"{{"run_id":"{run_id}","target_table":"T_POSITION","target_date_col":"D_BIZ","biz_date":"2026-08-14","source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
+            r#"{{"run_id":"{run_id}","target_table":"T_POSITION","primary_key":["D_BIZ"],"source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
         );
         exchange(service.clone(), "/v1/runs", &open_body);
         exchange(

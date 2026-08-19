@@ -6,7 +6,7 @@ use db_qbs_sink::{
     build_staging_ddl, check_connection_settings, precheck, AtomicSwapError, AtomicSwapRequest,
     AtomicSwapResult, CreateStagingError, Destination, DropStagingError, OpenRunRequest,
     RangeCheckColumn, RangeCheckResult, SinkConfig, SinkService, SourceColumn, TargetColumn,
-    WriteBatchError,
+    TargetKey, WriteBatchError,
 };
 
 const RUN_ID: &str = "20260814091530_a3f19c";
@@ -64,6 +64,8 @@ fn valid_columns() -> (Vec<SourceColumn>, Vec<TargetColumn>) {
             source_column("D_BIZ", "DATE", None, None, None),
         ],
         vec![
+            // D_BIZ 是主键列：目标端必须 NOT NULL（ADR-0035 §2 第 3 条），
+            // 「目标列必须可空」那条对主键列豁免——MySQL 的 PRIMARY KEY 列按定义就非空。
             target_column(
                 "D_BIZ",
                 "datetime",
@@ -72,7 +74,7 @@ fn valid_columns() -> (Vec<SourceColumn>, Vec<TargetColumn>) {
                 None,
                 None,
                 Some(0),
-                true,
+                false,
                 None,
                 3,
             ),
@@ -485,18 +487,40 @@ fn connection_ritual_reports_variable_expected_and_actual_values() {
     assert!(error.contains("16777216"), "{error}");
 }
 
-#[derive(Default)]
 struct FakeDestination {
     columns: Vec<TargetColumn>,
+    /// 目标表上的唯一约束。缺省给一条 `PRIMARY KEY (D_BIZ)`——多数用例的目标表是「配好的」，
+    /// 缺约束是要单独立用例去证的例外，不是默认状态。
+    keys: Vec<TargetKey>,
     created: Mutex<Vec<(String, String)>>,
     dropped: Mutex<Vec<String>>,
     create_error: Mutex<Option<CreateStagingError>>,
     drop_error: Mutex<Option<DropStagingError>>,
 }
 
+impl Default for FakeDestination {
+    fn default() -> Self {
+        Self {
+            columns: Vec::new(),
+            keys: vec![TargetKey {
+                name: "PRIMARY".to_owned(),
+                columns: vec!["D_BIZ".to_owned()],
+            }],
+            created: Mutex::new(Vec::new()),
+            dropped: Mutex::new(Vec::new()),
+            create_error: Mutex::new(None),
+            drop_error: Mutex::new(None),
+        }
+    }
+}
+
 impl Destination for FakeDestination {
     fn target_columns(&self, _target_table: &str) -> Result<Vec<TargetColumn>, String> {
         Ok(self.columns.clone())
+    }
+
+    fn target_keys(&self, _target_table: &str) -> Result<Vec<TargetKey>, String> {
+        Ok(self.keys.clone())
     }
 
     fn create_staging(&self, staging_table: &str, ddl: &str) -> Result<(), CreateStagingError> {
@@ -545,8 +569,7 @@ fn open_request(source_columns: Vec<SourceColumn>) -> OpenRunRequest {
     OpenRunRequest {
         run_id: RUN_ID.to_owned(),
         target_table: "T_POSITION".to_owned(),
-        target_date_col: "D_BIZ".to_owned(),
-        biz_date: "2026-08-14".to_owned(),
+        primary_key: vec!["D_BIZ".to_owned()],
         source_columns,
         range_check_results: None,
     }
@@ -609,7 +632,7 @@ fn bare_number_range_check_delays_staging_and_rejects_invalid_rows() {
             None,
             None,
             Some(0),
-            true,
+            false,
             None,
             2,
         ),
@@ -681,7 +704,7 @@ fn bare_number_range_check_with_no_invalid_rows_creates_staging() {
             None,
             None,
             Some(0),
-            true,
+            false,
             None,
             2,
         ),
@@ -706,28 +729,83 @@ fn bare_number_range_check_with_no_invalid_rows_creates_staging() {
 }
 
 #[test]
-fn open_rejects_a_target_date_column_mapped_from_a_non_date_source() {
+fn open_rejects_a_primary_key_the_target_table_has_no_constraint_for() {
+    // 撤掉 DELETE 之后这是**唯一**挡住静默重复的东西：目标表没有对应唯一约束时，
+    // `ON DUPLICATE KEY UPDATE` 不报错、写得进去、重跑就多一份行。
     let (sources, targets) = valid_columns();
+    let destination = Arc::new(FakeDestination {
+        columns: targets,
+        keys: Vec::new(),
+        ..FakeDestination::default()
+    });
+    let service = SinkService::new("qbs", destination);
+
+    let error = service.open(open_request(sources)).unwrap_err();
+
+    assert_eq!(error.status, 422);
+    assert!(
+        error.details["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["target"] == "<无唯一约束>"),
+        "{:?}",
+        error.details
+    );
+}
+
+#[test]
+fn open_rejects_a_nullable_primary_key_column() {
+    let (sources, mut targets) = valid_columns();
+    targets[0].nullable = true;
     let destination = Arc::new(FakeDestination {
         columns: targets,
         ..FakeDestination::default()
     });
     let service = SinkService::new("qbs", destination);
+
+    let error = service.open(open_request(sources)).unwrap_err();
+
+    assert_eq!(error.status, 422);
+    assert!(
+        error.details["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["column"] == "D_BIZ"
+                && issue["rule"].as_str().unwrap().contains("NOT NULL")),
+        "{:?}",
+        error.details
+    );
+}
+
+#[test]
+fn open_rejects_a_primary_key_column_that_is_not_among_the_selected_columns() {
+    let (sources, targets) = valid_columns();
+    let destination = Arc::new(FakeDestination {
+        columns: targets,
+        keys: vec![TargetKey {
+            name: "PRIMARY".to_owned(),
+            columns: vec!["C_MISSING".to_owned()],
+        }],
+        ..FakeDestination::default()
+    });
+    let service = SinkService::new("qbs", destination);
     let mut request = open_request(sources);
-    request.target_date_col = "C_NAME".to_owned();
+    request.primary_key = vec!["C_MISSING".to_owned()];
 
     let error = service.open(request).unwrap_err();
 
     assert_eq!(error.status, 422);
-    assert!(error.details["issues"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|issue| {
-            issue["column"] == "C_NAME"
-                && issue["rule"]
-                    == "target_date_col 必须对应同名的 Oracle DATE 或 TIMESTAMP(0..6) 源列"
-        }));
+    assert!(
+        error.details["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["column"] == "C_MISSING" && issue["source"] == "<missing>"),
+        "{:?}",
+        error.details
+    );
 }
 
 #[test]
@@ -749,7 +827,7 @@ fn open_accepts_a_supported_timestamp_business_date_column() {
         None,
         None,
         Some(6),
-        true,
+        false,
         None,
         1,
     )];

@@ -37,6 +37,7 @@ const countFormatter = new Intl.NumberFormat("zh-CN");
 const FAILURE_KIND_LABELS: Readonly<Record<string, string>> = {
   CONFIG: "配置",
   ORCHESTRATOR: "未拉起",
+  // 已退役、不会再产生（ADR-0036 §5 取消了形状预检）；闭集只增不删，标签跟着留。
   SHAPE_PRECHECK: "SQL 形状",
   SOURCE_CONNECT: "Oracle 连接",
   SOURCE_DBLINK: "dblink",
@@ -119,8 +120,6 @@ export function historyPresentation(history: RunHistory): HistoryPresentation {
  * 人话本来就点名到列与值（ADR-0017 §4），缺的是**这属于哪一类失败**：`sink_code` 只有
  * 目标端路径才有，源端连接失败、dblink 不可用、传输中断这三类过去在界面上一个码都没有，
  * 只能整句读完才知道是哪一侧坏了。分类标签补的就是这一格。
- *
- * 形状预检失败不走这里——`runPresentation` 在 web 侧另成一句（`shapeFailureConclusion`）。
  */
 function failureConclusion(history: RunHistory): string {
   const message = history.message ?? "运行失败";
@@ -132,8 +131,8 @@ function failureConclusion(history: RunHistory): string {
  * 运行成功的中文人话结论。
  *
  * source 回的 `message` 是英文原文（`run completed successfully`，属于 API 语义，不动），
- * 直接拿来当结论条会让同一个位置一半中文一半英文——形状预检失败那条和映射预检失败那条都是中文。
- * 这里照那两条的句式在 web 侧成文，只说已核实的事：推了多少行、暂存表切没切。
+ * 直接拿来当结论条会让同一个位置一半中文一半英文——映射预检失败那条是中文。
+ * 这里照那条的句式在 web 侧成文，只说已核实的事：推了多少行、暂存表切没切。
  * 目标端没报出 `SWAPPED` 时不提切换，别替它下结论。
  */
 function succeededConclusion(

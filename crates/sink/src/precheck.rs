@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    classify_column, is_business_date_column, ColumnShape, PrecheckIssue, RangeCheckColumn,
-    ShapeRejection, SourceColumn, TargetColumn, TargetShape,
+    classify_column, ColumnShape, PrecheckIssue, RangeCheckColumn, ShapeRejection, SourceColumn,
+    TargetColumn, TargetKey, TargetShape,
 };
 
 pub fn precheck(
@@ -10,20 +10,22 @@ pub fn precheck(
     source_columns: &[SourceColumn],
     target_columns: &[TargetColumn],
 ) -> Vec<PrecheckIssue> {
-    precheck_inner(target_table, None, source_columns, target_columns)
+    precheck_inner(target_table, &[], source_columns, target_columns, &[])
 }
 
-pub(crate) fn precheck_with_date_column(
+pub fn precheck_with_primary_key(
     target_table: &str,
-    target_date_col: &str,
+    primary_key: &[String],
     source_columns: &[SourceColumn],
     target_columns: &[TargetColumn],
+    target_keys: &[TargetKey],
 ) -> Vec<PrecheckIssue> {
     precheck_inner(
         target_table,
-        Some(target_date_col),
+        primary_key,
         source_columns,
         target_columns,
+        target_keys,
     )
 }
 
@@ -53,11 +55,16 @@ pub(crate) fn range_check_columns(
 
 fn precheck_inner(
     target_table: &str,
-    target_date_col: Option<&str>,
+    primary_key: &[String],
     source_columns: &[SourceColumn],
     target_columns: &[TargetColumn],
+    target_keys: &[TargetKey],
 ) -> Vec<PrecheckIssue> {
     let mut issues = Vec::new();
+    let key_columns: HashSet<String> = primary_key
+        .iter()
+        .map(|column| column.to_uppercase())
+        .collect();
     if target_table.chars().count() > 37 {
         issues.push(PrecheckIssue {
             column: "<target_table>".to_owned(),
@@ -99,7 +106,10 @@ fn precheck_inner(
         };
 
         validate_source_type(source, Some(target), &mut issues);
-        if !target.nullable {
+        // 主键列**必须** NOT NULL（ADR-0035 §2 第 3 条），与这条「目标列必须可空」
+        // 正面冲突，且不可能同时满足——MySQL 的 `PRIMARY KEY` 列按定义就是 NOT NULL。
+        // 主键列因此从这条里豁免，改由 `validate_primary_key` 反向判。
+        if !target.nullable && !key_columns.contains(&normalized_name) {
             issues.push(issue_with_suggestion(
                 source,
                 Some(target),
@@ -121,38 +131,91 @@ fn precheck_inner(
         }
     }
 
-    if let Some(date_column) = target_date_col {
-        validate_date_column(date_column, source_columns, &targets, &mut issues);
+    if !primary_key.is_empty() {
+        validate_primary_key(
+            primary_key,
+            &source_names,
+            &targets,
+            target_keys,
+            &mut issues,
+        );
     }
 
     issues
 }
 
-fn validate_date_column(
-    date_column: &str,
-    source_columns: &[SourceColumn],
+/// ADR-0035 §2 的三条，任一不满足即拒跑。
+///
+/// 撤掉 DELETE 之后这是**唯一**挡住静默重复的东西：目标表没有对应唯一约束时，
+/// `ON DUPLICATE KEY UPDATE` 不报错、写得进去、重跑就多一份行。
+fn validate_primary_key(
+    primary_key: &[String],
+    source_names: &HashSet<String>,
     targets: &HashMap<String, &TargetColumn>,
+    target_keys: &[TargetKey],
     issues: &mut Vec<PrecheckIssue>,
 ) {
-    let source = source_columns
-        .iter()
-        .find(|column| column.name.eq_ignore_ascii_case(date_column));
-    if source.is_some_and(|column| is_business_date_column(column)) {
-        return;
+    for column in primary_key {
+        let normalized = column.to_uppercase();
+        if !source_names.contains(&normalized) {
+            issues.push(PrecheckIssue {
+                column: column.clone(),
+                source: "<missing>".to_owned(),
+                target: targets
+                    .get(&normalized)
+                    .map(|target| target_display(target))
+                    .unwrap_or_else(|| "<missing>".to_owned()),
+                rule: "主键列必须落在本次选中的列里，否则 upsert 无从比对".to_owned(),
+                suggestion: Some("把该列选进来，或改主键".to_owned()),
+            });
+            continue;
+        }
+        let Some(target) = targets.get(&normalized).copied() else {
+            continue;
+        };
+        if target.nullable {
+            issues.push(PrecheckIssue {
+                column: column.clone(),
+                source: "-".to_owned(),
+                target: target_display(target),
+                rule: "主键列必须 NOT NULL：MySQL 的 UNIQUE 允许多个 NULL，可空会让 upsert 静默退化成纯 INSERT"
+                    .to_owned(),
+                suggestion: Some("把目标列改成 NOT NULL".to_owned()),
+            });
+        }
     }
 
-    issues.push(PrecheckIssue {
-        column: date_column.to_owned(),
-        source: source
-            .map(source_display)
-            .unwrap_or_else(|| "<missing>".to_owned()),
-        target: targets
-            .get(&date_column.to_uppercase())
-            .map(|column| target_display(column))
-            .unwrap_or_else(|| "<missing>".to_owned()),
-        rule: "target_date_col 必须对应同名的 Oracle DATE 或 TIMESTAMP(0..6) 源列".to_owned(),
-        suggestion: Some("改任务定义的 target_date_col，或改源 SQL 该列类型".to_owned()),
+    let wanted: HashSet<String> = primary_key
+        .iter()
+        .map(|column| column.to_uppercase())
+        .collect();
+    let covered = target_keys.iter().any(|key| {
+        let actual: HashSet<String> = key
+            .columns
+            .iter()
+            .map(|column| column.to_uppercase())
+            .collect();
+        actual == wanted
     });
+    if !covered {
+        let existing = if target_keys.is_empty() {
+            "<无唯一约束>".to_owned()
+        } else {
+            target_keys
+                .iter()
+                .map(|key| format!("{}({})", key.name, key.columns.join(",")))
+                .collect::<Vec<_>>()
+                .join("；")
+        };
+        issues.push(PrecheckIssue {
+            column: "<primary_key>".to_owned(),
+            source: primary_key.join(","),
+            target: existing,
+            rule: "目标表上必须有一条 PRIMARY KEY 或 UNIQUE 约束，其列集合与勾选的主键完全一致；否则 ON DUPLICATE KEY UPDATE 会静默退化成纯 INSERT，重跑就出重复行"
+                .to_owned(),
+            suggestion: Some("在目标表上建对应的主键或唯一索引，或改勾主键列".to_owned()),
+        });
+    }
 }
 
 fn validate_source_type(

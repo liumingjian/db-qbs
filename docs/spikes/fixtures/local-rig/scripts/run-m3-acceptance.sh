@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 # Issue #115 / ADR-0032: M3 type, mapping, and source-value acceptance on the local rig.
+#
+# 【2026-08-18 #121 起未跑，需按 #122 重做】写入模型已由「按业务日期 DELETE + INSERT」
+# 换成按主键 upsert（ADR-0035 §1），任务定义换成结构化规格（ADR-0036）。本脚本**尚未改到新形态**：
+# 任务创建与发起运行的报文仍是退役的 `source_sql` / `biz_date` 形状，判据也仍是 DELETE 时代的
+# 语义（purged_rows、当日范围被清空、哨兵行被删除），在 upsert 下不再成立。
+# 台架改造与判据重推归 #122。
 set -uo pipefail
 
 SCENARIOS=(

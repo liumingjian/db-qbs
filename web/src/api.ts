@@ -1,19 +1,63 @@
 export type ColumnPrecision = Record<string, [number, number]>;
 
+/** 比较符只有这三个（ADR-0035 §3 字面）：`>` / `<` / `=`。 */
+export type Comparison = "gt" | "lt" | "eq";
+
+/**
+ * 条件值怎么绑进 SQL。**不是源列的 Oracle 类型**——describe 回来的类型不许进任务定义
+ * （ADR-0036 §6），所以这是用户在构建器里就该列做的声明：按字典 `DATA_TYPE` 预填、可改。
+ */
+export type ValueType = "text" | "number" | "date";
+
+/** 值来源二选一（ADR-0035 §3）：建任务时写死，或发起运行时逐条填。 */
+export type ValueSource = "constant" | "runtime";
+
+export type Direction = "asc" | "desc";
+
+export interface Condition {
+  column: string;
+  operator: Comparison;
+  value_type: ValueType;
+  /** 绑定变量名，规格内唯一，由用户拥有——运行参数与运行历史都拿它当键。 */
+  parameter: string;
+  value_source: ValueSource;
+  /** 仅 `value_source === "constant"` 时有意义；运行时填的条件必须留空。 */
+  constant: string;
+}
+
+export interface OrderTerm {
+  column: string;
+  direction: Direction;
+}
+
+/**
+ * 任务定义的**结构化规格**（ADR-0036 §1），唯一真相源。
+ *
+ * SQL 不在里面：它由规格现算，界面上只读，v1 没有编辑入口。
+ */
+export interface TaskSpec {
+  dblink?: string;
+  owner: string;
+  table: string;
+  target_table: string;
+  columns: string[];
+  /** upsert 的去重键，必选（所有者 2026-08-18 裁定）。 */
+  primary_key: string[];
+  conditions: Condition[];
+  order_by: OrderTerm[];
+}
+
 export interface TaskInput {
   name: string;
-  source_sql: string;
-  source_date_col: string;
-  target_table: string;
-  target_date_col: string;
-  column_precision?: ColumnPrecision;
+  spec: TaskSpec;
 }
 
 export interface Task extends TaskInput {
   task_id: string;
 }
 
-export type TaskDefinition = Omit<TaskInput, "name">;
+/** 运行时逐条填的参数：参数名 → 值。顺序无关，服务端按参数名规范化（ADR-0036 §7）。 */
+export type RunParams = Record<string, string>;
 
 export interface BuilderTable {
   owner: string;
@@ -29,20 +73,21 @@ export interface BuilderColumn {
   nullable: boolean;
 }
 
-export interface BuilderSelection {
-  dblink: string;
-  owner: string;
-  table: string;
-  columns: string[];
-  source_date_col: string;
-  target_table: string;
-  target_date_col: string;
+/** `POST /api/builder/sql` 回的一条运行参数声明。 */
+export interface RunParameter {
+  parameter: string;
+  column: string;
+  value_type: ValueType;
 }
 
-export interface ShapeCheck {
-  rule: string;
-  passed: boolean;
-  message: string;
+/**
+ * 规格的派生面（ADR-0036 §6）：源端 SQL 与运行参数清单。
+ *
+ * **只出不进**——web 拿规格换一份现算的 SQL 来展示，没有把 SQL 传回来的路。
+ */
+export interface BuilderSql {
+  source_sql: string;
+  run_parameters: RunParameter[];
 }
 
 export interface MappingIssue {
@@ -53,8 +98,7 @@ export interface MappingIssue {
   message: string | null;
   /**
    * 动作型建议，**由 sink 侧算**（ADR-0010 2026-08-16 增补二 §1）。判定式不得复制进
-   * TypeScript 重算一遍——建议与判定同源，两者都只有 sink 一份。M3 子票 ⑥ 才开始有值，
-   * 在那之前恒缺省。
+   * TypeScript 重算一遍——建议与判定同源，两者都只有 sink 一份。
    */
   suggestion?: string | null;
 }
@@ -84,7 +128,7 @@ export interface FetchedColumn {
   length: number | null;
   /** `TIMESTAMP(n)` 的 `n`（ADR-0010 2026-08-16 增补一）。非 `TIMESTAMP` 列不带它。 */
   fsp?: number | null;
-  /** 见 {@link ColumnSupport}。M3 子票 ③ 之前恒 `ok`。 */
+  /** 见 {@link ColumnSupport}。 */
   support?: ColumnSupport | null;
 }
 
@@ -97,7 +141,13 @@ export interface RunHistory {
   run_record_id: string;
   run_id: string | null;
   task_id: string;
-  biz_date: string;
+  /** 本次运行参数集，参数名 → 值（ADR-0036 §7）。无参数的任务是空对象。 */
+  run_params: RunParams;
+  /**
+   * 当次**实际执行**的源端 SQL 快照（ADR-0036 §2）。存的是未绑定的语句文本，
+   * 参数值不内联——值由 `run_params` 展示。
+   */
+  source_sql: string;
   staging_table: string | null;
   started_at: string;
   finished_at: string | null;
@@ -121,8 +171,8 @@ export interface RunHistory {
   value: string | null;
   message: string | null;
   /**
-   * 失败分类闭集（source 侧 `FailureKind`，见 ADR-0029）。成功、进行中、
-   * 以及本功能之前落盘的老历史行都是 `null`——读到 `null` 不是错误。
+   * 失败分类闭集（source 侧 `FailureKind`，见 ADR-0029）。成功与进行中都是 `null`——
+   * 读到 `null` 不是错误。
    */
   failure_kind: string | null;
   unknown_reason: "PROCESS_DISAPPEARED" | "SERVICE_RESTARTED" | null;
@@ -131,14 +181,14 @@ export interface RunHistory {
   bytes: number;
   ms: number;
   last_ts: string | null;
-  shape_checks: ShapeCheck[];
   mapping_issues: MappingIssue[];
 }
 
 export interface LiveRunDetail {
   run_record_id: string;
   run_id: string | null;
-  biz_date: string | null;
+  run_params: RunParams;
+  source_sql: string;
   staging_table: string | null;
   stage: string | null;
   seq: number;
@@ -151,9 +201,14 @@ export interface LiveRunDetail {
 
 export type RunDetail = LiveRunDetail | (RunHistory & { live: false });
 
+/**
+ * 运行历史的筛选面只剩任务一维。
+ *
+ * 业务日期那一维随 ADR-0035 §3 一起没了：运行参数是任务自己定义的名字，
+ * 不同任务的参数名各不相同，筛不出一个跨任务的通用维度。
+ */
 export interface RunHistoryFilters {
   taskId?: string;
-  bizDate?: string;
 }
 
 export class ApiError extends Error {
@@ -166,21 +221,23 @@ export class ApiError extends Error {
   }
 }
 
+export function emptySpec(): TaskSpec {
+  return {
+    owner: "",
+    table: "",
+    target_table: "",
+    columns: [],
+    primary_key: [],
+    conditions: [],
+    order_by: [],
+  };
+}
+
 export function taskInputFrom(
   task: TaskInput,
   overrides: Partial<TaskInput> = {},
 ): TaskInput {
-  return {
-    name: task.name,
-    source_sql: task.source_sql,
-    source_date_col: task.source_date_col,
-    target_table: task.target_table,
-    target_date_col: task.target_date_col,
-    ...(task.column_precision === undefined
-      ? {}
-      : { column_precision: task.column_precision }),
-    ...overrides,
-  };
+  return { name: task.name, spec: task.spec, ...overrides };
 }
 
 export async function listTasks(): Promise<Task[]> {
@@ -197,9 +254,6 @@ export async function listRunHistory(
   if (filters.taskId !== undefined && filters.taskId !== "") {
     query.set("task_id", filters.taskId);
   }
-  if (filters.bizDate !== undefined && filters.bizDate !== "") {
-    query.set("biz_date", filters.bizDate);
-  }
   const suffix = query.size === 0 ? "" : `?${query.toString()}`;
   const response = await fetch(`/api/runs${suffix}`, {
     headers: { Accept: "application/json" },
@@ -209,11 +263,11 @@ export async function listRunHistory(
 
 export async function startRun(
   taskId: string,
-  bizDate: string,
+  runParams: RunParams,
 ): Promise<{ run_record_id: string }> {
   return postJson<{ run_record_id: string }>(
     "/api/runs",
-    { task_id: taskId, biz_date: bizDate },
+    { task_id: taskId, run_params: runParams },
     "发起运行失败",
   );
 }
@@ -280,27 +334,21 @@ export async function fetchBuilderColumns(input: {
   return postJson<BuilderColumn[]>("/api/builder/columns", input, "读取 Oracle 列失败");
 }
 
-export async function generateBuilderTask(
-  input: BuilderSelection,
-): Promise<TaskDefinition> {
-  return postJson<TaskDefinition>("/api/builder/sql", input, "生成 SQL 失败");
-}
-
-export async function inspectSqlShape(
-  input: TaskDefinition,
-): Promise<ShapeCheck[]> {
-  const response = await postJson<{ checks: ShapeCheck[] }>(
-    "/api/sql-shape",
-    input,
-    "检查 SQL 形状失败",
-  );
-  return response.checks;
+export async function generateBuilderSql(spec: TaskSpec): Promise<BuilderSql> {
+  return postJson<BuilderSql>("/api/builder/sql", spec, "生成 SQL 失败");
 }
 
 export async function fetchColumns(
-  input: TaskDefinition,
+  spec: TaskSpec,
+  columnPrecision?: ColumnPrecision,
 ): Promise<ColumnFetchResult> {
-  return postJson<ColumnFetchResult>("/api/columns", input, "取列失败");
+  return postJson<ColumnFetchResult>(
+    "/api/columns",
+    columnPrecision === undefined
+      ? { spec }
+      : { spec, column_precision: columnPrecision },
+    "取列失败",
+  );
 }
 
 async function postJson<T>(path: string, body: unknown, fallback: string): Promise<T> {

@@ -8,19 +8,18 @@ fn target_ddl_is_derived_from_describe_columns() {
         source_column("D_BIZ", "DATE", None, None, None),
     ];
 
-    let ddl = generate_target_ddl(&columns, "T_POSITION", "D_BIZ", None).unwrap();
+    let ddl = generate_target_ddl(&columns, "T_POSITION", &key("D_BIZ"), None).unwrap();
 
     assert_eq!(
         ddl,
         concat!(
             "-- db-qbs 生成的目标表建表 SQL，请自行执行；产品不会替你建表。\n",
-            "-- 下面这条索引不是可选项：切换事务的 DELETE 会锁住目标表当日范围，\n",
-            "-- 业务日期列无索引时锁全表。\n",
+            "-- 下面那条主键不是可选项：写入走 upsert，目标表没有它时重跑会静默出重复行。\n",
             "CREATE TABLE `T_POSITION` (\n",
             "  `N_VA_PRICE` DECIMAL(18,4) NULL,\n",
             "  `C_NAME` VARCHAR(50) NULL,\n",
-            "  `D_BIZ` DATETIME(0) NULL,\n",
-            "  KEY `idx_d_biz` (`D_BIZ`)\n",
+            "  `D_BIZ` DATETIME(0) NOT NULL,\n",
+            "  PRIMARY KEY (`D_BIZ`)\n",
             ") DEFAULT CHARSET=utf8mb4;"
         )
     );
@@ -31,7 +30,7 @@ fn target_ddl_is_derived_from_describe_columns() {
 fn empty_target_table_uses_the_visible_placeholder() {
     let columns = vec![source_column("D_BIZ", "DATE", None, None, None)];
 
-    let ddl = generate_target_ddl(&columns, "", "D_BIZ", None).unwrap();
+    let ddl = generate_target_ddl(&columns, "", &key("D_BIZ"), None).unwrap();
 
     assert!(ddl.contains("CREATE TABLE <目标表名> ("));
 }
@@ -53,7 +52,7 @@ fn target_ddl_uses_all_m3_source_shapes() {
     let mut precision = ColumnPrecision::new();
     precision.insert("N_RAW".to_owned(), [12, 2]);
 
-    let ddl = generate_target_ddl(&columns, "T_POSITION", "D_BIZ", Some(&precision)).unwrap();
+    let ddl = generate_target_ddl(&columns, "T_POSITION", &key("D_BIZ"), Some(&precision)).unwrap();
 
     for expected in [
         "`N_REGULAR` DECIMAL(18,4) NULL",
@@ -64,7 +63,7 @@ fn target_ddl_uses_all_m3_source_shapes() {
         "`C_NVARCHAR` VARCHAR(40) NULL",
         "`C_CHAR` VARCHAR(30) NULL",
         "`C_NCHAR` VARCHAR(20) NULL",
-        "`D_BIZ` DATETIME(0) NULL",
+        "`D_BIZ` DATETIME(0) NOT NULL",
         "`D_EVENT` DATETIME(6) NULL",
     ] {
         assert!(ddl.contains(expected), "missing {expected} in {ddl}");
@@ -81,11 +80,9 @@ fn target_ddl_leaves_unconfigured_number_shapes_as_placeholders() {
         source_column("D_BIZ", "DATE", None, None, None),
     ];
 
-    let ddl = generate_target_ddl(&columns, "T_POSITION", "D_BIZ", None).unwrap();
+    let ddl = generate_target_ddl(&columns, "T_POSITION", &key("D_BIZ"), None).unwrap();
 
-    assert!(ddl.contains(
-        "-- N_RAW、N_EXPR 列的精度 describe 给不出，请在任务定义的 [column_precision] 字段为它们配 (p,s)。"
-    ));
+    assert!(ddl.contains("-- N_RAW、N_EXPR 列的精度 describe 给不出，请在取列面为它们配 (p,s)。"));
     assert_eq!(ddl.matches("DECIMAL(<p>,<s>)").count(), 2);
 }
 
@@ -96,7 +93,7 @@ fn target_ddl_escapes_placeholder_names_inside_the_sql_comment() {
         source_column("D_BIZ", "DATE", None, None, None),
     ];
 
-    let ddl = generate_target_ddl(&columns, "T_POSITION", "D_BIZ", None).unwrap();
+    let ddl = generate_target_ddl(&columns, "T_POSITION", &key("D_BIZ"), None).unwrap();
 
     assert!(ddl.contains("-- N_RAW\\nDROP TABLE `T_AUDIT`; 列的精度"));
     assert!(!ddl.contains("\nDROP TABLE `T_AUDIT`;"));
@@ -113,7 +110,7 @@ fn target_ddl_rejects_derived_shapes_at_both_decimal_boundaries() {
             source_column("D_BIZ", "DATE", None, None, None),
         ];
 
-        let error = generate_target_ddl(&columns, "T_POSITION", "D_BIZ", None).unwrap_err();
+        let error = generate_target_ddl(&columns, "T_POSITION", &key("D_BIZ"), None).unwrap_err();
 
         assert_eq!(error.columns.len(), 1);
         assert_eq!(error.columns[0].column, name);
@@ -130,7 +127,7 @@ fn target_ddl_error_reports_all_unsupported_columns() {
         source_column("D_BIZ", "DATE", None, None, None),
     ];
 
-    let error = generate_target_ddl(&columns, "T_POSITION", "D_BIZ", None).unwrap_err();
+    let error = generate_target_ddl(&columns, "T_POSITION", &key("D_BIZ"), None).unwrap_err();
 
     assert_eq!(
         error
@@ -150,13 +147,41 @@ fn target_ddl_error_reports_all_unsupported_columns() {
 }
 
 #[test]
-fn target_date_column_accepts_timestamp_with_supported_fsp() {
-    let columns = vec![timestamp_column("D_BIZ", 6)];
+fn a_composite_primary_key_makes_every_key_column_not_null() {
+    let columns = vec![
+        source_column("C_FUND", "VARCHAR2", None, None, Some(20)),
+        timestamp_column("D_BIZ", 6),
+        source_column("N_AMT", "NUMBER", Some(18), Some(2), None),
+    ];
 
-    let ddl = generate_target_ddl(&columns, "T_POSITION", "D_BIZ", None).unwrap();
+    let ddl = generate_target_ddl(
+        &columns,
+        "T_POSITION",
+        &["C_FUND".to_owned(), "D_BIZ".to_owned()],
+        None,
+    )
+    .unwrap();
 
-    assert!(ddl.contains("`D_BIZ` DATETIME(6) NULL"));
-    assert!(ddl.contains("KEY `idx_d_biz` (`D_BIZ`)"));
+    assert!(ddl.contains("`C_FUND` VARCHAR(20) NOT NULL"));
+    assert!(ddl.contains("`D_BIZ` DATETIME(6) NOT NULL"));
+    // 非主键列仍要可空——那是 ADR-0009 映射预检的要求，两条各管各的列。
+    assert!(ddl.contains("`N_AMT` DECIMAL(18,2) NULL"));
+    assert!(ddl.contains("PRIMARY KEY (`C_FUND`, `D_BIZ`)"));
+}
+
+#[test]
+fn a_primary_key_column_missing_from_describe_is_named() {
+    let columns = vec![source_column("D_BIZ", "DATE", None, None, None)];
+
+    let error = generate_target_ddl(&columns, "T_POSITION", &key("C_FUND"), None).unwrap_err();
+
+    assert_eq!(error.columns.len(), 1);
+    assert_eq!(error.columns[0].column, "C_FUND");
+    assert_eq!(error.columns[0].source, "<missing>");
+}
+
+fn key(column: &str) -> Vec<String> {
+    vec![column.to_owned()]
 }
 
 fn source_column(

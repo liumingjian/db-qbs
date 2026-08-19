@@ -167,8 +167,7 @@ fn open_run_request_shape_with_range_check_results() {
         OpenRunRequest {
             run_id: "20260818120000_a1b2c3".to_owned(),
             target_table: "ORDERS".to_owned(),
-            target_date_col: "BIZ_DATE".to_owned(),
-            biz_date: "2026-08-18".to_owned(),
+            primary_key: vec!["ID".to_owned()],
             source_columns: vec![column_minimal()],
             range_check_results: Some(vec![RangeCheckResult {
                 column: "AMT".to_owned(),
@@ -178,8 +177,7 @@ fn open_run_request_shape_with_range_check_results() {
         json!({
             "run_id": "20260818120000_a1b2c3",
             "target_table": "ORDERS",
-            "target_date_col": "BIZ_DATE",
-            "biz_date": "2026-08-18",
+            "primary_key": ["ID"],
             "source_columns": [{
                 "name": "ID",
                 "type": "VARCHAR2",
@@ -198,16 +196,14 @@ fn open_run_request_shape_omits_absent_range_check_results() {
         OpenRunRequest {
             run_id: "20260818120000_a1b2c3".to_owned(),
             target_table: "ORDERS".to_owned(),
-            target_date_col: "BIZ_DATE".to_owned(),
-            biz_date: "2026-08-18".to_owned(),
+            primary_key: vec!["ID".to_owned()],
             source_columns: vec![],
             range_check_results: None,
         },
         json!({
             "run_id": "20260818120000_a1b2c3",
             "target_table": "ORDERS",
-            "target_date_col": "BIZ_DATE",
-            "biz_date": "2026-08-18",
+            "primary_key": ["ID"],
             "source_columns": []
         }),
     );

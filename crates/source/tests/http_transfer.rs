@@ -45,8 +45,7 @@ fn rows_cross_the_http_protocol_then_commit() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
-            target_date_col: "BIZ_DAY".to_owned(),
-            biz_date: "2026-08-14".to_owned(),
+            primary_key: vec!["ID".to_owned()],
         },
         |_| {},
     )
@@ -105,8 +104,7 @@ fn error_response_preserves_sink_diagnostics() {
         .open(&OpenRunRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
-            target_date_col: "BIZ_DAY".to_owned(),
-            biz_date: "2026-08-14".to_owned(),
+            primary_key: vec!["ID".to_owned()],
             source_columns: Vec::new(),
             range_check_results: None,
         })

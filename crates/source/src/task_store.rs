@@ -6,32 +6,23 @@ use rand::RngCore;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::ColumnPrecision;
+use crate::TaskSpec;
 
 const DATABASE_FILE: &str = "db-qbs.sqlite3";
 
+/// 一条任务定义。**规格是全部内容**——SQL 不存（ADR-0036 §2），现算。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Task {
     pub task_id: String,
     pub name: String,
-    pub source_sql: String,
-    pub source_date_col: String,
-    pub target_table: String,
-    pub target_date_col: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub column_precision: Option<ColumnPrecision>,
+    pub spec: TaskSpec,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskInput {
     pub name: String,
-    pub source_sql: String,
-    pub source_date_col: String,
-    pub target_table: String,
-    pub target_date_col: String,
-    #[serde(default)]
-    pub column_precision: Option<ColumnPrecision>,
+    pub spec: TaskSpec,
 }
 
 pub struct TaskStore {
@@ -56,50 +47,31 @@ impl TaskStore {
 
         let connection = Connection::open(&database_path)
             .map_err(|error| format!("打开 SQLite 库文件失败：{error}"))?;
+        drop_legacy_task_table(&connection)?;
         connection
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS tasks (
-                    task_id         TEXT PRIMARY KEY NOT NULL,
-                    name            TEXT NOT NULL,
-                    source_sql      TEXT NOT NULL,
-                    source_date_col TEXT NOT NULL,
-                    target_table    TEXT NOT NULL,
-                    target_date_col TEXT NOT NULL,
-                    column_precision TEXT
+                    task_id TEXT PRIMARY KEY NOT NULL,
+                    name    TEXT NOT NULL,
+                    spec    TEXT NOT NULL
                 );",
             )
             .map_err(|error| format!("初始化 SQLite 任务表失败：{error}"))?;
-        ensure_column(&connection)?;
 
         Ok(Self { connection })
     }
 
     pub fn create(&self, input: TaskInput) -> Result<Task, String> {
+        input.spec.validate()?;
         let task = Task {
             task_id: generate_task_id(),
             name: input.name,
-            source_sql: input.source_sql,
-            source_date_col: input.source_date_col,
-            target_table: input.target_table,
-            target_date_col: input.target_date_col,
-            column_precision: input.column_precision,
+            spec: input.spec,
         };
-        let column_precision = column_precision_json(task.column_precision.as_ref())?;
         self.connection
             .execute(
-                "INSERT INTO tasks (
-                    task_id, name, source_sql, source_date_col, target_table, target_date_col,
-                    column_precision
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    task.task_id,
-                    task.name,
-                    task.source_sql,
-                    task.source_date_col,
-                    task.target_table,
-                    task.target_date_col,
-                    column_precision,
-                ],
+                "INSERT INTO tasks (task_id, name, spec) VALUES (?1, ?2, ?3)",
+                params![task.task_id, task.name, spec_json(&task.spec)?],
             )
             .map_err(|error| format!("写入 SQLite 任务失败：{error}"))?;
         Ok(task)
@@ -108,12 +80,7 @@ impl TaskStore {
     pub fn list(&self) -> Result<Vec<Task>, String> {
         let mut statement = self
             .connection
-            .prepare(
-                "SELECT task_id, name, source_sql, source_date_col, target_table, target_date_col,
-                        column_precision
-                   FROM tasks
-               ORDER BY rowid",
-            )
+            .prepare("SELECT task_id, name, spec FROM tasks ORDER BY rowid")
             .map_err(|error| format!("准备 SQLite 任务列表查询失败：{error}"))?;
         let tasks = statement
             .query_map([], task_from_row)
@@ -126,10 +93,7 @@ impl TaskStore {
     pub fn get(&self, task_id: &str) -> Result<Option<Task>, String> {
         self.connection
             .query_row(
-                "SELECT task_id, name, source_sql, source_date_col, target_table, target_date_col,
-                        column_precision
-                   FROM tasks
-                  WHERE task_id = ?1",
+                "SELECT task_id, name, spec FROM tasks WHERE task_id = ?1",
                 [task_id],
                 task_from_row,
             )
@@ -138,27 +102,12 @@ impl TaskStore {
     }
 
     pub fn update(&self, task_id: &str, input: TaskInput) -> Result<Option<Task>, String> {
-        let column_precision = column_precision_json(input.column_precision.as_ref())?;
+        input.spec.validate()?;
         let updated_rows = self
             .connection
             .execute(
-                "UPDATE tasks
-                    SET name = ?2,
-                        source_sql = ?3,
-                        source_date_col = ?4,
-                        target_table = ?5,
-                        target_date_col = ?6,
-                        column_precision = ?7
-                  WHERE task_id = ?1",
-                params![
-                    task_id,
-                    input.name,
-                    input.source_sql,
-                    input.source_date_col,
-                    input.target_table,
-                    input.target_date_col,
-                    column_precision,
-                ],
+                "UPDATE tasks SET name = ?2, spec = ?3 WHERE task_id = ?1",
+                params![task_id, input.name, spec_json(&input.spec)?],
             )
             .map_err(|error| format!("更新 SQLite 任务失败：{error}"))?;
         if updated_rows == 0 {
@@ -179,54 +128,55 @@ impl TaskStore {
 }
 
 fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
-    let encoded: Option<String> = row.get("column_precision")?;
-    let column_precision = encoded
-        .map(|encoded| {
-            let column_index = row.as_ref().column_index("column_precision")?;
-            serde_json::from_str(&encoded).map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    column_index,
-                    rusqlite::types::Type::Text,
-                    Box::new(error),
-                )
-            })
-        })
-        .transpose()?;
+    let encoded: String = row.get("spec")?;
+    let spec = serde_json::from_str(&encoded).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            row.as_ref()
+                .column_index("spec")
+                .expect("the spec column was just read"),
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })?;
     Ok(Task {
-        task_id: row.get(0)?,
-        name: row.get(1)?,
-        source_sql: row.get(2)?,
-        source_date_col: row.get(3)?,
-        target_table: row.get(4)?,
-        target_date_col: row.get(5)?,
-        column_precision,
+        task_id: row.get("task_id")?,
+        name: row.get("name")?,
+        spec,
     })
 }
 
-fn ensure_column(connection: &Connection) -> Result<(), String> {
-    let exists: bool = connection
+/// 旧的四字段任务表（ADR-0016 §2）整表丢弃、换新数据结构——ADR-0036 §4 的原判，
+/// 前提是第一版尚无真实用户数据。**不做就地翻译**（反解析任意 Oracle SQL 正是 ADR-0023 §2
+/// 否掉的那件事），**不做 legacy 并存**（会把「两种任务形态」永久焊进发起链路）。
+fn drop_legacy_task_table(connection: &Connection) -> Result<(), String> {
+    let table_exists: bool = connection
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'column_precision')",
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks')",
             [],
             |row| row.get(0),
         )
-        .map_err(|error| format!("检查 SQLite 任务列 column_precision 失败：{error}"))?;
-    if exists {
+        .map_err(|error| format!("检查 SQLite 任务表失败：{error}"))?;
+    if !table_exists {
+        return Ok(());
+    }
+    let has_spec_column: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'spec')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("检查 SQLite 任务列 spec 失败：{error}"))?;
+    if has_spec_column {
         return Ok(());
     }
     connection
-        .execute("ALTER TABLE tasks ADD COLUMN column_precision TEXT", [])
-        .map_err(|error| format!("迁移 SQLite 任务列 column_precision 失败：{error}"))?;
+        .execute("DROP TABLE tasks", [])
+        .map_err(|error| format!("丢弃旧 SQLite 任务表失败：{error}"))?;
     Ok(())
 }
 
-fn column_precision_json(value: Option<&ColumnPrecision>) -> Result<Option<String>, String> {
-    value
-        .map(|value| {
-            serde_json::to_string(value)
-                .map_err(|error| format!("序列化任务 column_precision 失败：{error}"))
-        })
-        .transpose()
+fn spec_json(spec: &TaskSpec) -> Result<String, String> {
+    serde_json::to_string(spec).map_err(|error| format!("序列化任务规格失败：{error}"))
 }
 
 fn generate_task_id() -> String {
@@ -248,65 +198,71 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
+    use crate::task_spec::{Comparison, Condition, ValueSource, ValueType};
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
-    #[test]
-    fn column_precision_round_trips_as_one_json_column() {
-        let directory = temp_directory();
-        let mut column_precision = ColumnPrecision::new();
-        column_precision.insert("N_AMT".to_owned(), [20, 4]);
-        column_precision.insert("N_RATE".to_owned(), [38, -30]);
+    fn sample_spec() -> TaskSpec {
+        TaskSpec {
+            dblink: Some("FA".to_owned()),
+            owner: "HTBR45".to_owned(),
+            table: "T_R_FR_ASTSTAT".to_owned(),
+            columns: vec!["ID".to_owned(), "D_BIZ".to_owned()],
+            primary_key: vec!["ID".to_owned()],
+            conditions: vec![Condition {
+                column: "D_BIZ".to_owned(),
+                operator: Comparison::Eq,
+                value_type: ValueType::Date,
+                parameter: "biz_date".to_owned(),
+                value_source: ValueSource::Runtime,
+                constant: String::new(),
+            }],
+            order_by: Vec::new(),
+            target_table: "T_POSITION".to_owned(),
+        }
+    }
 
+    #[test]
+    fn spec_round_trips_through_one_json_column() {
+        let directory = temp_directory();
         let store = TaskStore::open(&directory).unwrap();
         let created = store
             .create(TaskInput {
                 name: "holdings".to_owned(),
-                source_sql: "SELECT N_AMT, N_RATE FROM HOLDINGS".to_owned(),
-                source_date_col: "D_BIZ".to_owned(),
-                target_table: "HOLDINGS".to_owned(),
-                target_date_col: "D_BIZ".to_owned(),
-                column_precision: Some(column_precision.clone()),
+                spec: sample_spec(),
             })
             .unwrap();
 
-        assert_eq!(created.column_precision, Some(column_precision.clone()));
+        assert_eq!(created.spec, sample_spec());
         assert_eq!(store.get(&created.task_id).unwrap(), Some(created.clone()));
-        assert_eq!(store.list().unwrap(), vec![created.clone()]);
+        assert_eq!(store.list().unwrap(), vec![created]);
 
-        let connection = Connection::open(directory.join(DATABASE_FILE)).unwrap();
-        let encoded: String = connection
-            .query_row(
-                "SELECT column_precision FROM tasks WHERE task_id = ?1",
-                [&created.task_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(encoded, r#"{"N_AMT":[20,4],"N_RATE":[38,-30]}"#);
-
-        let cleared = store
-            .update(
-                &created.task_id,
-                TaskInput {
-                    name: created.name,
-                    source_sql: created.source_sql,
-                    source_date_col: created.source_date_col,
-                    target_table: created.target_table,
-                    target_date_col: created.target_date_col,
-                    column_precision: None,
-                },
-            )
-            .unwrap()
-            .unwrap();
-        assert_eq!(cleared.column_precision, None);
-
-        drop(connection);
         drop(store);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn existing_task_table_is_migrated_without_precision_values() {
+    fn an_invalid_spec_is_refused_before_it_reaches_sqlite() {
+        let directory = temp_directory();
+        let store = TaskStore::open(&directory).unwrap();
+        let mut spec = sample_spec();
+        spec.primary_key = vec!["MISSING".to_owned()];
+
+        let error = store
+            .create(TaskInput {
+                name: "holdings".to_owned(),
+                spec,
+            })
+            .unwrap_err();
+        assert_eq!(error, "主键列 MISSING 不在选中的列里");
+        assert!(store.list().unwrap().is_empty());
+
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_legacy_four_field_task_table_is_dropped_whole() {
         let directory = temp_directory();
         let database = directory.join(DATABASE_FILE);
         let connection = Connection::open(&database).unwrap();
@@ -328,19 +284,9 @@ mod tests {
         drop(connection);
 
         let store = TaskStore::open(&directory).unwrap();
-        assert_eq!(store.get("legacy").unwrap().unwrap().column_precision, None);
+        assert!(store.list().unwrap().is_empty());
+        assert_eq!(store.get("legacy").unwrap(), None);
 
-        let connection = Connection::open(database).unwrap();
-        let has_column: bool = connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'column_precision')",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(has_column);
-
-        drop(connection);
         drop(store);
         std::fs::remove_dir_all(directory).unwrap();
     }

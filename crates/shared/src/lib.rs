@@ -116,10 +116,14 @@ pub enum LogLevel {
 pub enum LogEvent {
     CliFailed,
     SourceStarted,
+    /// 已退役、不再产生：业务日期不再是一等概念（ADR-0035 §3）。
+    /// 闭集只增不删（ADR-0017 §5），所以值保留。
     BusinessDateInvalid,
     SourceConfigFailed,
     TaskConfigFailed,
+    /// 已退役、不再产生：SQL 形状预检整段随 ADR-0036 §5 取消。同上，值保留。
     SqlShapePrecheckFailed,
+    /// 已退役、不再产生，理由同 [`LogEvent::SqlShapePrecheckFailed`]。
     SqlShapePrecheckPassed,
     StageChanged,
     MappingPrecheckFailed,

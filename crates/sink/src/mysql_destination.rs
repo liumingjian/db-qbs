@@ -10,7 +10,7 @@ use mysql::{
 use crate::service::quote_identifier;
 use crate::{
     AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, CreateStagingError, Destination,
-    DropStagingError, SinkConfig, TargetColumn, WriteBatchError,
+    DropStagingError, SinkConfig, TargetColumn, TargetKey, WriteBatchError,
 };
 
 type MetadataRow = (
@@ -90,6 +90,38 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
                 )
             })
             .map_err(|error| error.to_string())
+    }
+
+    fn target_keys(&self, target_table: &str) -> Result<Vec<TargetKey>, String> {
+        let rows: Vec<(String, String)> = self
+            .pool
+            .with_conn(|connection| {
+                connection.exec(
+                    r#"
+SELECT INDEX_NAME, COLUMN_NAME
+  FROM information_schema.STATISTICS
+ WHERE TABLE_SCHEMA = :database AND TABLE_NAME = :target_table AND NON_UNIQUE = 0
+ ORDER BY INDEX_NAME, SEQ_IN_INDEX
+"#,
+                    params! {
+                        "database" => &self.database,
+                        "target_table" => target_table,
+                    },
+                )
+            })
+            .map_err(|error| error.to_string())?;
+
+        let mut keys: Vec<TargetKey> = Vec::new();
+        for (index_name, column_name) in rows {
+            match keys.last_mut() {
+                Some(key) if key.name == index_name => key.columns.push(column_name),
+                _ => keys.push(TargetKey {
+                    name: index_name,
+                    columns: vec![column_name],
+                }),
+            }
+        }
+        Ok(keys)
     }
 
     fn create_staging(&self, _staging_table: &str, ddl: &str) -> Result<(), CreateStagingError> {
@@ -186,35 +218,31 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
                     return Ok(AtomicSwapOutcome::Failed(error));
                 }
 
-                let delete_statement = build_delete_statement(
-                    &self.database,
-                    &request.target_table,
-                    &request.target_date_col,
-                );
-                transaction.exec_drop(
-                    delete_statement,
-                    (&request.biz_date_start, &request.biz_date_end),
-                )?;
-                let purged_rows = transaction.affected_rows();
-
-                let insert_statement = build_swap_insert_statement(
+                let insert_statement = build_swap_upsert_statement(
                     &self.database,
                     &request.target_table,
                     &request.staging_table,
                     &request.columns,
+                    &request.primary_key,
                 );
                 transaction.query_drop(insert_statement)?;
                 let swapped_rows = transaction.affected_rows();
-                if swapped_rows != staged_rows {
+                // MySQL 在 `ON DUPLICATE KEY UPDATE` 下 `affected_rows` **插入记 1、更新记 2**，
+                // 所以旧模型那条 `swapped_rows == staged_rows` 会把成功的任务全判成失败。
+                // 断言改成区间（ADR-0035 §4）——它仍抓得住「灌回时少写了行」这类真故障。
+                if swapped_rows < staged_rows || swapped_rows > staged_rows.saturating_mul(2) {
                     transaction.rollback()?;
-                    let message =
-                        format!("暂存表有 {staged_rows} 行，切换 INSERT 只写入 {swapped_rows} 行");
+                    let message = format!(
+                        "暂存表有 {staged_rows} 行，切换 upsert 报告影响 {swapped_rows} 行，不落在 [{staged_rows}, {}] 区间内",
+                        staged_rows.saturating_mul(2)
+                    );
                     return Ok(AtomicSwapOutcome::Failed(AtomicSwapError::Other(message)));
                 }
                 transaction.commit()?;
                 Ok(AtomicSwapOutcome::Swapped(AtomicSwapResult {
                     staged_rows,
-                    purged_rows,
+                    // 新模型不删任何行；这个 0 是事实，不是拿 0 糊弄（ADR-0035 §4）。
+                    purged_rows: 0,
                     swapped_rows,
                     count_ms,
                 }))
@@ -338,35 +366,51 @@ fn build_insert_statement(
     )
 }
 
-fn build_delete_statement(database: &str, target_table: &str, target_date_col: &str) -> String {
-    let quoted_date_column = quote_identifier(target_date_col);
-    format!(
-        "DELETE FROM {}.{} WHERE {} >= ? AND {} < ?",
-        quote_identifier(database),
-        quote_identifier(target_table),
-        quoted_date_column,
-        quoted_date_column
-    )
-}
-
-fn build_swap_insert_statement(
+/// 切换段：`INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`，**不再 DELETE**（ADR-0035 §1）。
+///
+/// 更新列 = 全部选中列**排除主键列本身**，语义是「同一主键的行，以本次源端数据为准」。
+/// 不做部分更新：没有对应需求，且会引入「这列这次没更新是有意还是漏了」的排查成本。
+fn build_swap_upsert_statement(
     database: &str,
     target_table: &str,
     staging_table: &str,
     columns: &[String],
+    primary_key: &[String],
 ) -> String {
     let quoted_columns = columns
         .iter()
         .map(|column| quote_identifier(column))
         .collect::<Vec<_>>()
         .join(", ");
-    format!(
+    let updates = columns
+        .iter()
+        .filter(|column| {
+            !primary_key
+                .iter()
+                .any(|key| key.eq_ignore_ascii_case(column))
+        })
+        .map(|column| {
+            let quoted = quote_identifier(column);
+            format!("{quoted} = VALUES({quoted})")
+        })
+        .collect::<Vec<_>>();
+    let mut statement = format!(
         "INSERT INTO {}.{} ({quoted_columns}) SELECT {quoted_columns} FROM {}.{}",
         quote_identifier(database),
         quote_identifier(target_table),
         quote_identifier(database),
         quote_identifier(staging_table)
-    )
+    );
+    // 全部列都是主键时没有可更新的列，但仍必须带上这段：否则重跑会撞 `ERROR 1062`
+    // 而不是安静地幂等。拿主键列做一次无操作赋值即可。
+    let assignments = if updates.is_empty() {
+        let quoted = quote_identifier(&primary_key[0]);
+        format!("{quoted} = {quoted}")
+    } else {
+        updates.join(", ")
+    };
+    statement.push_str(&format!(" ON DUPLICATE KEY UPDATE {assignments}"));
+    statement
 }
 
 // Connections enter this pool only after the creation hook has completed.
@@ -541,8 +585,8 @@ pub fn check_connection_settings(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_delete_statement, build_insert_statement, build_swap_insert_statement,
-        classify_atomic_swap_error, classify_mysql_diagnostic, PoolError,
+        build_insert_statement, build_swap_upsert_statement, classify_atomic_swap_error,
+        classify_mysql_diagnostic, PoolError,
     };
     use crate::{AtomicSwapError, WriteBatchError};
     use mysql::{Error as MysqlError, MySqlError};
@@ -603,19 +647,38 @@ mod tests {
     }
 
     #[test]
-    fn swap_statements_use_a_half_open_date_range_and_explicit_columns() {
+    fn the_swap_upserts_on_the_primary_key_and_updates_every_other_column() {
         assert_eq!(
-            build_delete_statement("qbs", "T_POSITION", "D_BIZ"),
-            "DELETE FROM `qbs`.`T_POSITION` WHERE `D_BIZ` >= ? AND `D_BIZ` < ?"
-        );
-        assert_eq!(
-            build_swap_insert_statement(
+            build_swap_upsert_statement(
                 "qbs",
                 "T_POSITION",
                 "T_POSITION__stg_run",
                 &["C_SECOND".to_owned(), "C_FIRST".to_owned()],
+                &["c_first".to_owned()],
             ),
-            "INSERT INTO `qbs`.`T_POSITION` (`C_SECOND`, `C_FIRST`) SELECT `C_SECOND`, `C_FIRST` FROM `qbs`.`T_POSITION__stg_run`"
+            concat!(
+                "INSERT INTO `qbs`.`T_POSITION` (`C_SECOND`, `C_FIRST`) ",
+                "SELECT `C_SECOND`, `C_FIRST` FROM `qbs`.`T_POSITION__stg_run` ",
+                "ON DUPLICATE KEY UPDATE `C_SECOND` = VALUES(`C_SECOND`)"
+            )
+        );
+    }
+
+    #[test]
+    fn an_all_key_table_still_gets_an_upsert_clause_so_a_rerun_stays_idempotent() {
+        assert_eq!(
+            build_swap_upsert_statement(
+                "qbs",
+                "T_POSITION",
+                "T_POSITION__stg_run",
+                &["C_ONLY".to_owned()],
+                &["C_ONLY".to_owned()],
+            ),
+            concat!(
+                "INSERT INTO `qbs`.`T_POSITION` (`C_ONLY`) ",
+                "SELECT `C_ONLY` FROM `qbs`.`T_POSITION__stg_run` ",
+                "ON DUPLICATE KEY UPDATE `C_ONLY` = `C_ONLY`"
+            )
         );
     }
 }

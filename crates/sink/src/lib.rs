@@ -26,7 +26,9 @@ pub use db_qbs_shared::{
 };
 pub use http::serve;
 pub use mysql_destination::{check_connection_settings, MysqlDestination};
-pub use precheck::precheck;
+// `precheck` 是不带主键那一支，只给「生成的表喂回预检必过」那道漂移闸用；
+// 带主键那一支同样导出，因为漂移闸现在还要守「生成的 DDL 带主键，ADR-0035 §2 三条得过」。
+pub use precheck::{precheck, precheck_with_primary_key};
 pub use service::build_staging_ddl;
 
 const MAX_PREPARED_STATEMENT_PLACEHOLDERS: usize = 65_535;
@@ -54,6 +56,16 @@ impl SinkConfig {
     }
 }
 
+/// 目标表上一条唯一性约束（`PRIMARY KEY` 或 `UNIQUE`）覆盖的列集合。
+///
+/// 撤掉 DELETE 之后，幂等全靠它：目标表上**没有**对应约束时，
+/// `ON DUPLICATE KEY UPDATE` 不报错、写得进去、重跑就出重复行（ADR-0035 §2）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetKey {
+    pub name: String,
+    pub columns: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetColumn {
     pub name: String,
@@ -72,9 +84,9 @@ pub struct TargetColumn {
 pub struct AtomicSwapRequest {
     pub staging_table: String,
     pub target_table: String,
-    pub target_date_col: String,
-    pub biz_date_start: String,
-    pub biz_date_end: String,
+    /// upsert 的去重键（ADR-0035 §1）。`ON DUPLICATE KEY UPDATE` 的更新列
+    /// = `columns` 减去这里的列。
+    pub primary_key: Vec<String>,
     pub columns: Vec<String>,
     pub source_rows: u64,
     pub source_batches: u64,
@@ -84,6 +96,7 @@ pub struct AtomicSwapRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AtomicSwapResult {
     pub staged_rows: u64,
+    /// 恒为 0（ADR-0035 §4）——新写入模型不删任何行，字段保留。
     pub purged_rows: u64,
     pub swapped_rows: u64,
     pub count_ms: u64,
@@ -129,6 +142,7 @@ pub enum WriteBatchError {
 
 pub trait Destination: Send + Sync {
     fn target_columns(&self, target_table: &str) -> Result<Vec<TargetColumn>, String>;
+    fn target_keys(&self, target_table: &str) -> Result<Vec<TargetKey>, String>;
     fn create_staging(&self, staging_table: &str, ddl: &str) -> Result<(), CreateStagingError>;
     fn write_batch(
         &self,
@@ -148,9 +162,7 @@ struct ActiveRun {
     source_columns: Vec<String>,
     swap_columns: Vec<String>,
     target_table: String,
-    target_date_col: String,
-    biz_date_start: String,
-    biz_date_end: String,
+    primary_key: Vec<String>,
     max_rows_per_insert: usize,
     next_seq: u64,
     rows_written: u64,

@@ -8,7 +8,8 @@ function terminal(overrides: Partial<RunDetail> = {}): RunDetail {
     run_record_id: "record-01",
     run_id: "run-01",
     task_id: "task-01",
-    biz_date: "2026-08-14",
+    run_params: { d_biz: "2026-08-14" },
+    source_sql: "SELECT a.ID AS ID\n  FROM APP.ORDERS a",
     staging_table: "ORDERS__stg_run_01",
     started_at: "2026-08-15T10:00:00.000Z",
     finished_at: "2026-08-15T10:01:00.000Z",
@@ -38,7 +39,6 @@ function terminal(overrides: Partial<RunDetail> = {}): RunDetail {
     bytes: 0,
     ms: 0,
     last_ts: "2026-08-15T10:01:00.000Z",
-    shape_checks: [],
     mapping_issues: [],
     live: false,
     ...overrides,
@@ -50,7 +50,8 @@ describe("run detail presentation", () => {
     const presentation = runPresentation({
       run_record_id: "record-01",
       run_id: null,
-      biz_date: null,
+      run_params: {},
+      source_sql: "SELECT a.ID AS ID\n  FROM APP.ORDERS a",
       staging_table: null,
       stage: null,
       seq: 0,
@@ -73,7 +74,8 @@ describe("run detail presentation", () => {
     const detail: RunDetail = {
       run_record_id: "record-01",
       run_id: "run-01",
-      biz_date: "2026-08-14",
+      run_params: { d_biz: "2026-08-14" },
+      source_sql: "SELECT a.ID AS ID\n  FROM APP.ORDERS a",
       staging_table: "ORDERS__stg_run_01",
       stage: "STREAMING",
       seq: 4,
@@ -92,12 +94,7 @@ describe("run detail presentation", () => {
     });
   });
 
-  it("does not invent terminal blocks for local shape, mapping, or unknown failures", () => {
-    expect(
-      runPresentation(
-        terminal({ run_id: null, failure_kind: "SHAPE_PRECHECK" }),
-      ),
-    ).toMatchObject({ kind: "shape-failed", terminalEffect: null });
+  it("does not invent terminal blocks for mapping or unknown failures", () => {
     expect(runPresentation(terminal({ sink_code: "PRECHECK_FAILED" }))).toMatchObject({
       kind: "mapping-failed",
       terminalEffect: null,
@@ -114,7 +111,7 @@ describe("run detail presentation", () => {
     ).toMatchObject({ kind: "unknown", terminalEffect: null, error: null });
   });
 
-  it("does not mislabel a pre-run configuration failure as a shape failure", () => {
+  it("classifies a pre-run configuration failure by its category label", () => {
     expect(
       runPresentation(
         terminal({
@@ -131,16 +128,18 @@ describe("run detail presentation", () => {
     });
   });
 
-  it("recognizes an unclassified legacy shape failure from its failed checks", () => {
+  it("no longer has a shape-precheck branch at all", () => {
+    // ADR-0036 §5 取消了整段形状预检。`SHAPE_PRECHECK` 是个不会再产生的分类值
+    // （闭集只增不删），落到通用失败一支，前缀由分类标签给出。
     expect(
       runPresentation(
         terminal({
           run_id: null,
           staging_table: null,
-          failure_kind: null,
-          shape_checks: [{ rule: "named_projection", passed: false, message: "bad" }],
+          failure_kind: "SHAPE_PRECHECK",
+          message: "退役的分类",
         }),
       ),
-    ).toMatchObject({ kind: "shape-failed", terminalEffect: null });
+    ).toMatchObject({ kind: "failed", conclusion: "[SQL 形状] 退役的分类" });
   });
 });

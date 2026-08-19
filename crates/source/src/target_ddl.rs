@@ -3,8 +3,8 @@ use std::fmt;
 use serde::Serialize;
 
 use crate::{
-    classify_column, is_business_date_column, is_supported_decimal_shape, ColumnPrecision,
-    ColumnShape, ShapeRejection, SourceColumn, TargetShape,
+    classify_column, is_supported_decimal_shape, ColumnPrecision, ColumnShape, ShapeRejection,
+    SourceColumn, TargetShape,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -46,7 +46,7 @@ impl std::error::Error for TargetDdlError {}
 pub fn generate_target_ddl(
     columns: &[SourceColumn],
     target_table: &str,
-    target_date_col: &str,
+    primary_key: &[String],
     column_precision: Option<&ColumnPrecision>,
 ) -> Result<String, TargetDdlError> {
     let mut definitions = Vec::new();
@@ -58,9 +58,16 @@ pub fn generate_target_ddl(
             precision_placeholders.push(column.name.escape_debug().to_string());
         }
 
+        // 主键列必须 NOT NULL，其余列必须可空——两条各有出处：前者是 ADR-0035 §2 第 3 条
+        // （可空会让 upsert 静默退化），后者是 ADR-0009 的映射预检。
+        let nullability = if is_key_column(&column.name, primary_key) {
+            "NOT NULL"
+        } else {
+            "NULL"
+        };
         match target_column_type(column, column_precision) {
             Ok(column_type) => definitions.push(format!(
-                "  {} {} NULL",
+                "  {} {} {nullability}",
                 quote_identifier(&column.name),
                 column_type
             )),
@@ -68,22 +75,21 @@ pub fn generate_target_ddl(
         }
     }
 
-    let target_date_column = columns
-        .iter()
-        .find(|column| column.name.eq_ignore_ascii_case(target_date_col));
-    if !target_date_column.is_some_and(|column| is_business_date_column(column))
-        && !errors
+    for key_column in primary_key {
+        let described = columns
             .iter()
-            .any(|error| error.column.eq_ignore_ascii_case(target_date_col))
-    {
-        let source = target_date_column
-            .map(source_type)
-            .unwrap_or_else(|| "<missing>".to_owned());
-        errors.push(named_error(
-            target_date_col,
-            source,
-            "target_date_col must name an Oracle DATE or TIMESTAMP(0..6) describe column",
-        ));
+            .any(|column| column.name.eq_ignore_ascii_case(key_column));
+        if !described
+            && !errors
+                .iter()
+                .any(|error| error.column.eq_ignore_ascii_case(key_column))
+        {
+            errors.push(named_error(
+                key_column,
+                "<missing>".to_owned(),
+                "primary key column is not among the described source columns",
+            ));
+        }
     }
 
     if !errors.is_empty() {
@@ -95,30 +101,37 @@ pub fn generate_target_ddl(
     } else {
         quote_identifier(target_table)
     };
-    let index_name = format!("idx_{}", target_date_col.to_ascii_lowercase());
+    // 主键不是可选项：撤掉 DELETE 之后幂等全靠它，目标表没有它时
+    // `ON DUPLICATE KEY UPDATE` 会静默退化成纯 INSERT（ADR-0035 §2），预检会直接拒跑。
     definitions.push(format!(
-        "  KEY {} ({})",
-        quote_identifier(&index_name),
-        quote_identifier(target_date_col)
+        "  PRIMARY KEY ({})",
+        primary_key
+            .iter()
+            .map(|column| quote_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ")
     ));
 
     let precision_note = if precision_placeholders.is_empty() {
         String::new()
     } else {
         format!(
-            "-- {} 列的精度 describe 给不出，请在任务定义的 [column_precision] 字段为它们配 (p,s)。\n",
+            "-- {} 列的精度 describe 给不出，请在取列面为它们配 (p,s)。\n",
             precision_placeholders.join("、")
         )
     };
 
     Ok(format!(
         "-- db-qbs 生成的目标表建表 SQL，请自行执行；产品不会替你建表。\n\
-         -- 下面这条索引不是可选项：切换事务的 DELETE 会锁住目标表当日范围，\n\
-         -- 业务日期列无索引时锁全表。\n\
+         -- 下面那条主键不是可选项：写入走 upsert，目标表没有它时重跑会静默出重复行。\n\
          {precision_note}CREATE TABLE {table_name} (\n{}\n\
          ) DEFAULT CHARSET=utf8mb4;",
         definitions.join(",\n")
     ))
+}
+
+fn is_key_column(name: &str, primary_key: &[String]) -> bool {
+    primary_key.iter().any(|key| key.eq_ignore_ascii_case(name))
 }
 
 fn target_column_type(

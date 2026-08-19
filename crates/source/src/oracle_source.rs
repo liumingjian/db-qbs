@@ -1,17 +1,24 @@
 use db_qbs_shared::{canon_date, canon_number, canon_text, canon_timestamp};
+use oracle::sql_type::ToSql;
 use oracle::sql_type::{OracleType, Timestamp};
 use oracle::{Connection, InitParams, ResultSet, Row};
-use sqlparser::ast::{Expr, SelectItem, SetExpr, Statement};
-use sqlparser::dialect::GenericDialect;
-use sqlparser::parser::Parser;
 
 use crate::{
     builder_column_query, builder_table_query, classify_column, column_support, BuilderColumn,
     BuilderTable, FailureKind, RangeCheckColumn, RangeCheckResult, RowSource, SourceColumn,
-    SourceConfig, SourceReadError, TaskConfig, FETCH_ARRAY_SIZE,
+    SourceConfig, SourceReadError, TaskConfig, TaskSpec, FETCH_ARRAY_SIZE,
 };
 
-const DESCRIBE_BIZ_DATE: &str = "0001-01-01";
+/// 一次查询的绑定变量取值：参数名 → 值。全部值都走绑定（ADR-0011 §2「不发明第二套转义」），
+/// 常量条件也不例外，所以它同时承载「写死的常量」与「运行时填的参数」。
+type Bindings = Vec<(String, String)>;
+
+fn named_params(bindings: &Bindings) -> Vec<(&str, &dyn ToSql)> {
+    bindings
+        .iter()
+        .map(|(name, value)| (name.as_str(), value as &dyn ToSql))
+        .collect()
+}
 
 pub struct OracleRowSource {
     rows: ResultSet<'static, Row>,
@@ -19,6 +26,7 @@ pub struct OracleRowSource {
     value_kinds: Vec<ValueKind>,
     config: SourceConfig,
     source_sql: String,
+    bindings: Bindings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,31 +38,34 @@ enum ValueKind {
 }
 
 impl OracleRowSource {
-    pub fn connect(
-        config: &SourceConfig,
-        task: &TaskConfig,
-        biz_date: &str,
-    ) -> Result<Self, SourceReadError> {
-        let rows = open_result_set(config, task, biz_date)?;
-        let (mut columns, value_kinds) = describe_columns(rows.column_info());
-        normalize_expression_metadata(&task.source_sql, &mut columns);
+    pub fn connect(config: &SourceConfig, task: &TaskConfig) -> Result<Self, SourceReadError> {
+        let source_sql = task.source_sql();
+        let bindings = task
+            .bindings()
+            .map_err(|message| SourceReadError::with_kind(&message, None, FailureKind::Config))?;
+        let rows = open_result_set(config, &source_sql, &bindings)?;
+        let (columns, value_kinds) = describe_columns(rows.column_info());
 
         Ok(Self {
             rows,
             columns,
             value_kinds,
             config: config.clone(),
-            source_sql: task.source_sql.clone(),
+            source_sql,
+            bindings,
         })
     }
 
+    /// 取列面：只为把游标开起来拿列信息，绑定变量喂哑值（见 [`TaskSpec::describe_bindings`]）。
+    ///
+    /// 投影里**结构性只有真列**（`a.C AS C`），所以旧那段「表达式列要抹掉精度再重分类」
+    /// 的归一化随生成器一起退役了——构建器根本产不出表达式列（ADR-0036 §5 第 5/6 条）。
     pub fn describe(
         config: &SourceConfig,
-        task: &TaskConfig,
+        spec: &TaskSpec,
     ) -> Result<Vec<SourceColumn>, SourceReadError> {
-        let rows = open_result_set(config, task, DESCRIBE_BIZ_DATE)?;
-        let (mut columns, _) = describe_columns(rows.column_info());
-        normalize_expression_metadata(&task.source_sql, &mut columns);
+        let rows = open_result_set(config, &spec.source_sql(), &spec.describe_bindings())?;
+        let (columns, _) = describe_columns(rows.column_info());
         Ok(columns)
     }
 
@@ -112,13 +123,12 @@ impl OracleRowSource {
     fn execute_range_check(
         &self,
         columns: &[RangeCheckColumn],
-        biz_date: &str,
     ) -> Result<(Vec<RangeCheckResult>, u64), SourceReadError> {
         let query = build_range_check_query(&self.source_sql, columns);
         let connection = open_connection(&self.config)?;
         let statement = connection.statement(&query).build().map_err(oracle_error)?;
         let mut rows = statement
-            .into_result_set_named(&[("biz_date", &biz_date)])
+            .into_result_set_named(&named_params(&self.bindings))
             .map_err(oracle_error)?;
         let row = rows
             .next()
@@ -185,17 +195,17 @@ fn aggregate_count(row: &Row, index: usize, label: &str) -> Result<u64, SourceRe
 
 fn open_result_set(
     config: &SourceConfig,
-    task: &TaskConfig,
-    biz_date: &str,
+    source_sql: &str,
+    bindings: &Bindings,
 ) -> Result<ResultSet<'static, Row>, SourceReadError> {
     let connection = open_connection(config)?;
     let statement = connection
-        .statement(&task.source_sql)
+        .statement(source_sql)
         .fetch_array_size(FETCH_ARRAY_SIZE)
         .build()
         .map_err(oracle_error)?;
     let rows = statement
-        .into_result_set_named(&[("biz_date", &biz_date)])
+        .into_result_set_named(&named_params(bindings))
         .map_err(oracle_error)?;
     Ok(rows)
 }
@@ -223,55 +233,6 @@ fn describe_columns(infos: &[oracle::ColumnInfo]) -> (Vec<SourceColumn>, Vec<Val
         .unzip()
 }
 
-fn normalize_expression_metadata(source_sql: &str, columns: &mut [SourceColumn]) {
-    let Ok(statements) = Parser::parse_sql(&GenericDialect, source_sql) else {
-        return;
-    };
-    let [Statement::Query(query)] = statements.as_slice() else {
-        return;
-    };
-    let SetExpr::Select(select) = query.body.as_ref() else {
-        return;
-    };
-    if select.projection.len() != columns.len() {
-        return;
-    }
-
-    for (item, column) in select.projection.iter().zip(columns) {
-        let SelectItem::ExprWithAlias { expr, .. } = item else {
-            continue;
-        };
-        let expression = strip_nested_expression(expr);
-        if matches!(
-            expression,
-            Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Cast { .. }
-        ) {
-            continue;
-        }
-
-        match column.data_type.to_uppercase().as_str() {
-            "NUMBER" => {
-                column.precision = None;
-                column.scale = None;
-            }
-            "VARCHAR2" | "NVARCHAR2" | "CHAR" | "NCHAR" => {
-                column.length = None;
-            }
-            _ => continue,
-        }
-        // 精度 / 长度被抹掉之后重新分类：数值表达式列落「待配精度」、
-        // 字符表达式列落「不支持」，与手写标记逐条一致（#125 Q7）。
-        column.support = Some(column_support(classify_column(column)));
-    }
-}
-
-fn strip_nested_expression(mut expression: &Expr) -> &Expr {
-    while let Expr::Nested(inner) = expression {
-        expression = inner;
-    }
-    expression
-}
-
 impl RowSource for OracleRowSource {
     fn columns(&self) -> &[SourceColumn] {
         &self.columns
@@ -280,9 +241,8 @@ impl RowSource for OracleRowSource {
     fn range_check(
         &mut self,
         columns: &[RangeCheckColumn],
-        biz_date: &str,
     ) -> Result<(Vec<RangeCheckResult>, u64), SourceReadError> {
-        self.execute_range_check(columns, biz_date)
+        self.execute_range_check(columns)
     }
 
     fn next_row(&mut self) -> Result<Option<Vec<Option<String>>>, SourceReadError> {
@@ -630,65 +590,8 @@ mod tests {
         assert_eq!(wire["support"], "ok");
     }
 
-    #[test]
-    fn uncast_expression_metadata_uses_the_m3_expression_rules() {
-        let column = |name: &str, data_type: &str, precision, scale, length, support| {
-            let mut column = expected_column(data_type, precision, scale, length, None, support);
-            column.name = name.to_owned();
-            column
-        };
-        let mut columns = vec![
-            column(
-                "N_EXPR",
-                "NUMBER",
-                Some(18),
-                Some(2),
-                None,
-                ColumnSupport::Ok,
-            ),
-            column(
-                "C_EXPR",
-                "VARCHAR2",
-                None,
-                None,
-                Some(20),
-                ColumnSupport::Ok,
-            ),
-            column(
-                "C_COLUMN",
-                "VARCHAR2",
-                None,
-                None,
-                Some(10),
-                ColumnSupport::Ok,
-            ),
-            column(
-                "C_CAST",
-                "VARCHAR2",
-                None,
-                None,
-                Some(20),
-                ColumnSupport::Ok,
-            ),
-        ];
-
-        normalize_expression_metadata(
-            "SELECT n.amount * 2 AS N_EXPR, n.note || n.note AS C_EXPR, \
-             n.note AS C_COLUMN, CAST(n.note || n.note AS VARCHAR2(20)) AS C_CAST \
-             FROM notes n",
-            &mut columns,
-        );
-
-        assert_eq!(columns[0].precision, None);
-        assert_eq!(columns[0].scale, None);
-        assert_eq!(columns[0].support, Some(ColumnSupport::NeedsPrecision));
-        assert_eq!(columns[1].length, None);
-        assert_eq!(columns[1].support, Some(ColumnSupport::Unsupported));
-        assert_eq!(columns[2].length, Some(10));
-        assert_eq!(columns[2].support, Some(ColumnSupport::Ok));
-        assert_eq!(columns[3].length, Some(20));
-        assert_eq!(columns[3].support, Some(ColumnSupport::Ok));
-    }
+    // 表达式列的元数据修正（原 `normalize_expression_metadata`）已随 ADR-0036 §5 删除：
+    // 生成器结构性只产 `a.C AS C`，SQL 又不可手改，表达式列在 v1 根本进不来。
 
     #[test]
     fn timestamp_values_use_fixed_six_digit_canonical_form() {

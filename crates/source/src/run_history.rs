@@ -8,17 +8,17 @@ use rusqlite::{named_params, params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::FailureKind;
+use crate::{FailureKind, RunParams};
 
 const DATABASE_FILE: &str = "db-qbs.sqlite3";
 
 macro_rules! history_params {
-    ($history:expr, $shape_checks:expr, $mapping_issues:expr) => {
+    ($history:expr, $run_params:expr, $mapping_issues:expr) => {
         named_params! {
             ":run_record_id": $history.run_record_id,
             ":run_id": $history.run_id,
             ":task_id": $history.task_id,
-            ":biz_date": $history.biz_date,
+            ":run_params": $run_params,
             ":staging_table": $history.staging_table,
             ":started_at": $history.started_at,
             ":started_at_ms": $history.started_at_ms,
@@ -49,7 +49,7 @@ macro_rules! history_params {
             ":bytes": $history.bytes,
             ":ms": $history.ms,
             ":last_ts": $history.last_ts,
-            ":shape_checks": $shape_checks,
+            ":source_sql": $history.source_sql,
             ":mapping_issues": $mapping_issues,
         }
     };
@@ -89,7 +89,16 @@ pub struct RunHistory {
     pub run_record_id: String,
     pub run_id: Option<String>,
     pub task_id: String,
-    pub biz_date: String,
+    /// 本次运行的参数集：参数名 → 值，按参数名排序（ADR-0036 §7 的规范形式）。
+    /// 它同时是并发互斥键的后半段与历史里那一列的展示内容；无参数时是空 map，
+    /// 互斥键随之退化成「同任务不许并跑」。
+    pub run_params: RunParams,
+    /// 当次**实际执行**的源端 SQL 快照（ADR-0036 §2）。
+    ///
+    /// 它与任务定义现算的那份性质根本不同：这份回答「当时执行了什么」，是审计事实，
+    /// 规格改了它也不能跟着变。存的是**未绑定的语句文本**，参数值不内联——
+    /// 值由 `run_params` 那一列负责展示，内联会让同一份事实在两处重复。
+    pub source_sql: String,
     pub staging_table: Option<String>,
     pub started_at: String,
     pub finished_at: Option<String>,
@@ -121,7 +130,6 @@ pub struct RunHistory {
     pub bytes: u64,
     pub ms: u64,
     pub last_ts: Option<String>,
-    pub shape_checks: Vec<Value>,
     pub mapping_issues: Vec<Value>,
     #[serde(skip)]
     started_at_ms: i64,
@@ -131,14 +139,16 @@ impl RunHistory {
     pub fn accepted(
         run_record_id: &str,
         task_id: &str,
-        biz_date: &str,
+        run_params: RunParams,
+        source_sql: &str,
         accepted_at: DateTime<Utc>,
     ) -> Self {
         Self {
             run_record_id: run_record_id.to_owned(),
             run_id: None,
             task_id: task_id.to_owned(),
-            biz_date: biz_date.to_owned(),
+            run_params,
+            source_sql: source_sql.to_owned(),
             staging_table: None,
             started_at: accepted_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             finished_at: None,
@@ -168,7 +178,6 @@ impl RunHistory {
             bytes: 0,
             ms: 0,
             last_ts: None,
-            shape_checks: Vec::new(),
             mapping_issues: Vec::new(),
             started_at_ms: accepted_at.timestamp_millis(),
         }
@@ -191,9 +200,6 @@ impl RunHistory {
 
         match event {
             Some("source_started") => {
-                if let Some(biz_date) = text(log, "biz_date") {
-                    self.biz_date = biz_date.to_owned();
-                }
                 if let Some(ts) = text(log, "ts") {
                     self.started_at = ts.to_owned();
                     if let Ok(parsed) = DateTime::parse_from_rfc3339(ts) {
@@ -341,13 +347,15 @@ impl HistoryStore {
 
         let store = Self { database_path };
         let connection = store.connection()?;
+        drop_legacy_history_table(&connection)?;
         connection
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS run_history (
                     run_record_id       TEXT PRIMARY KEY NOT NULL,
                     run_id              TEXT,
                     task_id             TEXT NOT NULL,
-                    biz_date            TEXT NOT NULL,
+                    run_params          TEXT NOT NULL DEFAULT '{}',
+                    source_sql          TEXT NOT NULL DEFAULT '',
                     staging_table       TEXT,
                     started_at          TEXT NOT NULL,
                     started_at_ms       INTEGER NOT NULL,
@@ -378,14 +386,12 @@ impl HistoryStore {
                     bytes               INTEGER NOT NULL,
                     ms                  INTEGER NOT NULL,
                     last_ts             TEXT,
-                    shape_checks        TEXT NOT NULL DEFAULT '[]',
                     mapping_issues      TEXT NOT NULL DEFAULT '[]'
                 );
-                 CREATE INDEX IF NOT EXISTS run_history_task_date
-                     ON run_history(task_id, biz_date, started_at_ms);",
+                 CREATE INDEX IF NOT EXISTS run_history_task_started
+                     ON run_history(task_id, started_at_ms);",
             )
             .map_err(|error| format!("初始化 SQLite 运行历史表失败：{error}"))?;
-        ensure_json_column(&connection, "shape_checks")?;
         ensure_json_column(&connection, "mapping_issues")?;
         ensure_nullable_text_column(&connection, "failure_kind")?;
         Ok(store)
@@ -401,28 +407,27 @@ impl HistoryStore {
         let transaction = connection
             .transaction()
             .map_err(|error| format!("开启 SQLite 运行历史事务失败：{error}"))?;
-        let shape_checks = json_array_text(&history.shape_checks)?;
+        let run_params = run_params_text(&history.run_params)?;
         let mapping_issues = json_array_text(&history.mapping_issues)?;
         transaction
             .execute(
                 "INSERT INTO run_history (
-                    run_record_id, run_id, task_id, biz_date, staging_table, started_at,
-                    started_at_ms, finished_at, outcome, target_table_effect, stage,
+                    run_record_id, run_id, task_id, run_params, source_sql, staging_table,
+                    started_at, started_at_ms, finished_at, outcome, target_table_effect, stage,
                     source_rows, staged_rows, sink_reported_rows, purged_rows, source_batches,
                     received_batches, fetch_ms, push_ms, commit_ms, count_ms, cursor_ms,
                     source_code, sink_code, [column], [value], message, unknown_reason,
-                    failure_kind, seq, rows_pushed, bytes, ms, last_ts, shape_checks,
-                    mapping_issues
+                    failure_kind, seq, rows_pushed, bytes, ms, last_ts, mapping_issues
                  ) VALUES (
-                    :run_record_id, :run_id, :task_id, :biz_date, :staging_table, :started_at,
-                    :started_at_ms, :finished_at, :outcome, :target_table_effect, :stage,
-                    :source_rows, :staged_rows, :sink_reported_rows, :purged_rows,
+                    :run_record_id, :run_id, :task_id, :run_params, :source_sql, :staging_table,
+                    :started_at, :started_at_ms, :finished_at, :outcome, :target_table_effect,
+                    :stage, :source_rows, :staged_rows, :sink_reported_rows, :purged_rows,
                     :source_batches, :received_batches, :fetch_ms, :push_ms, :commit_ms,
                     :count_ms, :cursor_ms, :source_code, :sink_code, :column, :value,
                     :message, :unknown_reason, :failure_kind, :seq, :rows_pushed, :bytes, :ms,
-                    :last_ts, :shape_checks, :mapping_issues
+                    :last_ts, :mapping_issues
                  )",
-                history_params!(history, shape_checks, mapping_issues),
+                history_params!(history, run_params, mapping_issues),
             )
             .map_err(|error| format!("插入 SQLite 运行历史失败：{error}"))?;
         cleanup_transaction(&transaction, now, retention_days)?;
@@ -441,12 +446,13 @@ impl HistoryStore {
         let transaction = connection
             .transaction()
             .map_err(|error| format!("开启 SQLite 运行历史事务失败：{error}"))?;
-        let shape_checks = json_array_text(&history.shape_checks)?;
+        let run_params = run_params_text(&history.run_params)?;
         let mapping_issues = json_array_text(&history.mapping_issues)?;
         transaction
             .execute(
                 "UPDATE run_history SET
-                    run_id=:run_id, task_id=:task_id, biz_date=:biz_date,
+                    run_id=:run_id, task_id=:task_id, run_params=:run_params,
+                    source_sql=:source_sql,
                     staging_table=:staging_table, started_at=:started_at,
                     started_at_ms=:started_at_ms, finished_at=:finished_at, outcome=:outcome,
                     target_table_effect=:target_table_effect, stage=:stage,
@@ -458,10 +464,10 @@ impl HistoryStore {
                     sink_code=:sink_code, [column]=:column, [value]=:value, message=:message,
                     unknown_reason=:unknown_reason, failure_kind=:failure_kind, seq=:seq,
                     rows_pushed=:rows_pushed,
-                    bytes=:bytes, ms=:ms, last_ts=:last_ts, shape_checks=:shape_checks,
+                    bytes=:bytes, ms=:ms, last_ts=:last_ts,
                     mapping_issues=:mapping_issues
                   WHERE run_record_id=:run_record_id",
-                history_params!(history, shape_checks, mapping_issues),
+                history_params!(history, run_params, mapping_issues),
             )
             .map_err(|error| format!("更新 SQLite 运行历史失败：{error}"))?;
         cleanup_transaction(&transaction, now, retention_days)?;
@@ -481,22 +487,19 @@ impl HistoryStore {
             .map_err(|error| format!("查询 SQLite 运行历史失败：{error}"))
     }
 
-    pub fn list(
-        &self,
-        task_id: Option<&str>,
-        biz_date: Option<&str>,
-    ) -> Result<Vec<RunHistory>, String> {
+    /// 按业务日期筛选随「业务日期」这个一等概念一起退役（ADR-0035 §3）：
+    /// 运行参数是任务自定义的名字，筛不出一个通用维度来。只留按任务筛。
+    pub fn list(&self, task_id: Option<&str>) -> Result<Vec<RunHistory>, String> {
         let connection = self.connection()?;
         let mut statement = connection
             .prepare(&format!(
                 "{HISTORY_SELECT}
                   WHERE (?1 IS NULL OR task_id = ?1)
-                    AND (?2 IS NULL OR biz_date = ?2)
                ORDER BY started_at_ms DESC, rowid DESC"
             ))
             .map_err(|error| format!("准备 SQLite 运行历史列表查询失败：{error}"))?;
         let history = statement
-            .query_map(params![task_id, biz_date], history_from_row)
+            .query_map(params![task_id], history_from_row)
             .map_err(|error| format!("查询 SQLite 运行历史列表失败：{error}"))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("读取 SQLite 运行历史列表失败：{error}"))?;
@@ -564,11 +567,13 @@ pub fn expired_history_indices(
 pub fn fold_history_lines(
     run_record_id: &str,
     task_id: &str,
-    biz_date: &str,
+    run_params: RunParams,
+    source_sql: &str,
     accepted_at: DateTime<Utc>,
     lines: &[&str],
 ) -> Result<RunHistory, String> {
-    let mut history = RunHistory::accepted(run_record_id, task_id, biz_date, accepted_at);
+    let mut history =
+        RunHistory::accepted(run_record_id, task_id, run_params, source_sql, accepted_at);
     for line in lines {
         let log: Value =
             serde_json::from_str(line).map_err(|error| format!("运行日志 JSON 无效：{error}"))?;
@@ -592,6 +597,45 @@ fn cleanup_transaction(
         )
         .map_err(|error| format!("清理过期 SQLite 运行历史失败：{error}"))?;
     Ok(())
+}
+
+/// 老历史表整表丢弃，与任务定义同一条理由（ADR-0036 §4，前提是第一版尚无真实用户数据）。
+///
+/// 它按 `biz_date` 一列存筛选维度、按 `shape_checks` 存已退役的形状预检结果，
+/// 两者在新模型里都没有对应物；把 `biz_date` 翻成一个参数名不明的运行参数是**编事实**，
+/// 而历史那份数据的全部价值就在于它是事实。
+fn drop_legacy_history_table(connection: &Connection) -> Result<(), String> {
+    let has_biz_date: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('run_history') WHERE name = 'biz_date')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("检查 SQLite 运行历史表失败：{error}"))?;
+    if !has_biz_date {
+        return Ok(());
+    }
+    connection
+        .execute("DROP TABLE run_history", [])
+        .map_err(|error| format!("丢弃旧 SQLite 运行历史表失败：{error}"))?;
+    Ok(())
+}
+
+fn run_params_text(run_params: &RunParams) -> Result<String, String> {
+    serde_json::to_string(run_params).map_err(|error| format!("序列化运行参数失败：{error}"))
+}
+
+fn decode_run_params(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunParams> {
+    let encoded: String = row.get("run_params")?;
+    serde_json::from_str(&encoded).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            row.as_ref()
+                .column_index("run_params")
+                .expect("the run_params column was just read"),
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })
 }
 
 fn retention_cutoff(now: DateTime<Utc>, retention_days: u64) -> Option<DateTime<Utc>> {
@@ -658,12 +702,12 @@ fn number(value: &Value, key: &str) -> Option<u64> {
 }
 
 const HISTORY_SELECT: &str = "SELECT
-    run_record_id, run_id, task_id, biz_date, staging_table, started_at, started_at_ms,
-    finished_at, outcome, target_table_effect, stage, source_rows, staged_rows,
+    run_record_id, run_id, task_id, run_params, source_sql, staging_table, started_at,
+    started_at_ms, finished_at, outcome, target_table_effect, stage, source_rows, staged_rows,
     sink_reported_rows, purged_rows, source_batches, received_batches, fetch_ms, push_ms,
     commit_ms, count_ms, cursor_ms, source_code, sink_code, [column], [value],
     message, unknown_reason, failure_kind, seq, rows_pushed, bytes, ms, last_ts,
-    shape_checks, mapping_issues
+    mapping_issues
   FROM run_history";
 
 fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunHistory> {
@@ -671,7 +715,8 @@ fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunHistory> {
         run_record_id: row.get("run_record_id")?,
         run_id: row.get("run_id")?,
         task_id: row.get("task_id")?,
-        biz_date: row.get("biz_date")?,
+        run_params: decode_run_params(row)?,
+        source_sql: row.get("source_sql")?,
         staging_table: row.get("staging_table")?,
         started_at: row.get("started_at")?,
         started_at_ms: row.get("started_at_ms")?,
@@ -702,7 +747,6 @@ fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunHistory> {
         bytes: row.get("bytes")?,
         ms: row.get("ms")?,
         last_ts: row.get("last_ts")?,
-        shape_checks: json_array_from_row(row, "shape_checks")?,
         mapping_issues: json_array_from_row(row, "mapping_issues")?,
     })
 }

@@ -11,20 +11,12 @@ import {
 } from "./components/DesignSystem";
 import { messageFrom } from "./errors";
 import { mappingSuggestion } from "./m3";
-import {
-  failedShapeRuleCount,
-  shapeRuleDescription,
-  shapeRuleLabel,
-} from "./shape";
 import { runPresentation } from "./run";
-import type { RunPresentation, RunPresentationKind } from "./run";
+import type { RunPresentation } from "./run";
+import { runParamsSummary } from "./spec";
 
 const RUN_POLL_INTERVAL_MS = 1000;
 const countFormatter = new Intl.NumberFormat("zh-CN");
-type PrecheckKind = Extract<
-  RunPresentationKind,
-  "shape-failed" | "mapping-failed"
->;
 
 export function RunScreen({
   task,
@@ -194,7 +186,7 @@ function RunIdentity({ task, detail }: { task: Task; detail: RunDetail }) {
         value={detail.run_id ?? "未发起，目标端不知道这次运行"}
       />
       <DetailValue label="task_id" value={task.task_id} />
-      <DetailValue label="biz_date" value={detail.biz_date ?? "等待子进程回报"} />
+      <DetailValue label="run_params" value={runParamsSummary(detail.run_params)} />
       <DetailValue label="staging_table" value={detail.staging_table ?? "—"} />
     </dl>
   );
@@ -238,10 +230,7 @@ function FinishedRun({
   presentation: RunPresentation;
   onOpenColumnFetch: () => void;
 }) {
-  const precheckKind =
-    presentation.kind === "shape-failed" || presentation.kind === "mapping-failed"
-      ? presentation.kind
-      : null;
+  const mappingFailed = presentation.kind === "mapping-failed";
   return (
     <>
       <section className={`run-result is-${presentation.kind}`}>
@@ -256,11 +245,9 @@ function FinishedRun({
         <RunConclusion detail={detail} presentation={presentation} />
       </section>
 
-      {precheckKind !== null && (
-        <PrecheckReports detail={detail} kind={precheckKind} />
-      )}
+      {mappingFailed && <PrecheckReports detail={detail} />}
 
-      {precheckKind === "mapping-failed" && (
+      {mappingFailed && (
         <div className="precheck-exit">
           <span>
             目标表和这段 SQL 对不上。建表 SQL 在取列那一步现取，这屏不重给——
@@ -325,65 +312,36 @@ function RunConclusion({
   return <div className={className}>{presentation.conclusion}</div>;
 }
 
+/**
+ * 映射预检报告（ADR-0009）。
+ *
+ * 这里过去是并排两段：source 本地的 SQL 形状预检 + sink 的映射预检。形状预检整段随
+ * ADR-0036 §5 取消，于是只剩这一段——**不留占位空栏**，没有的东西不摆在屏上说「未执行」。
+ */
 function PrecheckReports({
   detail,
-  kind,
 }: {
   detail: RunDetail & { live: false };
-  kind: PrecheckKind;
 }) {
-  const shapeFailed = kind === "shape-failed";
-  // 副标题不复述结论条：卡头已经说了这是哪一段预检，结论条已经说了「未向 sink 发出请求」，
-  // 这里只报「六条里几条没过」，与通过态那句同句式。source 回的 `detail.message`
-  // 是英文原文（`source-local SQL shape precheck found N problem(s)`），属于 API 语义不动它。
-  const shapeSubtitle = shapeFailed
-    ? `六条形状规则中 ${failedShapeRuleCount(detail.shape_checks)} 条未通过。`
-    : "六条形状规则已通过。";
   return (
-    <div
-      className={shapeFailed ? "precheck-reports" : "precheck-reports is-map-failed"}
-    >
-      <section className={shapeFailed ? "is-failed" : "is-passed"}>
-        <header>
-          <strong>SQL 形状预检</strong>
-          <span>source 本地</span>
-        </header>
-        <p>{shapeSubtitle}</p>
-        <DiagnosticTable
-          columns={["规则", "结果", "说明"]}
-          rows={detail.shape_checks.map((check) => [
-            shapeRuleLabel(check.rule),
-            check.passed ? "通过" : "未通过",
-            shapeRuleDescription(check.rule, check.message),
-          ])}
-        />
-        {shapeFailed && <small>六条规则一次报告；本次未向 sink 发出请求。</small>}
-      </section>
-      <section className={shapeFailed ? "is-skipped" : "is-failed"}>
+    <div className="precheck-reports is-map-failed">
+      <section className="is-failed">
         <header>
           <strong>映射预检</strong>
           <span>sink</span>
         </header>
-        {shapeFailed ? (
-          <p>
-            未执行——没跑到这一段，<code>sink</code> 不知道存在这个运行。
-          </p>
-        ) : (
-          <>
-            <p>{detail.message ?? "目标端映射预检未通过。"}</p>
-            <DiagnosticTable
-              columns={["列", "源端", "目标端", "规则", "建议"]}
-              rows={detail.mapping_issues.map((issue) => [
-                issue.column ?? "—",
-                issue.source ?? "—",
-                issue.target ?? "—",
-                issue.rule ?? issue.message ?? "—",
-                mappingSuggestion(issue),
-              ])}
-            />
-            <small>总计 {detail.mapping_issues.length} 项问题</small>
-          </>
-        )}
+        <p>{detail.message ?? "目标端映射预检未通过。"}</p>
+        <DiagnosticTable
+          columns={["列", "源端", "目标端", "规则", "建议"]}
+          rows={detail.mapping_issues.map((issue) => [
+            issue.column ?? "—",
+            issue.source ?? "—",
+            issue.target ?? "—",
+            issue.rule ?? issue.message ?? "—",
+            mappingSuggestion(issue),
+          ])}
+        />
+        <small>总计 {detail.mapping_issues.length} 项问题</small>
       </section>
     </div>
   );

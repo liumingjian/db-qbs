@@ -6,9 +6,9 @@ use std::process::ExitCode;
 
 use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
 use db_qbs_source::{
-    generate_run_id, load_source_config, load_task_config, parse_biz_date, precheck_sql,
-    run_transfer, FailureKind, HttpSinkClient, OracleRowSource, RunStage, TransferEvent,
-    TransferFailure, TransferRequest, TransferSummary,
+    generate_run_id, load_source_config, load_task_config, run_transfer, FailureKind,
+    HttpSinkClient, OracleRowSource, RunStage, TransferEvent, TransferFailure, TransferRequest,
+    TransferSummary,
 };
 use serde_json::{json, Map, Value};
 
@@ -44,28 +44,11 @@ fn run() -> bool {
         LogLevel::Info,
         LogEvent::SourceStarted,
         Some(&task_path),
-        [
-            ("biz_date", json!(arguments.biz_date)),
-            (
-                "message",
-                json!("source one-shot process started; SQL shape messages are authored locally"),
-            ),
-        ],
+        [(
+            "message",
+            json!("source one-shot process started; the task spec is the only source of truth"),
+        )],
     );
-
-    if let Err(message) = parse_biz_date(&arguments.biz_date) {
-        emit(
-            LogLevel::Error,
-            LogEvent::BusinessDateInvalid,
-            Some(&task_path),
-            [
-                ("message", json!(message)),
-                ("value", json!(arguments.biz_date)),
-                ("failure_kind", json!(FailureKind::Config.as_str())),
-            ],
-        );
-        return false;
-    }
 
     let source_config = match load_source_config(&arguments.config) {
         Ok(config) => config,
@@ -98,32 +81,9 @@ fn run() -> bool {
         }
     };
 
-    if let Err(problems) = precheck_sql(&task) {
-        emit(
-            LogLevel::Error,
-            LogEvent::SqlShapePrecheckFailed,
-            Some(&task_path),
-            [
-                (
-                    "message",
-                    json!(format!(
-                        "source-local SQL shape precheck found {} problem(s)",
-                        problems.len()
-                    )),
-                ),
-                ("problems", json!(problems)),
-                ("failure_kind", json!(FailureKind::ShapePrecheck.as_str())),
-            ],
-        );
-        return false;
-    }
-
-    emit(
-        LogLevel::Info,
-        LogEvent::SqlShapePrecheckPassed,
-        Some(&task_path),
-        [("message", json!("source-local SQL shape precheck passed"))],
-    );
+    // SQL 形状预检整段取消（ADR-0036 §5）：六条规则里五条由生成器**结构性保证**
+    // 或随「业务日期」一等概念退役，第六条（精度确定性）按所有者的降级裁定一并取消。
+    // 判定并未全部消失——ADR-0009 的映射预检仍在 sink 侧硬拒。
 
     let run_id = generate_run_id();
     emit_with_run(
@@ -139,7 +99,7 @@ fn run() -> bool {
             ),
         ],
     );
-    let mut source = match OracleRowSource::connect(&source_config, &task, &arguments.biz_date) {
+    let mut source = match OracleRowSource::connect(&source_config, &task) {
         Ok(source) => source,
         Err(error) => {
             emit_with_run(
@@ -180,9 +140,8 @@ fn run() -> bool {
 
     let request = TransferRequest {
         run_id: run_id.clone(),
-        target_table: task.target_table,
-        target_date_col: task.target_date_col,
-        biz_date: arguments.biz_date,
+        target_table: task.spec.target_table.clone(),
+        primary_key: task.spec.primary_key.clone(),
     };
     let result = run_transfer(&mut source, &mut sink, request, |event| {
         emit_transfer_event(event, &run_id, &task_path)
@@ -371,14 +330,12 @@ fn emit_failed_run(failure: &TransferFailure, run_id: &str, task: &Path) {
 struct Arguments {
     config: PathBuf,
     task: PathBuf,
-    biz_date: String,
 }
 
 impl Arguments {
     fn parse(arguments: &[String]) -> Result<Self, String> {
         let mut config = None;
         let mut task = None;
-        let mut biz_date = None;
         let mut index = 0;
 
         while index < arguments.len() {
@@ -386,10 +343,9 @@ impl Arguments {
             let slot = match flag {
                 "--config" => &mut config,
                 "--task" => &mut task,
-                "--biz-date" => &mut biz_date,
                 _ => {
                     return Err(format!(
-                        "unknown argument {flag}; only --config, --task, and --biz-date are accepted"
+                        "unknown argument {flag}; only --config and --task are accepted"
                     ));
                 }
             };
@@ -413,7 +369,6 @@ impl Arguments {
             task: task
                 .map(PathBuf::from)
                 .ok_or_else(|| "missing required --task".to_owned())?,
-            biz_date: biz_date.ok_or_else(|| "missing required --biz-date".to_owned())?,
         })
     }
 }
@@ -470,21 +425,27 @@ mod tests {
     use super::Arguments;
 
     #[test]
-    fn only_the_three_documented_options_are_accepted() {
+    fn only_the_two_documented_options_are_accepted() {
+        // `--biz-date` 随 ADR-0035 §3 取消：业务日期不再是一等概念，本次运行的取值
+        // 由任务文件的 `[run_params]` 带进来，不再走命令行。
         let arguments = vec![
             "--config".to_owned(),
             "source.toml".to_owned(),
             "--task".to_owned(),
             "task.toml".to_owned(),
-            "--biz-date".to_owned(),
-            "2026-08-14".to_owned(),
         ];
         assert!(Arguments::parse(&arguments).is_ok());
 
-        let mut arguments_with_extra = arguments;
+        let mut arguments_with_extra = arguments.clone();
         arguments_with_extra.extend(["--granularity".to_owned(), "DAY".to_owned()]);
         assert!(Arguments::parse(&arguments_with_extra)
             .unwrap_err()
             .contains("--granularity"));
+
+        let mut arguments_with_biz_date = arguments;
+        arguments_with_biz_date.extend(["--biz-date".to_owned(), "2026-08-14".to_owned()]);
+        assert!(Arguments::parse(&arguments_with_biz_date)
+            .unwrap_err()
+            .contains("--biz-date"));
     }
 }

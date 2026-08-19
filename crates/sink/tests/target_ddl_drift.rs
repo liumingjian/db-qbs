@@ -1,11 +1,13 @@
-use db_qbs_sink::{precheck, TargetColumn};
+use db_qbs_sink::{precheck_with_primary_key, TargetColumn, TargetKey};
 // 列结构与三档标记的定义在 `db-qbs-shared`（#124），两端各是同一个类型——
 // 这里不再有「source 的列结构抄成 sink 的列结构」那层恒等变换（#125 Q10）。
 use db_qbs_source::{
     generate_target_ddl, ColumnPrecision, ColumnSupport, SourceColumn as DdlSourceColumn,
 };
 use serde::Deserialize;
-use sqlparser::ast::{CharacterLength, ColumnOption, DataType, ExactNumberInfo, Statement};
+use sqlparser::ast::{
+    CharacterLength, ColumnOption, DataType, ExactNumberInfo, Statement, TableConstraint,
+};
 use sqlparser::dialect::MySqlDialect;
 use sqlparser::parser::Parser;
 
@@ -36,12 +38,21 @@ fn generated_target_ddl_stays_compatible_with_sink_precheck_for_m1_types() {
 
     for case in cases {
         for source_columns in source_columns_for(case) {
-            let ddl = generate_target_ddl(&source_columns, "T_GENERATED", "D_BIZ", None).unwrap();
+            let ddl = generate_target_ddl(&source_columns, "T_GENERATED", &key(), None).unwrap();
             let target_columns = parse_target_columns(&ddl);
+            let target_keys = parse_target_keys(&ddl);
 
             // `support` 随报文经过 sink，但不得成为判定输入。
+            // 主键这一维也要一起过：生成的 DDL 带 `PRIMARY KEY`，ADR-0035 §2 那三条
+            // （约束确有、列在选中列里、列 NOT NULL）必须全过，否则两端就漂了。
             assert_eq!(
-                precheck("T_GENERATED", &source_columns, &target_columns),
+                precheck_with_primary_key(
+                    "T_GENERATED",
+                    &key(),
+                    &source_columns,
+                    &target_columns,
+                    &target_keys,
+                ),
                 [],
                 "{}: {ddl}",
                 case.id
@@ -133,11 +144,12 @@ fn generated_target_ddl_stays_compatible_with_sink_precheck_for_m3_shapes() {
     let ddl = generate_target_ddl(
         &source_columns,
         "T_GENERATED",
-        "D_BIZ",
+        &key(),
         Some(&column_precision),
     )
     .unwrap();
     let target_columns = parse_target_columns(&ddl);
+    let target_keys = parse_target_keys(&ddl);
     // 裸 NUMBER 带着任务定义里配好的比较形状到达 sink，其余列原样。
     let sink_source_columns = source_columns
         .iter()
@@ -152,7 +164,13 @@ fn generated_target_ddl_stays_compatible_with_sink_precheck_for_m3_shapes() {
         .collect::<Vec<_>>();
 
     assert_eq!(
-        precheck("T_GENERATED", &sink_source_columns, &target_columns),
+        precheck_with_primary_key(
+            "T_GENERATED",
+            &key(),
+            &sink_source_columns,
+            &target_columns,
+            &target_keys,
+        ),
         [],
         "{ddl}"
     );
@@ -199,7 +217,8 @@ fn sink_rejects_source_shapes_marked_unsupported() {
         target_column("TS_TOO_PRECISE", "datetime(6)", "datetime", None, None),
         target_column("PAYLOAD", "text", "text", None, None),
     ];
-    let issues = precheck("T_GENERATED", &source_columns, &target_columns);
+    let issues =
+        precheck_with_primary_key("T_GENERATED", &[], &source_columns, &target_columns, &[]);
 
     for column in &source_columns {
         assert_eq!(column.support, Some(ColumnSupport::Unsupported));
@@ -209,6 +228,37 @@ fn sink_rejects_source_shapes_marked_unsupported() {
             column.name
         );
     }
+}
+
+/// 这份夹具一律以 `D_BIZ` 作主键：每个用例的列集合里它都在。
+fn key() -> Vec<String> {
+    vec!["D_BIZ".to_owned()]
+}
+
+/// 从生成的建表语句里读回唯一约束——目标端真有什么，就喂什么给预检。
+fn parse_target_keys(ddl: &str) -> Vec<TargetKey> {
+    let statement = Parser::parse_sql(&MySqlDialect {}, ddl)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let Statement::CreateTable { constraints, .. } = statement else {
+        panic!("generated SQL was not CREATE TABLE: {ddl}");
+    };
+
+    constraints
+        .into_iter()
+        .filter_map(|constraint| match constraint {
+            TableConstraint::PrimaryKey { columns, .. } => Some(TargetKey {
+                name: "PRIMARY".to_owned(),
+                columns: columns.into_iter().map(|column| column.value).collect(),
+            }),
+            TableConstraint::Unique { name, columns, .. } => Some(TargetKey {
+                name: name.map(|name| name.value).unwrap_or_default(),
+                columns: columns.into_iter().map(|column| column.value).collect(),
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 fn source_columns_for(case: &Case) -> Vec<Vec<DdlSourceColumn>> {

@@ -1,11 +1,25 @@
-source_sql = '''
-SELECT n.row_id AS ROW_ID,
-       n.v_text AS V_TEXT,
-       n.d_biz AS D_BIZ
-  FROM t_m1_narrow n
- WHERE n.d_biz >= TO_DATE(:biz_date,'YYYY-MM-DD')
-   AND n.d_biz <  TO_DATE(:biz_date,'YYYY-MM-DD') + 1
-'''
-source_date_col = "D_BIZ"
+# M1 台架的窄表任务定义 —— 结构化规格（ADR-0036 §1），SQL 由它现算，不再存在这里。
+#
+# 旧的 `d_biz >= :biz_date AND d_biz < :biz_date + 1` 半开区间在 v1 表达不出来：
+# 比较符只有 `>` `<` `=`（ADR-0035 §3 字面），没有 `>=` / `<=`。这里用 `= d` 顶上——
+# 台架里 d_biz 是纯日期（时分秒为零），单点等值与原半开区间同集合。
+# 这条表达力缺口挂在 ADR-0035 的时效 2 上，不要自作主张加 `>=`。
+
+[spec]
+owner = "SPIKE"
+table = "T_M1_NARROW"
 target_table = "M1_NARROW"
-target_date_col = "D_BIZ"
+columns = ["ROW_ID", "V_TEXT", "D_BIZ"]
+# 主键必选（所有者 2026-08-18 裁定）：撤掉 DELETE 之后，幂等全靠它。
+primary_key = ["ROW_ID"]
+
+[[spec.conditions]]
+column = "D_BIZ"
+operator = "eq"
+value_type = "date"
+parameter = "d_biz"
+value_source = "runtime"
+constant = ""
+
+[run_params]
+d_biz = "2026-08-14"

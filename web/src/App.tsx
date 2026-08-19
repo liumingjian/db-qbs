@@ -1,7 +1,6 @@
 import {
   Bell,
   CalendarClock,
-  Check,
   Clock3,
   Copy,
   Database,
@@ -13,34 +12,34 @@ import {
   TableProperties,
   Tag,
   Trash2,
-  WandSparkles,
   X,
 } from "lucide-react";
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 
 import {
-  ApiError,
   createTask,
   deleteTask,
+  emptySpec,
   fetchBuilderColumns,
   fetchBuilderTables,
   fetchColumns,
-  generateBuilderTask,
-  inspectSqlShape,
+  generateBuilderSql,
   listTasks,
   taskInputFrom,
   updateTask,
 } from "./api";
 import type {
   BuilderColumn,
+  BuilderSql,
   BuilderTable,
   ColumnFetchResult,
+  Condition,
   FetchedColumn,
-  ShapeCheck,
+  OrderTerm,
   Task,
-  TaskDefinition,
   TaskInput,
+  TaskSpec,
   TargetDdlIssue,
 } from "./api";
 import { messageFrom } from "./errors";
@@ -51,7 +50,13 @@ import {
   targetDdlFailureFrom,
 } from "./m3";
 import { RunScreen } from "./RunScreen";
-import { shapeRuleDescription, shapeRuleLabel } from "./shape";
+import {
+  COMPARISONS,
+  comparisonSymbol,
+  defaultParameterName,
+  defaultValueType,
+  VALUE_TYPE_LABELS,
+} from "./spec";
 import { StartRunDialog } from "./StartRunDialog";
 
 type DialogState =
@@ -68,13 +73,7 @@ function pageFromHash(hash: string): Page {
   return hash === "#history" ? "history" : "tasks";
 }
 
-const emptyTask: TaskInput = {
-  name: "",
-  source_sql: "",
-  source_date_col: "",
-  target_table: "",
-  target_date_col: "",
-};
+const emptyTask: TaskInput = { name: "", spec: emptySpec() };
 
 export function App() {
   const [page, setPage] = useState<Page>(() =>
@@ -125,7 +124,12 @@ export function App() {
     }
 
     return tasks.filter((task) =>
-      [task.name, task.task_id, task.source_sql, task.target_table]
+      [
+        task.name,
+        task.task_id,
+        `${task.spec.owner}.${task.spec.table}`,
+        task.spec.target_table,
+      ]
         .join(" ")
         .toLocaleLowerCase("zh-CN")
         .includes(normalizedQuery),
@@ -300,7 +304,7 @@ export function App() {
                     <input
                       value={query}
                       onChange={(event) => setQuery(event.target.value)}
-                      placeholder="任务名 / 目标表 / SQL"
+                      placeholder="任务名 / 源表 / 目标表"
                     />
                   </label>
                   <button
@@ -349,7 +353,7 @@ export function App() {
             title={`编辑 · ${dialog.task.name}`}
             initial={taskInputFrom(dialog.task)}
             submitLabel="保存"
-            editFieldsOnly
+            hideName
             onClose={closeDialog}
             onSubmit={(input) => handleUpdate(dialog.task, input)}
           />
@@ -460,10 +464,10 @@ function TaskTable({
         <thead>
           <tr>
             <th>任务</th>
+            <th>源表</th>
             <th>目标表</th>
-            <th>源日期列</th>
-            <th>目标日期列</th>
-            <th>source_sql</th>
+            <th>主键</th>
+            <th>条件</th>
             <th className="action-column">操作</th>
           </tr>
         </thead>
@@ -474,11 +478,13 @@ function TaskTable({
                 <span className="task-name">{task.name}</span>
                 <span className="task-id">{task.task_id}</span>
               </td>
-              <td className="mono">{task.target_table}</td>
-              <td className="mono">{task.source_date_col}</td>
-              <td className="mono">{task.target_date_col}</td>
-              <td className="sql-cell" title={task.source_sql}>
-                {task.source_sql}
+              <td className="mono">
+                {task.spec.owner}.{task.spec.table}
+              </td>
+              <td className="mono">{task.spec.target_table}</td>
+              <td className="mono">{task.spec.primary_key.join(", ")}</td>
+              <td className="sql-cell" title={conditionSummary(task.spec)}>
+                {conditionSummary(task.spec)}
               </td>
               <td>
                 <div className="row-actions">
@@ -488,7 +494,7 @@ function TaskTable({
                     onClick={() => onAction({ kind: "start", task })}
                   />
                   <ActionButton
-                    label="编辑四个字段"
+                    label="编辑任务定义"
                     icon={<Pencil size={15} />}
                     onClick={() => onAction({ kind: "edit", task })}
                   />
@@ -537,51 +543,87 @@ function ActionButton({
   );
 }
 
+type ColumnFetchState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "oracle-failed"; message: string }
+  | { kind: "target-ddl-failed"; columns: FetchedColumn[]; issues: TargetDdlIssue[] }
+  | { kind: "ready"; result: ColumnFetchResult };
+
+/**
+ * 任务定义编辑器 —— 构建器本身就是任务定义（ADR-0036 §1）。
+ *
+ * 它不再是「一次性生成四个字段、选择态丢弃」的向导：结构化规格是唯一真相源，
+ * 选表、勾列、勾主键、条件、排序**全部原样存进任务定义**，再次打开还在（所有者裁定 6）。
+ * SQL 是规格的派生面，只读展示，v1 没有编辑入口。
+ */
 function TaskFormDialog({
   title,
   initial,
   submitLabel,
-  editFieldsOnly = false,
+  hideName = false,
   onClose,
   onSubmit,
 }: {
   title: string;
   initial: TaskInput;
   submitLabel: string;
-  editFieldsOnly?: boolean;
+  hideName?: boolean;
   onClose: () => void;
   onSubmit: (input: TaskInput) => Promise<void>;
 }) {
-  const [input, setInput] = useState<TaskInput>({ ...initial });
+  const [name, setName] = useState(initial.name);
+  const [spec, setSpec] = useState<TaskSpec>(() => ({ ...initial.spec }));
+  const [tables, setTables] = useState<BuilderTable[]>([]);
+  const [columns, setColumns] = useState<BuilderColumn[]>([]);
+  const [loading, setLoading] = useState<"tables" | "columns" | null>(null);
+  const [builderError, setBuilderError] = useState<string | null>(null);
+  const [sql, setSql] = useState<BuilderSql | null>(null);
+  const [sqlError, setSqlError] = useState<string | null>(null);
+  const [columnFetch, setColumnFetch] = useState<ColumnFetchState>({ kind: "idle" });
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [guideOpen, setGuideOpen] = useState(false);
-  const [overwriteConfirm, setOverwriteConfirm] = useState(false);
-  const [generatedSql, setGeneratedSql] = useState<string | null>(null);
-  const [shapeChecks, setShapeChecks] = useState<ShapeCheck[]>([]);
-  const [shapeError, setShapeError] = useState<string | null>(null);
-  const [columnFetch, setColumnFetch] = useState<ColumnFetchState>({ kind: "idle" });
 
-  const definition = useMemo(() => taskDefinitionFrom(input), [input]);
+  const dblink = spec.dblink ?? "";
+  const tableKey = spec.owner === "" ? "" : tableKeyFor({ owner: spec.owner, name: spec.table });
+  const dictionary = useMemo(
+    () => new Map(columns.map((column) => [column.name, column])),
+    [columns],
+  );
+  // 编辑既有任务时字典还没读，但选中的列名规格里就有——照样列出来，
+  // 只是字典那几列显示为未知。不读一次 Oracle 就改不了条件，是没必要的门槛。
+  const columnNames = useMemo(() => {
+    const names = columns.map((column) => column.name);
+    for (const column of spec.columns) {
+      if (!names.includes(column)) {
+        names.push(column);
+      }
+    }
+    return names;
+  }, [columns, spec.columns]);
 
+  // SQL 现算：规格一变就换一份（ADR-0036 §2 不存 SQL）。规格还没成形时不去打扰后端——
+  // 它会拿 `validate()` 的报错回话，那不是「SQL 生成失败」，只是还没填完。
+  const specComplete = spec.owner !== "" && spec.columns.length > 0;
   useEffect(() => {
-    if (input.source_sql.trim() === "") {
-      setShapeChecks([]);
-      setShapeError(null);
+    if (!specComplete) {
+      setSql(null);
+      setSqlError(null);
       return;
     }
     let active = true;
     const timeout = window.setTimeout(() => {
-      void inspectSqlShape(definition)
-        .then((checks) => {
+      void generateBuilderSql(spec)
+        .then((generated) => {
           if (active) {
-            setShapeChecks(checks);
-            setShapeError(null);
+            setSql(generated);
+            setSqlError(null);
           }
         })
-        .catch((inspectError) => {
+        .catch((generateError) => {
           if (active) {
-            setShapeError(messageFrom(inspectError));
+            setSql(null);
+            setSqlError(messageFrom(generateError));
           }
         });
     }, 250);
@@ -589,57 +631,150 @@ function TaskFormDialog({
       active = false;
       window.clearTimeout(timeout);
     };
-  }, [definition]);
+  }, [spec, specComplete]);
 
-  function updateField<K extends keyof TaskInput>(
-    field: K,
-    value: TaskInput[K],
-  ) {
-    setInput((currentInput) => ({ ...currentInput, [field]: value }));
-    if (field !== "name") {
-      setColumnFetch({ kind: "idle" });
-    }
-  }
-
-  // 角标说的是「你在这一屏改过它」：非空、不是构建器这次生成的、也不是打开时加载进来的那一段。
-  // 覆盖确认用的判断比它宽——加载进来的 SQL 同样值得保护，只是它不算「手改」，写上就是假话。
-  const sqlManuallyEdited =
-    input.source_sql.trim() !== "" &&
-    input.source_sql !== generatedSql &&
-    input.source_sql !== initial.source_sql;
-
-  function openGuide() {
-    const sqlIsProtected =
-      input.source_sql.trim() !== "" && input.source_sql !== generatedSql;
-    if (sqlIsProtected) {
-      setOverwriteConfirm(true);
-    } else {
-      setGuideOpen(true);
-    }
-  }
-
-  function applyGeneratedTask(task: TaskDefinition) {
-    setInput((currentInput) => ({ ...currentInput, ...task }));
-    setGeneratedSql(task.source_sql);
-    setGuideOpen(false);
+  function updateSpec(change: Partial<TaskSpec>) {
+    setSpec((current) => ({ ...current, ...change }));
     setColumnFetch({ kind: "idle" });
+  }
+
+  async function loadTables() {
+    setLoading("tables");
+    setBuilderError(null);
+    try {
+      setTables(await fetchBuilderTables(dblink));
+    } catch (loadError) {
+      setBuilderError(messageFrom(loadError));
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  async function loadColumns() {
+    if (spec.owner === "" || spec.table === "") {
+      return;
+    }
+    setLoading("columns");
+    setBuilderError(null);
+    try {
+      setColumns(
+        await fetchBuilderColumns({
+          dblink,
+          owner: spec.owner,
+          table: spec.table,
+        }),
+      );
+    } catch (loadError) {
+      setBuilderError(messageFrom(loadError));
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  function selectTable(key: string) {
+    const table = tables.find((candidate) => tableKeyFor(candidate) === key);
+    setColumns([]);
+    // 换表就等于换一份规格：列、主键、条件、排序全是上一张表的列名，留着只会生成一段
+    // 引用不存在列的 SQL。目标表名是用户自己写的，不跟着清。
+    updateSpec({
+      owner: table?.owner ?? "",
+      table: table?.name ?? "",
+      columns: [],
+      primary_key: [],
+      conditions: [],
+      order_by: [],
+    });
+  }
+
+  function toggleColumn(column: string) {
+    const selected = spec.columns.includes(column);
+    updateSpec({
+      columns: selected
+        ? spec.columns.filter((name) => name !== column)
+        : [...spec.columns, column],
+      primary_key: selected
+        ? spec.primary_key.filter((name) => name !== column)
+        : spec.primary_key,
+    });
+  }
+
+  function toggleKey(column: string) {
+    updateSpec({
+      primary_key: spec.primary_key.includes(column)
+        ? spec.primary_key.filter((name) => name !== column)
+        : [...spec.primary_key, column],
+    });
+  }
+
+  function addCondition() {
+    const column = columnNames[0];
+    if (column === undefined) {
+      return;
+    }
+    updateSpec({
+      conditions: [
+        ...spec.conditions,
+        {
+          column,
+          operator: "eq",
+          value_type: defaultValueType(dictionary.get(column)?.data_type),
+          parameter: defaultParameterName(
+            column,
+            spec.conditions.map((condition) => condition.parameter),
+          ),
+          value_source: "runtime",
+          constant: "",
+        },
+      ],
+    });
+  }
+
+  function updateCondition(index: number, change: Partial<Condition>) {
+    updateSpec({
+      conditions: spec.conditions.map((condition, position) =>
+        position === index ? { ...condition, ...change } : condition,
+      ),
+    });
+  }
+
+  function removeCondition(index: number) {
+    updateSpec({
+      conditions: spec.conditions.filter((_, position) => position !== index),
+    });
+  }
+
+  function addOrderTerm() {
+    const column = columnNames[0];
+    if (column === undefined) {
+      return;
+    }
+    updateSpec({ order_by: [...spec.order_by, { column, direction: "asc" }] });
+  }
+
+  function updateOrderTerm(index: number, change: Partial<OrderTerm>) {
+    updateSpec({
+      order_by: spec.order_by.map((term, position) =>
+        position === index ? { ...term, ...change } : term,
+      ),
+    });
+  }
+
+  function removeOrderTerm(index: number) {
+    updateSpec({
+      order_by: spec.order_by.filter((_, position) => position !== index),
+    });
   }
 
   async function handleColumnFetch() {
     setColumnFetch({ kind: "loading" });
     try {
-      setColumnFetch({ kind: "ready", result: await fetchColumns(definition) });
+      setColumnFetch({ kind: "ready", result: await fetchColumns(spec) });
     } catch (fetchError) {
-      const checks = shapeChecksFromColumnFetchError(fetchError);
-      if (checks !== null) {
-        setColumnFetch({ kind: "shape-failed", checks });
+      const targetDdlFailure = targetDdlFailureFrom(fetchError);
+      if (targetDdlFailure !== null) {
+        setColumnFetch({ kind: "target-ddl-failed", ...targetDdlFailure });
       } else {
-        const targetDdlFailure = targetDdlFailureFrom(fetchError);
-        if (targetDdlFailure !== null) {
-          setColumnFetch({ kind: "target-ddl-failed", ...targetDdlFailure });
-        } else {
-          setColumnFetch({ kind: "oracle-failed", message: messageFrom(fetchError) });
-        }
+        setColumnFetch({ kind: "oracle-failed", message: messageFrom(fetchError) });
       }
     }
   }
@@ -649,7 +784,7 @@ function TaskFormDialog({
     setSubmitting(true);
     setError(null);
     try {
-      await onSubmit(input);
+      await onSubmit({ name, spec });
       onClose();
     } catch (submitError) {
       setError(messageFrom(submitError));
@@ -659,94 +794,193 @@ function TaskFormDialog({
   }
 
   return (
-    <Modal
-      title={title}
-      onClose={onClose}
-      busy={submitting || overwriteConfirm}
-      wide
-    >
+    <Modal title={title} onClose={onClose} busy={submitting} wide>
       <form onSubmit={(event) => void handleSubmit(event)}>
         <div className="modal-body form-stack">
-          {!editFieldsOnly && (
+          {!hideName && (
             <FormField label="任务名称">
               <input
                 autoFocus
                 required
-                value={input.name}
-                onChange={(event) => updateField("name", event.target.value)}
+                value={name}
+                onChange={(event) => setName(event.target.value)}
               />
             </FormField>
           )}
-          <section className="builder-entry" aria-label="SQL 构建器">
-            <div>
-              <strong>SQL 构建器</strong>
-              <span>一次性生成四字段，选择状态不会保存</span>
+
+          <section className="builder-guide" aria-labelledby="builder-source-title">
+            <header>
+              <div>
+                <strong id="builder-source-title">源表</strong>
+                <span>Oracle 字典元数据仅展示，不判定类型是否可搬</span>
+              </div>
+            </header>
+            <div className="builder-controls">
+              <FormField label="数据库链接（可选）">
+                <input
+                  value={dblink}
+                  placeholder="如 FA"
+                  onChange={(event) =>
+                    updateSpec({
+                      dblink:
+                        event.target.value === "" ? undefined : event.target.value,
+                    })
+                  }
+                />
+              </FormField>
+              <button
+                className="button is-ghost"
+                type="button"
+                onClick={() => void loadTables()}
+                disabled={loading !== null}
+              >
+                {loading === "tables" ? (
+                  <LoaderCircle className="is-spinning" size={15} />
+                ) : (
+                  <RefreshCw size={15} />
+                )}
+                {loading === "tables" ? "读取中" : "读取表"}
+              </button>
+              <FormField label="Oracle 表">
+                {tables.length === 0 ? (
+                  <input
+                    readOnly
+                    value={spec.owner === "" ? "" : `${spec.owner}.${spec.table}`}
+                    placeholder="先读取表"
+                  />
+                ) : (
+                  <select
+                    value={tableKey}
+                    onChange={(event) => selectTable(event.target.value)}
+                  >
+                    <option value="">请选择</option>
+                    {tables.map((table) => {
+                      const key = tableKeyFor(table);
+                      return (
+                        <option key={key} value={key}>
+                          {table.owner}.{table.name}
+                        </option>
+                      );
+                    })}
+                  </select>
+                )}
+              </FormField>
+              <button
+                className="button is-ghost"
+                type="button"
+                onClick={() => void loadColumns()}
+                disabled={spec.owner === "" || loading !== null}
+              >
+                {loading === "columns" ? (
+                  <LoaderCircle className="is-spinning" size={15} />
+                ) : (
+                  <TableProperties size={15} />
+                )}
+                {loading === "columns" ? "读取中" : "读取列"}
+              </button>
             </div>
-            <button className="button is-ghost" type="button" onClick={openGuide}>
-              <WandSparkles size={15} aria-hidden="true" />
-              {input.source_sql.trim() === "" ? "打开构建器" : "重走向导"}
-            </button>
+            {builderError !== null && (
+              <div className="form-error" role="alert">
+                {builderError}
+              </div>
+            )}
+            {columnNames.length > 0 && (
+              <div className="builder-columns table-wrap">
+                <table className="data-grid">
+                  <thead>
+                    <tr>
+                      <th>选择</th>
+                      <th>主键</th>
+                      <th>列名</th>
+                      <th>字典类型</th>
+                      <th>精度 / 长度</th>
+                      <th>可空</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {columnNames.map((columnName) => {
+                      const column = dictionary.get(columnName);
+                      const selected = spec.columns.includes(columnName);
+                      return (
+                        <tr key={columnName}>
+                          <td>
+                            <input
+                              type="checkbox"
+                              checked={selected}
+                              onChange={() => toggleColumn(columnName)}
+                              aria-label={`选择 ${columnName}`}
+                            />
+                          </td>
+                          <td>
+                            <input
+                              type="checkbox"
+                              checked={spec.primary_key.includes(columnName)}
+                              disabled={!selected}
+                              onChange={() => toggleKey(columnName)}
+                              aria-label={`把 ${columnName} 设为主键列`}
+                            />
+                          </td>
+                          <td className="mono">{columnName}</td>
+                          <td className="mono">{column?.data_type ?? "—"}</td>
+                          <td className="mono">
+                            {column === undefined ? "—" : columnShape(column)}
+                          </td>
+                          <td>
+                            {column === undefined ? "—" : column.nullable ? "是" : "否"}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <footer>
+              <span>
+                {spec.columns.length} 列已选 · {spec.primary_key.length} 列作主键
+              </span>
+              <span className="builder-key-note">
+                主键必选：撤掉 DELETE 之后，去重全靠它（ADR-0035 §2）。
+              </span>
+            </footer>
           </section>
-          {guideOpen && (
-            <SqlBuilderGuide
-              targetTable={input.target_table}
-              onCancel={() => setGuideOpen(false)}
-              onGenerated={applyGeneratedTask}
-            />
-          )}
-          <FormField
-            label="source_sql"
-            badge={sqlManuallyEdited ? "当前 SQL 已被手改" : undefined}
-          >
-            <textarea
-              autoFocus={editFieldsOnly}
+
+          <ConditionEditor
+            conditions={spec.conditions}
+            columnNames={columnNames}
+            dictionary={dictionary}
+            onAdd={addCondition}
+            onChange={updateCondition}
+            onRemove={removeCondition}
+          />
+
+          <OrderEditor
+            terms={spec.order_by}
+            columnNames={columnNames}
+            onAdd={addOrderTerm}
+            onChange={updateOrderTerm}
+            onRemove={removeOrderTerm}
+          />
+
+          <FormField label="target_table">
+            <input
               required
-              rows={7}
-              value={input.source_sql}
-              onChange={(event) =>
-                updateField("source_sql", event.target.value)
-              }
+              value={spec.target_table}
+              onChange={(event) => updateSpec({ target_table: event.target.value })}
             />
           </FormField>
-          <ShapeFeedback checks={shapeChecks} error={shapeError} />
-          <div className="field-grid">
-            <FormField label="source_date_col">
-              <input
-                required
-                value={input.source_date_col}
-                onChange={(event) =>
-                  updateField("source_date_col", event.target.value)
-                }
-              />
-            </FormField>
-            <FormField label="target_table">
-              <input
-                required
-                value={input.target_table}
-                onChange={(event) =>
-                  updateField("target_table", event.target.value)
-                }
-              />
-            </FormField>
-            <FormField label="target_date_col">
-              <input
-                required
-                value={input.target_date_col}
-                onChange={(event) =>
-                  updateField("target_date_col", event.target.value)
-                }
-              />
-            </FormField>
-          </div>
           <p className="target-side-note">
-            目标端只给这两个文本框：不给目标表下拉、不给目标列列表，
+            目标端只给这一个文本框：不给目标表下拉、不给目标列列表，
             <strong>是不画，不是没画完</strong>。目标表由你自己用下面的建表 SQL 建。
           </p>
+
+          <GeneratedSql sql={sql} error={sqlError} ready={specComplete} />
+
           <section className="column-fetch-section" aria-labelledby="column-fetch-title">
             <header>
               <div>
                 <strong id="column-fetch-title">目标表建表 SQL</strong>
-                <span>由当前 SQL 的游标 describe 正向推导</span>
+                <span>由当前规格生成的 SQL 开游标 describe 正向推导</span>
               </div>
               <button
                 className="button is-primary"
@@ -764,342 +998,307 @@ function TaskFormDialog({
             </header>
             <ColumnFetchPanel state={columnFetch} />
           </section>
+
           {error !== null && (
             <div className="form-error" role="alert">
               {error}
             </div>
           )}
         </div>
-        <ModalFooter
-          onClose={onClose}
-          busy={submitting}
-          submitLabel={submitLabel}
-        />
+        <ModalFooter onClose={onClose} busy={submitting} submitLabel={submitLabel} />
       </form>
-      {overwriteConfirm && (
-        <div className="confirm-backdrop" role="presentation">
-          <section
-            className="confirm-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="overwrite-title"
-          >
-            <header id="overwrite-title">重走向导会覆盖你手改的 SQL</header>
-            <p>
-              构建器会用新生成的四字段整段替换当前内容，也不会恢复上一次的勾选状态。
-            </p>
-            <footer>
-              <button
-                className="button is-ghost"
-                type="button"
-                onClick={() => setOverwriteConfirm(false)}
-              >
-                取消
-              </button>
-              <button
-                className="button is-danger"
-                type="button"
-                onClick={() => {
-                  setOverwriteConfirm(false);
-                  setGuideOpen(true);
-                }}
-              >
-                覆盖并重走向导
-              </button>
-            </footer>
-          </section>
-        </div>
-      )}
     </Modal>
   );
 }
 
-type ColumnFetchState =
-  | { kind: "idle" }
-  | { kind: "loading" }
-  | { kind: "shape-failed"; checks: ShapeCheck[] }
-  | { kind: "oracle-failed"; message: string }
-  | { kind: "target-ddl-failed"; columns: FetchedColumn[]; issues: TargetDdlIssue[] }
-  | { kind: "ready"; result: ColumnFetchResult };
-
-function SqlBuilderGuide({
-  targetTable,
-  onCancel,
-  onGenerated,
+/**
+ * 过滤条件控件：字段 + 比较符 + 值，可有若干条（ADR-0035 §3）。
+ *
+ * 一条都没有时整表取数——**这是允许的**，量级风险归台架（#122）去证，不在这里挡。
+ * 比较符严格只有 `>` `<` `=`：`>=` / `<=` 与 `IN` / `BETWEEN` / `LIKE` 第一版都不做。
+ */
+function ConditionEditor({
+  conditions,
+  columnNames,
+  dictionary,
+  onAdd,
+  onChange,
+  onRemove,
 }: {
-  targetTable: string;
-  onCancel: () => void;
-  onGenerated: (task: TaskDefinition) => void;
+  conditions: Condition[];
+  columnNames: string[];
+  dictionary: ReadonlyMap<string, BuilderColumn>;
+  onAdd: () => void;
+  onChange: (index: number, change: Partial<Condition>) => void;
+  onRemove: (index: number) => void;
 }) {
-  const [dblink, setDblink] = useState("");
-  const [tables, setTables] = useState<BuilderTable[]>([]);
-  const [tableKey, setTableKey] = useState("");
-  const [columns, setColumns] = useState<BuilderColumn[]>([]);
-  const [selectedColumns, setSelectedColumns] = useState<string[]>([]);
-  const [dateColumn, setDateColumn] = useState("");
-  const [loading, setLoading] = useState<
-    "tables" | "columns" | "generate" | null
-  >(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const selectedTable = tables.find(
-    (table) => tableKeyFor(table) === tableKey,
-  );
-  const loadingTables = loading === "tables";
-  const loadingColumns = loading === "columns";
-  const generatingTask = loading === "generate";
-
-  async function loadTables() {
-    setLoading("tables");
-    setError(null);
-    try {
-      setTables(await fetchBuilderTables(dblink));
-      setTableKey("");
-      setColumns([]);
-      setSelectedColumns([]);
-      setDateColumn("");
-    } catch (loadError) {
-      setError(messageFrom(loadError));
-    } finally {
-      setLoading(null);
-    }
-  }
-
-  async function loadColumns() {
-    if (selectedTable === undefined) {
-      return;
-    }
-    setLoading("columns");
-    setError(null);
-    try {
-      const loaded = await fetchBuilderColumns({
-        dblink,
-        owner: selectedTable.owner,
-        table: selectedTable.name,
-      });
-      setColumns(loaded);
-      setSelectedColumns(loaded.map((column) => column.name));
-      setDateColumn("");
-    } catch (loadError) {
-      setError(messageFrom(loadError));
-    } finally {
-      setLoading(null);
-    }
-  }
-
-  function toggleColumn(column: string) {
-    setSelectedColumns((selected) => {
-      if (selected.includes(column)) {
-        return selected.filter((name) => name !== column);
-      }
-      return [...selected, column];
-    });
-    if (dateColumn === column) {
-      setDateColumn("");
-    }
-  }
-
-  async function generateTask() {
-    if (selectedTable === undefined || dateColumn === "") {
-      return;
-    }
-    setLoading("generate");
-    setError(null);
-    try {
-      onGenerated(
-        await generateBuilderTask({
-          dblink,
-          owner: selectedTable.owner,
-          table: selectedTable.name,
-          columns: selectedColumns,
-          source_date_col: dateColumn,
-          target_table: targetTable,
-          target_date_col: dateColumn,
-        }),
-      );
-    } catch (generateError) {
-      setError(messageFrom(generateError));
-      setLoading(null);
-    }
-  }
-
   return (
-    <section className="builder-guide" aria-labelledby="builder-guide-title">
+    <section className="spec-editor" aria-labelledby="conditions-title">
       <header>
         <div>
-          <strong id="builder-guide-title">选表、勾列、指定日期列</strong>
-          <span>Oracle 字典元数据仅展示，不判定类型是否可搬</span>
+          <strong id="conditions-title">过滤条件</strong>
+          <span>一条都没有就是整表取数</span>
         </div>
         <button
-          className="icon-button"
+          className="button is-ghost"
           type="button"
-          title="收起构建器"
-          aria-label="收起构建器"
-          onClick={onCancel}
+          onClick={onAdd}
+          disabled={columnNames.length === 0}
         >
-          <X size={15} aria-hidden="true" />
+          <Plus size={15} aria-hidden="true" />
+          添加条件
         </button>
       </header>
-      <div className="builder-controls">
-        <FormField label="数据库链接（可选）">
-          <input
-            value={dblink}
-            placeholder="如 FA"
-            onChange={(event) => setDblink(event.target.value)}
-          />
-        </FormField>
-        <button
-          className="button is-ghost"
-          type="button"
-          onClick={() => void loadTables()}
-          disabled={loading !== null}
-        >
-          {loadingTables ? (
-            <LoaderCircle className="is-spinning" size={15} />
-          ) : (
-            <RefreshCw size={15} />
-          )}
-          {loadingTables ? "读取中" : "读取表"}
-        </button>
-        <FormField label="Oracle 表">
-          <select
-            value={tableKey}
-            onChange={(event) => setTableKey(event.target.value)}
-            disabled={tables.length === 0}
-          >
-            <option value="">请选择</option>
-            {tables.map((table) => {
-              const key = tableKeyFor(table);
-              return (
-                <option key={key} value={key}>
-                  {table.owner}.{table.name}
-                </option>
-              );
-            })}
-          </select>
-        </FormField>
-        <button
-          className="button is-ghost"
-          type="button"
-          onClick={() => void loadColumns()}
-          disabled={selectedTable === undefined || loading !== null}
-        >
-          {loadingColumns ? (
-            <LoaderCircle className="is-spinning" size={15} />
-          ) : (
-            <TableProperties size={15} />
-          )}
-          {loadingColumns ? "读取中" : "读取列"}
-        </button>
-      </div>
-      {columns.length > 0 && (
-        <div className="builder-columns table-wrap">
-          <table className="data-grid">
-            <thead>
-              <tr>
-                <th>选择</th>
-                <th>日期列</th>
-                <th>列名</th>
-                <th>字典类型</th>
-                <th>精度 / 长度</th>
-                <th>可空</th>
-              </tr>
-            </thead>
-            <tbody>
-              {columns.map((column) => {
-                const selected = selectedColumns.includes(column.name);
-                return (
-                  <tr key={column.name}>
-                    <td>
-                      <input
-                        type="checkbox"
-                        checked={selected}
-                        onChange={() => toggleColumn(column.name)}
-                        aria-label={`选择 ${column.name}`}
-                      />
-                    </td>
-                    <td>
-                      <input
-                        type="radio"
-                        name="source-date-column"
-                        checked={dateColumn === column.name}
-                        disabled={!selected}
-                        onChange={() => setDateColumn(column.name)}
-                        aria-label={`指定 ${column.name} 为日期列`}
-                      />
-                    </td>
-                    <td className="mono">{column.name}</td>
-                    <td className="mono">{column.data_type}</td>
-                    <td className="mono">{columnShape(column)}</td>
-                    <td>{column.nullable ? "是" : "否"}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+      {conditions.length === 0 ? (
+        <p className="spec-empty">没有条件：本任务每次取整张表。</p>
+      ) : (
+        <ul className="condition-list">
+          {conditions.map((condition, index) => (
+            <li key={index} className="condition-row">
+              <label>
+                <span>字段</span>
+                <select
+                  value={condition.column}
+                  onChange={(event) => {
+                    const column = event.target.value;
+                    onChange(index, {
+                      column,
+                      value_type: defaultValueType(dictionary.get(column)?.data_type),
+                    });
+                  }}
+                >
+                  {columnOptions(columnNames, condition.column)}
+                </select>
+              </label>
+              <label>
+                <span>比较</span>
+                <select
+                  value={condition.operator}
+                  onChange={(event) =>
+                    onChange(index, {
+                      operator: event.target.value as Condition["operator"],
+                    })
+                  }
+                >
+                  {COMPARISONS.map((operator) => (
+                    <option key={operator} value={operator}>
+                      {comparisonSymbol(operator)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>值类型</span>
+                <select
+                  value={condition.value_type}
+                  onChange={(event) =>
+                    onChange(index, {
+                      value_type: event.target.value as Condition["value_type"],
+                    })
+                  }
+                >
+                  {Object.entries(VALUE_TYPE_LABELS).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>参数名</span>
+                <input
+                  required
+                  value={condition.parameter}
+                  onChange={(event) => onChange(index, { parameter: event.target.value })}
+                />
+              </label>
+              <label>
+                <span>值来源</span>
+                <select
+                  value={condition.value_source}
+                  onChange={(event) => {
+                    const valueSource = event.target.value as Condition["value_source"];
+                    onChange(index, {
+                      value_source: valueSource,
+                      // 运行时填的条件不许同时写死常量值——两个值来源只能有一个说了算。
+                      constant: valueSource === "runtime" ? "" : condition.constant,
+                    });
+                  }}
+                >
+                  <option value="runtime">运行时填</option>
+                  <option value="constant">常量</option>
+                </select>
+              </label>
+              <label>
+                <span>常量值</span>
+                <input
+                  value={condition.constant}
+                  disabled={condition.value_source === "runtime"}
+                  required={condition.value_source === "constant"}
+                  onChange={(event) => onChange(index, { constant: event.target.value })}
+                />
+              </label>
+              <button
+                className="icon-button is-danger"
+                type="button"
+                title="删除这条条件"
+                aria-label={`删除条件 ${condition.parameter}`}
+                onClick={() => onRemove(index)}
+              >
+                <Trash2 size={15} aria-hidden="true" />
+              </button>
+            </li>
+          ))}
+        </ul>
       )}
-      {error !== null && (
-        <div className="form-error" role="alert">
-          {error}
-        </div>
-      )}
-      <footer>
-        <span>{selectedColumns.length} 列已选</span>
-        <button
-          className="button is-primary"
-          type="button"
-          onClick={() => void generateTask()}
-          disabled={
-            selectedTable === undefined ||
-            selectedColumns.length === 0 ||
-            dateColumn === "" ||
-            loading !== null
-          }
-        >
-          {generatingTask ? (
-            <LoaderCircle className="is-spinning" size={15} />
-          ) : (
-            <WandSparkles size={15} />
-          )}
-          {generatingTask ? "生成中" : "生成四字段"}
-        </button>
-      </footer>
+      <small className="spec-note">
+        值一律走绑定变量，常量也有自己的参数名——理由不是防注入，是转义正确性（ADR-0011 §2）。
+        只有「运行时填」的参数进运行参数集与并发互斥键。
+      </small>
     </section>
   );
 }
 
-function ShapeFeedback({
-  checks,
-  error,
+function OrderEditor({
+  terms,
+  columnNames,
+  onAdd,
+  onChange,
+  onRemove,
 }: {
-  checks: ShapeCheck[];
-  error: string | null;
+  terms: OrderTerm[];
+  columnNames: string[];
+  onAdd: () => void;
+  onChange: (index: number, change: Partial<OrderTerm>) => void;
+  onRemove: (index: number) => void;
 }) {
-  if (error !== null) {
-    return (
-      <div className="shape-feedback is-unavailable">
-        形状反馈暂不可用：{error}
-      </div>
-    );
-  }
-
-  const failures = checks.filter((check) => !check.passed);
-  if (failures.length === 0) {
-    return null;
-  }
-
   return (
-    <div className="shape-feedback" role="alert">
-      <strong>SQL 形状预检未通过</strong>
-      {failures.map((check) => (
-        <span key={check.rule}>
-          {shapeRuleLabel(check.rule)}：
-          {shapeRuleDescription(check.rule, check.message)}
-        </span>
-      ))}
-    </div>
+    <section className="spec-editor" aria-labelledby="order-title">
+      <header>
+        <div>
+          <strong id="order-title">排序</strong>
+          <span>字段 + 正序 / 倒序，可留空</span>
+        </div>
+        <button
+          className="button is-ghost"
+          type="button"
+          onClick={onAdd}
+          disabled={columnNames.length === 0}
+        >
+          <Plus size={15} aria-hidden="true" />
+          添加排序
+        </button>
+      </header>
+      {terms.length === 0 ? (
+        <p className="spec-empty">没有排序：由 Oracle 决定返回顺序。</p>
+      ) : (
+        <ul className="condition-list">
+          {terms.map((term, index) => (
+            <li key={index} className="condition-row is-order">
+              <label>
+                <span>字段</span>
+                <select
+                  value={term.column}
+                  onChange={(event) => onChange(index, { column: event.target.value })}
+                >
+                  {columnOptions(columnNames, term.column)}
+                </select>
+              </label>
+              <label>
+                <span>方向</span>
+                <select
+                  value={term.direction}
+                  onChange={(event) =>
+                    onChange(index, {
+                      direction: event.target.value as OrderTerm["direction"],
+                    })
+                  }
+                >
+                  <option value="asc">正序</option>
+                  <option value="desc">倒序</option>
+                </select>
+              </label>
+              <button
+                className="icon-button is-danger"
+                type="button"
+                title="删除这条排序"
+                aria-label={`删除排序 ${term.column}`}
+                onClick={() => onRemove(index)}
+              >
+                <Trash2 size={15} aria-hidden="true" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
+}
+
+/**
+ * 源端 SQL 的只读展示。
+ *
+ * v1 **没有编辑入口**（ADR-0036 §1）：SQL 是规格的派生面，现算现看，不存进任务定义，
+ * 也没有把它传回后端的路。这里连 `textarea` 都不给——给了就是在暗示可以改。
+ */
+function GeneratedSql({
+  sql,
+  error,
+  ready,
+}: {
+  sql: BuilderSql | null;
+  error: string | null;
+  ready: boolean;
+}) {
+  return (
+    <section className="generated-sql" aria-labelledby="generated-sql-title">
+      <header>
+        <div>
+          <strong id="generated-sql-title">源端 SQL</strong>
+          <span>由规格现算，只读</span>
+        </div>
+      </header>
+      {error !== null ? (
+        <div className="form-error" role="alert">
+          {error}
+        </div>
+      ) : sql === null ? (
+        <p className="spec-empty">
+          {ready ? "正在生成..." : "先选表、勾列，SQL 会自己长出来。"}
+        </p>
+      ) : (
+        <>
+          <pre className="ddl-output">{sql.source_sql}</pre>
+          <div className="run-parameter-list">
+            <strong>运行参数</strong>
+            {sql.run_parameters.length === 0 ? (
+              <span>无——发起运行时不需要填任何值。</span>
+            ) : (
+              <ul>
+                {sql.run_parameters.map((parameter) => (
+                  <li key={parameter.parameter}>
+                    <span className="mono">{parameter.parameter}</span>
+                    <span>
+                      {parameter.column} · {VALUE_TYPE_LABELS[parameter.value_type]}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function columnOptions(columnNames: string[], current: string) {
+  const names = columnNames.includes(current) ? columnNames : [current, ...columnNames];
+  return names.map((name) => (
+    <option key={name} value={name}>
+      {name}
+    </option>
+  ));
 }
 
 function ColumnFetchPanel({ state }: { state: ColumnFetchState }) {
@@ -1115,14 +1314,6 @@ function ColumnFetchPanel({ state }: { state: ColumnFetchState }) {
       <div className="fetch-progress">
         <span />
         正在连接 Oracle 并 describe 当前 SQL
-      </div>
-    );
-  }
-  if (state.kind === "shape-failed") {
-    return (
-      <div className="fetch-failure" role="alert">
-        <strong>这段 SQL 的形状不能跑，取列未执行。</strong>
-        <ShapeCheckTable checks={state.checks} />
       </div>
     );
   }
@@ -1228,73 +1419,25 @@ function DdlText({ ddl }: { ddl: string }) {
   );
 }
 
-function ShapeCheckTable({ checks }: { checks: ShapeCheck[] }) {
-  return (
-    <div className="table-wrap">
-      <table className="data-grid shape-grid">
-        <thead>
-          <tr>
-            <th>约束</th>
-            <th>结果</th>
-          </tr>
-        </thead>
-        <tbody>
-          {checks.map((check) => (
-            <tr key={check.rule}>
-              <td>{shapeRuleLabel(check.rule)}</td>
-              <td className={check.passed ? "shape-pass" : "shape-fail"}>
-                {check.passed ? (
-                  <>
-                    <Check size={14} />通过
-                  </>
-                ) : (
-                  shapeRuleDescription(check.rule, check.message)
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function taskDefinitionFrom(input: TaskInput): TaskDefinition {
-  return {
-    source_sql: input.source_sql,
-    source_date_col: input.source_date_col,
-    target_table: input.target_table,
-    target_date_col: input.target_date_col,
-    ...(input.column_precision === undefined
-      ? {}
-      : { column_precision: input.column_precision }),
-  };
-}
-
-function shapeChecksFromColumnFetchError(error: unknown): ShapeCheck[] | null {
-  if (!(error instanceof ApiError) || !isRecord(error.body)) {
-    return null;
+/**
+ * 任务列表里那一列条件的单行读法：`列 符 参数名` 或 `列 符 常量`。
+ *
+ * 一条条件都没有时明写「整表」——留空会被读成「没配好」，而整表取数是允许的形态。
+ */
+function conditionSummary(spec: TaskSpec): string {
+  if (spec.conditions.length === 0) {
+    return "整表";
   }
-  if (error.body.kind !== "sql_shape" || !Array.isArray(error.body.checks)) {
-    return null;
-  }
-  if (!error.body.checks.every(isShapeCheck)) {
-    return null;
-  }
-  return error.body.checks;
-}
-
-function isShapeCheck(value: unknown): value is ShapeCheck {
-  return (
-    isRecord(value) &&
-    typeof value.rule === "string" &&
-    typeof value.passed === "boolean" &&
-    typeof value.message === "string"
-  );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return spec.conditions
+    .map(
+      (condition) =>
+        `${condition.column} ${comparisonSymbol(condition.operator)} ${
+          condition.value_source === "constant"
+            ? condition.constant
+            : `:${condition.parameter}`
+        }`,
+    )
+    .join(" AND ");
 }
 
 function tableKeyFor(table: BuilderTable): string {

@@ -87,7 +87,6 @@ pub trait RowSource {
     fn range_check(
         &mut self,
         _columns: &[RangeCheckColumn],
-        _biz_date: &str,
     ) -> Result<(Vec<RangeCheckResult>, u64), SourceReadError> {
         Err(SourceReadError::with_kind(
             "source row source cannot execute a range check",
@@ -101,8 +100,8 @@ pub trait RowSource {
 pub struct TransferRequest {
     pub run_id: String,
     pub target_table: String,
-    pub target_date_col: String,
-    pub biz_date: String,
+    /// upsert 的去重键（ADR-0035 §2），原样过线交给 sink 侧预检核对。
+    pub primary_key: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,12 +272,10 @@ pub fn run_transfer(
     let cursor_started = Instant::now();
     observe(TransferEvent::StageChanged(RunStage::Preparing));
 
-    let biz_date = request.biz_date.clone();
     let mut open_request = OpenRunRequest {
         run_id: request.run_id.clone(),
         target_table: request.target_table,
-        target_date_col: request.target_date_col,
-        biz_date,
+        primary_key: request.primary_key,
         source_columns: source.columns().to_vec(),
         range_check_results: None,
     };
@@ -330,22 +327,21 @@ pub fn run_transfer(
             opened
         } else {
             let range_started = Instant::now();
-            let (range_check_results, scanned_rows) =
-                match source.range_check(&range_columns, &open_request.biz_date) {
-                    Ok(result) => result,
-                    Err(error) => {
-                        observe(TransferEvent::StageChanged(RunStage::Failed));
-                        return Err(Box::new(
-                            TransferFailure::from_source_error(RunStage::Preparing, error, 0, 0)
-                                .with_timings(
-                                    Duration::ZERO,
-                                    Duration::ZERO,
-                                    Duration::ZERO,
-                                    cursor_started.elapsed(),
-                                ),
-                        ));
-                    }
-                };
+            let (range_check_results, scanned_rows) = match source.range_check(&range_columns) {
+                Ok(result) => result,
+                Err(error) => {
+                    observe(TransferEvent::StageChanged(RunStage::Failed));
+                    return Err(Box::new(
+                        TransferFailure::from_source_error(RunStage::Preparing, error, 0, 0)
+                            .with_timings(
+                                Duration::ZERO,
+                                Duration::ZERO,
+                                Duration::ZERO,
+                                cursor_started.elapsed(),
+                            ),
+                    ));
+                }
+            };
             observe(TransferEvent::RangeCheckExecuted {
                 columns: range_columns
                     .iter()

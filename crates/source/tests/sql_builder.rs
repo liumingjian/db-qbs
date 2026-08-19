@@ -1,71 +1,222 @@
+//! 构建器两件事：元数据查询，与「结构化规格 → 源端 SQL」的生成（ADR-0036 §1）。
+//!
+//! SQL 形状预检的六条规则已随 ADR-0036 §5 整段取消，原来那个「生成的 SQL 必须过六条」的
+//! 断言随之失去对象。顶上来的判据是**生成即合法**：投影恒是 `a.C AS C`，值恒是绑定变量，
+//! 标识符恒过白名单——这些由生成器结构性保证，下面逐条钉住。
+
 use db_qbs_source::{
-    builder_column_query, builder_table_query, generate_builder_task, sql_shape_report,
-    validate_builder_dblink, BuilderTaskInput,
+    builder_column_query, builder_table_query, validate_builder_dblink, Comparison, Condition,
+    Direction, OrderTerm, RunParams, TaskSpec, ValueSource, ValueType,
 };
 
-#[test]
-fn generated_builder_task_has_four_fields_and_passes_all_shape_checks() {
-    let task = generate_builder_task(BuilderTaskInput {
+fn spec() -> TaskSpec {
+    TaskSpec {
         dblink: Some("FA".to_owned()),
         owner: "HTBR45".to_owned(),
         table: "T_R_FR_ASTSTAT".to_owned(),
-        columns: vec!["N_VA_PRICE".to_owned(), "D_BIZ".to_owned()],
-        source_date_col: "D_BIZ".to_owned(),
         target_table: "T_POSITION".to_owned(),
-        target_date_col: "D_BIZ".to_owned(),
-    })
-    .unwrap();
+        columns: vec!["N_VA_PRICE".to_owned(), "D_BIZ".to_owned()],
+        primary_key: vec!["D_BIZ".to_owned()],
+        conditions: Vec::new(),
+        order_by: Vec::new(),
+    }
+}
 
-    let json = serde_json::to_value(&task).unwrap();
-    assert_eq!(json.as_object().unwrap().len(), 4);
-    assert_eq!(task.source_date_col, "D_BIZ");
-    assert_eq!(task.target_table, "T_POSITION");
-    assert_eq!(task.target_date_col, "D_BIZ");
+fn condition(column: &str, parameter: &str, value_type: ValueType) -> Condition {
+    Condition {
+        column: column.to_owned(),
+        operator: Comparison::Eq,
+        value_type,
+        parameter: parameter.to_owned(),
+        value_source: ValueSource::Runtime,
+        constant: String::new(),
+    }
+}
+
+#[test]
+fn a_spec_without_conditions_reads_the_whole_table() {
+    let spec = spec();
+    spec.validate().unwrap();
+
+    // 一条条件都没有就是整表取数（ADR-0035 §3 明许）。量级风险归台架去证，不在这里挡。
     assert_eq!(
-        task.source_sql,
+        spec.source_sql(),
+        concat!(
+            "SELECT a.N_VA_PRICE AS N_VA_PRICE,\n",
+            "       a.D_BIZ AS D_BIZ\n",
+            "  FROM HTBR45.T_R_FR_ASTSTAT@FA a"
+        )
+    );
+    assert!(spec.runtime_parameters().is_empty());
+    assert!(spec.bindings(&RunParams::new()).unwrap().is_empty());
+}
+
+#[test]
+fn each_value_type_renders_its_own_binding_form() {
+    // DATE 列拿字符串裸比会走 Oracle 隐式转换、吃 NLS_DATE_FORMAT，换个会话换个语义，
+    // 所以每条条件自带 value_type，三种类型各有各的写法。
+    let mut spec = spec();
+    spec.conditions = vec![
+        Condition {
+            operator: Comparison::Gt,
+            ..condition("D_BIZ", "from_date", ValueType::Date)
+        },
+        Condition {
+            operator: Comparison::Lt,
+            ..condition("N_VA_PRICE", "cap", ValueType::Number)
+        },
+        condition("C_CODE", "code", ValueType::Text),
+    ];
+    spec.validate().unwrap();
+
+    assert_eq!(
+        spec.source_sql(),
         concat!(
             "SELECT a.N_VA_PRICE AS N_VA_PRICE,\n",
             "       a.D_BIZ AS D_BIZ\n",
             "  FROM HTBR45.T_R_FR_ASTSTAT@FA a\n",
-            " WHERE a.D_BIZ >= TO_DATE(:biz_date,'YYYY-MM-DD')\n",
-            "   AND a.D_BIZ <  TO_DATE(:biz_date,'YYYY-MM-DD') + 1"
+            " WHERE a.D_BIZ > TO_DATE(:from_date,'YYYY-MM-DD')\n",
+            "   AND a.N_VA_PRICE < TO_NUMBER(:cap)\n",
+            "   AND a.C_CODE = :code"
         )
-    );
-    let checks = sql_shape_report(&task);
-    assert!(
-        checks.iter().all(|check| check.passed),
-        "generated SQL failed shape checks: {checks:#?}\n{}",
-        task.source_sql
     );
 }
 
 #[test]
-fn builder_allows_a_true_column_subset_and_requires_the_date_column_in_it() {
-    let input = BuilderTaskInput {
-        dblink: None,
-        owner: "APP".to_owned(),
-        table: "ORDERS".to_owned(),
-        columns: vec!["D_BIZ".to_owned()],
-        source_date_col: "D_BIZ".to_owned(),
-        target_table: String::new(),
-        target_date_col: String::new(),
-    };
+fn order_terms_land_after_the_predicates() {
+    let mut spec = spec();
+    spec.conditions = vec![condition("D_BIZ", "d_biz", ValueType::Date)];
+    spec.order_by = vec![
+        OrderTerm {
+            column: "D_BIZ".to_owned(),
+            direction: Direction::Desc,
+        },
+        OrderTerm {
+            column: "N_VA_PRICE".to_owned(),
+            direction: Direction::Asc,
+        },
+    ];
+    spec.validate().unwrap();
 
-    let task = generate_builder_task(input.clone()).unwrap();
-    assert_eq!(task.target_date_col, "D_BIZ");
-    let checks = sql_shape_report(&task);
-    assert!(
-        checks.iter().all(|check| check.passed),
-        "generated SQL failed shape checks: {checks:#?}\n{}",
-        task.source_sql
+    assert!(spec
+        .source_sql()
+        .ends_with(" ORDER BY a.D_BIZ DESC, a.N_VA_PRICE ASC"));
+}
+
+#[test]
+fn constants_bind_too_and_stay_out_of_the_run_parameter_set() {
+    // 常量也走绑定变量：理由不是防注入，是转义正确性（ADR-0011 §2「不发明第二套转义」）。
+    // 但常量每次都一样，进「运行参数集」不增加任何区分度，所以互斥键里没有它。
+    let mut spec = spec();
+    spec.conditions = vec![
+        Condition {
+            value_source: ValueSource::Constant,
+            constant: "CNY".to_owned(),
+            ..condition("C_CURRENCY", "currency", ValueType::Text)
+        },
+        condition("D_BIZ", "d_biz", ValueType::Date),
+    ];
+    spec.validate().unwrap();
+
+    assert!(spec.source_sql().contains("a.C_CURRENCY = :currency"));
+    assert_eq!(
+        spec.runtime_parameters()
+            .iter()
+            .map(|condition| condition.parameter.as_str())
+            .collect::<Vec<_>>(),
+        vec!["d_biz"]
     );
 
-    let error = generate_builder_task(BuilderTaskInput {
-        columns: vec!["ID".to_owned()],
-        ..input
-    })
-    .unwrap_err();
-    assert_eq!(error, "source_date_col must be one of the selected columns");
+    let mut run_params = RunParams::new();
+    run_params.insert("d_biz".to_owned(), "2026-08-18".to_owned());
+    assert_eq!(
+        spec.bindings(&run_params).unwrap(),
+        vec![
+            ("currency".to_owned(), "CNY".to_owned()),
+            ("d_biz".to_owned(), "2026-08-18".to_owned()),
+        ]
+    );
+
+    // 少填一个运行参数就不许开跑——报的是参数名，不是「参数不全」。
+    assert_eq!(
+        spec.bindings(&RunParams::new()).unwrap_err(),
+        "运行参数 d_biz 未取值"
+    );
+}
+
+#[test]
+fn describe_bindings_cover_every_parameter_with_a_typed_dummy() {
+    let mut spec = spec();
+    spec.conditions = vec![
+        condition("D_BIZ", "d_biz", ValueType::Date),
+        condition("N_VA_PRICE", "cap", ValueType::Number),
+        condition("C_CODE", "code", ValueType::Text),
+    ];
+
+    assert_eq!(
+        spec.describe_bindings(),
+        vec![
+            ("d_biz".to_owned(), "1970-01-01".to_owned()),
+            ("cap".to_owned(), "0".to_owned()),
+            ("code".to_owned(), String::new()),
+        ]
+    );
+}
+
+#[test]
+fn validation_refuses_the_four_ways_a_spec_can_be_unusable() {
+    let mut no_key = spec();
+    no_key.primary_key.clear();
+    assert_eq!(
+        no_key.validate().unwrap_err(),
+        "主键必选：至少要勾一列作为 upsert 的去重键"
+    );
+
+    let mut key_outside = spec();
+    key_outside.primary_key = vec!["ID".to_owned()];
+    assert_eq!(
+        key_outside.validate().unwrap_err(),
+        "主键列 ID 不在选中的列里"
+    );
+
+    let mut duplicate_parameter = spec();
+    duplicate_parameter.conditions = vec![
+        condition("D_BIZ", "d_biz", ValueType::Date),
+        condition("N_VA_PRICE", "D_BIZ", ValueType::Number),
+    ];
+    assert_eq!(
+        duplicate_parameter.validate().unwrap_err(),
+        "参数名 D_BIZ 重复"
+    );
+
+    let mut runtime_with_constant = spec();
+    runtime_with_constant.conditions = vec![Condition {
+        constant: "2026-08-18".to_owned(),
+        ..condition("D_BIZ", "d_biz", ValueType::Date)
+    }];
+    assert_eq!(
+        runtime_with_constant.validate().unwrap_err(),
+        "条件 d_biz 标了运行时填，不能同时写死常量值"
+    );
+}
+
+#[test]
+fn identifiers_are_the_only_thing_not_bound_so_they_are_whitelisted() {
+    // 值走绑定变量，标识符不能——标识符这一侧只能靠白名单式校验挡住拼串。
+    let mut injected = spec();
+    injected.table = "T_R_FR_ASTSTAT WHERE 1=1 --".to_owned();
+    assert!(injected.validate().is_err());
+
+    let mut injected_condition = spec();
+    injected_condition.conditions = vec![condition("D_BIZ) OR (1=1", "d_biz", ValueType::Date)];
+    assert!(injected_condition.validate().is_err());
+
+    let mut injected_order = spec();
+    injected_order.order_by = vec![OrderTerm {
+        column: "D_BIZ; DROP TABLE T".to_owned(),
+        direction: Direction::Asc,
+    }];
+    assert!(injected_order.validate().is_err());
 }
 
 #[test]

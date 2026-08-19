@@ -1,18 +1,9 @@
-use serde::{Deserialize, Serialize};
+//! 构建器的**元数据查询**面：列表 / 列清单。
+//!
+//! 源端 SQL 的生成已随 ADR-0036 §1 搬进 [`crate::task_spec`]——任务定义存的是结构化规格，
+//! SQL 由规格现算，这里只剩「去数据字典问有哪些表、哪些列」。
 
-use crate::TaskConfig;
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BuilderTaskInput {
-    pub dblink: Option<String>,
-    pub owner: String,
-    pub table: String,
-    pub columns: Vec<String>,
-    pub source_date_col: String,
-    pub target_table: String,
-    pub target_date_col: String,
-}
+use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BuilderTable {
@@ -28,75 +19,6 @@ pub struct BuilderColumn {
     pub scale: Option<i64>,
     pub length: Option<u64>,
     pub nullable: bool,
-}
-
-pub fn generate_builder_task(input: BuilderTaskInput) -> Result<TaskConfig, String> {
-    validate_builder_task_input(&input)?;
-
-    let BuilderTaskInput {
-        dblink,
-        owner,
-        table,
-        columns,
-        source_date_col,
-        target_table,
-        target_date_col,
-    } = input;
-    let dblink_suffix = dictionary_suffix(dblink.as_deref())?;
-    let projection = columns
-        .iter()
-        .map(|column| format!("a.{column} AS {column}"))
-        .collect::<Vec<_>>()
-        .join(",\n       ");
-    let target_date_col = if target_date_col.trim().is_empty() {
-        source_date_col.clone()
-    } else {
-        target_date_col
-    };
-
-    Ok(TaskConfig {
-        source_sql: format!(
-            "SELECT {projection}\n  FROM {owner}.{table}{dblink_suffix} a\n WHERE a.{source_date_col} >= TO_DATE(:biz_date,'YYYY-MM-DD')\n   AND a.{source_date_col} <  TO_DATE(:biz_date,'YYYY-MM-DD') + 1"
-        ),
-        source_date_col,
-        target_table,
-        target_date_col,
-        column_precision: None,
-    })
-}
-
-fn validate_builder_task_input(input: &BuilderTaskInput) -> Result<(), String> {
-    if input.owner.trim().is_empty() || input.table.trim().is_empty() {
-        return Err("owner and table are required".to_owned());
-    }
-    for identifier in [&input.owner, &input.table] {
-        validate_oracle_identifier(identifier)?;
-    }
-    if input.columns.is_empty() {
-        return Err("at least one column must be selected".to_owned());
-    }
-    if input.columns.iter().any(|column| column.trim().is_empty()) {
-        return Err("selected column names must not be empty".to_owned());
-    }
-    for column in &input.columns {
-        validate_oracle_identifier(column)?;
-    }
-    for (index, column) in input.columns.iter().enumerate() {
-        if input.columns[..index]
-            .iter()
-            .any(|previous| previous.eq_ignore_ascii_case(column))
-        {
-            return Err("selected columns must not contain duplicates".to_owned());
-        }
-    }
-    if !input
-        .columns
-        .iter()
-        .any(|column| column.eq_ignore_ascii_case(&input.source_date_col))
-    {
-        return Err("source_date_col must be one of the selected columns".to_owned());
-    }
-    Ok(())
 }
 
 pub fn builder_table_query(dblink: Option<&str>) -> Result<String, String> {
@@ -128,21 +50,7 @@ fn normalize_dblink(dblink: Option<&str>) -> Result<Option<String>, String> {
     let Some(dblink) = dblink.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
-    validate_oracle_identifier(dblink)
+    crate::task_spec::validate_identifier(dblink, "dblink")
         .map_err(|_| "dblink must be an unquoted Oracle identifier".to_owned())?;
     Ok(Some(dblink.to_ascii_uppercase()))
-}
-
-fn validate_oracle_identifier(identifier: &str) -> Result<(), String> {
-    let mut bytes = identifier.bytes();
-    let first_is_valid = bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic());
-    if first_is_valid
-        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'#'))
-    {
-        Ok(())
-    } else {
-        Err(format!(
-            "Oracle identifier {identifier:?} must use an unquoted name"
-        ))
-    }
 }

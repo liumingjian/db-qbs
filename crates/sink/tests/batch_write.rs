@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 use db_qbs_shared::BatchPayload;
 use db_qbs_sink::{
     AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, CreateStagingError, Destination,
-    DropStagingError, OpenRunRequest, SinkService, SourceColumn, TargetColumn, WriteBatchError,
+    DropStagingError, OpenRunRequest, SinkService, SourceColumn, TargetColumn, TargetKey,
+    WriteBatchError,
 };
 
 const RUN_ID: &str = "20260814091530_a3f19c";
@@ -30,6 +31,13 @@ struct FakeDestination {
 impl Destination for FakeDestination {
     fn target_columns(&self, _target_table: &str) -> Result<Vec<TargetColumn>, String> {
         Ok(self.columns.clone())
+    }
+
+    fn target_keys(&self, _target_table: &str) -> Result<Vec<TargetKey>, String> {
+        Ok(vec![TargetKey {
+            name: "PRIMARY".to_owned(),
+            columns: vec!["D_BIZ".to_owned()],
+        }])
     }
 
     fn create_staging(&self, _staging_table: &str, _ddl: &str) -> Result<(), CreateStagingError> {
@@ -330,8 +338,7 @@ fn open_request(source_columns: Vec<SourceColumn>) -> OpenRunRequest {
     OpenRunRequest {
         run_id: RUN_ID.to_owned(),
         target_table: "T_POSITION".to_owned(),
-        target_date_col: "D_BIZ".to_owned(),
-        biz_date: "2026-08-14".to_owned(),
+        primary_key: vec!["D_BIZ".to_owned()],
         source_columns,
         range_check_results: None,
     }
@@ -415,7 +422,8 @@ fn golden_columns() -> (Vec<SourceColumn>, Vec<TargetColumn>) {
                 },
                 length: *length,
                 datetime_precision: (*name == "D_BIZ").then_some(0),
-                nullable: true,
+                // D_BIZ 是这份夹具的主键列：主键列必须 NOT NULL，其余列必须可空。
+                nullable: *name != "D_BIZ",
                 character_set: length.map(|_| "utf8mb4".to_owned()),
                 ordinal: (specs.len() - index) as u64,
             },
@@ -451,7 +459,8 @@ fn target_column(
         scale: None,
         length,
         datetime_precision: (data_type == "datetime").then_some(0),
-        nullable: true,
+        // D_BIZ 是这份夹具的主键列：主键列必须 NOT NULL，其余列必须可空。
+        nullable: name != "D_BIZ",
         character_set: length.map(|_| "utf8mb4".to_owned()),
         ordinal,
     }

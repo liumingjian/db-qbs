@@ -21,8 +21,7 @@ fn streams_rows_in_order_then_commits_the_fetch_accumulator() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
-            target_date_col: "BIZ_DAY".to_owned(),
-            biz_date: "2026-08-14".to_owned(),
+            primary_key: vec!["ID".to_owned()],
         },
         |_| {},
     )
@@ -50,8 +49,7 @@ fn batch_events_include_the_cumulative_source_row_count() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
-            target_date_col: "BIZ_DAY".to_owned(),
-            biz_date: "2026-08-14".to_owned(),
+            primary_key: vec!["ID".to_owned()],
         },
         |event| events.push(event),
     )
@@ -90,8 +88,7 @@ fn open_failure_does_not_abort_before_staging_exists() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
-            target_date_col: "BIZ_DAY".to_owned(),
-            biz_date: "2026-08-14".to_owned(),
+            primary_key: vec!["ID".to_owned()],
         },
         |event| events.push(event),
     )
@@ -128,8 +125,7 @@ fn commit_transport_failure_gets_once_and_never_aborts() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
-            target_date_col: "BIZ_DAY".to_owned(),
-            biz_date: "2026-08-14".to_owned(),
+            primary_key: vec!["ID".to_owned()],
         },
         |event| events.push(event),
     )
@@ -162,8 +158,7 @@ fn empty_result_commits_without_sending_a_batch() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
-            target_date_col: "BIZ_DAY".to_owned(),
-            biz_date: "2026-08-14".to_owned(),
+            primary_key: vec!["ID".to_owned()],
         },
         |_| {},
     )
@@ -201,8 +196,7 @@ fn range_check_runs_between_two_open_requests_and_emits_scan_event() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
-            target_date_col: "BIZ_DAY".to_owned(),
-            biz_date: "2026-08-14".to_owned(),
+            primary_key: vec!["ID".to_owned()],
         },
         |event| events.push(event),
     )
@@ -250,8 +244,7 @@ fn fetch_failure_aborts_and_does_not_commit() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
-            target_date_col: "BIZ_DAY".to_owned(),
-            biz_date: "2026-08-14".to_owned(),
+            primary_key: vec!["ID".to_owned()],
         },
         |_| {},
     )
@@ -276,8 +269,7 @@ fn byte_budget_splits_wide_rows_before_the_row_limit() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
-            target_date_col: "BIZ_DAY".to_owned(),
-            biz_date: "2026-08-14".to_owned(),
+            primary_key: vec!["ID".to_owned()],
         },
         |_| {},
     )
@@ -305,8 +297,7 @@ fn commit_diagnostic_distinguishes_discarded_and_unknown() {
             TransferRequest {
                 run_id: RUN_ID.to_owned(),
                 target_table: "ORDERS".to_owned(),
-                target_date_col: "BIZ_DAY".to_owned(),
-                biz_date: "2026-08-14".to_owned(),
+                primary_key: vec!["ID".to_owned()],
             },
             |_| {},
         )
@@ -344,8 +335,7 @@ fn rows_written_mismatch_aborts_before_commit() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
-            target_date_col: "BIZ_DAY".to_owned(),
-            biz_date: "2026-08-14".to_owned(),
+            primary_key: vec!["ID".to_owned()],
         },
         |_| {},
     )
@@ -374,8 +364,7 @@ fn abort_failure_is_reported_before_the_failed_stage() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
-            target_date_col: "BIZ_DAY".to_owned(),
-            biz_date: "2026-08-14".to_owned(),
+            primary_key: vec!["ID".to_owned()],
         },
         |event| events.push(event),
     )
@@ -430,7 +419,6 @@ impl RowSource for FakeSource {
     fn range_check(
         &mut self,
         columns: &[RangeCheckColumn],
-        _biz_date: &str,
     ) -> Result<(Vec<RangeCheckResult>, u64), SourceReadError> {
         self.range_check_requests.push(columns.to_vec());
         self.range_check.clone().ok_or_else(|| {

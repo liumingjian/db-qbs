@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use db_qbs_sink::{
     AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, BatchPayload, CreateStagingError,
     Destination, DropStagingError, OpenRunRequest, SinkService, SourceColumn, TargetColumn,
-    WriteBatchError,
+    TargetKey, WriteBatchError,
 };
 
 const RUN_ID: &str = "20260814091530_a3f19c";
@@ -40,9 +40,17 @@ impl Destination for FakeDestination {
             scale: None,
             length: None,
             datetime_precision: Some(0),
-            nullable: true,
+            // 主键列必须 NOT NULL（ADR-0035 §2 第 3 条）。
+            nullable: false,
             character_set: None,
             ordinal: 1,
+        }])
+    }
+
+    fn target_keys(&self, _target_table: &str) -> Result<Vec<TargetKey>, String> {
+        Ok(vec![TargetKey {
+            name: "PRIMARY".to_owned(),
+            columns: vec!["D_BIZ".to_owned()],
         }])
     }
 
@@ -101,8 +109,7 @@ fn open_request_for(run_id: &str) -> OpenRunRequest {
     OpenRunRequest {
         run_id: run_id.to_owned(),
         target_table: "T_POSITION".to_owned(),
-        target_date_col: "D_BIZ".to_owned(),
-        biz_date: "2026-08-14".to_owned(),
+        primary_key: vec!["D_BIZ".to_owned()],
         source_columns: vec![SourceColumn {
             name: "D_BIZ".to_owned(),
             data_type: "DATE".to_owned(),
@@ -140,9 +147,7 @@ fn commit_atomically_swaps_then_exposes_a_sealed_swapped_tombstone() {
     let requests = destination.swap_requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].target_table, "T_POSITION");
-    assert_eq!(requests[0].target_date_col, "D_BIZ");
-    assert_eq!(requests[0].biz_date_start, "2026-08-14");
-    assert_eq!(requests[0].biz_date_end, "2026-08-15");
+    assert_eq!(requests[0].primary_key, vec!["D_BIZ".to_owned()]);
     assert_eq!(requests[0].columns, vec!["D_BIZ".to_owned()]);
     drop(requests);
     assert_eq!(destination.dropped.lock().unwrap().len(), 1);

@@ -15,6 +15,9 @@ pub enum FailureKind {
     /// 父进程没能把这次运行拉起来（物化任务文件失败、子进程 spawn 失败）。
     Orchestrator,
     /// 源端 SQL 形状预检未通过（source 本地成文，ADR-0016 §4）。
+    ///
+    /// **已退役、不再产生**：形状预检整段随 ADR-0036 §5 取消。保留这个值是因为本闭集
+    /// 「只增不删不改义」——删掉它等于改写一个已发布的分类表。
     ShapePrecheck,
     /// 连不上 Oracle：Instant Client 初始化、监听器、登录。
     SourceConnect,

@@ -12,14 +12,18 @@ use serde_json::Value;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
-const TASK_FIELDS: [&str; 6] = [
-    "name",
-    "source_date_col",
-    "source_sql",
-    "target_date_col",
-    "target_table",
-    "task_id",
-];
+/// 任务定义在线上恰好三样：名字、结构化规格、身份。SQL 不在里面（ADR-0036 §2）。
+const TASK_FIELDS: [&str; 3] = ["name", "spec", "task_id"];
+
+/// 一份任务定义的请求体。规格是唯一真相源，条件带一个「运行时填」的日期参数 `d_biz`。
+fn task_json(name: &str, target_table: &str) -> String {
+    format!(
+        r#"{{"name":"{name}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"{target_table}","columns":["ID","D_BIZ"],"primary_key":["ID"],"conditions":[{{"column":"D_BIZ","operator":"eq","value_type":"date","parameter":"d_biz","value_source":"runtime","constant":""}}],"order_by":[]}}}}"#
+    )
+}
+
+/// 上面那份规格现算出来的源端 SQL。父子两端算的是同一份，历史里钉的也是它。
+const EXPECTED_SOURCE_SQL: &str = "SELECT a.ID AS ID,\n       a.D_BIZ AS D_BIZ\n  FROM APP.HOLDINGS a\n WHERE a.D_BIZ = TO_DATE(:d_biz,'YYYY-MM-DD')";
 
 #[test]
 fn task_crud_persists_stable_identity_without_exposing_credentials() {
@@ -31,9 +35,7 @@ fn task_crud_persists_stable_identity_without_exposing_credentials() {
         port,
         "POST",
         "/api/tasks",
-        Some(
-            r#"{"name":"持仓明细","source_sql":"SELECT ID, D_BIZ FROM HOLDINGS WHERE D_BIZ >= :biz_date AND D_BIZ < :biz_date + 1","source_date_col":"D_BIZ","target_table":"HOLDINGS","target_date_col":"D_BIZ"}"#,
-        ),
+        Some(&task_json("持仓明细", "HOLDINGS")),
     )
     .unwrap();
     assert_eq!(created.status, 201, "{}", created.body);
@@ -54,9 +56,7 @@ fn task_crud_persists_stable_identity_without_exposing_credentials() {
         port,
         "PUT",
         &format!("/api/tasks/{task_id}"),
-        Some(
-            r#"{"name":"持仓日明细","source_sql":"SELECT ID, AMOUNT, D_BIZ FROM HOLDINGS WHERE D_BIZ >= :biz_date AND D_BIZ < :biz_date + 1","source_date_col":"D_BIZ","target_table":"HOLDINGS_DAILY","target_date_col":"D_BIZ"}"#,
-        ),
+        Some(&task_json("持仓日明细", "HOLDINGS_DAILY")),
     )
     .unwrap();
     assert_eq!(updated.status, 200, "{}", updated.body);
@@ -64,7 +64,7 @@ fn task_crud_persists_stable_identity_without_exposing_credentials() {
     assert_task_fields(&updated);
     assert_eq!(updated["task_id"], task_id);
     assert_eq!(updated["name"], "持仓日明细");
-    assert_eq!(updated["target_table"], "HOLDINGS_DAILY");
+    assert_eq!(updated["spec"]["target_table"], "HOLDINGS_DAILY");
 
     let first_output = terminate(child);
     assert_success(&first_output);
@@ -112,9 +112,10 @@ fn task_writes_reject_client_identity_and_incomplete_definitions() {
         port,
         "POST",
         "/api/tasks",
-        Some(
-            r#"{"task_id":"chosen-by-client","name":"持仓明细","source_sql":"SELECT ID FROM HOLDINGS","source_date_col":"D_BIZ","target_table":"HOLDINGS","target_date_col":"D_BIZ"}"#,
-        ),
+        Some(&format!(
+            r#"{{"task_id":"chosen-by-client",{}"#,
+            &task_json("持仓明细", "HOLDINGS")[1..]
+        )),
     )
     .unwrap();
     assert_eq!(client_identity.status, 400, "{}", client_identity.body);
@@ -124,7 +125,7 @@ fn task_writes_reject_client_identity_and_incomplete_definitions() {
         "POST",
         "/api/tasks",
         Some(
-            r#"{"source_sql":"SELECT ID FROM HOLDINGS","source_date_col":"D_BIZ","target_table":"HOLDINGS","target_date_col":"D_BIZ"}"#,
+            r#"{"spec":{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":["ID"],"primary_key":["ID"],"conditions":[],"order_by":[]}}"#,
         ),
     )
     .unwrap();
@@ -147,7 +148,7 @@ fn run_launch_materializes_task_and_aggregates_child_output_until_exit() {
         &directory,
         &format!(
             r#"printf '%s\n' "$@" > '{}'
-printf '%s\n' '{{"ts":"2026-08-15T10:00:00.000Z","level":"info","event":"source_started","run_id":null,"task":null,"biz_date":"2026-08-14","message":"started"}}'
+printf '%s\n' '{{"ts":"2026-08-15T10:00:00.000Z","level":"info","event":"source_started","run_id":null,"task":null,"message":"started"}}'
 printf '%s\n' '{{"ts":"2026-08-15T10:00:01.000Z","level":"info","event":"stage_changed","run_id":"run-7","task":null,"stage":"PREPARING","message":"preparing"}}'
 printf '%s\n' '{{"ts":"2026-08-15T10:00:02.000Z","level":"info","event":"run_opened","run_id":"run-7","task":null,"staging_table":"STG_7","columns_checked":2,"message":"opened"}}'
 printf '%s\n' '{{"ts":"2026-08-15T10:00:03.000Z","level":"info","event":"stage_changed","run_id":"run-7","task":null,"stage":"STREAMING","message":"streaming"}}'
@@ -163,12 +164,7 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
     );
     let (port, config, source, _ready) =
         start_source_ready(|port| write_run_config(&directory, port, &fake_child));
-    let created = post(
-        port,
-        "/api/tasks",
-        r#"{"name":"holdings","source_sql":"SELECT a.ID AS ID,\n       a.N_AMT AS N_AMT,\n       a.N_RATE AS N_RATE,\n       a.D_BIZ AS D_BIZ\n  FROM HOLDINGS a\n WHERE a.D_BIZ >= TO_DATE(:biz_date,'YYYY-MM-DD')\n   AND a.D_BIZ <  TO_DATE(:biz_date,'YYYY-MM-DD') + 1","source_date_col":"D_BIZ","target_table":"HOLDINGS","target_date_col":"D_BIZ","column_precision":{"N_AMT":[20,4],"N_RATE":[38,-30]}}"#,
-    )
-    .unwrap();
+    let created = post(port, "/api/tasks", &task_json("holdings", "HOLDINGS")).unwrap();
     assert_eq!(created.status, 201, "{}", created.body);
     let task_id = json_body(&created)["task_id"].as_str().unwrap().to_owned();
     let audit = rusqlite::Connection::open(directory.join("db-qbs.sqlite3")).unwrap();
@@ -186,7 +182,7 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
     let started = post(
         port,
         "/api/runs",
-        &format!(r#"{{"task_id":"{task_id}","biz_date":"2026-08-14"}}"#),
+        &format!(r#"{{"task_id":"{task_id}","run_params":{{"d_biz":"2026-08-14"}}}}"#),
     )
     .unwrap();
     assert_eq!(started.status, 202, "{}", started.body);
@@ -203,7 +199,8 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
         serde_json::json!({
             "run_record_id": run_record_id,
             "run_id": "run-7",
-            "biz_date": "2026-08-14",
+            "run_params": { "d_biz": "2026-08-14" },
+            "source_sql": EXPECTED_SOURCE_SQL,
             "staging_table": "STG_7",
             "stage": "STREAMING",
             "seq": 2,
@@ -228,19 +225,20 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
     );
     let task_toml = fs::read_to_string(&task_files[0]).unwrap();
     for field in [
-        "source_sql",
-        "source_date_col",
-        "target_table",
-        "target_date_col",
+        "owner",
+        "table",
+        "columns",
+        "primary_key",
+        "conditions",
+        "run_params",
     ] {
         assert!(task_toml.contains(field), "{task_toml}");
     }
+    // SQL 不落进任务文件（ADR-0036 §2）：子进程从同一份规格现算。
+    assert!(!task_toml.contains("SELECT"), "{task_toml}");
     for secret in ["name", "task_id", "oracle_password", "secret"] {
         assert!(!task_toml.contains(secret), "{task_toml}");
     }
-    assert!(task_toml.contains("[column_precision]"), "{task_toml}");
-    assert!(task_toml.contains("N_AMT = [20, 4]"), "{task_toml}");
-    assert!(task_toml.contains("N_RATE = [38, -30]"), "{task_toml}");
 
     let args = fs::read_to_string(invocation).unwrap();
     assert_eq!(
@@ -250,8 +248,6 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
             config.to_str().unwrap(),
             "--task",
             task_files[0].to_str().unwrap(),
-            "--biz-date",
-            "2026-08-14",
         ]
     );
 
@@ -262,16 +258,12 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
     assert_eq!(history["run_record_id"], run_record_id);
     assert_eq!(history["run_id"], "run-7");
     assert_eq!(history["task_id"], task_id);
-    assert_eq!(history["shape_checks"].as_array().unwrap().len(), 6);
-    assert!(
-        history["shape_checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|check| check["passed"] == true),
-        "{history:#}"
+    assert_eq!(
+        history["run_params"],
+        serde_json::json!({ "d_biz": "2026-08-14" })
     );
-    assert_eq!(history["biz_date"], "2026-08-14");
+    // 当次执行的 SQL 快照（ADR-0036 §2）：存的是未绑定的语句文本，参数值不内联。
+    assert_eq!(history["source_sql"], EXPECTED_SOURCE_SQL);
     assert_eq!(history["outcome"], "SUCCEEDED");
     assert_eq!(history["target_table_effect"], "SWAPPED");
     assert_eq!(history["source_rows"], 7);
@@ -286,9 +278,8 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
     let by_task = json_body(&get(port, &format!("/api/runs?task_id={task_id}")).unwrap());
     assert_eq!(by_task.as_array().unwrap().len(), 1);
     assert_eq!(by_task[0]["run_record_id"], run_record_id);
-    let by_date = json_body(&get(port, "/api/runs?biz_date=2026-08-14").unwrap());
-    assert_eq!(by_date.as_array().unwrap().len(), 1);
-    let no_match = json_body(&get(port, "/api/runs?biz_date=2026-08-13").unwrap());
+    // 筛选只剩任务这一维：运行参数是任务自定义的名字，筛不出一个跨任务的通用维度。
+    let no_match = json_body(&get(port, "/api/runs?task_id=nonexistent").unwrap());
     assert_eq!(no_match, serde_json::json!([]));
     let audit = rusqlite::Connection::open(directory.join("db-qbs.sqlite3")).unwrap();
     let history_writes: u64 = audit
@@ -332,7 +323,7 @@ fn restart_cleanup_distinguishes_graceful_restart_from_process_disappearance() {
     let directory = temp_directory();
     let fake_child = write_fake_child(
         &directory,
-        r#"printf '%s\n' '{"ts":"2026-08-15T12:00:00.000Z","level":"info","event":"source_started","run_id":null,"task":null,"biz_date":"2026-08-14"}'
+        r#"printf '%s\n' '{"ts":"2026-08-15T12:00:00.000Z","level":"info","event":"source_started","run_id":null,"task":null}'
 printf '%s\n' '{"ts":"2026-08-15T12:00:01.000Z","level":"info","event":"stage_changed","run_id":"run-restart","task":null,"stage":"PREPARING"}'
 sleep 2
 "#,
@@ -386,7 +377,7 @@ fn child_hanging_mid_run_remains_live_and_accepted_is_not_preparing() {
         &directory,
         &format!(
             r#"while [ ! -f '{}' ]; do sleep 0.02; done
-printf '%s\n' '{{"ts":"2026-08-15T11:00:00.000Z","level":"info","event":"source_started","run_id":null,"task":null,"biz_date":"2026-08-14","message":"started"}}'
+printf '%s\n' '{{"ts":"2026-08-15T11:00:00.000Z","level":"info","event":"source_started","run_id":null,"task":null,"message":"started"}}'
 printf '%s\n' '{{"ts":"2026-08-15T11:00:01.000Z","level":"info","event":"stage_changed","run_id":"run-hanging","task":null,"stage":"PREPARING","message":"preparing"}}'
 printf '%s\n' '{{"ts":"2026-08-15T11:00:02.000Z","level":"info","event":"batch_pushed","run_id":"run-hanging","task":null,"seq":1,"rows":5,"source_rows":5,"bytes":64,"written":5,"ms":9}}'
 while [ ! -f '{}' ]; do sleep 0.02; done
@@ -403,7 +394,11 @@ while [ ! -f '{}' ]; do sleep 0.02; done
     let accepted = json_body(&get(port, &format!("/api/runs/{run_record_id}")).unwrap());
     assert_eq!(accepted["stage"], Value::Null);
     assert_eq!(accepted["run_id"], Value::Null);
-    assert_eq!(accepted["biz_date"], Value::Null);
+    assert_eq!(
+        accepted["run_params"],
+        serde_json::json!({ "d_biz": "2026-08-14" })
+    );
+    assert_eq!(accepted["source_sql"], EXPECTED_SOURCE_SQL);
     assert_eq!(accepted["seq"], 0);
     assert_eq!(accepted["rows_pushed"], 0);
     assert_eq!(accepted["bytes"], 0);
@@ -417,7 +412,10 @@ while [ ! -f '{}' ]; do sleep 0.02; done
     });
     assert_eq!(partial["stage"], "PREPARING");
     assert_eq!(partial["run_id"], "run-hanging");
-    assert_eq!(partial["biz_date"], "2026-08-14");
+    assert_eq!(
+        partial["run_params"],
+        serde_json::json!({ "d_biz": "2026-08-14" })
+    );
     assert_eq!(partial["seq"], 1);
     assert_eq!(partial["bytes"], 64);
     assert_eq!(partial["ms"], 9);
@@ -441,7 +439,7 @@ while [ ! -f '{}' ]; do sleep 0.02; done
 }
 
 #[test]
-fn run_launch_rejects_only_the_same_task_and_business_date_until_child_reap() {
+fn run_launch_rejects_only_the_same_task_and_run_parameters_until_child_reap() {
     let directory = temp_directory();
     let release = directory.join("release-children");
     let fake_child = write_fake_child(
@@ -460,7 +458,7 @@ fn run_launch_rejects_only_the_same_task_and_business_date_until_child_reap() {
     let duplicate = post(
         port,
         "/api/runs",
-        &format!(r#"{{"task_id":"{first_task_id}","biz_date":"2026-08-14"}}"#),
+        &format!(r#"{{"task_id":"{first_task_id}","run_params":{{"d_biz":"2026-08-14"}}}}"#),
     )
     .unwrap();
     assert_eq!(duplicate.status, 409, "{}", duplicate.body);
@@ -497,7 +495,7 @@ fn cancel_signals_preparing_and_streaming_but_rejects_committing() {
     let fake_child = write_fake_child(
         &directory,
         &format!(
-            r#"biz_date="$6"
+            r#"biz_date=$(sed -n 's/^d_biz = "\(.*\)"$/\1/p' "$4")
 case "$biz_date" in
   2026-08-14) stage=PREPARING ;;
   2026-08-15) stage=STREAMING ;;
@@ -625,7 +623,9 @@ fn non_loopback_listen_emits_the_required_warning() {
 }
 
 #[test]
-fn column_fetch_shape_failure_reports_all_checks_without_a_run_code() {
+fn column_fetch_rejects_an_invalid_spec_before_reaching_oracle() {
+    // SQL 形状预检整段取消（ADR-0036 §5）后，取列前的本地闸只剩规格自身的合法性：
+    // 标识符白名单、主键落在选中列里这一类。它仍必须在**连 Oracle 之前**判完。
     let directory = temp_directory();
     let (port, _config, child, _ready) =
         start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
@@ -634,36 +634,28 @@ fn column_fetch_shape_failure_reports_all_checks_without_a_run_code() {
         port,
         "/api/columns",
         r#"{
-          "source_sql":"SELECT a.id AS ID, a.biz_day AS BIZ_DAY FROM orders a WHERE a.biz_day >= TO_DATE(:biz_date,'YYYY-MM-DD') AND a.biz_day < TO_DATE(:biz_date,'YYYY-MM-DD') + 1",
-          "source_date_col":"BIZ_DAY",
-          "target_table":"ORDERS",
-          "target_date_col":"OTHER_DAY"
+          "spec":{
+            "owner":"APP","table":"ORDERS","target_table":"ORDERS",
+            "columns":["ID"],"primary_key":["MISSING"],
+            "conditions":[],"order_by":[]
+          }
         }"#,
     )
     .unwrap();
 
-    assert_eq!(response.status, 422);
+    assert_eq!(response.status, 400, "{}", response.body);
     let body: Value = serde_json::from_str(&response.body).unwrap();
-    assert_eq!(body["kind"], "sql_shape");
+    assert_eq!(body["kind"], "request");
     assert!(body.get("code").is_none());
     assert!(body.get("run_id").is_none());
-    let checks = body["checks"].as_array().unwrap();
-    assert_eq!(checks.len(), 6);
-    assert_eq!(
-        checks
-            .iter()
-            .filter(|check| check["passed"] == true)
-            .count(),
-        5
-    );
-    assert!(checks.iter().all(|check| check.get("code").is_none()));
+    assert!(body["message"].as_str().unwrap().contains("MISSING"));
 
     assert_success(&terminate(child));
     fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
-fn builder_generation_is_transient_and_its_sql_passes_all_shape_checks() {
+fn builder_sql_is_derived_from_the_spec_and_never_travels_back() {
     let directory = temp_directory();
     let (port, _config, child, _ready) =
         start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
@@ -675,36 +667,31 @@ fn builder_generation_is_transient_and_its_sql_passes_all_shape_checks() {
           "dblink":"FA",
           "owner":"HTBR45",
           "table":"T_R_FR_ASTSTAT",
-          "columns":["N_VA_PRICE","D_BIZ"],
-          "source_date_col":"D_BIZ",
           "target_table":"T_POSITION",
-          "target_date_col":"D_BIZ"
+          "columns":["N_VA_PRICE","D_BIZ"],
+          "primary_key":["D_BIZ"],
+          "conditions":[{"column":"D_BIZ","operator":"eq","value_type":"date","parameter":"d_biz","value_source":"runtime","constant":""}],
+          "order_by":[{"column":"D_BIZ","direction":"desc"}]
         }"#,
     )
     .unwrap();
 
-    assert_eq!(generated.status, 200);
-    let task: Value = serde_json::from_str(&generated.body).unwrap();
-    assert_eq!(task.as_object().unwrap().len(), 4);
-    assert_eq!(task["source_date_col"], "D_BIZ");
-    assert!(task["source_sql"]
-        .as_str()
-        .unwrap()
-        .contains("T_R_FR_ASTSTAT@FA"));
-
-    let shape = post(port, "/api/sql-shape", &generated.body).unwrap();
-    assert_eq!(shape.status, 200);
-    let shape: Value = serde_json::from_str(&shape.body).unwrap();
-    assert_eq!(shape["checks"].as_array().unwrap().len(), 6);
-    assert!(
-        shape["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|check| check["passed"] == true),
-        "shape report: {}",
-        shape
+    assert_eq!(generated.status, 200, "{}", generated.body);
+    let derived: Value = serde_json::from_str(&generated.body).unwrap();
+    // 派生面恰好两样（ADR-0036 §6 的前两样；第三样在报文里）。
+    assert_eq!(derived.as_object().unwrap().len(), 2);
+    let sql = derived["source_sql"].as_str().unwrap();
+    assert!(sql.contains("T_R_FR_ASTSTAT@FA"), "{sql}");
+    assert!(sql.contains("TO_DATE(:d_biz,'YYYY-MM-DD')"), "{sql}");
+    assert!(sql.ends_with(" ORDER BY a.D_BIZ DESC"), "{sql}");
+    assert_eq!(
+        derived["run_parameters"],
+        serde_json::json!([{ "parameter": "d_biz", "column": "D_BIZ", "value_type": "date" }])
     );
+
+    // 形状预检那个端点整段没了（ADR-0036 §5），不是改了语义。
+    let retired = post(port, "/api/sql-shape", &generated.body).unwrap();
+    assert_eq!(retired.status, 404);
 
     let tasks = get(port, "/api/tasks").unwrap();
     assert_eq!(tasks.status, 200);
@@ -756,10 +743,11 @@ fn column_fetch_oracle_failure_does_not_create_a_run_touch_sink_or_write_storage
         port,
         "/api/columns",
         r#"{
-          "source_sql":"SELECT a.id AS ID, a.biz_day AS BIZ_DAY FROM missing_orders a WHERE a.biz_day >= TO_DATE(:biz_date,'YYYY-MM-DD') AND a.biz_day < TO_DATE(:biz_date,'YYYY-MM-DD') + 1",
-          "source_date_col":"BIZ_DAY",
-          "target_table":"ORDERS",
-          "target_date_col":"BIZ_DAY"
+          "spec":{
+            "owner":"APP","table":"MISSING_ORDERS","target_table":"ORDERS",
+            "columns":["ID","BIZ_DAY"],"primary_key":["ID"],
+            "conditions":[],"order_by":[]
+          }
         }"#,
     )
     .unwrap();
@@ -938,12 +926,7 @@ fn assert_task_fields(task: &Value) {
 }
 
 fn create_task(port: u16) -> String {
-    let response = post(
-        port,
-        "/api/tasks",
-        r#"{"name":"holdings","source_sql":"SELECT ID, D_BIZ FROM HOLDINGS WHERE D_BIZ >= TO_DATE(:biz_date,'YYYY-MM-DD') AND D_BIZ < TO_DATE(:biz_date,'YYYY-MM-DD') + 1","source_date_col":"D_BIZ","target_table":"HOLDINGS","target_date_col":"D_BIZ"}"#,
-    )
-    .unwrap();
+    let response = post(port, "/api/tasks", &task_json("holdings", "HOLDINGS")).unwrap();
     assert_eq!(response.status, 201, "{}", response.body);
     json_body(&response)["task_id"].as_str().unwrap().to_owned()
 }
@@ -952,11 +935,12 @@ fn start_run(port: u16, task_id: &str) -> String {
     start_run_for_date(port, task_id, "2026-08-14")
 }
 
+/// 发起一次运行。运行参数只有一个 `d_biz`——它是任务自己声明的参数名，不是产品概念。
 fn start_run_for_date(port: u16, task_id: &str, biz_date: &str) -> String {
     let response = post(
         port,
         "/api/runs",
-        &format!(r#"{{"task_id":"{task_id}","biz_date":"{biz_date}"}}"#),
+        &format!(r#"{{"task_id":"{task_id}","run_params":{{"d_biz":"{biz_date}"}}}}"#),
     )
     .unwrap();
     assert_eq!(response.status, 202, "{}", response.body);

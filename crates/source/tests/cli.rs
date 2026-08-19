@@ -9,63 +9,42 @@ use serde_json::Value;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 #[test]
-fn invalid_shape_reports_all_problems_without_network_access() {
+fn an_unusable_task_file_fails_before_any_network_access() {
+    // SQL 形状预检整段取消后（ADR-0036 §5），子进程开跑前的本地闸只剩「任务文件读得动」这一条。
+    // 它仍必须在**碰网络之前**判完：形状不过时不发请求那条口径，换了对象没换性质。
     let directory = temp_directory();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let config = write_source_config(&directory, listener.local_addr().unwrap().port());
-    let task = write_task(
-        &directory,
-        "SELECT *, amount * 2 FROM orders WHERE biz_day = SYSDATE AND status = 'OPEN'",
-        "BIZ_DAY",
-        "OTHER_DAY",
-    );
+    let task = directory.join("task.toml");
+    fs::write(&task, "[spec]\nowner = \"APP\"\ngranularity = \"DAY\"\n").unwrap();
 
-    let output = run_source(&config, &task, "2026-08-14");
+    let output = run_source(&config, &task);
 
     assert_eq!(output.status.code(), Some(1));
-    assert!(
-        listener.accept().is_err(),
-        "precheck failure sent a request"
-    );
+    assert!(listener.accept().is_err(), "config failure sent a request");
     let lines = json_lines(&output.stdout);
     assert_common_fields(&lines, &fs::canonicalize(&task).unwrap());
     assert!(lines.iter().all(|line| line["run_id"].is_null()));
     let failure = lines
         .iter()
-        .find(|line| line["event"] == "sql_shape_precheck_failed")
+        .find(|line| line["event"] == "task_config_failed")
         .unwrap();
-    let codes: Vec<_> = failure["problems"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|problem| problem["code"].as_str().unwrap())
-        .collect();
-    assert!(codes.contains(&"relative_time_function"));
-    assert!(codes.contains(&"invalid_date_predicate"));
-    assert!(codes.contains(&"additional_where_predicate"));
-    assert!(codes.contains(&"unnamed_projection"));
-    assert!(codes.contains(&"date_column_mismatch"));
-    assert_eq!(failure["failure_kind"], "SHAPE_PRECHECK");
+    assert_eq!(failure["failure_kind"], "CONFIG");
+    assert!(failure["message"].as_str().unwrap().contains("granularity"));
 
     fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
-fn valid_shape_attempts_oracle_describe_before_sink() {
+fn a_usable_spec_attempts_oracle_describe_before_sink() {
     let directory = temp_directory();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let config = write_source_config(&directory, listener.local_addr().unwrap().port());
-    let task = write_task(
-        &directory,
-        "SELECT a.id AS ID, a.biz_day AS BIZ_DAY FROM orders a \
-         WHERE a.biz_day >= TO_DATE(:biz_date,'YYYY-MM-DD') \
-         AND a.biz_day < TO_DATE(:biz_date,'YYYY-MM-DD') + 1",
-        "BIZ_DAY",
-        "biz_day",
-    );
-    let output = run_source(&config, &task, "2026-08-14");
+    let task = write_task(&directory);
+
+    let output = run_source(&config, &task);
 
     assert_eq!(output.status.code(), Some(1));
     assert!(
@@ -74,9 +53,6 @@ fn valid_shape_attempts_oracle_describe_before_sink() {
     );
     let lines = json_lines(&output.stdout);
     assert_common_fields(&lines, &fs::canonicalize(&task).unwrap());
-    assert!(lines
-        .iter()
-        .any(|line| line["event"] == "sql_shape_precheck_passed"));
     assert!(lines
         .iter()
         .any(|line| line["event"] == "run_finished" && line["stage"] == "PREPARING"));
@@ -108,13 +84,12 @@ fn valid_shape_attempts_oracle_describe_before_sink() {
     fs::remove_dir_all(directory).unwrap();
 }
 
-fn run_source(config: &Path, task: &Path, biz_date: &str) -> std::process::Output {
+fn run_source(config: &Path, task: &Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_db-qbs-source-run"))
         .args(["--config"])
         .arg(config)
         .args(["--task"])
         .arg(task)
-        .args(["--biz-date", biz_date])
         .output()
         .unwrap()
 }
@@ -138,21 +113,28 @@ fn write_source_config(directory: &Path, port: u16) -> PathBuf {
     path
 }
 
-fn write_task(
-    directory: &Path,
-    sql: &str,
-    source_date_col: &str,
-    target_date_col: &str,
-) -> PathBuf {
+/// 一份可用的任务文件：结构化规格 + 本次运行参数，与父进程物化出来的那份同形。
+fn write_task(directory: &Path) -> PathBuf {
     let path = directory.join("task.toml");
     fs::write(
         &path,
-        format!(
-            "source_sql = '''{sql}'''\n\
-             source_date_col = \"{source_date_col}\"\n\
-             target_table = \"ORDERS\"\n\
-             target_date_col = \"{target_date_col}\"\n"
-        ),
+        "[spec]\n\
+         owner = \"APP\"\n\
+         table = \"ORDERS\"\n\
+         target_table = \"ORDERS\"\n\
+         columns = [\"ID\", \"BIZ_DAY\"]\n\
+         primary_key = [\"ID\"]\n\
+         \n\
+         [[spec.conditions]]\n\
+         column = \"BIZ_DAY\"\n\
+         operator = \"eq\"\n\
+         value_type = \"date\"\n\
+         parameter = \"biz_day\"\n\
+         value_source = \"runtime\"\n\
+         constant = \"\"\n\
+         \n\
+         [run_params]\n\
+         biz_day = \"2026-08-14\"\n",
     )
     .unwrap();
     path

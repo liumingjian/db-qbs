@@ -7,7 +7,8 @@ const baseHistory: RunHistory = {
   run_record_id: "record-1",
   run_id: "run-1",
   task_id: "task-1",
-  biz_date: "2026-08-14",
+  run_params: { d_biz: "2026-08-14" },
+  source_sql: "SELECT a.ID AS ID\n  FROM APP.ORDERS a",
   staging_table: "STG_1",
   started_at: "2026-08-15T10:00:00.000Z",
   finished_at: "2026-08-15T10:01:00.000Z",
@@ -37,7 +38,6 @@ const baseHistory: RunHistory = {
   bytes: 64,
   ms: 10,
   last_ts: "2026-08-15T10:01:00.000Z",
-  shape_checks: [],
   mapping_issues: [],
 };
 

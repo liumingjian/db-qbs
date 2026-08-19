@@ -11,11 +11,11 @@ import {
 import { messageFrom } from "./errors";
 import { historyPresentation, runIdPresentation } from "./history";
 import type { HistoryPresentation } from "./history";
+import { runParamsSummary } from "./spec";
 
 export function HistoryScreen({ tasks }: { tasks: Task[] }) {
   const [history, setHistory] = useState<RunHistory[] | null>(null);
   const [taskId, setTaskId] = useState("");
-  const [bizDate, setBizDate] = useState("");
   const [refreshing, setRefreshing] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -78,7 +78,7 @@ export function HistoryScreen({ tasks }: { tasks: Task[] }) {
         <button
           className="button is-ghost"
           type="button"
-          onClick={() => void loadHistory({ taskId, bizDate })}
+          onClick={() => void loadHistory({ taskId })}
           disabled={refreshing}
         >
           <RefreshCw
@@ -103,14 +103,6 @@ export function HistoryScreen({ tasks }: { tasks: Task[] }) {
               </option>
             ))}
           </select>
-        </label>
-        <label className="filter-field">
-          <span>业务日期</span>
-          <input
-            type="date"
-            value={bizDate}
-            onChange={(event) => setBizDate(event.target.value)}
-          />
         </label>
       </div>
       {error !== null && (
@@ -163,7 +155,7 @@ function HistoryResults({
             <th>RUN_RECORD_ID</th>
             <th>RUN_ID</th>
             <th>任务</th>
-            <th>业务日期</th>
+            <th>运行参数</th>
             <th className="outcome-column">结局</th>
             <th>错误码</th>
             <th className="numeric-column">行数</th>
@@ -226,7 +218,9 @@ function HistoryTableRow({
           <span className="task-name">{taskName ?? row.task_id}</span>
           <span className="task-id">{row.task_id}</span>
         </td>
-        <td className="mono">{row.biz_date}</td>
+        <td className="mono run-params-cell" title={runParamsSummary(row.run_params)}>
+          {runParamsSummary(row.run_params)}
+        </td>
         <td className="outcome-column">
           <HistoryOutcome row={row} presentation={presentation} />
         </td>
@@ -348,7 +342,7 @@ function RunHistoryDetail({
         <DetailValue label="run_record_id" value={row.run_record_id} />
         <DetailValue label="run_id" value={runIdPresentation(row)} />
         <DetailValue label="task" value={taskName ?? row.task_id} />
-        <DetailValue label="biz_date" value={row.biz_date} />
+        <DetailValue label="run_params" value={runParamsSummary(row.run_params)} />
         <DetailValue label="staging_table" value={row.staging_table ?? "—"} />
         <DetailValue
           label="started_at"
@@ -405,6 +399,15 @@ function RunHistoryDetail({
           )}
         </>
       )}
+
+      <section className="history-source-sql">
+        <h2>当次执行的源端 SQL</h2>
+        <p>
+          这是<strong>当时实际执行</strong>的语句快照（ADR-0036 §2），任务定义之后怎么改都不会改到它。
+          存的是未绑定的语句文本，参数值不内联——值看上面的 <code>run_params</code>。
+        </p>
+        <pre className="mono">{row.source_sql}</pre>
+      </section>
 
       <HistoryMetrics row={row} />
       {(row.column !== null || row.value !== null) &&

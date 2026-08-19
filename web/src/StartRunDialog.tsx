@@ -1,10 +1,11 @@
 import { Play, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 
 import { listRunHistory, startRun } from "./api";
-import type { RunHistory, Task } from "./api";
+import type { Condition, RunHistory, RunParams, Task } from "./api";
 import { messageFrom } from "./errors";
+import { comparisonSymbol, runtimeConditions, sameRunParams } from "./spec";
 
 /** 已跑多久。提示条本身就自称可能滞后，所以这里给个粗粒度就够，不做秒级跳动。 */
 function elapsedSince(startedAt: string): string {
@@ -22,6 +23,12 @@ function elapsedSince(startedAt: string): string {
   return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分钟`;
 }
 
+const INPUT_TYPES: Readonly<Record<Condition["value_type"], string>> = {
+  text: "text",
+  number: "number",
+  date: "date",
+};
+
 export function StartRunDialog({
   task,
   onClose,
@@ -31,41 +38,59 @@ export function StartRunDialog({
   onClose: () => void;
   onStarted: (runRecordId: string) => void;
 }) {
-  const [bizDate, setBizDate] = useState("");
+  const parameters = useMemo(() => runtimeConditions(task.spec), [task.spec]);
+  const [values, setValues] = useState<RunParams>(() =>
+    Object.fromEntries(
+      runtimeConditions(task.spec).map((condition) => [condition.parameter, ""]),
+    ),
+  );
   // 存的是那条进行中的记录本身，不是一个布尔——提示条要报出它的 run_record_id 和已跑时长，
   // 否则人只知道「可能有一个 run」，却没有任何办法去看它。
   const [runningRow, setRunningRow] = useState<RunHistory | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const allFilled = parameters.every(
+    (condition) => (values[condition.parameter] ?? "") !== "",
+  );
+
   useEffect(() => {
-    if (bizDate === "") {
+    if (!allFilled) {
       setRunningRow(null);
       return;
     }
     let active = true;
-    void listRunHistory({ taskId: task.task_id, bizDate })
-      .then((rows) => {
-        if (active) {
-          setRunningRow(rows.find((row) => row.outcome === null) ?? null);
-        }
-      })
-      .catch(() => {
-        if (active) {
-          setRunningRow(null);
-        }
-      });
+    // 逐个参数敲的时候不要每键一次就问一次后端——这条提示本来就自称可能滞后。
+    const timer = window.setTimeout(() => {
+      void listRunHistory({ taskId: task.task_id })
+        .then((rows) => {
+          if (active) {
+            setRunningRow(
+              rows.find(
+                (row) =>
+                  row.outcome === null && sameRunParams(row.run_params, values),
+              ) ?? null,
+            );
+          }
+        })
+        .catch(() => {
+          if (active) {
+            setRunningRow(null);
+          }
+        });
+    }, 250);
     return () => {
       active = false;
+      window.clearTimeout(timer);
     };
-  }, [bizDate, task.task_id]);
+  }, [allFilled, task.task_id, values]);
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     setSubmitting(true);
     setError(null);
     try {
-      const accepted = await startRun(task.task_id, bizDate);
+      const accepted = await startRun(task.task_id, values);
       onStarted(accepted.run_record_id);
     } catch (startError) {
       setError(messageFrom(startError));
@@ -94,18 +119,41 @@ export function StartRunDialog({
         </header>
         <form onSubmit={(event) => void handleSubmit(event)}>
           <div className="modal-body form-stack">
-            <label className="form-field">
-              <span>业务日期</span>
-              <input
-                type="date"
-                required
-                value={bizDate}
-                onChange={(event) => setBizDate(event.target.value)}
-              />
-            </label>
+            {parameters.length === 0 ? (
+              <p className="run-params-empty">
+                这个任务没有「运行时填」的条件，发起时无需取值。
+                <span>
+                  并发互斥此时退化成「同一个任务不许并跑」（ADR-0036 §7）。
+                </span>
+              </p>
+            ) : (
+              <div className="run-params" aria-label="运行参数">
+                {parameters.map((condition) => (
+                  <label className="form-field" key={condition.parameter}>
+                    <span className="field-label">
+                      {condition.parameter}
+                      <span className="field-badge mono">
+                        {condition.column} {comparisonSymbol(condition.operator)}
+                      </span>
+                    </span>
+                    <input
+                      type={INPUT_TYPES[condition.value_type]}
+                      required
+                      value={values[condition.parameter] ?? ""}
+                      onChange={(event) =>
+                        setValues((current) => ({
+                          ...current,
+                          [condition.parameter]: event.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+                ))}
+              </div>
+            )}
             {runningRow !== null && (
               <div className="stale-run-hint">
-                <strong>该任务该业务日期可能已有一个 run 进行中。</strong>
+                <strong>该任务以同一组运行参数可能已有一个 run 进行中。</strong>
                 <span className="mono">
                   {runningRow.run_record_id} · 已跑 {elapsedSince(runningRow.started_at)}
                 </span>
@@ -122,7 +170,7 @@ export function StartRunDialog({
             <button className="button is-ghost" type="button" onClick={onClose}>
               取消
             </button>
-            <button className="button is-primary" type="submit">
+            <button className="button is-primary" type="submit" disabled={submitting}>
               <Play size={15} aria-hidden="true" />
               {submitting ? "正在发起" : "发起"}
             </button>

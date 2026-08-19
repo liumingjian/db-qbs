@@ -14,10 +14,9 @@ use std::time::Duration;
 use chrono::Utc;
 use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
 use db_qbs_source::{
-    embedded_web_asset, generate_builder_task, generate_target_ddl, load_source_config,
-    parse_biz_date, sql_shape_report, validate_builder_dblink, BuilderTaskInput, HistoryChange,
-    HistoryStore, OracleRowSource, RunHistory, SourceConfig, Task, TaskConfig, TaskInput,
-    TaskStore, UnknownReason,
+    embedded_web_asset, generate_target_ddl, load_source_config, validate_builder_dblink,
+    ColumnPrecision, HistoryChange, HistoryStore, OracleRowSource, RunHistory, RunParams,
+    SourceConfig, Task, TaskConfig, TaskInput, TaskSpec, TaskStore, UnknownReason,
 };
 use rand::RngCore;
 use serde::de::DeserializeOwned;
@@ -39,7 +38,9 @@ struct RunState {
 
 struct ActiveRun {
     task_id: String,
-    biz_date: String,
+    /// 互斥键的后半段：本次运行参数集（ADR-0036 §7）。`RunParams` 是 `BTreeMap`，
+    /// 相等比较天然按参数名排序、值原样比，正是那份规范形式。
+    run_params: RunParams,
     child_pid: Option<u32>,
     stage: Option<String>,
 }
@@ -61,7 +62,8 @@ struct ServerState<'a> {
 #[serde(deny_unknown_fields)]
 struct StartRunInput {
     task_id: String,
-    biz_date: String,
+    #[serde(default)]
+    run_params: RunParams,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +78,16 @@ struct BuilderColumnsInput {
     dblink: Option<String>,
     owner: String,
     table: String,
+}
+
+/// 取列请求。`column_precision` **不在任务定义里**（ADR-0036 §6）：目标表 DDL 生成吃的是
+/// describe 回来的源列，属「取列」链，这份精度提示随请求一起来、用完即弃。
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ColumnFetchInput {
+    spec: TaskSpec,
+    #[serde(default)]
+    column_precision: Option<ColumnPrecision>,
 }
 
 fn main() -> ExitCode {
@@ -242,10 +254,6 @@ fn route_api_request(
         return handle_column_fetch(request, state.config);
     }
 
-    if method == Method::Post && path == "/api/sql-shape" {
-        return handle_sql_shape(request);
-    }
-
     if method == Method::Post && path == "/api/builder/tables" {
         return handle_builder_tables(request, state.config);
     }
@@ -318,30 +326,50 @@ fn handle_start_run(request: &mut Request, state: &ServerState<'_>) -> HttpRespo
         Ok(input) => input,
         Err(error) => return bad_request(error),
     };
-    if let Err(error) = parse_biz_date(&input.biz_date) {
-        return bad_request(error.to_owned());
-    }
     let task = match state.tasks.get(&input.task_id) {
         Ok(Some(task)) => task,
         Ok(None) => return not_found(),
         Err(error) => return internal_error(error),
     };
+    // 发起时逐条取值：规格声明了哪些参数要运行时填，这里就必须恰好填哪些。
+    if let Err(error) = check_run_params(&task.spec, &input.run_params) {
+        return bad_request(error);
+    }
 
     match start_run(
         state.config,
         state.config_path,
         &task,
-        &input.biz_date,
+        input.run_params,
         state.history,
         state.runs,
     ) {
         Ok(run_record_id) => json_response(202, &json!({ "run_record_id": run_record_id })),
         Err(StartRunError::AlreadyRunning) => json_response(
             409,
-            &json!({ "error": { "message": "该任务该业务日期已有 run 进行中" } }),
+            &json!({ "error": { "message": "该任务以同一组运行参数已有 run 进行中" } }),
         ),
         Err(StartRunError::Internal(error)) => internal_error(error),
     }
+}
+
+fn check_run_params(spec: &TaskSpec, run_params: &RunParams) -> Result<(), String> {
+    let declared: Vec<&str> = spec
+        .runtime_parameters()
+        .into_iter()
+        .map(|condition| condition.parameter.as_str())
+        .collect();
+    for parameter in &declared {
+        if !run_params.contains_key(*parameter) {
+            return Err(format!("运行参数 {parameter} 未取值"));
+        }
+    }
+    for parameter in run_params.keys() {
+        if !declared.iter().any(|declared| declared == parameter) {
+            return Err(format!("运行参数 {parameter} 不在任务定义里"));
+        }
+    }
+    Ok(())
 }
 
 fn handle_cancel_run(runs: &RunRegistry, run_record_id: &str) -> HttpResponse {
@@ -396,13 +424,13 @@ fn handle_get_run(
         Err(_) => return internal_error("run 投影锁已损坏".to_owned()),
     };
     if let Some(record) = record {
-        let observed_biz_date = record.run_id.as_ref().map(|_| &record.biz_date);
         return json_response(
             200,
             &json!({
                 "run_record_id": run_record_id,
                 "run_id": record.run_id,
-                "biz_date": observed_biz_date,
+                "run_params": record.run_params,
+                "source_sql": record.source_sql,
                 "staging_table": record.staging_table,
                 "stage": record.stage,
                 "seq": record.seq,
@@ -423,15 +451,12 @@ fn handle_get_run(
 
 fn handle_list_history(history_store: &HistoryStore, query: Option<&str>) -> HttpResponse {
     let mut task_id = None;
-    let mut biz_date = None;
     for (key, value) in url::form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
-        match key.as_ref() {
-            "task_id" => task_id = Some(value.into_owned()),
-            "biz_date" => biz_date = Some(value.into_owned()),
-            _ => {}
+        if key.as_ref() == "task_id" {
+            task_id = Some(value.into_owned());
         }
     }
-    match history_store.list(task_id.as_deref(), biz_date.as_deref()) {
+    match history_store.list(task_id.as_deref()) {
         Ok(history) => json_response(200, &history),
         Err(error) => internal_error(error),
     }
@@ -451,18 +476,20 @@ fn start_run(
     config: &SourceConfig,
     config_path: &Path,
     task: &Task,
-    biz_date: &str,
+    run_params: RunParams,
     history_store: &HistoryStore,
     runs: &RunRegistry,
 ) -> Result<String, StartRunError> {
     let run_record_id = generate_run_record_id();
-    let mut history = RunHistory::accepted(&run_record_id, &task.task_id, biz_date, Utc::now());
-    let task_config = task_config_from_task(task);
-    history.shape_checks = sql_shape_report(&task_config)
-        .into_iter()
-        .map(|check| serde_json::to_value(check).expect("shape checks must serialize"))
-        .collect();
-    register_active_run(runs, &run_record_id, &task.task_id, biz_date)?;
+    // 历史里钉的是**当次实际执行**的语句文本（ADR-0036 §2）：规格以后改了它也不跟着变。
+    let mut history = RunHistory::accepted(
+        &run_record_id,
+        &task.task_id,
+        run_params.clone(),
+        &task.spec.source_sql(),
+        Utc::now(),
+    );
+    register_active_run(runs, &run_record_id, &task.task_id, &run_params)?;
     if let Err(error) = history_store.insert(&history, Utc::now(), config.history_retention_days) {
         remove_active_run(runs, &run_record_id);
         return Err(StartRunError::Internal(error));
@@ -472,7 +499,7 @@ fn start_run(
         .live_histories
         .insert(run_record_id.clone(), history.clone());
 
-    let task_path = match materialize_task(config, task, &run_record_id) {
+    let task_path = match materialize_task(config, task, &run_params, &run_record_id) {
         Ok(path) => path,
         Err(error) => {
             history.mark_parent_failure(error.clone(), Utc::now());
@@ -487,8 +514,6 @@ fn start_run(
         .arg(config_path)
         .arg("--task")
         .arg(&task_path)
-        .arg("--biz-date")
-        .arg(biz_date)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .spawn()
@@ -536,12 +561,13 @@ fn start_run(
 fn materialize_task(
     config: &SourceConfig,
     task: &Task,
+    run_params: &RunParams,
     run_record_id: &str,
 ) -> Result<PathBuf, String> {
     let directory = config.data_dir.join(RUN_TASKS_DIRECTORY);
     fs::create_dir_all(&directory).map_err(|error| format!("创建临时任务目录失败：{error}"))?;
     let path = directory.join(format!("task-{run_record_id}.toml"));
-    let task_config = task_config_from_task(task);
+    let task_config = task_config_from_task(task, run_params);
     let contents = toml::to_string(&task_config)
         .map_err(|error| format!("序列化临时任务定义失败：{error}"))?;
     let mut file = OpenOptions::new()
@@ -557,13 +583,10 @@ fn materialize_task(
     Ok(path)
 }
 
-fn task_config_from_task(task: &Task) -> TaskConfig {
+fn task_config_from_task(task: &Task, run_params: &RunParams) -> TaskConfig {
     TaskConfig {
-        source_sql: task.source_sql.clone(),
-        source_date_col: task.source_date_col.clone(),
-        target_table: task.target_table.clone(),
-        target_date_col: task.target_date_col.clone(),
-        column_precision: task.column_precision.clone(),
+        spec: task.spec.clone(),
+        run_params: run_params.clone(),
     }
 }
 
@@ -645,7 +668,7 @@ fn register_active_run(
     runs: &RunRegistry,
     run_record_id: &str,
     task_id: &str,
-    biz_date: &str,
+    run_params: &RunParams,
 ) -> Result<(), StartRunError> {
     let mut runs = runs
         .lock()
@@ -653,7 +676,7 @@ fn register_active_run(
     if runs
         .active_runs
         .values()
-        .any(|run| run.task_id == task_id && run.biz_date == biz_date)
+        .any(|run| run.task_id == task_id && &run.run_params == run_params)
     {
         return Err(StartRunError::AlreadyRunning);
     }
@@ -661,7 +684,7 @@ fn register_active_run(
         run_record_id.to_owned(),
         ActiveRun {
             task_id: task_id.to_owned(),
-            biz_date: biz_date.to_owned(),
+            run_params: run_params.clone(),
             child_pid: None,
             stage: None,
         },
@@ -795,14 +818,6 @@ fn embedded_response(body: Vec<u8>, content_type: &str, path: &str) -> HttpRespo
         .with_header(cache_control_header)
 }
 
-fn handle_sql_shape(request: &mut Request) -> HttpResponse {
-    let task: TaskConfig = match read_json_body(request) {
-        Ok(task) => task,
-        Err(error) => return bad_request(error),
-    };
-    json_response(200, &json!({ "checks": sql_shape_report(&task) }))
-}
-
 fn handle_builder_tables(request: &mut Request, config: &SourceConfig) -> HttpResponse {
     let input: BuilderLinkInput = match read_json_body(request) {
         Ok(input) => input,
@@ -839,15 +854,33 @@ fn handle_builder_columns(request: &mut Request, config: &SourceConfig) -> HttpR
     }
 }
 
+/// 规格的派生面之一（ADR-0036 §6）：源端 SQL 与运行参数清单。
+///
+/// **只读**——v1 界面上没有编辑入口，所以这里只出不进：web 拿规格来换一份现算的 SQL 展示，
+/// 不存在「web 改了 SQL 再传回来」这条路。
 fn handle_builder_sql(request: &mut Request) -> HttpResponse {
-    let input: BuilderTaskInput = match read_json_body(request) {
-        Ok(input) => input,
+    let spec: TaskSpec = match read_json_body(request) {
+        Ok(spec) => spec,
         Err(error) => return bad_request(error),
     };
-    match generate_builder_task(input) {
-        Ok(task) => json_response(200, &task),
-        Err(error) => bad_request(error),
+    if let Err(error) = spec.validate() {
+        return bad_request(error);
     }
+    let parameters = spec
+        .runtime_parameters()
+        .into_iter()
+        .map(|condition| {
+            json!({
+                "parameter": condition.parameter,
+                "column": condition.column,
+                "value_type": condition.value_type,
+            })
+        })
+        .collect::<Vec<_>>();
+    json_response(
+        200,
+        &json!({ "source_sql": spec.source_sql(), "run_parameters": parameters }),
+    )
 }
 
 fn oracle_failure(error: db_qbs_source::SourceReadError) -> HttpResponse {
@@ -872,8 +905,8 @@ fn handle_column_fetch(request: &mut Request, config: &SourceConfig) -> HttpResp
             &json!({ "kind": "request", "message": format!("could not read request: {error}") }),
         );
     }
-    let task: TaskConfig = match serde_json::from_str(&body) {
-        Ok(task) => task,
+    let input: ColumnFetchInput = match serde_json::from_str(&body) {
+        Ok(input) => input,
         Err(error) => {
             return json_response(
                 400,
@@ -881,28 +914,19 @@ fn handle_column_fetch(request: &mut Request, config: &SourceConfig) -> HttpResp
             )
         }
     };
-
-    let checks = sql_shape_report(&task);
-    if checks.iter().any(|check| !check.passed) {
-        return json_response(
-            422,
-            &json!({
-                "kind": "sql_shape",
-                "message": "source-local SQL shape precheck failed",
-                "checks": checks,
-            }),
-        );
+    if let Err(error) = input.spec.validate() {
+        return json_response(400, &json!({ "kind": "request", "message": error }));
     }
 
-    let columns = match OracleRowSource::describe(config, &task) {
+    let columns = match OracleRowSource::describe(config, &input.spec) {
         Ok(columns) => columns,
         Err(error) => return oracle_failure(error),
     };
     match generate_target_ddl(
         &columns,
-        &task.target_table,
-        &task.target_date_col,
-        task.column_precision.as_ref(),
+        &input.spec.target_table,
+        &input.spec.primary_key,
+        input.column_precision.as_ref(),
     ) {
         Ok(target_ddl) => json_response(
             200,

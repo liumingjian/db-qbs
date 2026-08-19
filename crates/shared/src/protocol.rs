@@ -98,8 +98,11 @@ pub struct PrecheckIssue {
 pub struct OpenRunRequest {
     pub run_id: String,
     pub target_table: String,
-    pub target_date_col: String,
-    pub biz_date: String,
+    /// upsert 的去重键（ADR-0035 §2）。用户在构建器里勾，sink 侧预检去目标表核对
+    /// 「约束确有、列在选中列里、列 NOT NULL」三条——缺约束时
+    /// `ON DUPLICATE KEY UPDATE` 会**静默退化成纯 INSERT**，重跑就出重复行。
+    /// 撤掉 DELETE 之后，那条预检是唯一挡住静默重复的东西。
+    pub primary_key: Vec<String>,
     pub source_columns: Vec<SourceColumn>,
     /// 3.5 步：source 回发的值域校核结果。永久可选（#106 裁定 Q14/Q15）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -141,6 +144,7 @@ pub struct CommitRequest {
 pub struct CommitResponse {
     pub source_rows: u64,
     pub staged_rows: u64,
+    /// 新写入模型下**恒为 0**，字段保留（ADR-0035 §4）。这句话是真的：确实没删任何行。
     pub purged_rows: u64,
     pub swapped_rows: u64,
     pub count_ms: u64,

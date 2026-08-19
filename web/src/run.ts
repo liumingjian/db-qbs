@@ -1,13 +1,11 @@
 import type { RunDetail } from "./api";
 import type { RunPhase } from "./components/DesignSystem";
 import { historyPresentation } from "./history";
-import { failedShapeRuleCount } from "./shape";
 
 export type RunPresentationKind =
   | "accepted"
   | "live"
   | "succeeded"
-  | "shape-failed"
   | "mapping-failed"
   | "failed"
   | "unknown";
@@ -67,20 +65,9 @@ export function runPresentation(detail: RunDetail): RunPresentation {
       metrics,
     };
   }
-  const oldShapeFailure =
-    detail.failure_kind === null &&
-    detail.run_id === null &&
-    failedShapeRuleCount(detail.shape_checks) > 0;
-  if (detail.failure_kind === "SHAPE_PRECHECK" || oldShapeFailure) {
-    return {
-      kind: "shape-failed",
-      phase: null,
-      conclusion: shapeFailureConclusion(detail),
-      terminalEffect: null,
-      error: null,
-      metrics,
-    };
-  }
+  // SQL 形状预检那一支已随 ADR-0036 §5 整段取消，这里不再有对应的展示分支：
+  // `SHAPE_PRECHECK` 是个不会再产生的分类值（闭集只增不删），落到通用失败一支即可，
+  // 结论条前缀由 `failureKindLabel` 给出。
   if (detail.sink_code === "PRECHECK_FAILED") {
     return {
       kind: "mapping-failed",
@@ -100,19 +87,6 @@ export function runPresentation(detail: RunDetail): RunPresentation {
     error: presentation.error,
     metrics,
   };
-}
-
-/**
- * 形状预检失败的中文人话结论。
- *
- * source 回的 `message` 是英文原文（属于 API 语义，不动），直接拿来当结论条等于没给结论。
- * 这里按映射预检那条（「目标端：映射预检未通过：一次发现 1 项问题，未创建暂存表」）的句式
- * 给源端配一句，并明写目标表未被触碰——形状不过时根本没向 sink 发过请求。
- */
-function shapeFailureConclusion(detail: RunDetail & { live: false }): string {
-  const failed = failedShapeRuleCount(detail.shape_checks);
-  const count = failed === 0 ? "" : `一次发现 ${failed} 项问题，`;
-  return `源端：SQL 形状预检未通过：${count}未向 sink 发出请求，未创建暂存表，目标表未被触碰。`;
 }
 
 function runPhase(stage: string | null): RunPhase | null {

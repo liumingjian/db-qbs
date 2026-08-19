@@ -363,7 +363,6 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-hook",
- "sqlparser",
  "tiny_http",
  "toml",
  "ureq",

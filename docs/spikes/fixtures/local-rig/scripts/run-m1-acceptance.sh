@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # Issue #45: one-entry M1 rig acceptance orchestration. Run on the ADR-0005 arm64 mac rig.
+#
+# 【2026-08-18 #121 起未跑，需按 #122 重做】写入模型已由「按业务日期 DELETE + INSERT」
+# 换成按主键 upsert（ADR-0035 §1），任务定义换成结构化规格（ADR-0036）。本脚本的**调用面**
+# 已随之改到新形态，但**判据没有重新推导**：涉及 purged_rows、当日范围被清空、哨兵行被删除
+# 这一类断言仍是 DELETE 时代的语义，在 upsert 下不再成立。台架扩展与判据重推归 #122。
 set -uo pipefail
 
 SCENARIOS=(
@@ -207,10 +212,12 @@ prepare_rig() {
   start_sink
 }
 
+# `--biz-date` 随 ADR-0035 §3 取消：本次运行的取值由任务文件的 `[run_params]` 带进来。
+# 第二个参数留着只为不动调用点，实际不再传给子进程。
 run_source() {
-  local task=$1 biz_date=$2 log=$3 config=${4:-$SOURCE_CONFIG}
+  local task=$1 _biz_date=$2 log=$3 config=${4:-$SOURCE_CONFIG}
   compose exec -T client "$SOURCE_BIN" \
-    --config "$config" --task "$task" --biz-date "$biz_date" > "$log"
+    --config "$config" --task "$task" > "$log"
 }
 
 source_run_id() {
@@ -309,7 +316,7 @@ scenario_source_kill() {
 
   compose exec -T client rm -f /tmp/m1-source.pid /tmp/m1-kill.jsonl || return 1
   compose exec -T -d client sh -c \
-    "echo \$\$ > /tmp/m1-source.pid; exec $SOURCE_BIN --config $SOURCE_CONFIG --task $NARROW_TASK --biz-date $BIZ_DATE > /tmp/m1-kill.jsonl" || return 1
+    "echo \$\$ > /tmp/m1-source.pid; exec $SOURCE_BIN --config $SOURCE_CONFIG --task $NARROW_TASK > /tmp/m1-kill.jsonl" || return 1
   for (( attempt = 1; attempt <= 400; attempt++ )); do
     if compose exec -T client sh -c \
       "test -f /tmp/m1-kill.jsonl && grep -q '\"event\":\"batch_pushed\"' /tmp/m1-kill.jsonl"; then
@@ -362,7 +369,7 @@ scenario_sink_kill() {
   # Background plus `wait` instead of `exec`: the wrapper has to outlive the source to
   # record its exit status, while /tmp/m1-source.pid stays the source pid that cleanup kills.
   compose exec -T -d client sh -c \
-    "$SOURCE_BIN --config $SOURCE_CONFIG --task $NARROW_TASK --biz-date $BIZ_DATE > /tmp/m1-sink-kill.jsonl & echo \$! > /tmp/m1-source.pid; wait \$!; echo \$? > /tmp/m1-sink-kill.rc" || return 1
+    "$SOURCE_BIN --config $SOURCE_CONFIG --task $NARROW_TASK > /tmp/m1-sink-kill.jsonl & echo \$! > /tmp/m1-source.pid; wait \$!; echo \$? > /tmp/m1-sink-kill.rc" || return 1
   for (( attempt = 1; attempt <= 400; attempt++ )); do
     if compose exec -T client sh -c \
       "test -f /tmp/m1-sink-kill.jsonl && grep -q '\"event\":\"batch_pushed\"' /tmp/m1-sink-kill.jsonl"; then
@@ -489,11 +496,10 @@ api_post() {
 
 open_narrow_run() {
   local run_id=$1 payload
-  payload=$(jq -nc --arg run_id "$run_id" --arg date "$BIZ_DATE" '{
+  payload=$(jq -nc --arg run_id "$run_id" '{
     run_id: $run_id,
     target_table: "M1_NARROW",
-    target_date_col: "D_BIZ",
-    biz_date: $date,
+    primary_key: ["ROW_ID"],
     source_columns: [
       {name:"ROW_ID", type:"NUMBER", precision:8, scale:0, length:null},
       {name:"V_TEXT", type:"VARCHAR2", precision:null, scale:null, length:200},

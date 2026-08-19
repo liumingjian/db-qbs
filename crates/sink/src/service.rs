@@ -1,11 +1,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use chrono::NaiveDate;
 use regex::Regex;
 use serde_json::json;
 
-use crate::precheck::{precheck_with_date_column, range_check_columns, range_check_issue};
+use crate::precheck::{precheck_with_primary_key, range_check_columns, range_check_issue};
 use crate::{
     AbortResponse, ActiveRun, ApiError, AtomicSwapError, AtomicSwapRequest, BatchPayload,
     BatchResponse, CommitResponse, CreateStagingError, Destination, DropStagingError,
@@ -42,11 +41,24 @@ impl<D: Destination> SinkService<D> {
                 run_id: Some(request.run_id.clone()),
                 details: json!({ "kind": "OTHER" }),
             })?;
-        let mut issues = precheck_with_date_column(
+        let target_keys = self
+            .destination
+            .target_keys(&request.target_table)
+            .map_err(|message| ApiError {
+                status: 500,
+                code: "STAGING_CREATE_FAILED",
+                message: format!(
+                    "读取目标表唯一约束失败：{message}。这是目标端环境故障，目标表未被改动"
+                ),
+                run_id: Some(request.run_id.clone()),
+                details: json!({ "kind": "OTHER" }),
+            })?;
+        let mut issues = precheck_with_primary_key(
             &request.target_table,
-            &request.target_date_col,
+            &request.primary_key,
             &request.source_columns,
             &target_columns,
+            &target_keys,
         );
         let range_columns = range_check_columns(&request.source_columns, &target_columns);
         if !range_columns.is_empty() {
@@ -95,22 +107,13 @@ impl<D: Destination> SinkService<D> {
             .into_iter()
             .map(|column| column.name.clone())
             .collect();
-        let biz_date = NaiveDate::parse_from_str(&request.biz_date, "%Y-%m-%d")
-            .expect("open request date was validated");
-        let biz_date_end = biz_date
-            .succ_opt()
-            .expect("open request date has a following day")
-            .format("%Y-%m-%d")
-            .to_string();
         let active_run = ActiveRun {
             staging_table: staging_table.clone(),
             max_rows_per_insert: MAX_PREPARED_STATEMENT_PLACEHOLDERS / source_columns.len(),
             source_columns,
             swap_columns,
             target_table: request.target_table,
-            target_date_col: request.target_date_col,
-            biz_date_start: request.biz_date,
-            biz_date_end,
+            primary_key: request.primary_key,
             next_seq: 1,
             rows_written: 0,
             sealed: false,
@@ -245,9 +248,7 @@ impl<D: Destination> SinkService<D> {
         let swap_request = AtomicSwapRequest {
             staging_table: run.staging_table.clone(),
             target_table: run.target_table.clone(),
-            target_date_col: run.target_date_col.clone(),
-            biz_date_start: run.biz_date_start.clone(),
-            biz_date_end: run.biz_date_end.clone(),
+            primary_key: run.primary_key.clone(),
             columns: run.swap_columns.clone(),
             source_rows: total_rows,
             source_batches: total_batches,
@@ -702,15 +703,8 @@ fn validate_open_request(request: &OpenRunRequest) -> Result<(), ApiError> {
     if request.target_table.is_empty() {
         problems.push("target_table 不能为空");
     }
-    if request.target_date_col.is_empty() {
-        problems.push("target_date_col 不能为空");
-    }
-    match NaiveDate::parse_from_str(&request.biz_date, "%Y-%m-%d") {
-        Ok(date) if date.succ_opt().is_none() => {
-            problems.push("biz_date 必须存在可表示的下一日，以生成半开区间");
-        }
-        Err(_) => problems.push("biz_date 必须是有效的 YYYY-MM-DD 日历日"),
-        Ok(_) => {}
+    if request.primary_key.is_empty() {
+        problems.push("primary_key 不能为空：upsert 的去重键必选");
     }
     if request.source_columns.is_empty() {
         problems.push("source_columns 不能为空");

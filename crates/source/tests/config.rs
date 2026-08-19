@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use db_qbs_source::{load_source_config, load_task_config, parse_biz_date, ColumnPrecision};
+use db_qbs_source::{load_source_config, load_task_config, TaskConfig};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -17,7 +17,7 @@ fn unknown_source_and_task_fields_are_named() {
     let task = write(
         &directory,
         "task.toml",
-        &format!("{}granularity = \"DAY\"\n", valid_task()),
+        &format!("{}\n[spec.granularity]\nunit = \"DAY\"\n", valid_task()),
     );
 
     let source_error = load_source_config(&source).unwrap_err().to_string();
@@ -32,7 +32,7 @@ fn unknown_source_and_task_fields_are_named() {
 fn missing_and_malformed_files_name_the_file_kind_and_path() {
     let directory = temp_directory();
     let missing_source = directory.join("missing-source.toml");
-    let malformed_task = write(&directory, "broken-task.toml", "source_sql = [\n");
+    let malformed_task = write(&directory, "broken-task.toml", "[spec]\ncolumns = [\n");
 
     let source_error = load_source_config(&missing_source).unwrap_err().to_string();
     let task_error = load_task_config(&malformed_task).unwrap_err().to_string();
@@ -70,45 +70,54 @@ fn source_service_settings_require_listen_and_apply_documented_defaults() {
 }
 
 #[test]
-fn business_date_is_an_exact_timezone_free_calendar_day() {
-    assert!(parse_biz_date("2024-02-29").is_ok());
-    for invalid in [
-        "2023-02-29",
-        "0000-01-01",
-        "2026-8-14",
-        "2026-08-14Z",
-        "2026-08-14T00:00:00+08:00",
-    ] {
-        assert!(parse_biz_date(invalid).is_err(), "accepted {invalid}");
-    }
+fn the_task_file_carries_a_spec_and_this_run_parameters_and_nothing_else() {
+    let directory = temp_directory();
+    let path = write(&directory, "task.toml", valid_task());
+
+    let loaded = load_task_config(&path).unwrap();
+    assert_eq!(loaded.spec.owner, "APP");
+    assert_eq!(loaded.spec.primary_key, vec!["ID".to_owned()]);
+    assert_eq!(loaded.run_params["d_biz"], "2026-08-14");
+    // SQL 由规格现算（ADR-0036 §2）——两端算的是同一份，不存在「存下来的那份对不上」。
+    assert!(loaded.source_sql().contains("TO_DATE(:d_biz,'YYYY-MM-DD')"));
+    assert_eq!(
+        loaded.bindings().unwrap(),
+        vec![("d_biz".to_owned(), "2026-08-14".to_owned())]
+    );
+
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
-fn task_precision_subtable_is_optional_and_preserves_negative_scale() {
+fn column_precision_is_not_a_task_definition_field_any_more() {
+    // 它随取列请求走、用完即弃（ADR-0036 §6）。任务文件里再出现就是配置错，要点名。
     let directory = temp_directory();
-    let legacy = write(&directory, "legacy-task.toml", valid_task());
-    let configured = write(
+    let path = write(
         &directory,
-        "configured-task.toml",
+        "task.toml",
         &format!(
-            "{}\n[column_precision]\nN_AMT = [20, 4]\nN_RATE = [38, -30]\n",
+            "{}\n[spec.column_precision]\nN_AMT = [20, 4]\n",
             valid_task()
         ),
     );
 
-    assert_eq!(load_task_config(&legacy).unwrap().column_precision, None);
+    let error = load_task_config(&path).unwrap_err().to_string();
+    assert!(error.contains("column_precision"), "{error}");
 
-    let mut expected = ColumnPrecision::new();
-    expected.insert("N_AMT".to_owned(), [20, 4]);
-    expected.insert("N_RATE".to_owned(), [38, -30]);
-    assert_eq!(
-        load_task_config(&configured).unwrap().column_precision,
-        Some(expected)
-    );
-    let loaded = load_task_config(&configured).unwrap();
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn a_materialized_task_file_survives_a_serialize_reload_round_trip() {
+    // 临时任务定义是父进程写、子进程读的。`conditions` / `order_by` 是 array-of-tables，
+    // 必须排在所有标量之后，否则 `toml::to_string` 直接失败——这条用例就是那道闸。
+    let directory = temp_directory();
+    let path = write(&directory, "task.toml", valid_task());
+    let loaded = load_task_config(&path).unwrap();
+
     let serialized = toml::to_string(&loaded).unwrap();
-    assert!(serialized.contains("[column_precision]"));
-    assert!(serialized.contains("N_RATE = [38, -30]"));
+    let round_tripped: TaskConfig = toml::from_str(&serialized).unwrap();
+    assert_eq!(round_tripped, loaded);
 
     fs::remove_dir_all(directory).unwrap();
 }
@@ -124,10 +133,23 @@ fn valid_source() -> &'static str {
 }
 
 fn valid_task() -> &'static str {
-    "source_sql = \"SELECT id FROM orders\"\n\
-     source_date_col = \"BIZ_DAY\"\n\
+    "[spec]\n\
+     owner = \"APP\"\n\
+     table = \"ORDERS\"\n\
      target_table = \"ORDERS\"\n\
-     target_date_col = \"BIZ_DAY\"\n"
+     columns = [\"ID\", \"D_BIZ\"]\n\
+     primary_key = [\"ID\"]\n\
+     \n\
+     [[spec.conditions]]\n\
+     column = \"D_BIZ\"\n\
+     operator = \"eq\"\n\
+     value_type = \"date\"\n\
+     parameter = \"d_biz\"\n\
+     value_source = \"runtime\"\n\
+     constant = \"\"\n\
+     \n\
+     [run_params]\n\
+     d_biz = \"2026-08-14\"\n"
 }
 
 fn write(directory: &Path, name: &str, contents: &str) -> PathBuf {

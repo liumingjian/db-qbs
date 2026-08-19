@@ -4,11 +4,11 @@ import {
   ApiError,
   createTask,
   deleteTask,
+  emptySpec,
   fetchBuilderColumns,
   fetchBuilderTables,
   fetchColumns,
-  generateBuilderTask,
-  inspectSqlShape,
+  generateBuilderSql,
   cancelRun,
   fetchRun,
   listRunHistory,
@@ -17,6 +17,19 @@ import {
   taskInputFrom,
   updateTask,
 } from "./api";
+import type { TaskSpec } from "./api";
+
+function spec(overrides: Partial<TaskSpec> = {}): TaskSpec {
+  return {
+    ...emptySpec(),
+    owner: "APP",
+    table: "HOLDINGS",
+    target_table: "HOLDINGS",
+    columns: ["ID", "D_BIZ"],
+    primary_key: ["ID"],
+    ...overrides,
+  };
+}
 
 describe("task API", () => {
   afterEach(() => {
@@ -24,16 +37,7 @@ describe("task API", () => {
   });
 
   it("loads tasks from the source process", async () => {
-    const tasks = [
-      {
-        task_id: "task-01",
-        name: "持仓明细",
-        source_sql: "SELECT ID, D_BIZ FROM HOLDINGS",
-        source_date_col: "D_BIZ",
-        target_table: "HOLDINGS",
-        target_date_col: "D_BIZ",
-      },
-    ];
+    const tasks = [{ task_id: "task-01", name: "持仓明细", spec: spec() }];
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify(tasks), {
         status: 200,
@@ -48,14 +52,8 @@ describe("task API", () => {
     });
   });
 
-  it("creates a task with the five editable fields", async () => {
-    const input = {
-      name: "持仓明细",
-      source_sql: "SELECT ID, D_BIZ FROM HOLDINGS",
-      source_date_col: "D_BIZ",
-      target_table: "HOLDINGS",
-      target_date_col: "D_BIZ",
-    };
+  it("creates a task as a name plus one structured spec", async () => {
+    const input = { name: "持仓明细", spec: spec() };
     const created = { task_id: "task-01", ...input };
     const fetchMock = vi
       .fn()
@@ -73,14 +71,37 @@ describe("task API", () => {
     });
   });
 
-  it("updates and deletes a task by its stable identity", async () => {
+  it("never sends a SQL string with the task definition", async () => {
     const input = {
-      name: "持仓日明细",
-      source_sql: "SELECT ID, D_BIZ FROM HOLDINGS",
-      source_date_col: "D_BIZ",
-      target_table: "HOLDINGS_DAILY",
-      target_date_col: "D_BIZ",
+      name: "持仓明细",
+      spec: spec({
+        conditions: [
+          {
+            column: "D_BIZ",
+            operator: "eq",
+            value_type: "date",
+            parameter: "d_biz",
+            value_source: "runtime",
+            constant: "",
+          },
+        ],
+      }),
     };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ task_id: "t", ...input }), { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createTask(input);
+
+    // ADR-0036 §2：SQL 由规格现算，任务定义里一个字都不存。
+    const body = String(fetchMock.mock.calls[0][1].body);
+    expect(body).not.toContain("SELECT");
+    expect(body).not.toContain("source_sql");
+  });
+
+  it("updates and deletes a task by its stable identity", async () => {
+    const input = { name: "持仓日明细", spec: spec({ target_table: "HOLDINGS_DAILY" }) };
     const task = { task_id: "task/id", ...input };
     const fetchMock = vi
       .fn()
@@ -116,53 +137,16 @@ describe("task API", () => {
     );
 
     await expect(
-      createTask({
-        name: "",
-        source_sql: "",
-        source_date_col: "",
-        target_table: "",
-        target_date_col: "",
-      }),
+      createTask({ name: "", spec: emptySpec() }),
     ).rejects.toThrow("任务定义请求体无效");
   });
 
-  it("projects a stored task to editable fields without its identity", () => {
-    const task = {
-      task_id: "task-01",
-      name: "持仓明细",
-      source_sql: "SELECT ID, D_BIZ FROM HOLDINGS",
-      source_date_col: "D_BIZ",
-      target_table: "HOLDINGS",
-      target_date_col: "D_BIZ",
-    };
+  it("projects a stored task to name plus spec without its identity", () => {
+    const task = { task_id: "task-01", name: "持仓明细", spec: spec() };
 
     expect(taskInputFrom(task, { name: "持仓日明细" })).toEqual({
       name: "持仓日明细",
-      source_sql: task.source_sql,
-      source_date_col: task.source_date_col,
-      target_table: task.target_table,
-      target_date_col: task.target_date_col,
-    });
-  });
-
-  it("preserves optional column precision when projecting a stored task", () => {
-    const task = {
-      task_id: "task-01",
-      name: "持仓明细",
-      source_sql: "SELECT ID, N_AMT, D_BIZ FROM HOLDINGS",
-      source_date_col: "D_BIZ",
-      target_table: "HOLDINGS",
-      target_date_col: "D_BIZ",
-      column_precision: { N_AMT: [20, 4] as [number, number] },
-    };
-
-    expect(taskInputFrom(task)).toEqual({
-      name: task.name,
-      source_sql: task.source_sql,
-      source_date_col: task.source_date_col,
-      target_table: task.target_table,
-      target_date_col: task.target_date_col,
-      column_precision: task.column_precision,
+      spec: task.spec,
     });
   });
 });
@@ -172,7 +156,7 @@ describe("run history API", () => {
     vi.unstubAllGlobals();
   });
 
-  it("loads history with task and business-date filters", async () => {
+  it("filters run history by task and nothing else", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response("[]", {
         status: 200,
@@ -181,14 +165,12 @@ describe("run history API", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(
-      listRunHistory({ taskId: "task/a", bizDate: "2026-08-14" }),
-    ).resolves.toEqual([]);
+    // 业务日期那一维随 ADR-0035 §3 一起没了：运行参数是任务自定义的名字，筛不出通用维度。
+    await expect(listRunHistory({ taskId: "task/a" })).resolves.toEqual([]);
     expect(fetchMock).toHaveBeenCalledOnce();
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/runs?task_id=task%2Fa&biz_date=2026-08-14",
-      { headers: { Accept: "application/json" } },
-    );
+    expect(fetchMock).toHaveBeenCalledWith("/api/runs?task_id=task%2Fa", {
+      headers: { Accept: "application/json" },
+    });
   });
 
   it("starts, reads, and cancels a run by its two stable inputs", async () => {
@@ -196,7 +178,8 @@ describe("run history API", () => {
     const live = {
       run_record_id: accepted.run_record_id,
       run_id: null,
-      biz_date: null,
+      run_params: { d_biz: "2026-08-14" },
+      source_sql: "SELECT a.ID AS ID\n  FROM APP.HOLDINGS a",
       staging_table: null,
       stage: null,
       seq: 0,
@@ -214,19 +197,35 @@ describe("run history API", () => {
       .mockResolvedValueOnce(new Response(JSON.stringify(canceled), { status: 202 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(startRun("task-01", "2026-08-14")).resolves.toEqual(accepted);
+    await expect(startRun("task-01", { d_biz: "2026-08-14" })).resolves.toEqual(accepted);
     await expect(fetchRun(accepted.run_record_id)).resolves.toEqual(live);
     await expect(cancelRun(accepted.run_record_id)).resolves.toEqual(canceled);
 
     expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/runs", expect.objectContaining({
       method: "POST",
-      body: JSON.stringify({ task_id: "task-01", biz_date: "2026-08-14" }),
+      body: JSON.stringify({
+        task_id: "task-01",
+        run_params: { d_biz: "2026-08-14" },
+      }),
     }));
     expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/runs/record%2F01", {
       headers: { Accept: "application/json" },
     });
     expect(fetchMock).toHaveBeenNthCalledWith(3, "/api/runs/record%2F01/cancel", expect.objectContaining({
       method: "POST",
+    }));
+  });
+
+  it("starts a run with no parameters at all", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ run_record_id: "r1" }), { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await startRun("task-01", {});
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/runs", expect.objectContaining({
+      body: JSON.stringify({ task_id: "task-01", run_params: {} }),
     }));
   });
 });
@@ -269,43 +268,40 @@ describe("SQL builder API", () => {
     expect(columns[0]).not.toHaveProperty("supported");
   });
 
-  it("generates exactly the four task-definition fields", async () => {
+  it("exchanges a spec for the read-only SQL and its run parameters", async () => {
     const output = {
-      source_sql: "SELECT a.D_BIZ AS D_BIZ FROM ORDERS a WHERE a.D_BIZ >= :biz_date AND a.D_BIZ < :biz_date + 1",
-      source_date_col: "D_BIZ",
-      target_table: "ORDERS",
-      target_date_col: "D_BIZ",
+      source_sql:
+        "SELECT a.ID AS ID\n  FROM APP.HOLDINGS a\n WHERE a.D_BIZ = TO_DATE(:d_biz,'YYYY-MM-DD')",
+      run_parameters: [
+        { parameter: "d_biz", column: "D_BIZ", value_type: "date" },
+      ],
     };
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify(output), { status: 200 }),
-    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify(output), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(generateBuilderTask({
-      dblink: "",
-      owner: "APP",
-      table: "ORDERS",
-      columns: ["D_BIZ"],
-      source_date_col: "D_BIZ",
-      target_table: "ORDERS",
-      target_date_col: "D_BIZ",
-    })).resolves.toEqual(output);
-    expect(Object.keys(output)).toEqual([
-      "source_sql",
-      "source_date_col",
-      "target_table",
-      "target_date_col",
-    ]);
+    const input = spec({
+      conditions: [
+        {
+          column: "D_BIZ",
+          operator: "eq",
+          value_type: "date",
+          parameter: "d_biz",
+          value_source: "runtime",
+          constant: "",
+        },
+      ],
+    });
+    await expect(generateBuilderSql(input)).resolves.toEqual(output);
+    // 只出不进：送出去的是规格，回来的是 SQL，没有把 SQL 传回后端的路（ADR-0036 §1）。
+    expect(fetchMock).toHaveBeenCalledWith("/api/builder/sql", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify(input),
+    }));
   });
 
-  it("requests shape feedback separately from the side-effect-free column fetch", async () => {
-    const task = {
-      source_sql: "SELECT D_BIZ FROM ORDERS",
-      source_date_col: "D_BIZ",
-      target_table: "ORDERS",
-      target_date_col: "D_BIZ",
-    };
-    const checks = [{ rule: "business_date_range", passed: false, message: "bad range" }];
+  it("fetches columns from the spec, with column precision kept off the task definition", async () => {
     const columns = {
       // /api/columns 回的是 type，不是 builder 那个端点的 data_type
       columns: [{ name: "D_BIZ", type: "DATE", precision: null, scale: null, length: null }],
@@ -313,27 +309,29 @@ describe("SQL builder API", () => {
     };
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ checks }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(columns), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(columns), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(inspectSqlShape(task)).resolves.toEqual(checks);
-    await expect(fetchColumns(task)).resolves.toEqual(columns);
-    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/sql-shape", expect.objectContaining({ method: "POST" }));
-    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/columns", expect.objectContaining({ method: "POST" }));
+    const input = spec();
+    await expect(fetchColumns(input)).resolves.toEqual(columns);
+    await expect(fetchColumns(input, { N_AMT: [20, 4] })).resolves.toEqual(columns);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/columns", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ spec: input }),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/columns", expect.objectContaining({
+      body: JSON.stringify({ spec: input, column_precision: { N_AMT: [20, 4] } }),
+    }));
   });
 
-  it("preserves structured shape failures from column fetches", async () => {
+  it("preserves structured target-DDL failures from column fetches", async () => {
     const body = {
-      kind: "sql_shape",
-      message: "source-local SQL shape precheck failed",
-      checks: [
-        {
-          rule: "business_date_range",
-          passed: false,
-          message: "bad range",
-        },
-      ],
+      kind: "target_ddl",
+      message: "2 column(s) cannot be expressed in the target table",
+      columns: [{ column: "C_MEMO", source: "CLOB", message: "不支持的类型" }],
+      described_columns: [],
     };
     vi.stubGlobal(
       "fetch",
@@ -342,20 +340,11 @@ describe("SQL builder API", () => {
       ),
     );
 
-    const request = fetchColumns({
-      source_sql: "SELECT D_BIZ FROM ORDERS",
-      source_date_col: "D_BIZ",
-      target_table: "ORDERS",
-      target_date_col: "D_BIZ",
-    });
-
-    const error = await request.catch((requestError: unknown) => requestError);
+    const error = await fetchColumns(spec()).catch(
+      (requestError: unknown) => requestError,
+    );
 
     expect(error).toBeInstanceOf(ApiError);
-    expect(error).toMatchObject({
-      message: body.message,
-      status: 422,
-      body,
-    });
+    expect(error).toMatchObject({ message: body.message, status: 422, body });
   });
 });
