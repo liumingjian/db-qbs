@@ -152,6 +152,13 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .form-field > span { font-family: var(--font-num); font-size: var(--size-meta); }
 .field-label { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .field-badge { margin-left: auto; padding: 1px 7px; border: 1px solid var(--warn-bd); border-radius: var(--badge-radius); background: var(--warn-bg); color: var(--warn); font-family: var(--font-cn); font-size: var(--size-cap); }
+/* ADR-0039 §9 第 1 条：表格内的目标字段输入框，与单元格同高、不撑破行。 */
+.data-grid .cell-input { width: 100%; min-width: 90px; height: 26px; padding: 0 7px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-size: var(--size-cap); }
+.data-grid .cell-input:focus { border-color: var(--brand); outline: 0; box-shadow: 0 0 0 2px var(--brand-dim); }
+.data-grid .cell-input:disabled { border-color: var(--line); background: var(--mute-bg); color: var(--mute); }
+/* ADR-0039 §9 第 4 条：未映射的目标列整行压暗——它是参考信息，不是待办项。
+   压暗**不是拦截**：预检拒不拒是 sink 的事，构建器只亮不判（ADR-0023 §4）。 */
+.data-grid tr.is-unmapped td { color: var(--mute); }
 /* ADR-0039 §9 第 2 条：口令「已设置 / 未设置」是**事实陈述，不是成功或失败**——
    既有 .field-badge 换三个中性色令牌，不新造组件（同 M3 .row-size-warning.is-crit 的走法）。 */
 .field-badge.is-neutral { border-color: var(--line-strong); background: var(--mute-bg); color: var(--mute); }

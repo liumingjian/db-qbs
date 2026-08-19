@@ -25,6 +25,41 @@ export function targetFieldOf(
   return columns.find((mapping) => mapping.source === source)?.target;
 }
 
+/**
+ * 改目标字段名——**主键跟着走**（ADR-0039 增补 1）。
+ *
+ * 这是换名字空间的单点：`columns[].target` 与 `primary_key` 存的是同一个名字，改一处
+ * 另一处必须同步重写。**不许出现「界面勾着、`TaskSpec` 里是旧名」的中间态**——
+ * 那会一路走到 sink 预检才炸成「主键列必须落在本次选中的列里」，而用户什么都没做错。
+ *
+ * 主键里的**顺序原样保留**（它是复合键的列序，不是集合）；改成一个已经在主键里的名字时
+ * 不留重复项。源列没选中时原样返回，不凭空造一条映射。
+ */
+export function renameTargetField(
+  spec: Pick<TaskSpec, "columns" | "primary_key">,
+  source: string,
+  nextTarget: string,
+): Pick<TaskSpec, "columns" | "primary_key"> {
+  const previous = targetFieldOf(spec.columns, source);
+  if (previous === undefined || previous === nextTarget) {
+    return spec;
+  }
+  const columns = spec.columns.map((mapping) =>
+    mapping.source === source ? { ...mapping, target: nextTarget } : mapping,
+  );
+  if (!spec.primary_key.includes(previous)) {
+    return { columns, primary_key: spec.primary_key };
+  }
+  const primary_key: string[] = [];
+  for (const name of spec.primary_key) {
+    const renamed = name === previous ? nextTarget : name;
+    if (!primary_key.includes(renamed)) {
+      primary_key.push(renamed);
+    }
+  }
+  return { columns, primary_key };
+}
+
 export function comparisonSymbol(operator: Comparison): string {
   switch (operator) {
     case "gt":

@@ -6,6 +6,7 @@ import {
   comparisonSymbol,
   defaultParameterName,
   defaultValueType,
+  renameTargetField,
   runParamsSummary,
   runtimeConditions,
   sameRunParams,
@@ -113,5 +114,53 @@ describe("column mapping lookup", () => {
     expect(targetFieldOf([], "C_NAME")).toBeUndefined();
     // 目标名不是入口：拿目标字段去查也查不出来。
     expect(targetFieldOf(columns, "CUST_NAME")).toBeUndefined();
+  });
+});
+
+describe("renameTargetField（改目标名时主键跟着走）", () => {
+  const spec = {
+    columns: [
+      { source: "ID", target: "ID" },
+      { source: "C_NAME", target: "C_NAME" },
+      { source: "LOAD_DATE", target: "LOAD_DATE" },
+    ],
+    primary_key: ["ID", "C_NAME"],
+  };
+
+  it("改的那一列同时改掉映射与主键，顺序原样保留", () => {
+    const next = renameTargetField(spec, "C_NAME", "CUST_NAME");
+    expect(next.columns).toEqual([
+      { source: "ID", target: "ID" },
+      { source: "C_NAME", target: "CUST_NAME" },
+      { source: "LOAD_DATE", target: "LOAD_DATE" },
+    ]);
+    // 复合键的列序是有意义的：CUST_NAME 仍排在 ID 之后。
+    expect(next.primary_key).toEqual(["ID", "CUST_NAME"]);
+  });
+
+  it("改的列不在主键里时主键一个字不动", () => {
+    const next = renameTargetField(spec, "LOAD_DATE", "BIZ_DATE");
+    expect(next.primary_key).toEqual(["ID", "C_NAME"]);
+    expect(next.columns[2]).toEqual({ source: "LOAD_DATE", target: "BIZ_DATE" });
+  });
+
+  it("改成一个已经在主键里的名字时不留重复项", () => {
+    const next = renameTargetField(spec, "C_NAME", "ID");
+    expect(next.primary_key).toEqual(["ID"]);
+  });
+
+  it("没选中的源列原样返回，不凭空造一条映射", () => {
+    expect(renameTargetField(spec, "NOT_SELECTED", "X")).toBe(spec);
+  });
+
+  it("改成同一个名字是空操作", () => {
+    expect(renameTargetField(spec, "ID", "ID")).toBe(spec);
+  });
+
+  it("清空目标名不会留下「界面勾着、规格里是旧名」的中间态", () => {
+    const next = renameTargetField(spec, "ID", "");
+    expect(next.columns[0]).toEqual({ source: "ID", target: "" });
+    // 旧名 ID 已经不在主键里了——留着它就是那个被 ADR-0039 增补 1 明令禁止的中间态。
+    expect(next.primary_key).toEqual(["", "C_NAME"]);
   });
 });
