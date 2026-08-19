@@ -5,3 +5,5 @@ node_modules/
 /docs/spikes/fixtures/local-rig/number-shapes-generated.sql
 /docs/spikes/fixtures/local-rig/spike-number-shapes/target/
 /docs/spikes/fixtures/local-rig/spike-bc-date/target/
+/.claude/
+/.playwright/
