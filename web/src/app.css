@@ -265,17 +265,15 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .run-result { display: flex; flex-direction: column; gap: 12px; }
 .run-result-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
 .success-conclusion { max-width: 68ch; padding: 10px 13px; border-left: 3px solid var(--ok); background: var(--ok-bg); color: var(--dim); line-height: var(--lh-prose); }
-.precheck-reports { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1px solid var(--line); background: var(--line); gap: 1px; }
-.precheck-reports section { display: flex; flex-direction: column; gap: 9px; min-width: 0; padding: 13px; background: var(--panel); }
+/* 形状预检整段随 ADR-0036 §5 取消，这里只剩映射预检一段：容器不再分栏、不留占位空栏（#132）。 */
+.precheck-reports { border: 1px solid var(--line); background: var(--panel); }
+.precheck-reports section { display: flex; flex-direction: column; gap: 9px; padding: 13px; background: var(--panel); }
 .precheck-reports header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
 .precheck-reports header strong { font-size: 13px; font-weight: var(--weight-em); }
 .precheck-reports header span, .precheck-reports small { color: var(--mute); font-size: var(--size-cap); }
 .precheck-reports p { margin: 0; color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-copy); }
 .precheck-reports code { font-family: var(--font-num); }
 .precheck-reports .is-failed { border-top: 3px solid var(--crit); }
-.precheck-reports .is-passed { border-top: 3px solid var(--ok); }
-.precheck-reports .is-skipped { border-top: 3px solid var(--mute); background: var(--mute-bg); }
-.precheck-reports.is-map-failed > section { grid-column: 1 / -1; }
 .precheck-exit { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 12px; padding: 11px 13px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--mute-bg); color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-copy); }
 .precheck-exit code { font-family: var(--font-num); }
 .diagnostic-table-wrap { overflow-x: auto; border: 1px solid var(--line); }
@@ -347,12 +345,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .history-detail { padding-inline: 12px; }
   .run-header { align-items: flex-start; }
   .run-content { padding: 12px; }
-  .run-metrics, .precheck-reports { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .run-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 480px) {
   .environment { display: none; }
   .card-header { align-items: flex-start; }
   .search-field { min-width: 0; }
-  .run-metrics, .precheck-reports { grid-template-columns: minmax(0, 1fr); }
+  .run-metrics { grid-template-columns: minmax(0, 1fr); }
 }

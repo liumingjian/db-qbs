@@ -317,6 +317,9 @@ function RunConclusion({
  *
  * 这里过去是并排两段：source 本地的 SQL 形状预检 + sink 的映射预检。形状预检整段随
  * ADR-0036 §5 取消，于是只剩这一段——**不留占位空栏**，没有的东西不摆在屏上说「未执行」。
+ *
+ * 容器随之改成单段布局（#132）：两栏 grid 与 `is-map-failed`（「映射失败时整宽」）在只剩
+ * 一段之后都没有对象了，一并撤掉；态修饰只保留 `.is-failed`，本组件只在映射预检失败时渲染。
  */
 function PrecheckReports({
   detail,
@@ -324,7 +327,7 @@ function PrecheckReports({
   detail: RunDetail & { live: false };
 }) {
   return (
-    <div className="precheck-reports is-map-failed">
+    <div className="precheck-reports">
       <section className="is-failed">
         <header>
           <strong>映射预检</strong>
