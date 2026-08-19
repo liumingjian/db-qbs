@@ -115,7 +115,18 @@ impl<F: DestinationFactory> SinkService<F> {
             .iter()
             .map(|column| column.name.clone())
             .collect::<Vec<_>>();
-        let mut ordered_target_columns = target_columns.iter().collect::<Vec<_>>();
+        // 切换语句**只覆盖被映射到的列**。铺到目标表全部列的话，未映射列会被暂存表里那个
+        // NULL 一路写进目标表：预检按 ADR-0038 §5 第 3 分支放行了「未映射但有默认值」的列，
+        // 运行时却给它写 NULL，撞 `ERROR 1048`——预检与切换两套语义打架。
+        // 收窄之后，未映射列在 INSERT 时走它自己的 DEFAULT，在 UPDATE 时保持原值。
+        let mut ordered_target_columns = target_columns
+            .iter()
+            .filter(|column| {
+                source_columns
+                    .iter()
+                    .any(|mapped| mapped.eq_ignore_ascii_case(&column.name))
+            })
+            .collect::<Vec<_>>();
         ordered_target_columns.sort_by_key(|column| column.ordinal);
         let swap_columns = ordered_target_columns
             .into_iter()

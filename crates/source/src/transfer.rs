@@ -564,9 +564,14 @@ pub fn run_transfer(
         }
     };
 
+    // `swapped_rows` 的判据是**区间**不是等值：MySQL 在 `ON DUPLICATE KEY UPDATE` 下
+    // 插入记 1、更新记 2（ADR-0035 §4），值真变了的重跑必然大于 `staged_rows`。
+    // sink 侧 `mysql_destination.rs` 早已改成区间，这里的镜像断言当时漏改，
+    // 结果是「重跑改值」这条主路径必失败——#135 的 C4④ 抓到的就是它。
     if committed.source_rows != source_rows
         || committed.staged_rows != source_rows
-        || committed.swapped_rows != committed.staged_rows
+        || committed.swapped_rows < committed.staged_rows
+        || committed.swapped_rows > committed.staged_rows.saturating_mul(2)
     {
         observe(TransferEvent::StageChanged(RunStage::Failed));
         return Err(Box::new(

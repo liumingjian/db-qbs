@@ -18,6 +18,7 @@ cd docs/spikes/fixtures/local-rig
 ./scripts/run-m1-acceptance.sh           # 跑 #45 的九类 M1 验收并生成报告
 ./scripts/run-m2-acceptance.sh           # 跑 #72 的 A1–A14 M2 验收并生成报告
 ./scripts/run-m3-acceptance.sh           # 跑 #115 的 B1–B6 M3 验收并生成报告
+./scripts/run-v1-acceptance.sh           # 跑 #135 的 C1–C6 第一版验收并生成报告
 ./scripts/run-bulk-probe.sh              # 跑 #5 的内存形状探针（19 组配置矩阵）
 REPS=7 ./scripts/run-cpu-probe.sh        # 跑 #5 的客户端每行 CPU 探针（每档取中位数）
 ./scripts/run-mysql-roundtrip-probe.sh   # 跑 #13 的目标端往返实测（只起 MySQL，不用 Oracle）
@@ -336,3 +337,55 @@ run ID 与 W1–W6 的对应关系。这样 [`m3-visual-walkthrough.md`](m3-visu
 - **G2**：独立运行既有 `scripts/run-canon-gate.sh`，入口一字不改。
 - **W1–W6**：每次 M3 验收必须跑 [`m3-visual-walkthrough.md`](m3-visual-walkthrough.md)，逐条记录
   1024/1440 布局、五列报告、取列标记、DDL 占位符、白名单外列态和 B4 值域记录的实际观察。
+
+## 第一版的验收编排（第四个入口）
+
+判据见 [ADR-0040](../../adr/0040-v1-acceptance-criteria-and-rig-extension.md)（决策票
+[#122](https://github.com/liumingjian/db-qbs/issues/122)，实现票
+[#135](https://github.com/liumingjian/db-qbs/issues/135)）。第一版的验收面是**四份**台架
+（ADR-0040 §5.4）：M1 / M2 / M3 加上本入口，四份**串行**跑，共用同一套 docker 台架与端口。
+
+```bash
+M2_HOST_CARGO_TARGET=x86_64-apple-darwin \
+M2_ORACLE_CLIENT_LIB_DIR=/path/to/instantclient \
+  ./scripts/run-v1-acceptance.sh
+```
+
+入口依次跑 C1–C6：数据源 CRUD 与测试连接、不同名字段映射与目标端列面、用户可填筛选条件、
+主键 upsert 的幂等、映射预检三分支、内存形状。**编号字母全局唯一**：M2 是 A、M3 是 B、
+第一版是 C，任何情况下不复用、不重编（ADR-0040 §2）。**没有 C7**——「10 万行 / 约 100MB」
+的兑现点是 M1 的 `wide-100k` 加 C6，重复设一个只会有两个各自漂移的真源（ADR-0040 §1）。
+
+fixture 是新建的 `acceptance/oracle-v1.sql` 与 `acceptance/mysql-v1.sql`，只触碰 `T_V1_*`
+与 `V1_*` 表；**`oracle.sql` / `mysql.sql` 一个字节不动**（M1 基线是常量）。C6 的源表是 M1 的
+`t_m1_wide`（ADR-0040 §3.3 字面「同一张宽表」），目标端另起 `V1_WIDE`，免得把 10 万行残留
+留给下一份 M1 台架。
+
+### C6 的内存高水位怎么量
+
+判据是 `peak(100k) − baseline ≤ 2 × (peak(10k) − baseline)`，**source 与 sink 各判一次，
+两条都绿才算 PASS**。量的是内核维护的单调高水位，**不是轮询采样**——采样会漏掉峰值，
+漏掉之后判据假绿，比没有判据更坏：
+
+- **source**（一次性进程）：`acceptance/v1-memory-wrapper.py` 夹在编排进程与真二进制之间，
+  用 `wait4()` 取子进程的 `ru_maxrss`。**单位不是跨平台常量**（macOS 字节 / Linux kB），
+  wrapper 记原始值、平台与归一到字节的值。
+- **sink**（常驻进程）：run 结束后读容器里的 `/proc/<pid>/status` 的 `VmHWM`（kB）。
+- **两档之间必须重启 sink**：`VmHWM` 跨 run 只增不减，不重启比值恒等于 1、判据永久假绿。
+  报告里记下两档的 sink pid，证明重启这一步确实执行过。
+- **基线随档走、一档一测**（ADR-0040 #135 增补 1）：sink 每档是新进程，source 的基线由一趟
+  `ROW_ID < 1` 的 0 行真 run 给出——连库、建暂存表、走完切换，唯独没搬第一行。
+- 四个绝对数与四个基线原样进报告；**不设绝对上限**，**耗时只记不判**。
+
+### 跑完默认不清场
+
+所有者 2026-08-19 裁定：跑完把台架留着，C1/C2 建出来的两条数据源与那个不同名映射的任务
+正是 X1–X8 走查过半条目要用的数据。要清场传 `--clean`（反选，不是默认）。
+`--list` 只列 C1–C6，不启动台架；`./scripts/test-v1-acceptance.sh` 是不起台架的静态自检。
+
+### 报告
+
+报告落 `v1-acceptance-<UTC>.md`，**开头是「客户五条需求 → 在哪儿验 → 本次结果」的五行对照表**
+（所有者裁定），随后是逐场景结果、C6 的六个内存数、逐条断言证据，以及两节交代边界的正文：
+台架能证到哪儿（C1② / C2② / C3③ 有一半在界面上，归 X 走查），以及三份视觉走查在本入口的
+触发情况。**不许写「通过」**——贴的是实际观察，没跑的写明「未跑及为什么」。
