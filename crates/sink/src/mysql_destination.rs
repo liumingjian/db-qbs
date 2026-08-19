@@ -4,7 +4,8 @@ use std::time::Instant;
 
 use mysql::prelude::Queryable;
 use mysql::{
-    params, Conn, Error as MysqlError, Opts, OptsBuilder, Params, TxOpts, Value as MysqlValue,
+    consts::CapabilityFlags, params, Conn, Error as MysqlError, Opts, OptsBuilder, Params, TxOpts,
+    Value as MysqlValue,
 };
 
 use crate::service::quote_identifier;
@@ -51,7 +52,12 @@ impl MysqlDestination {
             .tcp_port(target.port)
             .user(Some(target.username.clone()))
             .pass(Some(target.password.clone()))
-            .db_name(Some(target.database.clone()));
+            .db_name(Some(target.database.clone()))
+            // `CLIENT_FOUND_ROWS` 让 MySQL 按**匹配到的行**而不是**值真变了的行**计数。
+            // 少了它，`ON DUPLICATE KEY UPDATE` 对「值与目标端一模一样的既有行」记 0，
+            // 一次原地重跑的 `affected_rows` 就是 0，切换段的区间断言当场把成功判成
+            // `SWAP_FAILED`（#138）。带上之后这一档记 1，`[n, 2n]` 重新精确。
+            .additional_capabilities(CapabilityFlags::CLIENT_FOUND_ROWS);
         let pool = RitualPool::new(Opts::from(opts))?;
         Ok(Self {
             database: target.database.clone(),
@@ -297,6 +303,8 @@ SELECT INDEX_NAME, COLUMN_NAME
                 // MySQL 在 `ON DUPLICATE KEY UPDATE` 下 `affected_rows` **插入记 1、更新记 2**，
                 // 所以旧模型那条 `swapped_rows == staged_rows` 会把成功的任务全判成失败。
                 // 断言改成区间（ADR-0035 §4）——它仍抓得住「灌回时少写了行」这类真故障。
+                // 第三档「值未变的既有行记 0」由连接上的 `CLIENT_FOUND_ROWS` 抹平（#138），
+                // 所以这里的下界仍是 `staged_rows`，**不能**放宽到 0。
                 if swapped_rows < staged_rows || swapped_rows > staged_rows.saturating_mul(2) {
                     transaction.rollback()?;
                     let message = format!(
