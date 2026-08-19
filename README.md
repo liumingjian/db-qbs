@@ -28,7 +28,12 @@ SQL `AS` 别名。**尚未在生产环境部署过。**
 | `db-qbs-source-run` | 源端 | 一次性进程，跑一趟导入（由 `db-qbs-source` 拉起，也可单独跑） |
 
 前提：源端装好 **Oracle Instant Client 19c Basic 包**（`oracle_client_lib_dir` 指向它），
-目标端有 **MySQL 8.0**；构建机需要 Rust 1.80+ 与 Node.js 22+（node 16 编不过 `npm run build`）。
+目标端有 **MySQL 8.0**；构建机需要 Rust 1.85+ 与 Node.js 22+（`Cargo.lock` 里的 `zeroize` 要 edition2024，
+1.85 以下的 Cargo 解析不动；node 16 编不过 `npm run build`）。
+
+要装到 **CentOS 7（glibc 2.17）** 上的产物不能在这台构建机上直接编 —— 装上去启动即
+`GLIBC_2.xx not found`。那条路走 `packaging/centos7/build.sh`（一条命令编完并在干净
+`centos:7` 上验一次启动），见 `packaging/centos7/README.md`。
 
 ```sh
 cargo build --release
