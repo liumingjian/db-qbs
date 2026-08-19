@@ -1,5 +1,7 @@
-mysql_dsn = "mysql://spike:spike123@mysql:3306/qbs"
-database = "qbs"
+# `mysql_dsn` / `database` 已随 ADR-0037 §2 退役：目标端凭据与库名随每个 run 的
+# `POST /v1/runs` 报文过线，sink 不再持有自己的那一份，启动时也不再连 MySQL。
+# 留着它们只会让 sink 在启动时打一条「请删除」的 warn，所以这里删干净。
+#
 # Binds all interfaces because the M2 rig runs db-qbs-source on the host while the sink stays
 # in qbs-client; the container loopback is unreachable from there. Rig fixture only — the
 # product default stays loopback-bound (ADR-0024 4).

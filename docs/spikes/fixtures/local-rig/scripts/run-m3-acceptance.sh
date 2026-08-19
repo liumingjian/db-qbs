@@ -1,16 +1,27 @@
 #!/usr/bin/env bash
 # Issue #115 / ADR-0032: M3 type, mapping, and source-value acceptance on the local rig.
 #
-# 【2026-08-18 #121 起未跑，需按 ADR-0040 §5 重做】写入模型已由「按业务日期 DELETE + INSERT」
-# 换成按主键 upsert（ADR-0035 §1），任务定义换成结构化规格（ADR-0036）。本脚本**尚未改到新形态**：
-# 任务创建与发起运行的报文仍是退役的 `source_sql` / `biz_date` 形状，判据也仍是 DELETE 时代的
-# 语义（purged_rows、当日范围被清空、哨兵行被删除），在 upsert 下不再成立。
-# 台架改造与判据重推见 **ADR-0040 §5**。
+# 判据依据：**ADR-0040 §5.3**（M3 的 B1–B6，编号不动）。
+# 调用面整体改到新报文：任务创建带两个 datasource_id 与一份结构化 `TaskSpec`（ADR-0036 §1、
+# ADR-0037 §1/§8），发起运行带 `run_params` 而不是 `biz_date`，目标端连接随 run 报文过线。
 #
-# 【2026-08-19 #118 追加】数据源管理落地（ADR-0037）：任务定义多了两个数据源 id 绑定，
-# `POST /v1/runs` 多了 `target` 连接字段，`sink.toml` 的 mysql_dsn / database 已退役
-# （sink 启动不再连 MySQL，连不上的失败点挪到开 run）。本脚本的调用面**尚未跟进**，
-# 一并归 ADR-0040 §5。
+# 判据面：
+#
+#   * **B1「哨兵被删除」→「哨兵留存」**（与 M1 两个 kill 场景同一条理由：哨兵主键不在源结果集里，
+#     upsert 碰不到它）；
+#   * **B4 / B6 的哨兵留存不变**——它们本来就是被拒跑的用例，目标端从头到尾没被碰过；
+#   * B1 的 `N_EXPR` 与 B2 的 `C_EXPR` **失去对象**：投影只能是 `a.C AS C`（ADR-0036 §2 + §5，
+#     `oracle_source.rs` 里那句「表达式列在 v1 根本进不来」），表达式列造不出来。B2 的问题数
+#     因此从 10 变 8（另一条见下）。裁定见 ADR-0040 增补（2026-08-19，#134）。
+#   * B2 的 `EXTRA` **判据方向反了**：ADR-0038 §4 把「两边列名集合完全相等」撤成子集判定，
+#     一个未被映射的可空列不再报 `源端结果缺少同名列`。就地改成断言它一条问题都不出。
+#
+# 六张 B 表另外补了 `PRIMARY KEY`（B2/B3 一并补了 `ROW_ID` 列）：主键必选，且目标端必须真有
+# 列集合一致的唯一约束，否则 `ON DUPLICATE KEY UPDATE` 静默退化成纯 INSERT（ADR-0035 §2）。
+#
+# `column_precision` 不再随任务定义走（ADR-0036 §6）。裸 NUMBER 的 (p,s) 现在**从目标端
+# DECIMAL 列取**（`precheck.rs` 的 `range_check_columns`），所以 B1/B4 不必也不能再配它。
+#
 set -uo pipefail
 
 SCENARIOS=(
@@ -50,6 +61,10 @@ SOURCE_URL=http://127.0.0.1:18088
 SOURCE_PORT=18088
 SINK_URL=http://127.0.0.1:18080
 BIZ_DATE=2026-08-14
+ORACLE_DATASOURCE_NAME="M3 源库"
+TARGET_DATASOURCE_NAME="M3 目标库"
+ORACLE_DATASOURCE_ID=""
+TARGET_DATASOURCE_ID=""
 KEEP_RIG=${M3_KEEP_RIG:-}
 RESULTS=()
 SOURCE_PID=""
@@ -167,10 +182,9 @@ ensure_source_port_free() {
 write_source_config() {
   local sink_url=$1
   mkdir -p "$SOURCE_DATA"
+  # oracle_* 三件套已随 ADR-0037 §10 退役（真相源是数据源库）；写着只会被迁成一条
+  # 名为「默认」的数据源，台架就分不清用的是哪条。client 库目录不退役（ADR-0037 §6）。
   cat > "$SOURCE_CONFIG" <<EOF
-oracle_connect_string = "//127.0.0.1:1521/XE"
-oracle_username = "spike"
-oracle_password = "spike123"
 oracle_client_lib_dir = "$M2_ORACLE_CLIENT_LIB_DIR"
 sink_base_url = "$sink_url"
 listen = "127.0.0.1:18088"
@@ -188,6 +202,7 @@ start_source() {
   nohup "$SOURCE_BIN" --config "$SOURCE_CONFIG" > "$SOURCE_LOG" 2>&1 &
   SOURCE_PID=$!
   wait_for_source || return 1
+  ensure_datasources || return 1
   kill -0 "$SOURCE_PID" 2>/dev/null && return 0
   cat "$SOURCE_LOG" >&2 || true
   return 1
@@ -242,15 +257,51 @@ start_sink() {
   fail "sink did not become ready"
 }
 
-create_task() {
-  local name=$1 sql=$2 target=$3 precision=${4:-} payload
-  if [[ -n "$precision" ]]; then
-    payload=$(jq -nc --arg name "$name" --arg sql "$sql" --arg target "$target" \
-      --argjson precision "$precision" '{name:$name,source_sql:$sql,source_date_col:"LOAD_DATE",target_table:$target,target_date_col:"LOAD_DATE",column_precision:$precision}') || return 1
-  else
-    payload=$(jq -nc --arg name "$name" --arg sql "$sql" --arg target "$target" \
-      '{name:$name,source_sql:$sql,source_date_col:"LOAD_DATE",target_table:$target,target_date_col:"LOAD_DATE"}') || return 1
+# 数据源是任务定义的前提（ADR-0037 §1）：任务绑的是 id，不是连接串。建过就复用。
+datasource_id_by_name() {
+  local name=$1
+  api GET /api/datasources || return 1
+  jq -r --arg name "$name" 'map(select(.name == $name)) | .[0].datasource_id // empty' <<<"$API_BODY"
+}
+
+ensure_datasource() {
+  local name=$1 payload=$2 existing
+  existing=$(datasource_id_by_name "$name") || return 1
+  if [[ -n "$existing" ]]; then
+    printf '%s' "$existing"
+    return 0
   fi
+  api POST /api/datasources "$payload" || return 1
+  [[ "$API_STATUS" == 201 ]] ||
+    fail "create datasource $name status=$API_STATUS body=$API_BODY" || return 1
+  jq -r '.datasource_id' <<<"$API_BODY"
+}
+
+ensure_datasources() {
+  local payload
+  payload=$(jq -nc --arg name "$ORACLE_DATASOURCE_NAME" '{
+    name:$name, kind:"oracle",
+    connect_string:"//127.0.0.1:1521/XE", username:"spike", password:"spike123"
+  }') || return 1
+  ORACLE_DATASOURCE_ID=$(ensure_datasource "$ORACLE_DATASOURCE_NAME" "$payload") || return 1
+  payload=$(jq -nc --arg name "$TARGET_DATASOURCE_NAME" '{
+    name:$name, kind:"mysql",
+    # sink 跑在 client 容器里、MySQL 是同网的 `mysql` 服务——目标端连接是**由 sink 用**的
+    # （ADR-0037 §1：凭据随 run 报文过线，sink 拿着它连），所以这里给的是容器内的名字，
+    # 不是宿主机的 127.0.0.1。Oracle 那条相反：source 跑在宿主机上，走发布出来的端口。
+    host:"mysql", port:3306, username:"spike", password:"spike123", database:"qbs"
+  }') || return 1
+  TARGET_DATASOURCE_ID=$(ensure_datasource "$TARGET_DATASOURCE_NAME" "$payload") || return 1
+  [[ -n "$ORACLE_DATASOURCE_ID" && -n "$TARGET_DATASOURCE_ID" ]] ||
+    fail "datasource ids missing: oracle=$ORACLE_DATASOURCE_ID target=$TARGET_DATASOURCE_ID"
+}
+
+create_task() {
+  local name=$1 spec=$2 payload
+  payload=$(jq -nc --arg name "$name" --arg source "$ORACLE_DATASOURCE_ID" \
+    --arg target "$TARGET_DATASOURCE_ID" --argjson spec "$spec" '{
+      name:$name, source_datasource_id:$source, target_datasource_id:$target, spec:$spec
+    }') || return 1
   api POST /api/tasks "$payload" || return 1
   [[ "$API_STATUS" == 201 ]] || fail "create task status=$API_STATUS body=$API_BODY" || return 1
   jq -r '.task_id' <<<"$API_BODY"
@@ -258,7 +309,8 @@ create_task() {
 
 start_task_run() {
   local task_id=$1 payload
-  payload=$(jq -nc --arg task "$task_id" --arg date "$BIZ_DATE" '{task_id:$task,biz_date:$date}') || return 1
+  payload=$(jq -nc --arg task "$task_id" --arg date "$BIZ_DATE" \
+    '{task_id:$task, run_params:{load_date:$date}}') || return 1
   api POST /api/runs "$payload" || return 1
   [[ "$API_STATUS" == 202 ]] || fail "start run status=$API_STATUS body=$API_BODY" || return 1
   jq -r '.run_record_id' <<<"$API_BODY"
@@ -286,34 +338,137 @@ assert_column_values() {
   assert_eq "$label" "$expected" "$actual"
 }
 
-b1_sql() {
-  printf '%s' "SELECT n.row_id AS ROW_ID, n.n_regular AS N_REGULAR, n.n_fraction AS N_FRACTION, n.n_negative AS N_NEGATIVE, n.n_bare AS N_BARE, n.n_bare * 1 AS N_EXPR, n.v_text AS V_TEXT, n.nv_text AS NV_TEXT, n.c_text AS C_TEXT, n.nc_text AS NC_TEXT, n.d_value AS D_VALUE, n.ts0 AS TS0, n.ts3 AS TS3, n.ts6 AS TS6, n.load_date AS LOAD_DATE FROM t_m3_b1 n WHERE n.load_date >= TO_DATE(:biz_date,'YYYY-MM-DD') AND n.load_date < TO_DATE(:biz_date,'YYYY-MM-DD') + 1"
+# 结构化规格取代退役的 `source_sql`（ADR-0036 §1/§2）：SQL 由规格现算，投影只能是 `a.C AS C`。
+#
+# 原来的 `load_date >= TO_DATE(:biz_date) AND < +1` 半开区间在 v1 表达不出来——比较符只有
+# `>` `<` `=`（ADR-0035 §3 字面）。台架里 load_date 是纯日期（时分秒为零），单点等值与原
+# 半开区间同集合。这条表达力缺口挂在 ADR-0035 的时效 2 上，不要自作主张加 `>=`。
+#
+# **B1 的 N_EXPR 与 B2 的 C_EXPR 不在下面**：那两列是 SQL 表达式，v1 的生成器产不出来
+# （ADR-0040 增补 2026-08-19 / #134），判据随之失去对象。
+b1_spec() {
+  jq -nc '{
+    owner:"SPIKE", table:"T_M3_B1", target_table:"M3_B1",
+    primary_key:["ROW_ID"],
+    columns:[
+      {source:"ROW_ID", target:"ROW_ID"},
+      {source:"N_REGULAR", target:"N_REGULAR"},
+      {source:"N_FRACTION", target:"N_FRACTION"},
+      {source:"N_NEGATIVE", target:"N_NEGATIVE"},
+      {source:"N_BARE", target:"N_BARE"},
+      {source:"V_TEXT", target:"V_TEXT"},
+      {source:"NV_TEXT", target:"NV_TEXT"},
+      {source:"C_TEXT", target:"C_TEXT"},
+      {source:"NC_TEXT", target:"NC_TEXT"},
+      {source:"D_VALUE", target:"D_VALUE"},
+      {source:"TS0", target:"TS0"},
+      {source:"TS3", target:"TS3"},
+      {source:"TS6", target:"TS6"},
+      {source:"LOAD_DATE", target:"LOAD_DATE"}
+    ],
+    conditions:[{
+      column:"LOAD_DATE", operator:"eq", value_type:"date",
+      parameter:"load_date", value_source:"runtime", constant:""
+    }]
+  }'
 }
 
-b2_sql() {
-  printf '%s' "SELECT b.bf AS BF, b.bd AS BD, b.payload AS PAYLOAD, b.v_text || b.v_text AS C_EXPR, b.c_char AS C_CHAR, b.n_too_wide AS N_TOO_WIDE, b.n_too_scale AS N_TOO_SCALE, b.n_missing AS N_MISSING, b.d_wrong AS D_WRONG, b.load_date AS LOAD_DATE FROM t_m3_b2 b WHERE b.load_date >= TO_DATE(:biz_date,'YYYY-MM-DD') AND b.load_date < TO_DATE(:biz_date,'YYYY-MM-DD') + 1"
+b2_spec() {
+  jq -nc '{
+    owner:"SPIKE", table:"T_M3_B2", target_table:"M3_B2",
+    primary_key:["ROW_ID"],
+    columns:[
+      {source:"ROW_ID", target:"ROW_ID"},
+      {source:"BF", target:"BF"},
+      {source:"BD", target:"BD"},
+      {source:"PAYLOAD", target:"PAYLOAD"},
+      {source:"C_CHAR", target:"C_CHAR"},
+      {source:"N_TOO_WIDE", target:"N_TOO_WIDE"},
+      {source:"N_TOO_SCALE", target:"N_TOO_SCALE"},
+      {source:"N_MISSING", target:"N_MISSING"},
+      {source:"D_WRONG", target:"D_WRONG"},
+      {source:"LOAD_DATE", target:"LOAD_DATE"}
+    ],
+    conditions:[{
+      column:"LOAD_DATE", operator:"eq", value_type:"date",
+      parameter:"load_date", value_source:"runtime", constant:""
+    }]
+  }'
 }
 
-b3_sql() {
-  printf '%s' "SELECT b.ts_too_precise AS TS_TOO_PRECISE, b.load_date AS LOAD_DATE FROM t_m3_b3 b WHERE b.load_date >= TO_DATE(:biz_date,'YYYY-MM-DD') AND b.load_date < TO_DATE(:biz_date,'YYYY-MM-DD') + 1"
+b3_spec() {
+  jq -nc '{
+    owner:"SPIKE", table:"T_M3_B3", target_table:"M3_B3",
+    primary_key:["ROW_ID"],
+    columns:[
+      {source:"ROW_ID", target:"ROW_ID"},
+      {source:"TS_TOO_PRECISE", target:"TS_TOO_PRECISE"},
+      {source:"LOAD_DATE", target:"LOAD_DATE"}
+    ],
+    conditions:[{
+      column:"LOAD_DATE", operator:"eq", value_type:"date",
+      parameter:"load_date", value_source:"runtime", constant:""
+    }]
+  }'
 }
 
-b4_sql() {
-  printf '%s' "SELECT b.row_id AS ROW_ID, b.n_bare AS N_BARE, b.load_date AS LOAD_DATE FROM t_m3_b4 b WHERE b.load_date >= TO_DATE(:biz_date,'YYYY-MM-DD') AND b.load_date < TO_DATE(:biz_date,'YYYY-MM-DD') + 1"
+b4_spec() {
+  jq -nc '{
+    owner:"SPIKE", table:"T_M3_B4", target_table:"M3_B4",
+    primary_key:["ROW_ID"],
+    columns:[
+      {source:"ROW_ID", target:"ROW_ID"},
+      {source:"N_BARE", target:"N_BARE"},
+      {source:"LOAD_DATE", target:"LOAD_DATE"}
+    ],
+    conditions:[{
+      column:"LOAD_DATE", operator:"eq", value_type:"date",
+      parameter:"load_date", value_source:"runtime", constant:""
+    }]
+  }'
 }
 
-b5_sql() {
-  printf '%s' "SELECT b.row_id AS ROW_ID, b.n_regular AS N_REGULAR, b.v_text AS V_TEXT, b.d_value AS D_VALUE, b.ts_value AS TS_VALUE, b.load_date AS LOAD_DATE FROM t_m3_b5 b WHERE b.load_date >= TO_DATE(:biz_date,'YYYY-MM-DD') AND b.load_date < TO_DATE(:biz_date,'YYYY-MM-DD') + 1"
+b5_spec() {
+  jq -nc '{
+    owner:"SPIKE", table:"T_M3_B5", target_table:"M3_B5",
+    primary_key:["ROW_ID"],
+    columns:[
+      {source:"ROW_ID", target:"ROW_ID"},
+      {source:"N_REGULAR", target:"N_REGULAR"},
+      {source:"V_TEXT", target:"V_TEXT"},
+      {source:"D_VALUE", target:"D_VALUE"},
+      {source:"TS_VALUE", target:"TS_VALUE"},
+      {source:"LOAD_DATE", target:"LOAD_DATE"}
+    ],
+    conditions:[{
+      column:"LOAD_DATE", operator:"eq", value_type:"date",
+      parameter:"load_date", value_source:"runtime", constant:""
+    }]
+  }'
 }
 
-b6_sql() {
-  printf '%s' "SELECT b.row_id AS ROW_ID, b.d_bc AS D_BC, b.load_date AS LOAD_DATE FROM t_m3_b6 b WHERE b.load_date >= TO_DATE(:biz_date,'YYYY-MM-DD') AND b.load_date < TO_DATE(:biz_date,'YYYY-MM-DD') + 1"
+b6_spec() {
+  jq -nc '{
+    owner:"SPIKE", table:"T_M3_B6", target_table:"M3_B6",
+    primary_key:["ROW_ID"],
+    columns:[
+      {source:"ROW_ID", target:"ROW_ID"},
+      {source:"D_BC", target:"D_BC"},
+      {source:"LOAD_DATE", target:"LOAD_DATE"}
+    ],
+    conditions:[{
+      column:"LOAD_DATE", operator:"eq", value_type:"date",
+      parameter:"load_date", value_source:"runtime", constant:""
+    }]
+  }'
 }
 
 scenario_b1() {
   start_source || return 1
   local task_id record run_id expected
-  task_id=$(create_task "B1 九行形态" "$(b1_sql)" M3_B1 '{"N_BARE":[20,4],"N_EXPR":[20,4]}') || return 1
+  # `column_precision` 已不在任务定义里（ADR-0036 §6）：裸 NUMBER 的 (p,s) 现在从目标端
+  # DECIMAL 列取（`precheck.rs` 的 `range_check_columns`），所以这里不再配、也配不了。
+  task_id=$(create_task "B1 九行形态" "$(b1_spec)") || return 1
   record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == false' || return 1
   run_id=$(jq -r '.run_id' <<<"$API_BODY") || return 1
@@ -321,47 +476,54 @@ scenario_b1() {
   assert_eq "B1 outcome" SUCCEEDED "$(jq -r '.outcome' <<<"$API_BODY")" || return 1
   assert_eq "B1 source rows" 6 "$(jq -r '.source_rows' <<<"$API_BODY")" || return 1
   assert_eq "B1 mapping issues" 0 "$(jq '.mapping_issues | length' <<<"$API_BODY")" || return 1
-  assert_eq "B1 target rows" 6 "$(mysql_exec "SELECT COUNT(*) FROM M3_B1 WHERE LOAD_DATE >= '2026-08-14' AND LOAD_DATE < '2026-08-15'")" || return 1
-  assert_eq "B1 sentinel removed" 0 "$(mysql_exec 'SELECT COUNT(*) FROM M3_B1 WHERE ROW_ID = 900')" || return 1
+  # ADR-0040 §5.3：DELETE 时代这里是「当日范围被清空后重填，哨兵一并消失」。upsert 下
+  # **结论反过来**——哨兵 ROW_ID=900 的主键不在源结果集里，碰不到它，所以当日行是 6 + 1。
+  assert_eq "B1 target rows" 7 "$(mysql_exec "SELECT COUNT(*) FROM M3_B1 WHERE LOAD_DATE >= '2026-08-14' AND LOAD_DATE < '2026-08-15'")" || return 1
+  assert_eq "B1 sentinel retained" 1 "$(mysql_exec 'SELECT COUNT(*) FROM M3_B1 WHERE ROW_ID = 900')" || return 1
 
   expected=$(printf '%s\n' NULL 1.23 -0.01 123456789012345678901234567890123456.78 0.00 0.00)
-  assert_column_values "B1 NUMBER(38,2)" 'SELECT IFNULL(CAST(N_REGULAR AS CHAR), "NULL") FROM M3_B1 ORDER BY ROW_ID' "$expected" || return 1
+  assert_column_values "B1 NUMBER(38,2)" 'SELECT IFNULL(CAST(N_REGULAR AS CHAR), "NULL") FROM M3_B1 WHERE ROW_ID < 900 ORDER BY ROW_ID' "$expected" || return 1
   expected=$(printf '%s\n' 0.000001 NULL 0.009999 -0.009999 0.000000 -0.000001)
-  assert_column_values "B1 NUMBER(4,6)" 'SELECT IFNULL(CAST(N_FRACTION AS CHAR), "NULL") FROM M3_B1 ORDER BY ROW_ID' "$expected" || return 1
+  assert_column_values "B1 NUMBER(4,6)" 'SELECT IFNULL(CAST(N_FRACTION AS CHAR), "NULL") FROM M3_B1 WHERE ROW_ID < 900 ORDER BY ROW_ID' "$expected" || return 1
   expected=$(printf '%s\n' 9999999900 -9999999900 NULL 12300 12400 0)
-  assert_column_values "B1 NUMBER(8,-2)" 'SELECT IFNULL(CAST(N_NEGATIVE AS CHAR), "NULL") FROM M3_B1 ORDER BY ROW_ID' "$expected" || return 1
+  assert_column_values "B1 NUMBER(8,-2)" 'SELECT IFNULL(CAST(N_NEGATIVE AS CHAR), "NULL") FROM M3_B1 WHERE ROW_ID < 900 ORDER BY ROW_ID' "$expected" || return 1
   expected=$(printf '%s\n' 0.0000 1.2345 -99999999999999.9999 NULL 0.0000 1.2345)
-  assert_column_values "B1 bare NUMBER" 'SELECT IFNULL(CAST(N_BARE AS CHAR), "NULL") FROM M3_B1 ORDER BY ROW_ID' "$expected" || return 1
-  assert_column_values "B1 numeric expression" 'SELECT IFNULL(CAST(N_EXPR AS CHAR), "NULL") FROM M3_B1 ORDER BY ROW_ID' "$expected" || return 1
+  assert_column_values "B1 bare NUMBER" 'SELECT IFNULL(CAST(N_BARE AS CHAR), "NULL") FROM M3_B1 WHERE ROW_ID < 900 ORDER BY ROW_ID' "$expected" || return 1
+  # 「数值表达式列」那一条判据（原 N_EXPR = n_bare * 1）已失去对象：投影只能是 `a.C AS C`，
+  # 表达式列在 v1 进不来（ADR-0036 §2/§5，`oracle_source.rs` 已删掉表达式列的元数据修正）。
+  # 编号不动、不重编；裸 NUMBER 这一档由上面 N_BARE 那条照原样守着。
+  echo "B1 numeric expression: N/A（判据已随 ADR-0036 §2/§5 退役——表达式列在 v1 进不来）"
 
   expected=$(printf '%s\n' "$(hex_value 'ABCD')" "$(hex_value 'AB        ')" "$(hex_value '          ')" "$(hex_value '甲乙        ')" NULL "$(hex_value 'ABCD')")
-  assert_column_values "B1 VARCHAR2 bytes" 'SELECT IFNULL(HEX(V_TEXT), "NULL") FROM M3_B1 ORDER BY ROW_ID' "$expected" || return 1
+  assert_column_values "B1 VARCHAR2 bytes" 'SELECT IFNULL(HEX(V_TEXT), "NULL") FROM M3_B1 WHERE ROW_ID < 900 ORDER BY ROW_ID' "$expected" || return 1
   expected=$(printf '%s\n' "$(hex_value '甲乙        ')" "$(hex_value 'ABCD')" "$(hex_value '甲乙        ')" "$(hex_value 'ABCD')" "$(hex_value '          ')" NULL)
-  assert_column_values "B1 NVARCHAR2 bytes" 'SELECT IFNULL(HEX(NV_TEXT), "NULL") FROM M3_B1 ORDER BY ROW_ID' "$expected" || return 1
+  assert_column_values "B1 NVARCHAR2 bytes" 'SELECT IFNULL(HEX(NV_TEXT), "NULL") FROM M3_B1 WHERE ROW_ID < 900 ORDER BY ROW_ID' "$expected" || return 1
   expected=$(printf '%s\n' "$(hex_value 'AB        ')" "$(hex_value '          ')" "$(hex_value '甲乙        ')" NULL "$(hex_value '          ')" "$(hex_value 'AB        ')")
-  assert_column_values "B1 CHAR bytes" 'SELECT IFNULL(HEX(C_TEXT), "NULL") FROM M3_B1 ORDER BY ROW_ID' "$expected" || return 1
+  assert_column_values "B1 CHAR bytes" 'SELECT IFNULL(HEX(C_TEXT), "NULL") FROM M3_B1 WHERE ROW_ID < 900 ORDER BY ROW_ID' "$expected" || return 1
   expected=$(printf '%s\n' "$(hex_value '甲乙        ')" "$(hex_value '          ')" "$(hex_value 'AB        ')" "$(hex_value '甲乙        ')" "$(hex_value '          ')" NULL)
-  assert_column_values "B1 NCHAR bytes" 'SELECT IFNULL(HEX(NC_TEXT), "NULL") FROM M3_B1 ORDER BY ROW_ID' "$expected" || return 1
+  assert_column_values "B1 NCHAR bytes" 'SELECT IFNULL(HEX(NC_TEXT), "NULL") FROM M3_B1 WHERE ROW_ID < 900 ORDER BY ROW_ID' "$expected" || return 1
 
   expected=$(printf '%s\n' "$(hex_value '0001-01-01 00:00:00')" "$(hex_value '0044-01-01 00:00:00')" "$(hex_value '0999-12-31 23:59:59')" "$(hex_value '9999-12-31 23:59:59')" "$(hex_value '2026-08-13 14:35:09')" NULL)
-  assert_column_values "B1 DATE bytes" 'SELECT IFNULL(HEX(CAST(D_VALUE AS CHAR)), "NULL") FROM M3_B1 ORDER BY ROW_ID' "$expected" || return 1
+  assert_column_values "B1 DATE bytes" 'SELECT IFNULL(HEX(CAST(D_VALUE AS CHAR)), "NULL") FROM M3_B1 WHERE ROW_ID < 900 ORDER BY ROW_ID' "$expected" || return 1
   expected=$(printf '%s\n' "$(hex_value '2026-08-13 14:35:09.000000')" "$(hex_value '2026-08-13 14:35:09.000000')" "$(hex_value '2026-08-13 14:35:09.000000')" "$(hex_value '2026-08-13 14:35:09.000000')" NULL "$(hex_value '2026-08-13 14:35:09.000000')")
-  assert_column_values "B1 TIMESTAMP(0) bytes" 'SELECT IFNULL(HEX(CAST(TS0 AS CHAR)), "NULL") FROM M3_B1 ORDER BY ROW_ID' "$expected" || return 1
+  assert_column_values "B1 TIMESTAMP(0) bytes" 'SELECT IFNULL(HEX(CAST(TS0 AS CHAR)), "NULL") FROM M3_B1 WHERE ROW_ID < 900 ORDER BY ROW_ID' "$expected" || return 1
   expected=$(printf '%s\n' "$(hex_value '2026-08-13 14:35:09.120000')" "$(hex_value '2026-08-13 14:35:09.120000')" "$(hex_value '2026-08-13 14:35:09.120000')" "$(hex_value '2026-08-13 14:35:09.120000')" NULL "$(hex_value '2026-08-13 14:35:09.120000')")
-  assert_column_values "B1 TIMESTAMP(3) bytes" 'SELECT IFNULL(HEX(CAST(TS3 AS CHAR)), "NULL") FROM M3_B1 ORDER BY ROW_ID' "$expected" || return 1
+  assert_column_values "B1 TIMESTAMP(3) bytes" 'SELECT IFNULL(HEX(CAST(TS3 AS CHAR)), "NULL") FROM M3_B1 WHERE ROW_ID < 900 ORDER BY ROW_ID' "$expected" || return 1
   expected=$(printf '%s\n' "$(hex_value '2026-08-13 14:35:09.120000')" "$(hex_value '2026-08-13 14:35:09.999999')" "$(hex_value '2026-08-13 14:35:09.120000')" "$(hex_value '2026-08-13 00:00:00.000000')" NULL "$(hex_value '2026-08-13 14:35:09.120000')")
-  assert_column_values "B1 TIMESTAMP(6) bytes" 'SELECT IFNULL(HEX(CAST(TS6 AS CHAR)), "NULL") FROM M3_B1 ORDER BY ROW_ID' "$expected" || return 1
+  assert_column_values "B1 TIMESTAMP(6) bytes" 'SELECT IFNULL(HEX(CAST(TS6 AS CHAR)), "NULL") FROM M3_B1 WHERE ROW_ID < 900 ORDER BY ROW_ID' "$expected" || return 1
   echo "B1 run_id: $run_id"
 }
 
 scenario_b2() {
   start_source || return 1
   local task_id record total
-  task_id=$(create_task "B2 一次报全" "$(b2_sql)" M3_B2) || return 1
+  task_id=$(create_task "B2 一次报全" "$(b2_spec)") || return 1
   record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == false' || return 1
   total=$(jq '.mapping_issues | length' <<<"$API_BODY") || return 1
-  assert_eq "B2 total issues" 10 "$total" || return 1
+  # 10 → 8：C_EXPR（表达式列在 v1 进不来）与 EXTRA（ADR-0038 §4 把列名集合判定撤成子集）
+  # 各自失去对象，其余八条一字不改。裁定见 ADR-0040 增补（2026-08-19，#134）。
+  assert_eq "B2 total issues" 8 "$total" || return 1
   assert_eq "B2 sink code" PRECHECK_FAILED "$(jq -r '.sink_code' <<<"$API_BODY")" || return 1
   assert_eq "B2 failure kind" MAPPING_PRECHECK "$(jq -r '.failure_kind' <<<"$API_BODY")" || return 1
   assert_eq "B2 staging table" null "$(jq -r '.staging_table' <<<"$API_BODY")" || return 1
@@ -370,13 +532,16 @@ scenario_b2() {
   assert_mapping_rule BF '源类型不在 M3 九行白名单内' || return 1
   assert_mapping_rule BD '源类型不在 M3 九行白名单内' || return 1
   assert_mapping_rule PAYLOAD '源类型不在 M3 九行白名单内' || return 1
-  assert_mapping_rule C_EXPR '字符列必须具有可判定的 length' || return 1
+  echo "B2 C_EXPR: N/A（判据已随 ADR-0036 §2/§5 退役——字符表达式列在 v1 进不来）"
   assert_mapping_rule C_CHAR '字符族目标类型必须是 VARCHAR' || return 1
   assert_mapping_rule N_TOO_WIDE 'MySQL DECIMAL 无法表达推导形状 DECIMAL(68,0)' || return 1
   assert_mapping_rule N_TOO_SCALE 'MySQL DECIMAL 无法表达推导形状 DECIMAL(35,35)' || return 1
   assert_mapping_rule N_MISSING '目标表缺少同名列' || return 1
   assert_mapping_rule D_WRONG 'DATE 的目标类型必须是 DATETIME' || return 1
-  assert_mapping_rule EXTRA '源端结果缺少同名列' || return 1
+  # EXTRA 的判据**方向反了**（ADR-0038 §4）：目标表可以有投影里没有的列，只要它可空
+  # 或有默认值。这里就地断言它一条问题都不出——撤掉的是「不多」半句，不是整条防线。
+  assert_eq "B2 EXTRA is no longer an issue" 0 \
+    "$(jq '[.mapping_issues[] | select(.column == "EXTRA")] | length' <<<"$API_BODY")" || return 1
   assert_eq "B2 staging tables" 0 "$(mysql_staging_count M3_B2)" || return 1
   echo "B2 mapping issues ($total): $(jq -c '.mapping_issues' <<<"$API_BODY")"
   B2_RECORD=$record
@@ -385,7 +550,7 @@ scenario_b2() {
 scenario_b3() {
   start_source || return 1
   local task_id record run_id
-  task_id=$(create_task "B3 TIMESTAMP(9)" "$(b3_sql)" M3_B3) || return 1
+  task_id=$(create_task "B3 TIMESTAMP(9)" "$(b3_spec)") || return 1
   record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == false' || return 1
   run_id=$(jq -r '.run_id' <<<"$API_BODY") || return 1
@@ -400,7 +565,8 @@ scenario_b3() {
 scenario_b4() {
   start_source || return 1
   local task_id record run_id range_event scanned_rows range_ms
-  task_id=$(create_task "B4 裸 NUMBER 值域" "$(b4_sql)" M3_B4 '{"N_BARE":[20,4]}') || return 1
+  # 值域校核要的 (p,s) 现在从目标端 DECIMAL(20,4) 取，不再随任务定义配（ADR-0036 §6）。
+  task_id=$(create_task "B4 裸 NUMBER 值域" "$(b4_spec)") || return 1
   record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == false' || return 1
   run_id=$(jq -r '.run_id' <<<"$API_BODY") || return 1
@@ -423,7 +589,7 @@ scenario_b4() {
 scenario_b5() {
   start_source || return 1
   local task_id record run_id
-  task_id=$(create_task "B5 常规形态零扫描" "$(b5_sql)" M3_B5) || return 1
+  task_id=$(create_task "B5 常规形态零扫描" "$(b5_spec)") || return 1
   record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == false' || return 1
   run_id=$(jq -r '.run_id' <<<"$API_BODY") || return 1
@@ -436,7 +602,7 @@ scenario_b5() {
 scenario_b6() {
   start_source || return 1
   local task_id record
-  task_id=$(create_task "B6 公元前日期" "$(b6_sql)" M3_B6) || return 1
+  task_id=$(create_task "B6 公元前日期" "$(b6_spec)") || return 1
   record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == false' || return 1
   assert_eq "B6 outcome" FAILED "$(jq -r '.outcome' <<<"$API_BODY")" || return 1
@@ -576,8 +742,9 @@ hand_over_rig() {
     web UI              : $SOURCE_URL
     B2 / W1-W2 run      : $B2_RECORD
     B4 / W6 run         : $B4_RECORD
-    W3-W4 builder SQL   : use B1 source SQL with N_BARE/N_EXPR and column_precision; use B2 for BINARY_FLOAT
-    W5 builder SQL       : use B2 source SQL and inspect the CLOB column from t_m3_b2
+    W3-W4 builder SQL   : use the B1 spec (N_BARE is the bare-NUMBER case; (p,s) now comes from
+                          the target DECIMAL, not from column_precision); use B2 for BINARY_FLOAT
+    W5 builder SQL       : use the B2 spec and inspect the CLOB column from t_m3_b2
     source data/history : $SOURCE_DATA/db-qbs.sqlite3
     source log          : $SOURCE_LOG
     tear down with      : kill $SOURCE_PID; docker compose -f $RIG_ROOT/docker-compose.yml exec -T client sh -c 'test ! -f /tmp/m3-sink.pid || { kill -TERM "\$(cat /tmp/m3-sink.pid)"; rm -f /tmp/m3-sink.pid; }'; rm -rf $WORK_ROOT

@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # Issue #45: one-entry M1 rig acceptance orchestration. Run on the ADR-0005 arm64 mac rig.
 #
-# 【2026-08-18 #121 起未跑，需按 ADR-0040 §5 重做】写入模型已由「按业务日期 DELETE + INSERT」
-# 换成按主键 upsert（ADR-0035 §1），任务定义换成结构化规格（ADR-0036）。本脚本的**调用面**
-# 已随之改到新形态，但**判据没有重新推导**：涉及 purged_rows、当日范围被清空、哨兵行被删除
-# 这一类断言仍是 DELETE 时代的语义，在 upsert 下不再成立。台架扩展与判据重推见 **ADR-0040 §5**。
+# 判据依据：**ADR-0040 §5.1**（M1 九个场景逐条重推，编号与场景数不动）。
+# 写入模型已由「按业务日期 DELETE + INSERT」换成按主键 upsert（ADR-0035 §1），任务定义换成
+# 结构化规格（ADR-0036），两端连接随任务文件 / run 报文过线（ADR-0037 §1/§2）。因此：
 #
-# 【2026-08-19 #118 追加】数据源管理落地（ADR-0037）：任务定义多了两个数据源 id 绑定，
-# `POST /v1/runs` 多了 `target` 连接字段，`sink.toml` 的 mysql_dsn / database 已退役
-# （sink 启动不再连 MySQL，连不上的失败点挪到开 run）。本脚本的调用面**尚未跟进**，
-# 一并归 ADR-0040 §5。
+#   * `empty-result`：`purged_rows = 0` 且目标端当日行**原封不动**——空结果集在 upsert 下等于什么都不做；
+#   * `source-kill-rerun` / `sink-kill-rerun`：重跑后**哨兵留存**（哈希 = target_with_sentinel），
+#     哨兵主键不冲突，upsert 碰不到它；
+#   * `wide-100k` / `narrow-100k`：行数判据不变，报告另加**载荷记账**一行（ADR-0040 §1）;
+#   * `commit-disconnect` / `commit-disconnect-discarded`：造态手段换了，见各自函数上的注释
+#     与 ADR-0040 增补（2026-08-19，#134）。
+#
 set -uo pipefail
 
 SCENARIOS=(
@@ -59,7 +61,10 @@ compose() {
 }
 
 mysql_exec() {
-  compose exec -T mysql mysql -N -B -uspike -pspike123 qbs -e "$1" 2>/dev/null
+  # stderr 丢弃的是 mysql 那句「命令行给口令不安全」的告警；连它一起吞掉的代价是
+  # 失败时一个字都不剩，所以这里补一句点名 SQL 的 fail（同 run_source，见 #138）。
+  compose exec -T mysql mysql -N -B -uspike -pspike123 qbs -e "$1" 2>/dev/null ||
+    fail "mysql 执行失败：$1"
 }
 
 fail() {
@@ -218,11 +223,34 @@ prepare_rig() {
 }
 
 # `--biz-date` 随 ADR-0035 §3 取消：本次运行的取值由任务文件的 `[run_params]` 带进来。
-# 第二个参数留着只为不动调用点，实际不再传给子进程。
+# 造「空结果集」这类态因此只能换取值——每次运行按日期现做一份任务文件塞进容器，
+# 而不是给子进程多传一个已经不存在的开关。仓库里那两份是规格的真相源，只有取值被替掉。
+materialize_task() {
+  local base=$1 date=$2 path=$3
+  sed "s|^d_biz = .*|d_biz = \"$date\"|" "$ACCEPTANCE_ROOT/$(basename "$base")" |
+    compose exec -T client sh -c 'umask 077; cat > "$1"' sh "$path" || return 1
+  compose exec -T client grep -Fq "d_biz = \"$date\"" "$path" ||
+    fail "任务文件 $path 没写进日期 $date"
+}
+
+task_for() {
+  local base=$1 date=$2 path
+  path=/tmp/m1-$(basename "$base" .toml)-$date.toml
+  materialize_task "$base" "$date" "$path" >&2 || return 1
+  printf '%s' "$path"
+}
+
 run_source() {
-  local task=$1 _biz_date=$2 log=$3 config=${4:-$SOURCE_CONFIG}
+  local task=$1 biz_date=$2 log=$3 config=${4:-$SOURCE_CONFIG} rendered rc=0
+  rendered=$(task_for "$task" "$biz_date") || return 1
   compose exec -T client "$SOURCE_BIN" \
-    --config "$config" --task "$task" > "$log"
+    --config "$config" --task "$rendered" > "$log" || rc=$?
+  # 不出声地 `return 1` 会让调用处的 `|| return 1` 变成哑弹：报告里只剩 docker 那句
+  # `exit status 1`，指不到是哪一步。#138 就是这样多花了一整轮台架才定位到的——
+  # run_finished 里明明写着 `SWAP_FAILED` 的全文。失败就把它打出来。
+  (( rc == 0 )) || fail "source run exited $rc: $(
+    jq -r 'select(.event == "run_finished") | .message // empty' "$log" 2>/dev/null | tail -1
+  )"
 }
 
 source_run_id() {
@@ -319,9 +347,11 @@ scenario_source_kill() {
   target_with_sentinel=$(narrow_hash) || return 1
   [[ "$target_with_sentinel" != "$baseline" ]] || fail "target sentinel did not change the direct-run baseline" || return 1
 
+  local rendered
+  rendered=$(task_for "$NARROW_TASK" "$BIZ_DATE") || return 1
   compose exec -T client rm -f /tmp/m1-source.pid /tmp/m1-kill.jsonl || return 1
   compose exec -T -d client sh -c \
-    "echo \$\$ > /tmp/m1-source.pid; exec $SOURCE_BIN --config $SOURCE_CONFIG --task $NARROW_TASK > /tmp/m1-kill.jsonl" || return 1
+    "echo \$\$ > /tmp/m1-source.pid; exec $SOURCE_BIN --config $SOURCE_CONFIG --task $rendered > /tmp/m1-kill.jsonl" || return 1
   for (( attempt = 1; attempt <= 400; attempt++ )); do
     if compose exec -T client sh -c \
       "test -f /tmp/m1-kill.jsonl && grep -q '\"event\":\"batch_pushed\"' /tmp/m1-kill.jsonl"; then
@@ -354,7 +384,10 @@ scenario_source_kill() {
   assert_source_success "$rerun" 100000 || return 1
   new_run=$(source_run_id "$rerun")
   [[ "$new_run" != "$old_run" ]] || fail "rerun reused killed run_id" || return 1
-  assert_eq "rerun hash versus direct run" "$baseline" "$(narrow_hash)"
+  # ADR-0040 §5.1：DELETE 时代重跑会把哨兵一起清掉、哈希回到 baseline。upsert 下**结论反过来**——
+  # 哨兵的主键不在源结果集里，`ON DUPLICATE KEY UPDATE` 碰不到它，所以它留存，
+  # 哈希回到的是 target_with_sentinel。
+  assert_eq "rerun hash keeps the sentinel" "$target_with_sentinel" "$(narrow_hash)"
 }
 
 scenario_sink_kill() {
@@ -373,8 +406,10 @@ scenario_sink_kill() {
   compose exec -T client rm -f /tmp/m1-source.pid /tmp/m1-sink-kill.jsonl /tmp/m1-sink-kill.rc || return 1
   # Background plus `wait` instead of `exec`: the wrapper has to outlive the source to
   # record its exit status, while /tmp/m1-source.pid stays the source pid that cleanup kills.
+  local rendered
+  rendered=$(task_for "$NARROW_TASK" "$BIZ_DATE") || return 1
   compose exec -T -d client sh -c \
-    "$SOURCE_BIN --config $SOURCE_CONFIG --task $NARROW_TASK > /tmp/m1-sink-kill.jsonl & echo \$! > /tmp/m1-source.pid; wait \$!; echo \$? > /tmp/m1-sink-kill.rc" || return 1
+    "$SOURCE_BIN --config $SOURCE_CONFIG --task $rendered > /tmp/m1-sink-kill.jsonl & echo \$! > /tmp/m1-source.pid; wait \$!; echo \$? > /tmp/m1-sink-kill.rc" || return 1
   for (( attempt = 1; attempt <= 400; attempt++ )); do
     if compose exec -T client sh -c \
       "test -f /tmp/m1-sink-kill.jsonl && grep -q '\"event\":\"batch_pushed\"' /tmp/m1-sink-kill.jsonl"; then
@@ -419,7 +454,8 @@ scenario_sink_kill() {
   assert_source_success "$rerun" 100000 || return 1
   new_run=$(source_run_id "$rerun")
   [[ "$new_run" != "$old_run" ]] || fail "rerun reused the interrupted run_id" || return 1
-  assert_eq "rerun hash versus direct run" "$baseline" "$(narrow_hash)"
+  # 与 source-kill 同一条理由（ADR-0040 §5.1）：upsert 下重跑之后哨兵留存。
+  assert_eq "rerun hash keeps the sentinel" "$target_with_sentinel" "$(narrow_hash)"
 }
 
 start_commit_drop_proxy() {
@@ -434,12 +470,16 @@ start_commit_drop_proxy() {
     fail "commit-drop proxy did not become ready"
 }
 
+# 造态换了手段，判据本身没变：证的仍是「source 把丢掉的提交回执诊断成 SWAPPED，
+# 而目标端确实已经是新数据」。DELETE 时代拿**空结果集 + 当日哨兵**造，看的是「当日行被清空」；
+# upsert 下空结果集等于什么都不做，那一态观察不到任何东西（ADR-0040 增补 2026-08-19 / #134）。
+# 换成**主键相撞的哨兵**：ROW_ID=1 先写成 commit-sentinel，搬完这一行必须被源端的值盖掉。
 scenario_commit_disconnect() {
   local log="$WORK_ROOT/commit-disconnect.jsonl" run_id status
   reset_sink_state || return 1
-  mysql_exec "DELETE FROM M1_NARROW WHERE D_BIZ >= '$EMPTY_DATE' AND D_BIZ < '$EMPTY_DATE' + INTERVAL 1 DAY; INSERT INTO M1_NARROW (ROW_ID,V_TEXT,D_BIZ) VALUES (99999999,'commit-sentinel','$EMPTY_DATE')" >/dev/null || return 1
+  mysql_exec "DELETE FROM M1_NARROW; INSERT INTO M1_NARROW (ROW_ID,V_TEXT,D_BIZ) VALUES (1,'commit-sentinel','$BIZ_DATE')" >/dev/null || return 1
   start_commit_drop_proxy || return 1
-  run_source "$NARROW_TASK" "$EMPTY_DATE" "$log" "$COMMIT_DROP_CONFIG"
+  run_source "$NARROW_TASK" "$BIZ_DATE" "$log" "$COMMIT_DROP_CONFIG"
   status=$?
   assert_eq "commit disconnect source exit" 1 "$status" || return 1
   jq -e . "$log" >/dev/null || return 1
@@ -452,16 +492,20 @@ scenario_commit_disconnect() {
     "$log" >/dev/null || fail "commit diagnostic did not explain that target was swapped" || return 1
   assert_json_eq "$log" \
     'select(.event == "run_finished") | .stage' COMMITTING "failed stage" || return 1
-  assert_eq "commit disconnect target rows" 0 \
-    "$(mysql_exec "SELECT COUNT(*) FROM M1_NARROW WHERE D_BIZ >= '$EMPTY_DATE' AND D_BIZ < '$EMPTY_DATE' + INTERVAL 1 DAY")"
+  assert_eq "commit disconnect target rows" 100000 \
+    "$(mysql_exec "SELECT COUNT(*) FROM M1_NARROW")" || return 1
+  # 这一行才是「诊断出来的 SWAPPED 确实落到了目标端」的证据：哨兵的值被源端的值盖掉了。
+  assert_eq "commit disconnect sentinel overwritten" M1-00000001 \
+    "$(mysql_exec "SELECT V_TEXT FROM M1_NARROW WHERE ROW_ID = 1")"
 }
 
+# 同 scenario_commit_disconnect：哨兵改成主键相撞的那一行，证的是它**没有**被盖掉。
 scenario_commit_disconnect_discarded() {
   local log="$WORK_ROOT/commit-disconnect-discarded.jsonl" run_id status
   reset_sink_state || return 1
-  mysql_exec "DELETE FROM M1_NARROW WHERE D_BIZ >= '$EMPTY_DATE' AND D_BIZ < '$EMPTY_DATE' + INTERVAL 1 DAY; INSERT INTO M1_NARROW (ROW_ID,V_TEXT,D_BIZ) VALUES (99999998,'discard-sentinel','$EMPTY_DATE')" >/dev/null || return 1
+  mysql_exec "DELETE FROM M1_NARROW; INSERT INTO M1_NARROW (ROW_ID,V_TEXT,D_BIZ) VALUES (1,'discard-sentinel','$BIZ_DATE')" >/dev/null || return 1
   start_commit_drop_proxy discarded || return 1
-  run_source "$NARROW_TASK" "$EMPTY_DATE" "$log" "$COMMIT_DROP_CONFIG"
+  run_source "$NARROW_TASK" "$BIZ_DATE" "$log" "$COMMIT_DROP_CONFIG"
   status=$?
   assert_eq "commit discard source exit" 1 "$status" || return 1
   jq -e . "$log" >/dev/null || return 1
@@ -475,19 +519,27 @@ scenario_commit_disconnect_discarded() {
   assert_json_eq "$log" \
     'select(.event == "run_finished") | .stage' COMMITTING "failed stage" || return 1
   assert_eq "commit discard target rows" 1 \
-    "$(mysql_exec "SELECT COUNT(*) FROM M1_NARROW WHERE D_BIZ >= '$EMPTY_DATE' AND D_BIZ < '$EMPTY_DATE' + INTERVAL 1 DAY")" || return 1
+    "$(mysql_exec "SELECT COUNT(*) FROM M1_NARROW")" || return 1
+  assert_eq "commit discard sentinel untouched" discard-sentinel \
+    "$(mysql_exec "SELECT V_TEXT FROM M1_NARROW WHERE ROW_ID = 1")" || return 1
   assert_eq "commit discard staging tables" 0 "$(staging_table_count)"
 }
 
+# ADR-0040 §5.1：这一条**语义整个翻转**，不是措辞要调。DELETE 时代「空结果集」= 当日那 7 行
+# 被清空（`purged_rows = 7`）；upsert 下「空结果集」= 什么都不做——`purged_rows` 恒 0，
+# 目标端当日行**原封不动**。所以这里比的是整段行内容的哈希，不是行数。
 scenario_empty() {
-  local log="$WORK_ROOT/empty.jsonl"
+  local log="$WORK_ROOT/empty.jsonl" before after
   mysql_exec "DELETE FROM M1_NARROW; INSERT INTO M1_NARROW (ROW_ID,V_TEXT,D_BIZ) VALUES (1,'old-1','$EMPTY_DATE'),(2,'old-2','$EMPTY_DATE'),(3,'old-3','$EMPTY_DATE'),(4,'old-4','$EMPTY_DATE'),(5,'old-5','$EMPTY_DATE'),(6,'old-6','$EMPTY_DATE'),(7,'old-7','$EMPTY_DATE')" >/dev/null || return 1
+  before=$(narrow_hash) || return 1
   run_source "$NARROW_TASK" "$EMPTY_DATE" "$log" || return 1
   assert_source_success "$log" 0 || return 1
   assert_json_eq "$log" \
-    'select(.event == "run_finished") | .purged_rows' 7 "purged rows" || return 1
-  assert_eq "empty date target rows" 0 \
-    "$(mysql_exec "SELECT COUNT(*) FROM M1_NARROW WHERE D_BIZ >= '$EMPTY_DATE' AND D_BIZ < '$EMPTY_DATE' + INTERVAL 1 DAY")"
+    'select(.event == "run_finished") | .purged_rows' 0 "purged rows" || return 1
+  assert_eq "empty date target rows" 7 \
+    "$(mysql_exec "SELECT COUNT(*) FROM M1_NARROW WHERE D_BIZ >= '$EMPTY_DATE' AND D_BIZ < '$EMPTY_DATE' + INTERVAL 1 DAY")" || return 1
+  after=$(narrow_hash) || return 1
+  assert_eq "empty date rows untouched" "$before" "$after"
 }
 
 api_post() {
@@ -501,9 +553,11 @@ api_post() {
 
 open_narrow_run() {
   local run_id=$1 payload
+  # ADR-0037 §1/§2：目标端连接随每个 run 的报文过线，`sink.toml` 的 mysql_dsn / database 已退役。
   payload=$(jq -nc --arg run_id "$run_id" '{
     run_id: $run_id,
     target_table: "M1_NARROW",
+    target: {host:"mysql", port:3306, username:"spike", password:"spike123", database:"qbs"},
     primary_key: ["ROW_ID"],
     source_columns: [
       {name:"ROW_ID", type:"NUMBER", precision:8, scale:0, length:null},
@@ -607,6 +661,32 @@ write_report() {
       row_dist=$(jq -sr '[.[] | select(.event == "batch_pushed") | .rows] | if length == 0 then "n/a" else ((min|tostring)+"/"+(max|tostring)) end' "$log")
       byte_dist=$(jq -sr '[.[] | select(.event == "batch_pushed") | .bytes] | sort | if length == 0 then "n/a" else ((.[0]|tostring)+"/"+(.[length/2|floor]|tostring)+"/"+(.[-1]|tostring)) end' "$log")
       echo "| $name | $rows | $batches | $fetch | $push | $ratio | $cursor | $commit | $count | $purged | $row_dist | $byte_dist |"
+    done < <(find "$WORK_ROOT" -name '*.jsonl' -type f | sort)
+    echo
+    # ADR-0040 §1：客户需求「单次 10 万行、约 100MB」的兑现点是 M1 的 wide-100k + §3 的内存断言。
+    # 数据本来就在批次事件里，缺的是把它读成这条判据的证据的那一行——没有它，将来没人看得出
+    # 那条需求是在哪儿兑现的。**只记不判**（不设耗时判据、不设载荷上限）。
+    echo "## 载荷记账（ADR-0040 §1）"
+    echo
+    echo "| Log | Rows | Batches | 源行宽 bytes/row | 批体 p50 | 载荷总量 |"
+    echo "|---|---:|---:|---:|---:|---:|"
+    local accounting
+    while IFS= read -r log; do
+      accounting=$(jq -sr '
+        [.[] | select(.event == "batch_pushed")] as $batches |
+        ([$batches[].rows] | add // 0) as $rows |
+        ([$batches[].bytes] | add // 0) as $bytes |
+        ([$batches[].bytes] | sort) as $sorted |
+        if ($batches | length) == 0 or $rows == 0 then "n/a | n/a | n/a | n/a | n/a"
+        else
+          ($rows | tostring) + " | " +
+          ($batches | length | tostring) + " | " +
+          (($bytes / $rows) | floor | tostring) + " | " +
+          ($sorted[($sorted | length / 2 | floor)] | tostring) + " | " +
+          (($bytes / 1048576 * 100 | floor) / 100 | tostring) + " MiB"
+        end
+      ' "$log") || return 1
+      echo "| $(basename "$log") | $accounting |"
     done < <(find "$WORK_ROOT" -name '*.jsonl' -type f | sort)
     echo
     echo "## Verification evidence"

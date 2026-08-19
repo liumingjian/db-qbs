@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Issue #72 / PRD #60 / ADR-0028: M2 API and lifecycle acceptance on the arm64 mac rig.
 #
-# 【2026-08-18 #121 起未跑，需按 ADR-0040 §5 重做】写入模型已由「按业务日期 DELETE + INSERT」
-# 换成按主键 upsert（ADR-0035 §1），任务定义换成结构化规格（ADR-0036）。本脚本**尚未改到新形态**：
-# 任务创建与发起运行的报文仍是退役的 `source_sql` / `biz_date` 形状，判据也仍是 DELETE 时代的
-# 语义（purged_rows、当日范围被清空、哨兵行被删除），在 upsert 下不再成立。
-# 台架改造与判据重推见 **ADR-0040 §5**。
+# 判据依据：**ADR-0040 §5.2**（M2 十四个 A 场景，编号不动、不重编）。
+# 调用面已从退役的 `source_sql` / `biz_date` 报文改到 **`TaskSpec` + 数据源 id 绑定**
+# （ADR-0036 §1、ADR-0037 §1/§8）：任务创建带两个 datasource_id 与一份结构化规格，
+# 发起运行带 `run_params` 而不是 `biz_date`，目标端连接由编排进程解出来随 run 报文过线
+# （`sink.toml` 的 mysql_dsn / database 已退役）。
 #
-# 【2026-08-19 #118 追加】数据源管理落地（ADR-0037）：任务定义多了两个数据源 id 绑定，
-# `POST /v1/runs` 多了 `target` 连接字段，`sink.toml` 的 mysql_dsn / database 已退役
-# （sink 启动不再连 MySQL，连不上的失败点挪到开 run）。本脚本的调用面**尚未跟进**，
-# 一并归 ADR-0040 §5。
+# 判据面只有一处翻转：**A3 与 A6 失去对象**——ADR-0036 §5 整段取消了 SQL 形状预检。
+# 两个编号**保留、脚本里跳过、报告里打 N/A**，不删号、不重编、不拿别的场景补位：
+# 编号是历史锚点，重编之后 2026-08-16 那几份旧报告就对不上了（ADR-0040 §5.2）。
+#
 set -uo pipefail
 
 SCENARIOS=(
@@ -64,6 +64,14 @@ SOURCE_PORT=18088
 SINK_URL=http://127.0.0.1:18080
 PROXY_URL=http://127.0.0.1:18081
 BIZ_DATE=2026-08-14
+# 台架自己的两条数据源（ADR-0037 §1）：源端 Oracle 与目标端 MySQL 各一条，
+# 建一次、后续每次 start_source 复用（数据都在同一个 SOURCE_DATA 里）。
+ORACLE_DATASOURCE_NAME="M2 源库"
+TARGET_DATASOURCE_NAME="M2 目标库"
+ORACLE_DATASOURCE_ID=""
+TARGET_DATASOURCE_ID=""
+# 跳过的场景用它退出：判据失去对象既不是失败，也不能算通过（ADR-0040 §5.2）。
+SKIPPED_EXIT=3
 # M2_KEEP_RIG=1 leaves the rig, the host source and the accumulated run history up after the
 # last scenario, so the manual render walkthrough can reuse the states the run just produced.
 KEEP_RIG=${M2_KEEP_RIG:-}
@@ -194,10 +202,11 @@ stop_child() {
 write_source_config() {
   local sink_url=$1
   mkdir -p "$SOURCE_DATA"
+  # `oracle_connect_string` / `oracle_username` / `oracle_password` 已随 ADR-0037 §10 退役：
+  # Oracle 凭据的真相源是数据源库。留着它们只会在首次启动时被迁成一条名为「默认」的数据源，
+  # 台架就分不清用的是自己建的那条还是迁出来的那条，所以这里不写。
+  # `oracle_client_lib_dir` **不退役**（ADR-0037 §6：ODPI-C 的 client 库是进程级的）。
   cat > "$SOURCE_CONFIG" <<EOF
-oracle_connect_string = "//127.0.0.1:1521/XE"
-oracle_username = "spike"
-oracle_password = "spike123"
 oracle_client_lib_dir = "$M2_ORACLE_CLIENT_LIB_DIR"
 sink_base_url = "$sink_url"
 listen = "127.0.0.1:18088"
@@ -241,6 +250,7 @@ start_source() {
     nohup "$SOURCE_BIN" --config "$SOURCE_CONFIG" > "$SOURCE_LOG" 2>&1 &
   SOURCE_PID=$!
   wait_for_source || return 1
+  ensure_datasources || return 1
   # 端口起前已清空，正常不会走到这里；留着是为了万一还有别的进程抢在中间，报错能说到点子上。
   kill -0 "$SOURCE_PID" 2>/dev/null && return 0
   cat "$SOURCE_LOG" >&2 || true
@@ -296,27 +306,91 @@ start_sink() {
   fail "sink did not become ready"
 }
 
-create_task() {
-  local name=$1 sql=$2 target=${3:-M1_NARROW} payload
-  payload=$(jq -nc --arg name "$name" --arg sql "$sql" --arg target "$target" '{
-    name:$name, source_sql:$sql, source_date_col:"D_BIZ",
-    target_table:$target, target_date_col:"D_BIZ"
+# 数据源是任务定义的前提（ADR-0037 §1）：任务绑的是 id，不是连接串。
+# 建过就复用——同一个 SOURCE_DATA 跨 start_source 保留，A12/A13 那种重启不该重建。
+datasource_id_by_name() {
+  local name=$1
+  api GET /api/datasources || return 1
+  jq -r --arg name "$name" 'map(select(.name == $name)) | .[0].datasource_id // empty' <<<"$API_BODY"
+}
+
+ensure_datasource() {
+  local name=$1 payload=$2 existing
+  existing=$(datasource_id_by_name "$name") || return 1
+  if [[ -n "$existing" ]]; then
+    printf '%s' "$existing"
+    return 0
+  fi
+  api POST /api/datasources "$payload" || return 1
+  [[ "$API_STATUS" == 201 ]] ||
+    fail "create datasource $name status=$API_STATUS body=$API_BODY" || return 1
+  jq -r '.datasource_id' <<<"$API_BODY"
+}
+
+ensure_datasources() {
+  local payload
+  payload=$(jq -nc --arg name "$ORACLE_DATASOURCE_NAME" '{
+    name:$name, kind:"oracle",
+    connect_string:"//127.0.0.1:1521/XE", username:"spike", password:"spike123"
   }') || return 1
+  ORACLE_DATASOURCE_ID=$(ensure_datasource "$ORACLE_DATASOURCE_NAME" "$payload") || return 1
+  payload=$(jq -nc --arg name "$TARGET_DATASOURCE_NAME" '{
+    name:$name, kind:"mysql",
+    # sink 跑在 client 容器里、MySQL 是同网的 `mysql` 服务——目标端连接是**由 sink 用**的
+    # （ADR-0037 §1：凭据随 run 报文过线，sink 拿着它连），所以这里给的是容器内的名字，
+    # 不是宿主机的 127.0.0.1。Oracle 那条相反：source 跑在宿主机上，走发布出来的端口。
+    host:"mysql", port:3306, username:"spike", password:"spike123", database:"qbs"
+  }') || return 1
+  TARGET_DATASOURCE_ID=$(ensure_datasource "$TARGET_DATASOURCE_NAME" "$payload") || return 1
+  [[ -n "$ORACLE_DATASOURCE_ID" && -n "$TARGET_DATASOURCE_ID" ]] ||
+    fail "datasource ids missing: oracle=$ORACLE_DATASOURCE_ID target=$TARGET_DATASOURCE_ID"
+}
+
+# 结构化规格取代退役的 `source_sql`（ADR-0036 §1/§2）：SQL 由它现算，任务定义里不存 SQL。
+#
+# 原来的 `d_biz >= :biz_date AND d_biz < :biz_date + 1` 半开区间在 v1 表达不出来——比较符只有
+# `>` `<` `=`（ADR-0035 §3 字面）。台架里 d_biz 是纯日期（时分秒为零），单点等值与原半开区间
+# 同集合，所以用 `= :d_biz` 顶上。这条表达力缺口挂在 ADR-0035 的时效 2 上，不要自作主张加 `>=`。
+narrow_spec() {
+  local target=${1:-M1_NARROW}
+  jq -nc --arg target "$target" '{
+    owner:"SPIKE", table:"T_M1_NARROW", target_table:$target,
+    primary_key:["ROW_ID"],
+    columns:[
+      {source:"ROW_ID", target:"ROW_ID"},
+      {source:"V_TEXT", target:"V_TEXT"},
+      {source:"D_BIZ",  target:"D_BIZ"}
+    ],
+    conditions:[{
+      column:"D_BIZ", operator:"eq", value_type:"date",
+      parameter:"d_biz", value_source:"runtime", constant:""
+    }]
+  }'
+}
+
+create_task() {
+  local name=$1 spec=$2 payload
+  payload=$(jq -nc --arg name "$name" --arg source "$ORACLE_DATASOURCE_ID" \
+    --arg target "$TARGET_DATASOURCE_ID" --argjson spec "$spec" '{
+      name:$name, source_datasource_id:$source, target_datasource_id:$target, spec:$spec
+    }') || return 1
   api POST /api/tasks "$payload" || return 1
   [[ "$API_STATUS" == 201 ]] || fail "create task status=$API_STATUS body=$API_BODY" || return 1
   jq -r '.task_id' <<<"$API_BODY"
 }
 
+# `biz_date` 那个一等概念已随 ADR-0035 §3 退役：发起时逐条填规格声明的运行参数。
+run_params_payload() {
+  local task_id=$1 date=${2:-$BIZ_DATE}
+  jq -nc --arg task "$task_id" --arg date "$date" '{task_id:$task, run_params:{d_biz:$date}}'
+}
+
 start_task_run() {
   local task_id=$1 date=${2:-$BIZ_DATE} payload
-  payload=$(jq -nc --arg task "$task_id" --arg date "$date" '{task_id:$task,biz_date:$date}') || return 1
+  payload=$(run_params_payload "$task_id" "$date") || return 1
   api POST /api/runs "$payload" || return 1
   [[ "$API_STATUS" == 202 ]] || fail "start run status=$API_STATUS body=$API_BODY" || return 1
   jq -r '.run_record_id' <<<"$API_BODY"
-}
-
-normal_sql() {
-  printf '%s' "SELECT n.row_id AS ROW_ID, n.v_text AS V_TEXT, n.d_biz AS D_BIZ FROM t_m1_narrow n WHERE n.d_biz >= TO_DATE(:biz_date,'YYYY-MM-DD') AND n.d_biz < TO_DATE(:biz_date,'YYYY-MM-DD') + 1"
 }
 
 scenario_a1() {
@@ -337,8 +411,10 @@ scenario_a2() {
   local before_history after_history before_sink_records after_sink_records task_id payload columns expected_columns
   before_history=$(history_count) || return 1
   before_sink_records=$(sink_log_record_count) || return 1
-  task_id=$(create_task "A2 取列" "$(normal_sql)") || return 1
-  payload=$(jq -nc --arg sql "$(normal_sql)" '{source_sql:$sql,source_date_col:"D_BIZ",target_table:"M1_NARROW",target_date_col:"D_BIZ"}')
+  task_id=$(create_task "A2 取列" "$(narrow_spec)") || return 1
+  # 取列面吃的是「哪个数据源 + 哪份规格」（ADR-0037 §1、ADR-0036 §1），不再吃一段 SQL。
+  payload=$(jq -nc --arg datasource "$ORACLE_DATASOURCE_ID" --argjson spec "$(narrow_spec)" \
+    '{datasource_id:$datasource, spec:$spec}') || return 1
   api POST /api/columns "$payload" || return 1
   assert_eq "column fetch status" 200 "$API_STATUS" || return 1
   columns=$(jq -c '.columns | map({name,type,precision,scale,length})' <<<"$API_BODY") || return 1
@@ -352,24 +428,33 @@ scenario_a2() {
   echo "task_id: $task_id"
 }
 
+# A3 的判据**已随 ADR-0036 §5 退役**：SQL 形状预检整段取消了，六条规则里五条由生成器
+# 结构性保证或随「业务日期」一等概念退役，第六条按所有者的降级裁定一并取消。取列面上再也
+# 造不出「形状失败」这一态——`/api/columns` 吃的是规格，规格产不出坏形状。
+#
+# 编号保留、不重编、不拿别的场景补位（ADR-0040 §5.2）：编号是历史锚点，2026-08-16 那几份
+# 旧报告仍然对得上；一个写着「已退役及其依据」的 N/A 行，比一个消失的编号更能回答「A3 去哪了」。
+# **N/A 是判据的状态，不是一次跑的豁免**——下次触发仍要逐条确认「对象还是不存在」。
 scenario_a3() {
-  start_source real || return 1
-  local payload
-  payload='{"source_sql":"SELECT * FROM t_m1_narrow","source_date_col":"D_BIZ","target_table":"M1_NARROW","target_date_col":"OTHER"}'
-  api POST /api/columns "$payload" || return 1
-  assert_eq "shape failure status" 422 "$API_STATUS" || return 1
-  assert_eq "shape check count" 6 "$(jq '.checks | length' <<<"$API_BODY")" || return 1
-  assert_eq "shape passed and failed both reported" true "$(jq '([.checks[].passed] | any) and ([.checks[].passed] | any(. == false))' <<<"$API_BODY")" || return 1
-  assert_eq "error code absent" false "$(jq 'has("code") or has("error")' <<<"$API_BODY")" || return 1
-  echo "actual response: $API_BODY"
+  echo "A3 判据已失去对象：SQL 形状预检整段取消（ADR-0036 §5），取列面造不出这一态。"
+  echo "编号保留、不重编；判定按 ADR-0040 §5.2 打 N/A。"
+  return "$SKIPPED_EXIT"
 }
 
 scenario_a4() {
   start_source real || return 1
-  local before_history after_history payload missing_table_sql
+  local before_history after_history payload missing_table_spec
   before_history=$(history_count) || return 1
-  missing_table_sql="SELECT n.D_BIZ AS D_BIZ FROM table_that_does_not_exist n WHERE n.D_BIZ >= TO_DATE(:biz_date,'YYYY-MM-DD') AND n.D_BIZ < TO_DATE(:biz_date,'YYYY-MM-DD') + 1"
-  payload=$(jq -nc --arg sql "$missing_table_sql" '{source_sql:$sql,source_date_col:"D_BIZ",target_table:"M1_NARROW",target_date_col:"D_BIZ"}') || return 1
+  # 表不存在这一态由规格里的 `table` 造：SQL 由规格现算，ORA-942 仍在 describe 那一步炸。
+  missing_table_spec=$(jq -nc '{
+    owner:"SPIKE", table:"TABLE_THAT_DOES_NOT_EXIST", target_table:"M1_NARROW",
+    primary_key:["D_BIZ"],
+    columns:[{source:"D_BIZ", target:"D_BIZ"}],
+    conditions:[{column:"D_BIZ", operator:"eq", value_type:"date",
+                 parameter:"d_biz", value_source:"runtime", constant:""}]
+  }') || return 1
+  payload=$(jq -nc --arg datasource "$ORACLE_DATASOURCE_ID" --argjson spec "$missing_table_spec" \
+    '{datasource_id:$datasource, spec:$spec}') || return 1
   api POST /api/columns "$payload" || return 1
   assert_eq "Oracle failure status" 502 "$API_STATUS" || return 1
   assert_eq "Oracle failure kind" oracle "$(jq -r '.kind' <<<"$API_BODY")" || return 1
@@ -384,7 +469,7 @@ scenario_a4() {
 scenario_a5() {
   start_source pause-committing || return 1
   local task_id run_record_id run_id live_projection terminal_marker terminal_projection history_projection
-  task_id=$(create_task "A5 正常 10 万行" "$(normal_sql)") || return 1
+  task_id=$(create_task "A5 正常 10 万行" "$(narrow_spec)") || return 1
   run_record_id=$(start_task_run "$task_id") || return 1
   wait_for_run "$run_record_id" '.live == true and .stage == "COMMITTING"' || return 1
   live_projection=$(jq -c '{seq,rows_pushed,bytes,ms}' <<<"$API_BODY") || return 1
@@ -406,29 +491,20 @@ scenario_a5() {
   A5_RECORD=$run_record_id
 }
 
+# A6 与 A3 同源：发起运行那一侧的形状预检也随 ADR-0036 §5 整段取消，`SHAPE_PRECHECK`
+# 这个失败分类已不在闭集里，`.shape_checks` 这个字段也不存在了。处置与 A3 一字不差
+# （ADR-0040 §5.2）：编号保留、脚本里跳过、报告里打 N/A。
 scenario_a6() {
-  start_source real || return 1
-  local task_id run_record_id before_sink_records after_sink_records
-  before_sink_records=$(sink_log_record_count) || return 1
-  task_id=$(create_task "A6 形状失败" "SELECT * FROM t_m1_narrow") || return 1
-  run_record_id=$(start_task_run "$task_id") || return 1
-  wait_for_run "$run_record_id" '.live == false' || return 1
-  assert_eq "run_record_id retained" "$run_record_id" "$(jq -r '.run_record_id' <<<"$API_BODY")" || return 1
-  assert_eq "run_id is null" null "$(jq -r '.run_id' <<<"$API_BODY")" || return 1
-  assert_eq "run shape check count" 6 "$(jq '.shape_checks | length' <<<"$API_BODY")" || return 1
-  assert_eq "run shape report has failure" true "$(jq '[.shape_checks[].passed] | any(. == false)' <<<"$API_BODY")" || return 1
-  assert_eq "shape failure category" SHAPE_PRECHECK "$(jq -r '.failure_kind' <<<"$API_BODY")" || return 1
-  api GET "/api/runs?task_id=$task_id" || return 1
-  assert_eq "history row present" true "$(jq --arg record "$run_record_id" 'any(.[]; .run_record_id == $record)' <<<"$API_BODY")" || return 1
-  after_sink_records=$(sink_log_record_count) || return 1
-  assert_eq "component=sink new log lines" 0 "$((after_sink_records - before_sink_records))"
+  echo "A6 判据已失去对象：发起面的 SQL 形状预检整段取消（ADR-0036 §5），SHAPE_PRECHECK 已不在失败闭集里。"
+  echo "编号保留、不重编；判定按 ADR-0040 §5.2 打 N/A。"
+  return "$SKIPPED_EXIT"
 }
 
 scenario_a7() {
   start_source real || return 1
   mysql_exec 'DROP TABLE IF EXISTS M2_BAD; CREATE TABLE M2_BAD (ROW_ID DECIMAL(8,0) NULL, D_BIZ DATETIME(0) NULL, INDEX (D_BIZ)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4' >/dev/null || return 1
   local task_id record
-  task_id=$(create_task "A7 映射失败" "$(normal_sql)" M2_BAD) || return 1
+  task_id=$(create_task "A7 映射失败" "$(narrow_spec M2_BAD)") || return 1
   record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == false' || return 1
   assert_eq "mapping run_id exists" true "$(jq '.run_id != null' <<<"$API_BODY")" || return 1
@@ -443,7 +519,7 @@ scenario_a8() {
   start_proxy verify || return 1
   start_source real "$PROXY_URL" || return 1
   local task_id record
-  task_id=$(create_task "A8 校验失败" "$(normal_sql)") || return 1
+  task_id=$(create_task "A8 校验失败" "$(narrow_spec)") || return 1
   record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == false' || return 1
   assert_eq "verification code" VERIFY_FAILED "$(jq -r '.sink_code' <<<"$API_BODY")" || return 1
@@ -456,7 +532,7 @@ scenario_a8() {
 scenario_a9() {
   start_source fail-escape || return 1
   local task_id record
-  task_id=$(create_task "A9 哨兵逃逸" "$(normal_sql)") || return 1
+  task_id=$(create_task "A9 哨兵逃逸" "$(narrow_spec)") || return 1
   record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == false' || return 1
   assert_eq "escape code" INTERNAL_PRECHECK_ESCAPE "$(jq -r '.sink_code' <<<"$API_BODY")" || return 1
@@ -469,10 +545,11 @@ scenario_a9() {
 scenario_a10() {
   start_source hang-streaming || return 1
   local task_id record payload
-  task_id=$(create_task "A10 并发" "$(normal_sql)") || return 1
+  task_id=$(create_task "A10 并发" "$(narrow_spec)") || return 1
   record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == true and .stage == "STREAMING"' || return 1
-  payload=$(jq -nc --arg task "$task_id" --arg date "$BIZ_DATE" '{task_id:$task,biz_date:$date}')
+  # 并发互斥键是「任务 + 本次运行参数集」（ADR-0036 §7），所以第二次必须用同一组参数发。
+  payload=$(run_params_payload "$task_id") || return 1
   api POST /api/runs "$payload" || return 1
   assert_eq "concurrent start status" 409 "$API_STATUS" || return 1
   echo "actual rejection: $API_BODY"
@@ -484,7 +561,7 @@ scenario_a11() {
   start_proxy swapped 3 || return 1
   start_source real "$PROXY_URL" || return 1
   local task_id record
-  task_id=$(create_task "A11 提交取消" "$(normal_sql)") || return 1
+  task_id=$(create_task "A11 提交取消" "$(narrow_spec)") || return 1
   record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == true and .stage == "COMMITTING"' || return 1
   api POST "/api/runs/$record/cancel" '{}' || return 1
@@ -498,7 +575,7 @@ scenario_a11() {
 scenario_a12() {
   start_source hang-streaming || return 1
   local task_id record killed_pid
-  task_id=$(create_task "A12 进程消失" "$(normal_sql)") || return 1
+  task_id=$(create_task "A12 进程消失" "$(narrow_spec)") || return 1
   record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == true and .stage == "STREAMING"' || return 1
   killed_pid=$SOURCE_PID
@@ -517,7 +594,7 @@ scenario_a12() {
 scenario_a13() {
   start_source hang-streaming || return 1
   local task_id record
-  task_id=$(create_task "A13 服务重启" "$(normal_sql)") || return 1
+  task_id=$(create_task "A13 服务重启" "$(narrow_spec)") || return 1
   record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == true and .stage == "STREAMING"' || return 1
   stop_source || return 1
@@ -532,7 +609,7 @@ scenario_a13() {
 scenario_a14() {
   start_source hang-streaming || return 1
   local task_id record
-  task_id=$(create_task "A14 生命周期" "$(normal_sql)") || return 1
+  task_id=$(create_task "A14 生命周期" "$(narrow_spec)") || return 1
   record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == true' || return 1
   A14_LIVE=$API_BODY
@@ -560,18 +637,29 @@ scenario_index() {
 }
 
 run_scenario() {
-  local name=$1 function=$2 index output
+  local name=$1 function=$2 index output status
   index=$(scenario_index "$name") || return 1
   output="$WORK_ROOT/$name.out"
   echo "==> $name"
-  if "$function" > "$output" 2>&1; then
+  # 状态单独取：`if cmd; then …; fi` 走完之后 `$?` 是 **if 语句本身**的 0，不是 cmd 的退出码，
+  # 那样 `$SKIPPED_EXIT`（3）永远读不到，A3/A6 会被当成 FAIL。
+  "$function" > "$output" 2>&1
+  status=$?
+  if (( status == 0 )); then
     RESULTS[$index]=PASS
     echo "    PASS"
-  else
-    RESULTS[$index]=FAIL
-    echo "    FAIL"
-    sed 's/^/    /' "$output"
+    return 0
   fi
+  # 判据失去对象既不是失败也不是通过——报告里照实写 N/A 并写明谁判废的，不许写「通过」。
+  if (( status == SKIPPED_EXIT )); then
+    RESULTS[$index]='N/A（判据已随 ADR-0036 §5 退役）'
+    echo "    N/A"
+    sed 's/^/    /' "$output"
+    return 0
+  fi
+  RESULTS[$index]=FAIL
+  echo "    FAIL"
+  sed 's/^/    /' "$output"
 }
 
 write_report() {
@@ -584,6 +672,8 @@ write_report() {
     # 派发的一方用 DB_QBS_GIT_COMMIT 把源端的 HEAD 传进来，报告就不会再写 unknown。
     echo "- Git commit: ${DB_QBS_GIT_COMMIT:-$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown（工作区不是 git checkout，且没传 DB_QBS_GIT_COMMIT）")}"
     echo "- Visual walkthrough: required separately by m2-visual-walkthrough.md"
+    echo "- 判据依据：ADR-0040 §5.2。A3 / A6 保留编号、打 N/A（判据已随 ADR-0036 §5 退役），"
+    echo "  不删号、不重编、不拿别的场景补位；N/A 是判据的状态，不是一次跑的豁免。"
     echo
     echo "## Scenarios"
     echo
@@ -692,11 +782,16 @@ echo "report: $REPORT"
 [[ -n "$KEEP_RIG" ]] && { hand_over_rig || exit 1; }
 
 failed=0
+skipped=0
 for (( index = 0; index < ${#SCENARIOS[@]}; index++ )); do
-  [[ "${RESULTS[$index]:-FAIL}" == PASS ]] || failed=$((failed + 1))
+  case "${RESULTS[$index]:-FAIL}" in
+    PASS) ;;
+    N/A*) skipped=$((skipped + 1)) ;;
+    *) failed=$((failed + 1)) ;;
+  esac
 done
 if (( failed > 0 )); then
   echo "M2 acceptance: FAIL ($failed/${#SCENARIOS[@]} scenarios)"
   exit 1
 fi
-echo "M2 acceptance: PASS (${#SCENARIOS[@]}/${#SCENARIOS[@]} scenarios)"
+echo "M2 acceptance: PASS ($(( ${#SCENARIOS[@]} - skipped ))/${#SCENARIOS[@]} scenarios, $skipped N/A)"

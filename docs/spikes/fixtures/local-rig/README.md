@@ -79,7 +79,9 @@ probes/mysql-roundtrip.sql  #13 的目标端往返实测（CHAR 尾空格 / DECI
 
 每个场景在终端输出 `PASS` / `FAIL`。最终报告默认写到本目录的
 `m1-acceptance-<UTC>.md`（可用 `M1_REPORT=/path/report.md` 指定），包含 fetch/push/cursor、
-commit 及其 `SELECT COUNT(*)` 子项、`purged_rows`、逐批实际行数和序列化字节分布。报告按
+commit 及其 `SELECT COUNT(*)` 子项、`purged_rows`、逐批实际行数和序列化字节分布，外加一节
+**载荷记账**（源行宽 bytes/row、批数、批体 p50、载荷总量估算）——客户需求「单次 10 万行、
+约 100MB」的兑现点就在那一行上（ADR-0040 §1），**只记不判**。报告按
 push/cursor 超过 50%、commit 对 30 分钟读超时、最大批次对 16 MiB 三条口径复审；批次行数
 始终从 JSONL 求和和排序，不假设固定值。
 
@@ -90,8 +92,10 @@ commit 场景由 `acceptance/commit-drop-proxy.py` 在 sink 完成事务后切�
 `DISCARDED` 墓碑——两种模式下 source 都只能靠墓碑 GET 判断目标表是否已被切换。代理只用于本台架。
 
 kill sink 场景在 source 推完部分批次后 `kill -KILL` sink，验证 source 以 1 退出、终止在
-`STREAMING` 且不产生 `commit_diagnosed`，目标表保持原样；重启 sink 后重跑必须换用新 `run_id`
-并复现直连基线的目标表哈希。
+`STREAMING` 且不产生 `commit_diagnosed`，目标表保持原样；重启 sink 后重跑必须换用新 `run_id`，
+且**哨兵留存**——写入模型换成按主键 upsert 之后（ADR-0035 §1），重跑碰不到主键不在源结果集里
+的那一行，目标表哈希回到的是「基线 + 哨兵」而不是基线本身（ADR-0040 §5.1）。同一条理由下，
+空结果集那一场的 `purged_rows` 恒 `0`、目标端当日行原封不动。
 入口生成的临时日志权限受 `umask 077` 约束，报告权限为 0600。
 
 `oracle/` 与 `mysql/` 分别挂进两个镜像的 initdb 目录，**只在首次建库时执行一次**。

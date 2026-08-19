@@ -86,7 +86,9 @@ INSERT ALL
   )
 SELECT 1 FROM dual;
 
+-- row_id 是本轮新加的：主键必选（所有者 2026-08-18 裁定），B2/B3 原本一列可做主键的都没有。
 CREATE TABLE t_m3_b2 (
+  row_id       NUMBER(8),
   bf           BINARY_FLOAT,
   bd           BINARY_DOUBLE,
   payload      CLOB,
@@ -100,18 +102,19 @@ CREATE TABLE t_m3_b2 (
 );
 
 INSERT INTO t_m3_b2
-  (bf, bd, payload, v_text, c_char, n_too_wide, n_too_scale, n_missing, d_wrong, load_date)
+  (row_id, bf, bd, payload, v_text, c_char, n_too_wide, n_too_scale, n_missing, d_wrong, load_date)
 VALUES
-  (1.5, 2.5, TO_CLOB('B2 payload'), 'B2', 'B2', NULL, NULL, 7,
+  (1, 1.5, 2.5, TO_CLOB('B2 payload'), 'B2', 'B2', NULL, NULL, 7,
    DATE '2026-08-13', DATE '2026-08-14');
 
 CREATE TABLE t_m3_b3 (
+  row_id         NUMBER(8),
   ts_too_precise TIMESTAMP(9),
   load_date      DATE
 );
 
 INSERT INTO t_m3_b3 VALUES (
-  TIMESTAMP '2026-08-13 14:35:09.123456789', DATE '2026-08-14'
+  1, TIMESTAMP '2026-08-13 14:35:09.123456789', DATE '2026-08-14'
 );
 
 CREATE TABLE t_m3_b4 (

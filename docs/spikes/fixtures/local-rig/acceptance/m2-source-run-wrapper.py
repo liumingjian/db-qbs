@@ -44,9 +44,9 @@ def emit(event, run_id=None, **fields):
 
 
 def fake_run(mode):
-    biz_date = argument("--biz-date") or "2026-08-14"
+    # `--biz-date` 随 ADR-0035 §3 取消：过滤条件与本次取值都在 `--task` 那份规格里。
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + f"_{random.randrange(0x1000000):06x}"
-    emit("source_started", biz_date=biz_date, message="M2 controlled child started")
+    emit("source_started", message="M2 controlled child started")
     emit("stage_changed", run_id, stage="PREPARING", message="preparing")
     emit("run_opened", run_id, staging_table=f"M2_NARROW__stg_{run_id}", columns_checked=3)
     emit("stage_changed", run_id, stage="STREAMING", message="streaming")

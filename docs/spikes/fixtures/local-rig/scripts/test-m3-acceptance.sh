@@ -116,10 +116,20 @@ while IFS= read -r shape; do
     exit 1
   fi
 done < <(grep -Eo 'DECIMAL\([0-9]+,[0-9]+\)' acceptance/mysql-m3.sql)
-grep -Eq '^[[:space:]]*C_EXPR[[:space:]]+VARCHAR\(20\)' acceptance/mysql-m3.sql || {
-  echo "B2 character-expression target must not add a second CHAR rejection reason" >&2
+# 写入模型是 upsert（ADR-0035 §2）：目标端必须真有列集合与勾选主键一致的唯一约束，
+# 否则 `ON DUPLICATE KEY UPDATE` 静默退化成纯 INSERT、重跑就出重复行。
+[[ $(grep -c 'PRIMARY KEY (ROW_ID)' acceptance/mysql-m3.sql) == 6 ]] || {
+  echo "all six M3 target tables must carry a PRIMARY KEY on ROW_ID" >&2
   exit 1
 }
+if grep -Eq '^[[:space:]]*ROW_ID[[:space:]]+DECIMAL\([0-9]+,[0-9]+\) NULL' acceptance/mysql-m3.sql; then
+  echo "M3 primary-key columns must be NOT NULL: MySQL UNIQUE allows many NULLs" >&2
+  exit 1
+fi
+if grep -Fq 'C_EXPR' acceptance/mysql-m3.sql; then
+  echo "C_EXPR lost its object with ADR-0036 §2/§5; the target column must go with it" >&2
+  exit 1
+fi
 
 for shape in \
   'NUMBER(38,2)' 'NUMBER(4,6)' 'NUMBER(8,-2)' 'n_bare       NUMBER' \
@@ -140,21 +150,42 @@ for value in \
     exit 1
   }
 done
-grep -Fq 'N_EXPR' "$runner"
-grep -Fq 'column_precision' "$runner"
 grep -Fq 'HEX(' "$runner"
+# 调用面：TaskSpec + 数据源 id 绑定 + run_params（ADR-0036 §1、ADR-0037 §1/§8）。
+for surface in 'source_datasource_id' 'target_datasource_id' 'run_params' 'b1_spec'; do
+  grep -Fq "$surface" "$runner" || {
+    echo "M3 must drive the current call surface: missing $surface" >&2
+    exit 1
+  }
+done
+# 匹配的是**报文字段**（`source_sql:` / `biz_date:`），不是散文里提到的名字——
+# 抬头那段说明本来就要点名这几个退役字段。
+for retired_field in 'source_sql' 'source_date_col' 'target_date_col' 'biz_date'; do
+  if grep -Eq "$retired_field[\"']?[:=]" "$runner"; then
+    echo "M3 must not send the retired $retired_field payload field" >&2
+    exit 1
+  fi
+done
+# ADR-0040 §5.3：B1 的哨兵从「被删除」翻成「留存」。
+b1_body=$(sed -n '/^scenario_b1()/,/^}/p' "$runner")
+grep -Fq 'B1 sentinel retained' <<<"$b1_body" || {
+  echo "B1 must assert the sentinel survives: upsert never touches a key it did not fetch" >&2
+  exit 1
+}
+if grep -Fq 'B1 sentinel removed' <<<"$b1_body"; then
+  echo "B1 still asserts the retired DELETE-era sentinel removal" >&2
+  exit 1
+fi
 
 for mapping_rule in \
   "BF '源类型不在 M3 九行白名单内'" \
   "BD '源类型不在 M3 九行白名单内'" \
   "PAYLOAD '源类型不在 M3 九行白名单内'" \
-  "C_EXPR '字符列必须具有可判定的 length'" \
   "C_CHAR '字符族目标类型必须是 VARCHAR'" \
   "N_TOO_WIDE 'MySQL DECIMAL 无法表达推导形状 DECIMAL(68,0)'" \
   "N_TOO_SCALE 'MySQL DECIMAL 无法表达推导形状 DECIMAL(35,35)'" \
   "N_MISSING '目标表缺少同名列'" \
-  "D_WRONG 'DATE 的目标类型必须是 DATETIME'" \
-  "EXTRA '源端结果缺少同名列'"; do
+  "D_WRONG 'DATE 的目标类型必须是 DATETIME'"; do
   grep -Fq "assert_mapping_rule $mapping_rule" "$runner" || {
     echo "B2 is missing its expected mapping rule: $mapping_rule" >&2
     exit 1
@@ -162,6 +193,19 @@ for mapping_rule in \
 done
 grep -Fq '一次发现 $total 项问题' "$runner"
 grep -Fq 'B2 total issues' "$runner"
+# EXTRA 的判据方向反了（ADR-0038 §4 把列名集合完全相等撤成子集判定）：未被映射的可空列
+# 不再报 `源端结果缺少同名列`。编号与场景都不动，断言就地改成「它一条问题都不出」。
+grep -Fq 'B2 EXTRA is no longer an issue' "$runner" || {
+  echo "B2 must assert the subset rule: an unmapped nullable target column is not an issue" >&2
+  exit 1
+}
+# C_EXPR / N_EXPR 失去对象（表达式列在 v1 进不来），照实记 N/A 并写明谁判废的，不许写「通过」。
+for retired in 'B1 numeric expression: N/A' 'B2 C_EXPR: N/A'; do
+  grep -Fq "$retired" "$runner" || {
+    echo "M3 must record the retired expression-column criterion as N/A: $retired" >&2
+    exit 1
+  }
+done
 grep -Fq 'staging tables' "$runner"
 grep -Fq 'TIMESTAMP(n>6) 不在白名单' "$runner"
 grep -Fq 'range_check_executed' "$runner"

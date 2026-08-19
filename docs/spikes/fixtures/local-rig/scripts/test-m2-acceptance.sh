@@ -87,11 +87,45 @@ for evidence in 'pause-committing' 'live_projection' 'release-child' 'terminal_p
   }
 done
 
-a6_body=$(sed -n '/^scenario_a6()/,/^}/p' "$runner")
-grep -Fq 'sink_log_record_count' <<<"$a6_body" || {
-  echo "A6 must prove that a run shape failure does not reach sink" >&2
+# A3 / A6 的判据已随 ADR-0036 §5 退役（SQL 形状预检整段取消）。ADR-0040 §5.2 的处置是
+# **保留编号、脚本里跳过、报告里打 N/A**——不删号、不重编、不拿别的场景补位。
+# 这里守的正是这一条：两个函数必须还在、必须还被 run_scenario 调用、且必须走 N/A 那条出口。
+for retired in a3 a6; do
+  body=$(sed -n "/^scenario_${retired}()/,/^}/p" "$runner")
+  grep -Fq 'return "$SKIPPED_EXIT"' <<<"$body" || {
+    echo "${retired} must exit through the N/A path, not pass or fail" >&2
+    exit 1
+  }
+  grep -Fq 'ADR-0036 §5' <<<"$body" || {
+    echo "${retired} must name the ADR that retired its criterion" >&2
+    exit 1
+  }
+done
+run_scenario_body=$(sed -n '/^run_scenario()/,/^}/p' "$runner")
+grep -Fq 'N/A（判据已随 ADR-0036 §5 退役）' <<<"$run_scenario_body" || {
+  echo "the runner must record retired criteria as N/A with their provenance" >&2
   exit 1
 }
+if grep -Fq '.shape_checks | length' "$runner"; then
+  echo "the runner must not still assert on the retired shape-precheck report" >&2
+  exit 1
+fi
+
+# 调用面：TaskSpec + 数据源 id 绑定 + run_params（ADR-0036 §1、ADR-0037 §1/§8）。
+for surface in 'source_datasource_id' 'target_datasource_id' 'run_params' 'narrow_spec'; do
+  grep -Fq "$surface" "$runner" || {
+    echo "M2 must drive the current call surface: missing $surface" >&2
+    exit 1
+  }
+done
+# 匹配的是**报文字段**（`source_sql:` / `biz_date:`），不是散文里提到的名字——
+# 抬头那段说明本来就要点名这几个退役字段。
+for retired_field in 'source_sql' 'source_date_col' 'target_date_col' 'biz_date'; do
+  if grep -Eq "$retired_field[\"']?[:=]" "$runner"; then
+    echo "M2 must not send the retired $retired_field payload field" >&2
+    exit 1
+  fi
+done
 
 grep -Fq 'commit-drop-proxy.py' "$runner" || {
   echo "A11 must reuse the existing commit-drop proxy" >&2
@@ -134,5 +168,7 @@ grep -Fq 'm2-visual-walkthrough.md' ../../../../CLAUDE.md
 grep -Fq 'docs/design-system/README.md' ../../../../CLAUDE.md
 grep -Fq 'docs/design-system/tokens.css' ../../../../CLAUDE.md
 grep -Fq 'every M2 acceptance' ../../../../CLAUDE.md
-grep -Fq 'before merge' ../../../../CLAUDE.md
+# ADR-0040 §7 把两道视觉门禁段并成了一段三行表，「before merge」这句措辞随之不在了。
+# 守的还是同一件事：触发即跑、不许豁免。
+grep -Fq 'A trigger fires, you run it' ../../../../CLAUDE.md
 grep -Fq 'actual observations' ../../../../CLAUDE.md

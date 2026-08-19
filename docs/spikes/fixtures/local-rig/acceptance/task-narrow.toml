@@ -27,5 +27,22 @@ parameter = "d_biz"
 value_source = "runtime"
 constant = ""
 
+# 两端连接直接写在任务文件里（ADR-0037 §1/§8）：编排进程在发起时把数据源解成明文塞进
+# 临时任务文件，M1 的 run 子进程是直接调起来的，没有编排进程，所以这一份由台架自己写死。
+# 口令是台架 fixture 的公开口令，不是任何真实凭据。
+[oracle]
+connect_string = "//oracle:1521/XE"
+username = "spike"
+password = "spike123"
+client_lib_dir = "/opt/oracle/instantclient_19_32"
+
+# `sink.toml` 的 mysql_dsn / database 已退役（ADR-0037 §2），库名随本段过线。
+[target]
+host = "mysql"
+port = 3306
+username = "spike"
+password = "spike123"
+database = "qbs"
+
 [run_params]
 d_biz = "2026-08-14"
