@@ -19,6 +19,7 @@ import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs
 
 def _find_dist() -> Path:
     """向上找 `web/dist`——脚本挪过一次目录（`.playwright/` → `local-rig/walkthrough/`），
@@ -61,13 +62,68 @@ SPEC = {
     "order_by": [],
 }
 
+# 财务凭证多一条「运行时填」的 `region`——X9 的预填三规则要它：
+# 失败那行里有 `load_date`（取行值）、没有 `region`（留空）、多出一个 `legacy_region`（丢弃）。
+FA_SPEC = copy.deepcopy(SPEC)
+FA_SPEC["conditions"] = FA_SPEC["conditions"] + [
+    {"column": "C_NAME", "operator": "eq", "value_type": "text",
+     "parameter": "region", "value_source": "runtime", "constant": ""},
+]
+
 TASKS = [
     {"task_id": "task-holding", "name": "持仓日明细",
      "source_datasource_id": "ds-ora-core", "target_datasource_id": "ds-my-dw",
      "spec": copy.deepcopy(SPEC)},
     {"task_id": "task-fa", "name": "财务凭证",
      "source_datasource_id": "ds-ora-fa", "target_datasource_id": "ds-my-dw",
-     "spec": copy.deepcopy(SPEC)},
+     "spec": FA_SPEC},
+]
+
+
+def run_row(**overrides):
+    """一条运行历史行。字段照 `web/src/api.ts` 的 `RunHistory` 给全，缺一个前端就渲染不出来。"""
+    row = {
+        "run_record_id": "rec", "run_id": "run", "task_id": "task-holding",
+        "run_params": {}, "source_sql": "SELECT a.ID AS ID\n  FROM APP.T_HOLDING a",
+        "staging_table": "STG_1", "started_at": "2026-08-19T02:00:00Z",
+        "finished_at": "2026-08-19T02:03:00Z", "outcome": "FAILED",
+        "target_table_effect": "DISCARDED", "stage": "FAILED",
+        "source_rows": 120, "staged_rows": 120, "sink_reported_rows": 118, "purged_rows": 0,
+        "source_batches": 2, "received_batches": 2,
+        "fetch_ms": 900, "push_ms": 1400, "commit_ms": 120, "count_ms": 60, "cursor_ms": 20,
+        "source_code": None, "sink_code": "VERIFY_FAILED", "column": None, "value": None,
+        "message": "目标端：门禁计数不一致：源端 120 行，目标端报 118 行",
+        "failure_kind": "VERIFY_FAILED", "unknown_reason": None,
+        "seq": 2, "rows_pushed": 120, "bytes": 40960,
+        "last_ts": "2026-08-19T02:03:00Z", "mapping_issues": [],
+    }
+    row.update(overrides)
+    row["ms"] = overrides.get("ms", 180000)
+    return row
+
+
+# X9 的五态各一行：可重跑两种（FAILED / 结局不明）、不给入口两种（进行中 / SUCCEEDED）、
+# 禁用一种（任务已删除）。`rec-live-fa` 与 `rec-failed-fa` 同任务，且参数只差一个 `region`——
+# 重跑时把 `region` 补成 `HZ`，就撞上「同一组参数可能已有 run 进行中」那条既有提示。
+HISTORY = [
+    run_row(run_record_id="rec-failed-fa", run_id="run-fa-7", task_id="task-fa",
+            run_params={"load_date": "2026-08-18", "legacy_region": "SH"}),
+    run_row(run_record_id="rec-live-fa", run_id="run-fa-8", task_id="task-fa",
+            run_params={"load_date": "2026-08-18", "region": "HZ"},
+            outcome=None, stage="STREAMING", finished_at=None, sink_code=None,
+            target_table_effect=None, sink_reported_rows=None, staged_rows=None,
+            started_at="2026-08-19T02:10:00Z", ms=42000),
+    run_row(run_record_id="rec-unknown", run_id="run-h-5",
+            run_params={"load_date": "2026-08-17"},
+            outcome=None, stage=None, sink_code=None, target_table_effect=None,
+            unknown_reason="PROCESS_DISAPPEARED", message=None, failure_kind="UNKNOWN"),
+    run_row(run_record_id="rec-succeeded", run_id="run-h-4",
+            run_params={"load_date": "2026-08-16"},
+            outcome="SUCCEEDED", target_table_effect="SWAPPED", stage="COMMITTING",
+            sink_code=None, sink_reported_rows=120, message="run completed successfully",
+            failure_kind=None),
+    run_row(run_record_id="rec-task-gone", run_id="run-x-1", task_id="task-removed",
+            run_params={"load_date": "2026-08-15"}),
 ]
 
 
@@ -151,7 +207,18 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/tasks":
             return self._send(200, TASKS)
         if path == "/api/runs":
-            return self._send(200, [])
+            task_id = None
+            if "?" in self.path:
+                task_id = parse_qs(self.path.split("?", 1)[1]).get("task_id", [None])[0]
+            rows = [r for r in HISTORY if task_id in (None, "", r["task_id"])]
+            return self._send(200, rows)
+        if path.startswith("/api/runs/"):
+            wanted = path.rsplit("/", 1)[-1]
+            for row in HISTORY:
+                if row["run_record_id"] == wanted:
+                    return self._send(200, dict(row, live=row["outcome"] is None
+                                                and row["unknown_reason"] is None))
+            return self._send(404, {"error": {"message": "run not found"}})
         return self._static(path)
 
     def do_POST(self):
@@ -198,6 +265,19 @@ class Handler(BaseHTTPRequestHandler):
                     for c in spec.get("conditions", []) if c["value_source"] == "runtime"
                 ],
             })
+        if path == "/api/runs":
+            # 重跑落地成的**新**记录：旧那条原样留在清单里，这里只往前插一条进行中的。
+            body = self._read()
+            new_id = f"rec-new-{len(HISTORY) + 1}"
+            HISTORY.insert(0, run_row(
+                run_record_id=new_id, run_id=None, task_id=body.get("task_id", ""),
+                run_params=body.get("run_params", {}), outcome=None, stage=None,
+                finished_at=None, sink_code=None, target_table_effect=None,
+                staging_table=None, started_at="2026-08-19T02:20:00Z", ms=0,
+                source_rows=None, staged_rows=None, sink_reported_rows=None,
+                purged_rows=None, seq=0, rows_pushed=0, bytes=0, message=None,
+                failure_kind=None))
+            return self._send(202, {"run_record_id": new_id})
         if path == "/api/datasources":
             draft = self._read()
             entry = dict(draft)

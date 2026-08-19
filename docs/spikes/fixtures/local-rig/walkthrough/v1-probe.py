@@ -340,6 +340,143 @@ def observe_task_screen(page):
     return {"columns": headers, "binding_cells": cells, "binding_cell_style": style}
 
 
+def open_history(page, width=1440):
+    page.set_viewport_size({"width": width, "height": 1200})
+    page.goto(BASE, wait_until="networkidle")
+    page.wait_for_selector("#tasks tbody tr")
+    page.click('nav[aria-label="主导航"] a[href="#history"]')
+    page.wait_for_selector("#history tbody tr")
+
+
+def fill_value(field):
+    """给一个**没被预填**的参数编一个值——只为把表单填满，不主张值本身有意义。"""
+    kind = field.get_attribute("type")
+    return {"date": "2026-08-18", "number": "1"}.get(kind, "HZ")
+
+
+def observe_rerun(page):
+    """X9：运行历史的「重跑」入口三态 + 发起对话框的预填。
+
+    判据在 `web/src/rerun.ts`：FAILED 与结局不明给入口，进行中与 SUCCEEDED 不给，
+    任务已删除给**禁用**入口加原因。预填三规则「有取行值 / 缺留空 / 多丢弃」。
+    """
+    open_history(page)
+    headers = [h.inner_text() for h in page.query_selector_all("#history thead th")]
+    rows = []
+    for tr in page.query_selector_all("#history tbody tr:not(.history-detail-row)"):
+        cells = [c.inner_text().strip() for c in tr.query_selector_all("td")]
+        # 认前缀：禁用那条的 `aria-label` 把原因也带在里面（原生 tooltip 对
+        # `disabled` 控件不出现，原因只能进无障碍名字）。
+        button = tr.query_selector('button[aria-label^="重跑"]')
+        rows.append({
+            "run_record_id": cells[0] if cells else None,
+            "run_params": cells[3] if len(cells) > 3 else None,
+            "outcome_cell": cells[4].replace("\n", " ") if len(cells) > 4 else None,
+            "action_cell": cells[9] if len(cells) > 9 else None,
+            "rerun_button": None if button is None else {
+                "disabled": button.is_disabled(),
+                "aria_label": button.get_attribute("aria-label"),
+                "wrapper_title": button.evaluate(
+                    "(el) => el.closest('.row-actions')?.getAttribute('title')"),
+            },
+        })
+    page.screenshot(path=f"{SHOTS}/x9-history-rerun.png", full_page=True)
+
+    enabled = page.query_selector_all(
+        '#history tbody button[aria-label^="重跑"]:not([disabled])')
+    if not enabled:
+        return {"columns": headers, "rows": rows,
+                "skipped": "这批历史里没有一条可重跑——X9 的对象不存在"}
+
+    # 点第一条可重跑的：对话框是**既有的那一个**，确认键仍是「发起」。
+    source_row = next(r for r in rows if (r["rerun_button"] or {}).get("disabled") is False)
+    enabled[0].click()
+    page.wait_for_selector(".modal")
+    dialog = {
+        "source_row": source_row,
+        "title": page.query_selector(".modal h2").inner_text(),
+        "context": page.query_selector(".modal .modal-context").inner_text(),
+        "submit_label": page.query_selector('.modal button[type="submit"]').inner_text(),
+        "prefilled": [
+            {
+                "parameter": label.query_selector(".field-label").inner_text().split("\n")[0],
+                "value": label.query_selector("input").input_value(),
+                "editable": not label.query_selector("input").is_disabled(),
+            }
+            for label in page.query_selector_all(".modal .run-params label.form-field")
+        ],
+    }
+    page.screenshot(path=f"{SHOTS}/x9-prefilled-dialog.png", full_page=True)
+
+    # 改一个字段，证明预填不是只读的；顺带把留空的那些填满，好让并跑提示有机会出现。
+    edited = None
+    for label in page.query_selector_all(".modal .run-params label.form-field"):
+        field = label.query_selector("input")
+        if field.input_value() == "":
+            field.fill(fill_value(field))
+            edited = label.query_selector(".field-label").inner_text().split("\n")[0]
+    dialog["edited_empty_field"] = edited
+    dialog["values_after_edit"] = [
+        field.input_value()
+        for field in page.query_selector_all(".modal .run-params input")
+    ]
+    try:
+        page.wait_for_selector(".modal .stale-run-hint", timeout=5000)
+        dialog["stale_run_hint"] = page.query_selector(".modal .stale-run-hint").inner_text()
+    except Exception:
+        dialog["stale_run_hint"] = None
+    page.screenshot(path=f"{SHOTS}/x9-concurrent-hint.png", full_page=True)
+
+    # 确认发起：既有闸门原样走，出来的要么是新记录、要么是后端的拒绝报文。
+    page.click('.modal button[type="submit"]')
+    try:
+        page.wait_for_selector(".modal .form-error", timeout=8000)
+        dialog["submit_result"] = {"rejected": page.query_selector(".modal .form-error").inner_text()}
+    except Exception:
+        dialog["submit_result"] = {"accepted": True}
+
+    open_history(page)
+    after = [
+        tr.query_selector("td").inner_text().strip()
+        for tr in page.query_selector_all("#history tbody tr:not(.history-detail-row)")
+    ]
+
+    # 结局不明那条单独再点一次：它的 `outcome` 也是 null，并跑提示如果按 `outcome` 认
+    # 「进行中」，就会指着你刚点的这条早已死掉的记录说它还在跑（#150 审查所见）。
+    # 这里要看到的是**没有**提示条。
+    unknown = None
+    for tr in page.query_selector_all("#history tbody tr:not(.history-detail-row)"):
+        cells = [c.inner_text().strip() for c in tr.query_selector_all("td")]
+        button = tr.query_selector('button[aria-label^="重跑"]:not([disabled])')
+        if button is not None and cells and "结局不明" in cells[4]:
+            button.click()
+            page.wait_for_selector(".modal")
+            for label in page.query_selector_all(".modal .run-params label.form-field"):
+                field = label.query_selector("input")
+                if field.input_value() == "":
+                    field.fill(fill_value(field))
+            page.wait_for_timeout(1500)
+            hint = page.query_selector(".modal .stale-run-hint")
+            unknown = {
+                "run_record_id": cells[0],
+                "values": [f.input_value()
+                           for f in page.query_selector_all(".modal .run-params input")],
+                "stale_run_hint": None if hint is None else hint.inner_text(),
+            }
+            page.screenshot(path=f"{SHOTS}/x9-unknown-rerun.png", full_page=True)
+            page.click('.modal .modal-footer button.is-ghost')
+            break
+
+    return {
+        "unknown_row_rerun": unknown,
+        "columns": headers,
+        "rows": rows,
+        "dialog": dialog,
+        "records_before": [r["run_record_id"] for r in rows],
+        "records_after": after,
+    }
+
+
 def observe_empty_datasources(page):
     """ADR-0039 §8：一个数据源都没有时，下拉里给的不是空白，而是一条通往数据源屏的路。"""
     page.set_viewport_size({"width": 1440, "height": 1200})
@@ -378,6 +515,7 @@ def main():
             "X5_X6_X7_at_1440": observe_builder(page, 1440),
             "X6_at_1024": observe_builder(page, 1024),
             "X8_task_screen": observe_task_screen(page),
+            "X9_rerun": observe_rerun(page),
         }
         browser.close()
     print(json.dumps(report, ensure_ascii=False, indent=2))

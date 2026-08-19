@@ -132,23 +132,32 @@ export function FormField({
   );
 }
 
+/**
+ * 表格行里的图标动作位。`title` 默认就是 `label`——只有需要说明**为什么按不动**时才另给
+ * （禁用态的按钮自己不会解释自己，原因只能挂在悬停提示上）。
+ */
 export function ActionButton({
   label,
   icon,
   danger = false,
+  disabled = false,
+  title,
   onClick,
 }: {
   label: string;
   icon: ReactNode;
   danger?: boolean;
+  disabled?: boolean;
+  title?: string;
   onClick: () => void;
 }) {
   return (
     <button
       className={`icon-button ${danger ? "is-danger" : ""}`}
       type="button"
-      title={label}
+      title={title ?? label}
       aria-label={label}
+      disabled={disabled}
       onClick={onClick}
     >
       {icon}
