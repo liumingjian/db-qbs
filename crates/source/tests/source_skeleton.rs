@@ -896,6 +896,74 @@ fn the_target_metadata_proxy_resolves_credentials_and_writes_nothing() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+#[test]
+fn the_draft_test_connection_reads_the_form_values_and_writes_nothing() {
+    // 「测通才让存」（ADR-0039 §3）要测的是**还没存进去的那组值**——新建态库里根本没有这条，
+    // 按 id 测无从谈起。本用例买三件事：路由没被按 id 那条吃掉、草稿走的是表单里的值、
+    // **一个字节都不落盘**（测连不产生数据源、不留 run）。
+    let directory = temp_directory();
+    let sink = TcpListener::bind("127.0.0.1:0").unwrap();
+    let sink_url = format!("http://{}", sink.local_addr().unwrap());
+    drop(sink); // 端口留空：请求发得出去、连不上，回话必须是 502 kind=sink。
+    let (port, _config, child, _ready) = start_source_ready(|port| {
+        write_config_with_oracle(
+            &directory,
+            &format!("127.0.0.1:{port}"),
+            &sink_url,
+            "/db-qbs-missing-oracle-client",
+        )
+    });
+    let datasources_before = json_body(&get(port, "/api/datasources").unwrap());
+    let files_before = directory_entries(&directory);
+
+    // 路由：`test-connection` 那一截不许被 `resource_id_from_path` 当成数据源 id 吃掉。
+    // 若被吃掉，这里回的是 404「数据源不存在」而不是 400「请求体读不出来」。
+    let malformed = post(port, "/api/datasources/test-connection", "{}").unwrap();
+    assert_eq!(malformed.status, 400, "{}", malformed.body);
+
+    // 字段不全按字段判，不按 id 判——库里有没有这条数据源与它无关。
+    let empty_host = post(
+        port,
+        "/api/datasources/test-connection",
+        r#"{"name":"草稿","kind":"mysql","host":"","port":3306,"username":"u","password":"p","database":"dw"}"#,
+    )
+    .unwrap();
+    assert_eq!(empty_host.status, 400, "{}", empty_host.body);
+    assert!(empty_host.body.contains("host"), "{}", empty_host.body);
+
+    // 目标端草稿：source 不建 MySQL 连接，测连也走 sink（ADR-0037 §9）。sink 不在 → 502。
+    let mysql_draft = post(
+        port,
+        "/api/datasources/test-connection",
+        r#"{"name":"草稿","kind":"mysql","host":"127.0.0.1","port":3306,"username":"u","password":"p","database":"dw_stage"}"#,
+    )
+    .unwrap();
+    assert_eq!(mysql_draft.status, 502, "{}", mysql_draft.body);
+    let parsed: Value = serde_json::from_str(&mysql_draft.body).unwrap();
+    assert_eq!(parsed["kind"], "sink");
+    // 不属于任何 run：回话里没有 run_id，也没有错误码标签（ADR-0039 §3）。
+    assert!(parsed.get("run_id").is_none(), "{}", mysql_draft.body);
+
+    // Oracle 草稿：客户端库路径是假的，连不上——但它同样不该落盘。
+    let oracle_draft = post(
+        port,
+        "/api/datasources/test-connection",
+        r#"{"name":"草稿","kind":"oracle","connect_string":"//127.0.0.1:1521/NOPE","username":"u","password":"p"}"#,
+    )
+    .unwrap();
+    assert_ne!(oracle_draft.status, 200, "{}", oracle_draft.body);
+
+    // 三次测连之后：数据源清单逐字未变、目录里一个新条目都没有。
+    assert_eq!(
+        json_body(&get(port, "/api/datasources").unwrap()),
+        datasources_before
+    );
+    assert_eq!(directory_entries(&directory), files_before);
+
+    assert_success(&terminate(child));
+    fs::remove_dir_all(directory).unwrap();
+}
+
 fn start_source(config: &Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_db-qbs-source"))
         .args(["--config"])

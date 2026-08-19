@@ -341,6 +341,80 @@ impl DatasourceStore {
         }
     }
 
+    /// 把**表单里当前填的值**解成一份可用的 Oracle 连接信息（ADR-0039 §3）。
+    ///
+    /// 与 [`Self::oracle_access`] 的差别只有一处：那一条按 id 读库，这一条吃调用方给的草稿——
+    /// 「测通才让存」要测的是**还没存进去的那组值**，按 id 读根本读不到。
+    pub fn draft_oracle_access(
+        &self,
+        datasource_id: Option<&str>,
+        settings: &DatasourceSettings,
+        client_lib_dir: &str,
+    ) -> Result<OracleAccess, String> {
+        settings.validate()?;
+        match settings {
+            DatasourceSettings::Oracle {
+                connect_string,
+                username,
+                password,
+            } => Ok(OracleAccess {
+                connect_string: connect_string.clone(),
+                username: username.clone(),
+                password: self.draft_password(datasource_id, password)?,
+                client_lib_dir: client_lib_dir.to_owned(),
+            }),
+            DatasourceSettings::Mysql { .. } => {
+                Err("这条数据源是 MySQL，不能当源端用".to_owned())
+            }
+        }
+    }
+
+    /// 同上，目标端那一侧。
+    pub fn draft_target_connection(
+        &self,
+        datasource_id: Option<&str>,
+        settings: &DatasourceSettings,
+    ) -> Result<TargetConnection, String> {
+        settings.validate()?;
+        match settings {
+            DatasourceSettings::Mysql {
+                host,
+                port,
+                username,
+                password,
+                database,
+            } => Ok(TargetConnection {
+                host: host.clone(),
+                port: *port,
+                username: username.clone(),
+                password: self.draft_password(datasource_id, password)?,
+                database: database.clone(),
+            }),
+            DatasourceSettings::Oracle { .. } => {
+                Err("这条数据源是 Oracle，不能当目标端用".to_owned())
+            }
+        }
+    }
+
+    /// 草稿口令的解释规则：填了就用填的，**留空则取库里存的那一份**。
+    ///
+    /// 这与 [`Self::update`] 的「留空 = 不改」是**同一条规则**，ADR-0039 §3 明写两处不许分岔——
+    /// 分岔的后果是「测的那份口令」与「存下去的那份口令」不是同一个，而测连正是为了防这件事。
+    /// 新建态（`datasource_id` 为 `None`）留空就是真的没有口令。
+    fn draft_password(
+        &self,
+        datasource_id: Option<&str>,
+        provided: &str,
+    ) -> Result<String, String> {
+        if !provided.is_empty() {
+            return Ok(provided.to_owned());
+        }
+        let Some(datasource_id) = datasource_id else {
+            return Ok(String::new());
+        };
+        self.unseal(self.require(datasource_id)?.settings.password())
+    }
+
     /// `source.toml` 里那三个已退役的 Oracle 字段的一次性迁移（ADR-0037 §10）。
     ///
     /// **判据是「表为空」**，所以它只可能发生一次：迁完就有条目了，之后再启动一律跳过。

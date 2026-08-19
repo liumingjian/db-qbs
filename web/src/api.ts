@@ -366,6 +366,54 @@ export async function deleteDatasource(datasourceId: string): Promise<Datasource
   return readJson<Datasource>(response, "删除数据源失败");
 }
 
+/** 「测试连接」的回报。`label` 是 MySQL 的库名 / Oracle 的连接串，拼在成功那一行里。 */
+export interface DatasourceTestResult {
+  ok: true;
+  elapsed_ms: number;
+  label: string;
+}
+
+/**
+ * 用**表单里当前填的那组值**测连（ADR-0039 §3），不是库里存的那条。
+ *
+ * 「测通才让存」这条门槛决定了它必须是草稿测连：新建的数据源库里还没有，
+ * 按 id 测无从谈起；改了口令的编辑态按 id 测的也是旧口令。
+ *
+ * `datasourceId` 只在编辑态给，用途单一——口令留空时服务端去库里取那一份，
+ * 与保存的「留空 = 不改」是同一条解释规则。
+ */
+export async function testDatasourceDraft(
+  input: DatasourceInput,
+  datasourceId: string | null,
+): Promise<DatasourceTestResult> {
+  return postJson<DatasourceTestResult>(
+    "/api/datasources/test-connection",
+    { ...input, datasource_id: datasourceId },
+    "测试连接失败",
+  );
+}
+
+/**
+ * 删数据源被拒（409）时，服务端点名的那几个任务（ADR-0039 §4）。
+ *
+ * 拿不到就返回空数组——**报文正文里本来就带着同一句话**，列表只是把它摆成可扫的形状。
+ */
+export function referencedTasksFrom(error: unknown): string[] {
+  if (!(error instanceof ApiError) || error.status !== 409) {
+    return [];
+  }
+  const body = error.body;
+  if (typeof body !== "object" || body === null || !("error" in body)) {
+    return [];
+  }
+  const detail = (body as { error: unknown }).error;
+  if (typeof detail !== "object" || detail === null || !("tasks" in detail)) {
+    return [];
+  }
+  const tasks = (detail as { tasks: unknown }).tasks;
+  return Array.isArray(tasks) ? tasks.filter((name): name is string => typeof name === "string") : [];
+}
+
 export async function testDatasource(datasourceId: string): Promise<{ ok: true }> {
   return postJson<{ ok: true }>(
     `/api/datasources/${encodeURIComponent(datasourceId)}/test-connection`,

@@ -244,3 +244,32 @@ M2 的 `--ok-bg` 事故（README §8 记录）就是判据被软化之后失守�
 
 **时效**：现场出现第一例裸 `NUMBER` 列时补入口，形态是取列表格里那一列就地填 `(p,s)`，
 不新开屏、不新造组件。
+
+### 3. 「测通才让存」必须有一个**草稿测连**端点，`POST /api/datasources/test-connection`
+
+（2026-08-19 增补，来源 [#130](https://github.com/liumingjian/db-qbs/issues/130) 实现期）
+
+§3 定了「**「测试连接」用表单里当前填的值，不是库里存的那份**」，但影响面清单只列了
+`web/src` 与 `api.ts` 三行——**那不够**。既有的测连入口是
+`POST /api/datasources/<id>/test-connection`，它按 id 去库里读一条出来测：
+
+- **新建态根本没有 id**：库里还没有这条数据源，「测通才让存」的门槛在新建的那一刻无从谈起；
+- **编辑态改了口令时按 id 测的是旧口令**，测通的与要存下去的不是同一组值——
+  而测连正是为了防这件事。
+
+> **裁定：加一个不带 id 的草稿入口 `POST /api/datasources/test-connection`。**
+> 请求体是 `DatasourceInput` 再加一个可选的 `datasource_id`（编辑态才有）。
+
+- **口令留空的解释规则与保存**（`PUT`）**完全一致**：给了 `datasource_id` 就取库里那一份，
+  新建态留空就是真的没有口令。§3 明写「两处不许分岔」，这里是把它落成同一个私有函数
+  （`DatasourceStore::draft_password`），不是两处各写一遍。
+- **不写任何存储**：解出来的连接用完即弃，不产生数据源、不进 run 注册表——
+  与 [ADR-0038](0038-column-mapping-and-target-metadata-face.md) §3 的两个目标端元数据入口同一处置。
+- **回报带 `elapsed_ms` 与 `label`**（MySQL 给库名、Oracle 给连接串），
+  §3 那一行 `.inline-result`（`连接成功 · 186 ms · dw_stage`）要用。**仍不出错误码标签**。
+- **既有的按 id 入口保留**：它是「这条存着的数据源现在还连得上吗」，与草稿测连是两个问题。
+- **路由顺序是硬的**：草稿入口必须排在按 id 那条前面，否则 `test-connection` 那一截
+  会被当成一个数据源 id 吃掉。用例 `the_draft_test_connection_reads_the_form_values_and_writes_nothing`
+  就守着这一点（被吃掉时回的是 404 而不是 400）。
+
+**这不改变 §9 的「零设计系统改动」结论**：新增的是一个后端入口，界面上仍只有那 4 条 CSS。

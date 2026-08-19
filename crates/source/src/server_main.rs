@@ -76,6 +76,21 @@ struct BuilderLinkInput {
     dblink: Option<String>,
 }
 
+/// 草稿测连的请求体（ADR-0039 §3）：吃的是**表单里当前填的那组值**，不是库里存的那条。
+///
+/// `datasource_id` 只有编辑态才有，用途单一——口令留空时去库里取那一份
+/// （与保存的「留空 = 不改」是同一条解释规则，两处不许分岔）。新建态没有它。
+///
+/// **不加 `deny_unknown_fields`**：`DatasourceInput` 内部用了 `flatten`，两者不兼容
+/// （与 `DatasourceInput` 自己的注释同一条理由）。
+#[derive(Deserialize)]
+struct DatasourceTestInput {
+    #[serde(default)]
+    datasource_id: Option<String>,
+    #[serde(flatten)]
+    draft: DatasourceInput,
+}
+
 /// 目标端元数据面的两个代理入口（ADR-0038 §3）：界面只报**数据源 id**，
 /// 凭据由 source 在这里解一次再过线——与「测试连接」同一条路径（ADR-0037 §1/§8）。
 #[derive(Deserialize)]
@@ -311,6 +326,12 @@ fn route_api_request(
             Method::Post => handle_create_datasource(request, state.datasources),
             _ => not_found(),
         };
+    }
+
+    // 草稿测连必须排在按 id 的那条前面：`/api/datasources/test-connection` 里那截
+    // `test-connection` 会被 `resource_id_from_path` 当成一个数据源 id 吃掉。
+    if method == Method::Post && path == "/api/datasources/test-connection" {
+        return handle_test_datasource_draft(request, state);
     }
 
     if method == Method::Post {
@@ -950,6 +971,65 @@ fn handle_delete_datasource(state: &ServerState<'_>, datasource_id: &str) -> Htt
         Ok(None) => not_found(),
         Err(error) => internal_error(error),
     }
+}
+
+/// 草稿「测试连接」（ADR-0039 §3）：用**表单里当前填的值**测，不是库里存的那份。
+///
+/// 存在的理由是「测通才让存」这条门槛（所有者 2026-08-19 裁定 2）——新建的数据源
+/// 库里根本还没有，按 id 测在新建态上无从谈起；改了口令的编辑态按 id 测的也是旧口令。
+///
+/// **不写任何存储**：解出来的连接用完即弃，与两个目标端元数据入口同一处置（ADR-0038 §3）。
+/// 回报里带 `elapsed_ms` 与 `label`，`.inline-result` 那一行纯文字要用（ADR-0039 §3）。
+fn handle_test_datasource_draft(request: &mut Request, state: &ServerState<'_>) -> HttpResponse {
+    let input: DatasourceTestInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    let datasource_id = input.datasource_id.as_deref().filter(|id| !id.is_empty());
+    let started = std::time::Instant::now();
+    match &input.draft.settings {
+        db_qbs_source::DatasourceSettings::Oracle { connect_string, .. } => {
+            let label = connect_string.clone();
+            let access = match state.datasources.draft_oracle_access(
+                datasource_id,
+                &input.draft.settings,
+                &state.config.oracle_client_lib_dir,
+            ) {
+                Ok(access) => access,
+                Err(error) => return bad_request(error),
+            };
+            match OracleRowSource::test_connection(&access) {
+                Ok(()) => test_connection_ok(started, label),
+                Err(error) => oracle_failure(error),
+            }
+        }
+        db_qbs_source::DatasourceSettings::Mysql { database, .. } => {
+            let label = database.clone();
+            let target = match state
+                .datasources
+                .draft_target_connection(datasource_id, &input.draft.settings)
+            {
+                Ok(target) => target,
+                Err(error) => return bad_request(error),
+            };
+            match test_target_connection(&state.config.sink_base_url, &target) {
+                Ok(()) => test_connection_ok(started, label),
+                Err(error) => json_response(502, &json!({ "kind": "sink", "message": error })),
+            }
+        }
+    }
+}
+
+/// 成功那一格：耗时与库名/连接串一起回去，界面拼成「连接成功 · 186 ms · dw_stage」。
+fn test_connection_ok(started: std::time::Instant, label: String) -> HttpResponse {
+    json_response(
+        200,
+        &json!({
+            "ok": true,
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+            "label": label,
+        }),
+    )
 }
 
 /// 「测试连接」（ADR-0037 §9）：Oracle 在本机直连，MySQL 走 sink 的新端点——

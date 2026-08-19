@@ -9,13 +9,13 @@ import {
   Play,
   Plus,
   RefreshCw,
+  Server,
   TableProperties,
   Tag,
   Trash2,
-  X,
 } from "lucide-react";
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import type { FormEvent, ReactNode } from "react";
+import type { FormEvent } from "react";
 
 import {
   createTask,
@@ -61,6 +61,8 @@ import {
   VALUE_TYPE_LABELS,
 } from "./spec";
 import { StartRunDialog } from "./StartRunDialog";
+import { DatasourceScreen } from "./DatasourceScreen";
+import { ActionButton, FormField, Modal, ModalFooter } from "./ui";
 
 type DialogState =
   | { kind: "create" }
@@ -70,10 +72,13 @@ type DialogState =
   | { kind: "start"; task: Task }
   | null;
 
-type Page = "tasks" | "history";
+type Page = "tasks" | "history" | "datasources";
 
 function pageFromHash(hash: string): Page {
-  return hash === "#history" ? "history" : "tasks";
+  if (hash === "#history") {
+    return "history";
+  }
+  return hash === "#datasources" ? "datasources" : "tasks";
 }
 
 const emptyTask: TaskInput = {
@@ -88,9 +93,10 @@ export function App() {
     pageFromHash(window.location.hash),
   );
   const [tasks, setTasks] = useState<Task[] | null>(null);
-  // 数据源清单（ADR-0037）。**管理屏归 #123**——本版只把清单读进来供构建器选，
-  // 建数据源仍只能走 `/api/datasources`。这是有意的中间态。
+  // 数据源清单（ADR-0037）。管理屏在导航第三项（ADR-0039 §1）——增删改之后要重读，
+  // 所以这里不再是「读一次就完」。
   const [datasources, setDatasources] = useState<Datasource[]>([]);
+  const [datasourcesLoading, setDatasourcesLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(true);
   const [query, setQuery] = useState("");
@@ -116,12 +122,21 @@ export function App() {
     void loadTasks();
   }, [loadTasks]);
 
-  useEffect(() => {
-    // 读不到数据源不该把整个任务屏打成错误——构建器会以「没有可选的数据源」自陈。
-    void listDatasources()
-      .then(setDatasources)
-      .catch(() => setDatasources([]));
+  const loadDatasources = useCallback(async () => {
+    setDatasourcesLoading(true);
+    try {
+      // 读不到数据源不该把整个任务屏打成错误——构建器会以「没有可选的数据源」自陈。
+      setDatasources(await listDatasources());
+    } catch {
+      setDatasources([]);
+    } finally {
+      setDatasourcesLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    void loadDatasources();
+  }, [loadDatasources]);
 
   useEffect(() => {
     function handleHashChange() {
@@ -228,6 +243,18 @@ export function App() {
             <Clock3 size={15} aria-hidden="true" />
             运行历史
           </a>
+          <a
+            className={`nav-item ${navPage === "datasources" ? "is-active" : ""}`}
+            href="#datasources"
+            aria-current={navPage === "datasources" ? "page" : undefined}
+            onClick={(event) => {
+              event.preventDefault();
+              navigate("datasources");
+            }}
+          >
+            <Server size={15} aria-hidden="true" />
+            数据源
+          </a>
           <p className="nav-section">非 V1 范围</p>
           <span className="nav-item is-disabled">
             <CalendarClock size={15} aria-hidden="true" />
@@ -261,6 +288,14 @@ export function App() {
               onClick={() => navigate("history")}
             >
               <Clock3 size={14} aria-hidden="true" />历史
+            </button>
+            <button
+              className={navPage === "datasources" ? "is-active" : ""}
+              type="button"
+              aria-current={navPage === "datasources" ? "page" : undefined}
+              onClick={() => navigate("datasources")}
+            >
+              <Server size={14} aria-hidden="true" />数据源
             </button>
           </nav>
           <span className="breadcrumb">
@@ -345,6 +380,7 @@ export function App() {
               <TaskResults
                 tasks={tasks}
                 filteredTasks={filteredTasks}
+                datasources={datasources}
                 refreshing={refreshing}
                 onCreate={openCreateDialog}
                 onAction={setDialog}
@@ -354,6 +390,15 @@ export function App() {
 
           {activeRun === null && page === "history" && (
             <HistoryScreen tasks={tasks ?? []} />
+          )}
+
+          {activeRun === null && page === "datasources" && (
+            <DatasourceScreen
+              datasources={datasources}
+              tasks={tasks ?? []}
+              loading={datasourcesLoading}
+              onChanged={loadDatasources}
+            />
           )}
         </div>
 
@@ -413,6 +458,8 @@ function pageLabel(page: Page): string {
       return "任务";
     case "history":
       return "运行历史";
+    case "datasources":
+      return "数据源";
   }
 }
 
@@ -429,12 +476,14 @@ function taskSummaryLabel(tasks: Task[] | null, refreshing: boolean): string {
 function TaskResults({
   tasks,
   filteredTasks,
+  datasources,
   refreshing,
   onCreate,
   onAction,
 }: {
   tasks: Task[] | null;
   filteredTasks: Task[];
+  datasources: Datasource[];
   refreshing: boolean;
   onCreate: () => void;
   onAction: (dialog: DialogState) => void;
@@ -452,7 +501,13 @@ function TaskResults({
   if (filteredTasks.length === 0) {
     return <div className="no-results">没有匹配的任务</div>;
   }
-  return <TaskTable tasks={filteredTasks} onAction={onAction} />;
+  return (
+    <TaskTable
+      tasks={filteredTasks}
+      datasources={datasources}
+      onAction={onAction}
+    />
+  );
 }
 
 function EmptyState({ onCreate }: { onCreate: () => void }) {
@@ -473,17 +528,26 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
 
 function TaskTable({
   tasks,
+  datasources,
   onAction,
 }: {
   tasks: Task[];
+  datasources: Datasource[];
   onAction: (dialog: DialogState) => void;
 }) {
+  // 「源 → 目标」显示的是**数据源名字**，`datasource_id` 只在数据源屏出现（ADR-0039 §8）。
+  const names = new Map(
+    datasources.map((datasource) => [datasource.datasource_id, datasource.name]),
+  );
+  const nameOf = (datasourceId: string) =>
+    names.get(datasourceId) ?? (datasourceId === "" ? "—" : datasourceId);
   return (
     <div className="table-wrap">
       <table className="data-grid">
         <thead>
           <tr>
             <th>任务</th>
+            <th>源 → 目标</th>
             <th>源表</th>
             <th>目标表</th>
             <th>主键</th>
@@ -497,6 +561,11 @@ function TaskTable({
               <td>
                 <span className="task-name">{task.name}</span>
                 <span className="task-id">{task.task_id}</span>
+              </td>
+              <td>
+                {nameOf(task.source_datasource_id)}
+                <span aria-hidden="true"> → </span>
+                {nameOf(task.target_datasource_id)}
               </td>
               <td className="mono">
                 {task.spec.owner}.{task.spec.table}
@@ -536,30 +605,6 @@ function TaskTable({
         </tbody>
       </table>
     </div>
-  );
-}
-
-function ActionButton({
-  label,
-  icon,
-  danger = false,
-  onClick,
-}: {
-  label: string;
-  icon: ReactNode;
-  danger?: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      className={`icon-button ${danger ? "is-danger" : ""}`}
-      type="button"
-      title={label}
-      aria-label={label}
-      onClick={onClick}
-    >
-      {icon}
-    </button>
   );
 }
 
@@ -889,6 +934,7 @@ function TaskFormDialog({
                     </option>
                   ))}
                 </select>
+                {oracleDatasources.length === 0 && <DatasourceHint />}
               </FormField>
               <FormField label="目标端（MySQL）">
                 <select
@@ -908,6 +954,7 @@ function TaskFormDialog({
                     </option>
                   ))}
                 </select>
+                {mysqlDatasources.length === 0 && <DatasourceHint />}
               </FormField>
             </div>
           </section>
@@ -1533,6 +1580,21 @@ function DdlText({ ddl }: { ddl: string }) {
  *
  * 一条条件都没有时明写「整表」——留空会被读成「没配好」，而整表取数是允许的形态。
  */
+/**
+ * 一个数据源都没有时给一条路，而不是一个空下拉（ADR-0039 §8）。
+ *
+ * **不做「就地弹出新建数据源」**：对话框套对话框会让同一套表单有两个入口，
+ * 两处的「测通才让存」行为一旦分岔就是最难查的一类不一致。代价是建任务被打断一次，
+ * 但按所有者裁定 1（现场 3~5 个数据源）这件事一共只发生几次。
+ */
+function DatasourceHint() {
+  return (
+    <a className="text-button" href="#datasources">
+      去「数据源」建一个 →
+    </a>
+  );
+}
+
 function conditionSummary(spec: TaskSpec): string {
   if (spec.conditions.length === 0) {
     return "整表";
@@ -1678,115 +1740,5 @@ function DeleteDialog({
         </button>
       </footer>
     </Modal>
-  );
-}
-
-function Modal({
-  title,
-  onClose,
-  busy,
-  narrow = false,
-  wide = false,
-  children,
-}: {
-  title: string;
-  onClose: () => void;
-  busy: boolean;
-  narrow?: boolean;
-  wide?: boolean;
-  children: ReactNode;
-}) {
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !busy) {
-        onClose();
-      }
-    }
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [busy, onClose]);
-
-  return (
-    <div
-      className="modal-backdrop"
-      role="presentation"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !busy) {
-          onClose();
-        }
-      }}
-    >
-      <section
-        className={`modal ${narrow ? "is-narrow" : ""} ${wide ? "is-wide" : ""}`}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="modal-title"
-      >
-        <header className="modal-header">
-          <h2 id="modal-title">{title}</h2>
-          <button
-            className="icon-button"
-            type="button"
-            title="关闭"
-            aria-label="关闭"
-            onClick={onClose}
-            disabled={busy}
-          >
-            <X size={16} aria-hidden="true" />
-          </button>
-        </header>
-        {children}
-      </section>
-    </div>
-  );
-}
-
-function ModalFooter({
-  onClose,
-  busy,
-  submitLabel,
-}: {
-  onClose: () => void;
-  busy: boolean;
-  submitLabel: string;
-}) {
-  return (
-    <footer className="modal-footer">
-      <button
-        className="button is-ghost"
-        type="button"
-        onClick={onClose}
-        disabled={busy}
-      >
-        取消
-      </button>
-      <button
-        className="button is-primary"
-        type="submit"
-        disabled={busy}
-      >
-        {busy ? "正在保存" : submitLabel}
-      </button>
-    </footer>
-  );
-}
-
-function FormField({
-  label,
-  badge,
-  children,
-}: {
-  label: string;
-  badge?: string;
-  children: ReactNode;
-}) {
-  return (
-    <label className="form-field">
-      <span className="field-label">
-        {label}
-        {badge !== undefined && <span className="field-badge">{badge}</span>}
-      </span>
-      {children}
-    </label>
   );
 }
