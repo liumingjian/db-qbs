@@ -4,7 +4,8 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use db_qbs_sink::{
-    build_staging_ddl, check_connection_settings, precheck, AtomicSwapError, AtomicSwapRequest,
+    build_staging_ddl, check_connection_settings, precheck, precheck_with_primary_key,
+    AtomicSwapError, AtomicSwapRequest,
     AtomicSwapResult, CreateStagingError, Destination, DropStagingError, OpenRunRequest,
     RangeCheckColumn, RangeCheckResult, SinkConfig, SinkService, SourceColumn, TargetColumn,
     TargetConnection, TargetKey, WriteBatchError,
@@ -177,6 +178,94 @@ fn startup_warns_about_the_unauthenticated_write_surface_before_connecting() {
     assert!(message.contains("无鉴权"), "{message}");
     assert!(message.contains("任意暂存表与目标表"), "{message}");
     assert!(message.contains("127.0.0.1:0"), "{message}");
+}
+
+#[test]
+fn the_three_nullability_branches_judge_mapped_and_unmapped_columns_apart() {
+    // ADR-0038 §5 的三分支，外加 §4 的子集判定：目标表多出来的列**不再因为「多」而被拒**，
+    // 只有真正会炸的那一档（未映射、NOT NULL、无默认值、非自增）才拒——
+    // 它撞的是 `ERROR 1364 Field doesn't have a default value`，本条把它提前到预检。
+    let sources = vec![
+        source_column("ID", "NUMBER", Some(10), Some(0), None),
+        source_column("C_NAME", "VARCHAR2", None, None, Some(50)),
+    ];
+    let primary_key = vec!["ID".to_owned()];
+    let keys = vec![TargetKey {
+        name: "PRIMARY".to_owned(),
+        columns: vec!["ID".to_owned()],
+    }];
+    // 第 1 分支：被映射到的主键列必须 NOT NULL。第 2 分支：被映射到的非主键列必须可空。
+    let key_column = target_column(
+        "ID", "decimal(10,0)", "decimal", Some(10), Some(0), None, None, false, None, 1,
+    );
+    let mapped = target_column(
+        "C_NAME", "varchar(50)", "varchar", None, None, Some(50), None, true, Some("utf8mb4"), 2,
+    );
+    let audit = target_column(
+        "CREATE_TIME", "datetime", "datetime", None, None, None, Some(0), false, None, 3,
+    );
+    let judge = |extra_column: &TargetColumn, key_nullable: bool, mapped_nullable: bool| {
+        let mut key_column = key_column.clone();
+        key_column.nullable = key_nullable;
+        let mut mapped = mapped.clone();
+        mapped.nullable = mapped_nullable;
+        precheck_with_primary_key(
+            "T_POSITION",
+            &primary_key,
+            &sources,
+            &[key_column, mapped, extra_column.clone()],
+            &keys,
+        )
+    };
+
+    // 第 3 分支之拒：NOT NULL、无 COLUMN_DEFAULT、非 auto_increment。
+    let issues = judge(&audit, false, true);
+    let unmapped = issues
+        .iter()
+        .find(|issue| issue.column == "CREATE_TIME")
+        .unwrap_or_else(|| panic!("{issues:?}"));
+    // 报告形态不变（ADR-0009 §8），这一档的源列一栏写「（未映射）」。
+    assert_eq!(unmapped.source, "（未映射）");
+    assert!(unmapped.rule.contains("未被映射且不允许留空"), "{unmapped:?}");
+    assert!(unmapped.rule.contains("CREATE_TIME"), "{unmapped:?}");
+    assert!(unmapped.suggestion.is_some());
+
+    // 第 3 分支之放行 ①：`NOT NULL DEFAULT CURRENT_TIMESTAMP` 的审计列不必映射也跑得通。
+    // 严格按「非主键列可空」判会把它拒掉，而提示是「请把 CREATE_TIME 改成可空」——
+    // 那是让用户去改一张本来没问题的表（ADR-0038 §5）。
+    let mut with_default = audit.clone();
+    with_default.default_value = Some("CURRENT_TIMESTAMP".to_owned());
+    with_default.extra = "DEFAULT_GENERATED".to_owned();
+    assert_eq!(judge(&with_default, false, true), Vec::new());
+
+    // 第 3 分支之放行 ②：auto_increment 由数据库自己填。
+    let mut auto_id = target_column(
+        "SEQ_NO", "bigint", "bigint", Some(20), Some(0), None, None, false, None, 4,
+    );
+    // 未映射的列不比类型——它压根没有源端对应物。
+    auto_id.extra = "auto_increment".to_owned();
+    assert_eq!(judge(&auto_id, false, true), Vec::new());
+
+    // §4 子集判定：目标表多一列可空的，照样放行——「不多不少」里的「不多」半句已撤除。
+    let mut spare = audit.clone();
+    spare.nullable = true;
+    assert_eq!(judge(&spare, false, true), Vec::new());
+
+    // 第 1 分支：主键列可空 → 拒（可空主键会让 upsert 静默退化成纯 INSERT）。
+    let nullable_key = judge(&with_default, true, true);
+    assert!(
+        nullable_key.iter().any(|issue| issue.column == "ID"),
+        "{nullable_key:?}"
+    );
+
+    // 第 2 分支：被映射到的非主键列 NOT NULL → 拒（防的是源端 NULL 写不进去）。
+    let not_null_mapped = judge(&with_default, false, false);
+    assert!(
+        not_null_mapped
+            .iter()
+            .any(|issue| issue.column == "C_NAME" && issue.rule.contains("必须可空")),
+        "{not_null_mapped:?}"
+    );
 }
 
 #[test]

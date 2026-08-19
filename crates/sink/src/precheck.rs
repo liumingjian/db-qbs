@@ -119,16 +119,35 @@ fn precheck_inner(
         }
     }
 
+    // ADR-0038 §4：「两边列名集合完全相等」撤成**子集**——目标表可以有投影里没有的列。
+    // 撤的只是「不多不少」里的「不多」半句，**按名字对齐那条防线一字不动**
+    // （反向那条「映射到目标表不存在的列」照旧拒，就在上面那个循环里）。
+    //
+    // 顶上来的是 §5 第 3 分支：未被映射的列里，真正会炸的那一档——`NOT NULL`
+    // 且无默认值且非 auto_increment——提前到预检拒掉，否则它会在搬到一半时
+    // 撞 `ERROR 1364 Field doesn't have a default value`。
+    //
+    // **剩下那一档没有产品侧防线**：人少勾了一列，那列在目标端从此恒为 NULL 或默认值，
+    // 而 V1 只比行数（ADR-0006），发现不了。这是 ADR-0038 §4 点名认下的失效模式，
+    // 正解是映射面上加一条提示（不是门禁），别在这里把旧规则悄悄加回来。
     for target in target_columns {
-        if !source_names.contains(&target.name.to_uppercase()) {
-            issues.push(PrecheckIssue {
-                column: target.name.clone(),
-                source: "<missing>".to_owned(),
-                target: target_display(target),
-                rule: "源端结果缺少同名列，源端与目标端列名集合必须完全相等".to_owned(),
-                suggestion: Some("改源 SQL 补出该列，或从目标表删列".to_owned()),
-            });
+        if source_names.contains(&target.name.to_uppercase()) {
+            continue;
         }
+        if target.nullable || target.default_value.is_some() || is_auto_increment(target) {
+            continue;
+        }
+        issues.push(PrecheckIssue {
+            column: target.name.clone(),
+            // 报告形态不变（ADR-0009 §8），这一档的源列一栏写「（未映射）」。
+            source: "（未映射）".to_owned(),
+            target: target_display(target),
+            rule: format!(
+                "目标表的 {} 列未被映射且不允许留空，请映射它或给它默认值",
+                target.name
+            ),
+            suggestion: Some("映射这一列，或在目标表上给它一个默认值".to_owned()),
+        });
     }
 
     if !primary_key.is_empty() {
@@ -142,6 +161,15 @@ fn precheck_inner(
     }
 
     issues
+}
+
+/// `information_schema.COLUMNS.EXTRA` 里带 `auto_increment` —— 这一列由数据库自己填，
+/// 未映射也写得进去（ADR-0038 §5 第 3 分支）。MySQL 给的是小写，这里仍按大小写无关判。
+fn is_auto_increment(target: &TargetColumn) -> bool {
+    target
+        .extra
+        .to_ascii_lowercase()
+        .contains("auto_increment")
 }
 
 /// ADR-0035 §2 的三条，任一不满足即拒跑。
