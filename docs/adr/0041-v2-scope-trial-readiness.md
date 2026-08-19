@@ -2,7 +2,7 @@
 
 **状态**: 已接受
 **日期**: 2026-08-19
-**票**: [#140](https://github.com/liumingjian/db-qbs/issues/140)（第二版地图）；规格 [#141](https://github.com/liumingjian/db-qbs/issues/141)，子票 [#142](https://github.com/liumingjian/db-qbs/issues/142)~[#147](https://github.com/liumingjian/db-qbs/issues/147)
+**票**: [#140](https://github.com/liumingjian/db-qbs/issues/140)（第二版地图）。**规格与实现票尚未生成**——见文末增补 3
 **先例**: [ADR-0034](0034-v1-scope-from-customer-needs.md)（第一版范围由客户五条需求定）——本 ADR 是它的**后继**，不是它的兑现
 
 ## 背景
@@ -191,3 +191,16 @@
 
 **这没有推翻 §1**：§1 说的是不加**搬运能力**。一键重跑不改搬运语义、不动链路、不碰四份台架的判据，
 它是把「客户点名的动作」从两步变成一步。**这是本版唯一的功能增量，不开第二个口子。**
+
+### 3. 规格与实现票由 `/to-spec`、`/to-tickets` 生成，**不手写**
+
+2026-08-19 一度手写了一份规格（#141）与七张实现票（#142~#148），**已全部删除**。
+
+**规矩**：本仓库的规格走 `mattpocock-skills` 的 **`/to-spec`**，实现票走 **`/to-tickets`**。
+这两个技能的 frontmatter 都是 `disable-model-invocation: true`——**模型调不动它们，只能由所有者敲**。
+手写出来的东西形状对不上模板（`to-spec` 要一长串 User Stories、Implementation Decisions 里不许出现文件路径；
+`to-tickets` 要 What to build + 勾选式 Acceptance criteria，且必须先把拆分 quiz 所有者、批准后才发布，
+并使用 GitHub 原生的 blocking 关系），更重要的是它绕过了「所有者批准拆分」这一步。
+
+**因此：本 ADR 的判定成立，但它没有配套的规格与票；两者由所有者敲 `/to-spec` 与 `/to-tickets` 生成。**
+本 ADR 增补 2 里那张「客户五条重点功能对照表」与 §2 的交付四样，是生成规格时的输入，不是规格本身。
