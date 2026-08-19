@@ -8,7 +8,9 @@
 [ADR-0009](0009-m1-mapping-precheck-rules.md)（**§1 那句「`ALL_TAB_COLUMNS` 留给 M2 的 SQL 构建器做列选择」由本 ADR 兑现**）、
 [ADR-0010](0010-http-protocol-contract.md)（接口闭集；**本 ADR 不扩它**，§3.1 亦不订正）、
 [ADR-0016](0016-task-definition-form.md)（任务定义四字段与 SQL 形状预检；**格式一字不变，§4 第 3 条由本 ADR 重新归类但不搬动**）、
-[ADR-0019](0019-m2-source-process-topology.md)（长驻父进程 + Web UI，本 ADR 的宿主）
+[ADR-0019](0019-m2-source-process-topology.md)（长驻父进程 + Web UI，本 ADR 的宿主）、
+[ADR-0038](0038-column-mapping-and-target-metadata-face.md)（**§7「`target_table` 人手填、不升级为选择」由它退役**——
+目标表名改为可过滤下拉；**§4「只亮不判」原样成立**）
 
 ## 背景
 

@@ -10,6 +10,17 @@
 [ADR-0026](0026-m2-in-flight-observation.md)（不做会说谎的条件展示）、
 [#57](https://github.com/liumingjian/db-qbs/issues/57)、地图 [#47](https://github.com/liumingjian/db-qbs/issues/47)
 
+> **2026-08-19：§3 的封条已由 [ADR-0038](0038-column-mapping-and-target-metadata-face.md) 完整解除
+> （[#120](https://github.com/liumingjian/db-qbs/issues/120)），本 ADR 标题后半句
+> 「不开跨端目标端元数据接口」自该日起失效。** sink 现有三个「不属于任何 run」的端点：
+> `test-connection`（[ADR-0037](0037-datasource-model-and-credential-boundary.md) §9）、
+> `tables`、`columns`。§3 那句「开出来只买到一个下拉框，买不到任何一处拦截」**依然字字成立**——
+> 变的是前提（[ADR-0034](0034-v1-scope-from-customer-needs.md) 改判后，那个下拉框本身就是客户点名的需求），
+> 不是论证。**§1/§2/§4/§5/§6/§8 原样成立**（§4 的建表 SQL 出口形态不变，但列名改取映射后的目标名，
+> 见 ADR-0038 §7）；**§7「元数据纯瞬态」由 ADR-0038 §8 原样推广到两个新端点**；
+> §3 末段那条推论（「`target_table` 人手填、不升级为选择」，源出
+> [ADR-0023](0023-m2-sql-builder-boundary.md) §7）**已退役**——目标表名现在是可过滤下拉。
+
 ## 背景
 
 `CONTEXT.md` V1 范围写着「不自动建目标表，**只生成建表 SQL 给人执行**」。
