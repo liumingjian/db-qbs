@@ -5,6 +5,7 @@ import {
   canSaveDatasource,
   connectionFingerprint,
   connectionSummary,
+  deleteRefusalMessage,
   draftFrom,
   referenceCounts,
 } from "./datasource";
@@ -137,5 +138,28 @@ describe("referencedTasksFrom", () => {
     expect(referencedTasksFrom(new ApiError("坏了", 500, { error: { message: "x" } }))).toEqual([]);
     expect(referencedTasksFrom(new ApiError("坏了", 409, { error: { message: "x" } }))).toEqual([]);
     expect(referencedTasksFrom(new Error("网络断了"))).toEqual([]);
+  });
+});
+
+describe("deleteRefusalMessage", () => {
+  it("点名的任务交给列表，红底那段话只说数量与动作——名字不列两遍", () => {
+    const server =
+      "数据源仍被 2 个任务引用：日销明细、客户主数据；请先改这些任务的数据源";
+    const shown = deleteRefusalMessage(server, ["日销明细", "客户主数据"]);
+    expect(shown).toBe("数据源仍被 2 个任务引用；请先改这些任务的数据源");
+    expect(shown).not.toContain("日销明细");
+    expect(shown).not.toContain("客户主数据");
+  });
+
+  it("数量取的是列表里真有几条，不是从服务端那句话里抠出来的数", () => {
+    expect(deleteRefusalMessage("随便什么", ["甲", "乙", "丙"])).toBe(
+      "数据源仍被 3 个任务引用；请先改这些任务的数据源",
+    );
+  });
+
+  it("拿不到 tasks 时原样退回服务端那句话——那时一遍也没有比一遍都不点名强", () => {
+    const server = "数据源仍被 1 个任务引用：日销明细；请先改这些任务的数据源";
+    expect(deleteRefusalMessage(server, [])).toBe(server);
+    expect(deleteRefusalMessage("删除失败", [])).toBe("删除失败");
   });
 });

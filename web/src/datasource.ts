@@ -112,3 +112,21 @@ export function referenceCounts(tasks: Task[]): Map<string, number> {
   }
   return counts;
 }
+
+/**
+ * 删除被拒时红底那段话该说什么（ADR-0039 §4）。
+ *
+ * 服务端的 409 报文把任务名连成一串写进 `message`，同一批名字又在 `error.tasks` 里，
+ * 界面上是两处各列一遍：红底一大坨顿号串，紧接着又一份 `<li>` 列表。判据要的「点名列出」
+ * 由列表那份买单——它随任务数变多仍然可扫，长句会在窄视口折成一坨——所以名字**只留列表**，
+ * 这里只说数量与该做什么。拿不到 `tasks` 时（旧服务端、报文形状变了）原样退回服务端那句话，
+ * 那时候一遍也没有比一遍都不点名强。
+ */
+export function deleteRefusalMessage(
+  message: string,
+  referencedTasks: string[],
+): string {
+  return referencedTasks.length === 0
+    ? message
+    : `数据源仍被 ${referencedTasks.length} 个任务引用；请先改这些任务的数据源`;
+}

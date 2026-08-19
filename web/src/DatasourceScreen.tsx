@@ -19,6 +19,7 @@ import {
   canSaveDatasource,
   connectionFingerprint,
   connectionSummary,
+  deleteRefusalMessage,
   draftFrom,
   referenceCounts,
 } from "./datasource";
@@ -469,7 +470,8 @@ function DatasourceFormDialog({
  * 删数据源（ADR-0039 §4 / ADR-0037 §7）。
  *
  * 仍被任务引用时服务端回 409，**报文里点名列出是哪几个任务**——那份引用清单为了判 409
- * 本来就要查。这里把它摆成 `.delete-copy` 正文里的一段列表，零新元素。
+ * 本来就要查。这里把它摆成 `.delete-copy` 正文里的一段列表，零新元素；红底那段话只留
+ * 数量与动作，名字不跟着再列一遍（`deleteRefusalMessage`，#139）。
  */
 function DatasourceDeleteDialog({
   datasource,
@@ -509,7 +511,7 @@ function DatasourceDeleteDialog({
         <span className="task-id">{datasource.datasource_id}</span>
         {error !== null && (
           <div className="form-error" role="alert">
-            {error}
+            {deleteRefusalMessage(error, blockedBy)}
           </div>
         )}
         {blockedBy.length > 0 && (
