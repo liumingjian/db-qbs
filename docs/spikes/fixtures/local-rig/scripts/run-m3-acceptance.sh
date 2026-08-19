@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Issue #115 / ADR-0032: M3 type, mapping, and source-value acceptance on the local rig.
 #
-# 【2026-08-18 #121 起未跑，需按 #122 重做】写入模型已由「按业务日期 DELETE + INSERT」
+# 【2026-08-18 #121 起未跑，需按 ADR-0040 §5 重做】写入模型已由「按业务日期 DELETE + INSERT」
 # 换成按主键 upsert（ADR-0035 §1），任务定义换成结构化规格（ADR-0036）。本脚本**尚未改到新形态**：
 # 任务创建与发起运行的报文仍是退役的 `source_sql` / `biz_date` 形状，判据也仍是 DELETE 时代的
 # 语义（purged_rows、当日范围被清空、哨兵行被删除），在 upsert 下不再成立。
-# 台架改造与判据重推归 #122。
+# 台架改造与判据重推见 **ADR-0040 §5**。
 #
 # 【2026-08-19 #118 追加】数据源管理落地（ADR-0037）：任务定义多了两个数据源 id 绑定，
 # `POST /v1/runs` 多了 `target` 连接字段，`sink.toml` 的 mysql_dsn / database 已退役
 # （sink 启动不再连 MySQL，连不上的失败点挪到开 run）。本脚本的调用面**尚未跟进**，
-# 一并归 #122。
+# 一并归 ADR-0040 §5。
 set -uo pipefail
 
 SCENARIOS=(
