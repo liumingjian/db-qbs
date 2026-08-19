@@ -24,6 +24,9 @@ REPS=7 ./scripts/run-cpu-probe.sh        # 跑 #5 的客户端每行 CPU 探针�
 ./scripts/run-mysql-roundtrip-probe.sh   # 跑 #13 的目标端往返实测（只起 MySQL，不用 Oracle）
 ./scripts/run-number-shapes-probe.sh     # 跑 #104 的 NUMBER 纯小数/负标度端到端往返实测
 ./scripts/run-bc-date-probe.sh           # 跑 #98 的公元前日期驱动年份符号取证（只用 Oracle）
+./scripts/rehearsal-up.sh                # 起演练台的两台 centos:7「主机」容器（#152）
+./scripts/rehearsal-reset.sh             # 把两台主机推倒重建回干净机器态
+./scripts/rehearsal-topology-check.sh    # 跑演练台的 R0–R10 拓扑判据
 ./scripts/sqlplus.sh   # 进 sqlplus
 ./scripts/down.sh      # 拆掉，连卷一起删
 ```
@@ -389,6 +392,61 @@ fixture 是新建的 `acceptance/oracle-v1.sql` 与 `acceptance/mysql-v1.sql`，
 （所有者裁定），随后是逐场景结果、C6 的六个内存数、逐条断言证据，以及两节交代边界的正文：
 台架能证到哪儿（C1② / C2② / C3③ 有一半在界面上，归 X 走查），以及三份视觉走查在本入口的
 触发情况。**不许写「通过」**——贴的是实际观察，没跑的写明「未跑及为什么」。
+
+## 装机演练台（#152 / ADR-0041 增补 1）
+
+第二版要在客户现场装机（ADR-0041），演练台就是那两台客户主机在 mac Docker 上的替身：
+**两个 `centos:7` 容器与既有的 Oracle / MySQL 同处一套 compose**，不新开第五个台架字母入口
+——ADR-0040 §2 的字母是按**搬运语义的入口**分的，第二版零搬运语义改动。
+
+```
+  qbs-host-source ── qbs-src-side ── qbs-oracle11        （源端主机：source + Instant Client）
+        │
+        └── 宿主 127.0.0.1:15443（扮演客户侧白名单端口）──▶ qbs-host-target:15443
+                                                    │
+                          qbs-host-target ── qbs-dst-side ── qbs-mysql8   （目标端主机：sink）
+```
+
+| 面 | 演练台怎么扮演 |
+|---|---|
+| 两库之间网络不通 | 两台主机各在一张自己的网上（`qbs-src-side` / `qbs-dst-side`），**跨容器直达是切断的** |
+| 公网那一跳 | 源端经**宿主上暴露出来的端口**到目标端——容器直连摸不到，只有暴露口能过 |
+| 白名单端口 | 目标端只暴露 `15443` 一个口（给 #153 的 stunnel 服务端）；没暴露的端口就是白名单外的端口 |
+| 干净机器 | 两台主机**不挂卷、不 build 自定义镜像**，删容器即归零；`rehearsal-reset.sh` 一条命令回到起点 |
+
+- **默认不起**：两台主机在 compose 的 `rehearsal` profile 下，`up.sh` 与四份既有台架的起停
+  一个字节不变。要它们跑 `./scripts/rehearsal-up.sh`（前提是两个库已经起着）。
+- **首次应用这套改动，两个库容器可能被重建**：`oracle` / `mysql` 各多挂了一张「侧」网，
+  而 networks 列表进 compose 的配置哈希。2026-08-19 在 Docker 29.3.1 上实测是**原地挂网、
+  没有重建**（库里 M1/M2/M3/v1 的表原样还在），但那是一次观察，不是对下一台机器的保证——
+  真重建了也不是事故：两个库**本来就没有数据卷**，`up.sh` 会照 initdb 脚本重新灌一遍
+  （Oracle 在模拟层下要等几分钟）。真正会丢的是**上一轮验收留在库里、给视觉走查用的那批数据**
+  （见「跑完默认不清场」），要用就先跑完走查再动这套改动。
+- **刻意不挂仓库**：挂上 `/workspace`，手册就能靠容器里现成的东西蒙混过关。东西必须像现场那样
+  `docker cp` 搬进去——那正是行李清单要列全的理由（规格 #149 B.9）。
+- **刻意用 `linux/amd64`**：客户机是 x86_64 CentOS 7，glibc 2.17 的下界也是在那个架构上兑现的
+  （#151）。演练台跟着客户机走，免得演练跑的是一套二进制、带去现场的是另一套。Rosetta 下慢，
+  但演练量的是装机步骤，不是吞吐——与本 README「边界」那条一脉相承。
+  要装进这两台主机的二进制由 `packaging/centos7/build.sh` 出（#151），产物架构与它们对得上。
+- **拓扑判据 R0–R10** 由 `./scripts/rehearsal-topology-check.sh` 逐条断言并打印实测。
+  **通的要通，不通的更要不通**：R3/R5（源端摸不到 MySQL、目标端摸不到 Oracle）、R6（跨容器直达）、
+  R8（白名单外的端口）四条负判据一旦悄悄失效，演练就会在一张比客户现场宽松的网上跑完，
+  手册里缺的那几步要到现场才炸。**每条负判据都配一条正对照**（R7a/R8a：目标端本机自连，
+  确认监听端真的活着）——没有正对照的「不通」不算证据，容器没起、没人监听、DNS 查不到，
+  得出的都是「不通」。脚本默认先跑一次推倒重建（R9），随后在**刚重建出来的干净**两台主机上
+  判其余各条，收尾回收探针进程并判 R10（`15443` 交还给 #153 的 stunnel）；`--no-reset` 跳过重建。
+- **R 不是第五个台架字母**：A/B/C 编的是**搬运语义的验收场景**（ADR-0040 §2），R 编的是演练台
+  自己的拓扑自检，一条搬运语义都不碰。第二版的验收判据是过程性的、落在演练记录里
+  （ADR-0041 §6），不新开验收入口。
+
+**真机差异**（手册要标出来的地方，见规格 #149 E.17）：容器里 root 是默认的、没装过任何东西、
+网络是通的，`host.docker.internal` 更是 Docker Desktop 才有的东西——真机上对应的是客户给的
+公网 IP 与白名单端口。ADR-0041 增补 1 明文接受这个代价：装的人就是写手册的人本人。
+
+**yum 源不是差异，是两边都要先做的第一步**：CentOS 7 已 EOL，`mirrorlist.centos.org` 已停服，
+`centos:7` 容器与客户那台真机**同样**装不上任何包（`yum install stunnel` 直接失败），
+都得先把 repo 指到 `vault.centos.org`——`packaging/centos7/Dockerfile`（#151）里已经有这段改源，
+装机手册（#155/#156）的第一条命令也是它。演练台在这一点上**不比真机宽松**，正好。
 
 ## 三份视觉走查的驱动脚本（`walkthrough/`）
 
