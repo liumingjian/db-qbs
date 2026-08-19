@@ -76,6 +76,17 @@ struct BuilderLinkInput {
     dblink: Option<String>,
 }
 
+/// 目标端元数据面的两个代理入口（ADR-0038 §3）：界面只报**数据源 id**，
+/// 凭据由 source 在这里解一次再过线——与「测试连接」同一条路径（ADR-0037 §1/§8）。
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetMetadataInput {
+    datasource_id: String,
+    /// 只有取列面要它；取表清单不带。
+    #[serde(default)]
+    target_table: String,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BuilderColumnsInput {
@@ -318,6 +329,14 @@ fn route_api_request(
             Method::Delete => handle_delete_datasource(state, datasource_id),
             _ => not_found(),
         };
+    }
+
+    if method == Method::Post && path == "/api/target/tables" {
+        return handle_target_tables(request, state);
+    }
+
+    if method == Method::Post && path == "/api/target/columns" {
+        return handle_target_columns(request, state);
     }
 
     if method == Method::Post && path == "/api/builder/sql" {
@@ -962,6 +981,79 @@ fn handle_test_datasource(state: &ServerState<'_>, datasource_id: &str) -> HttpR
                 Err(error) => json_response(502, &json!({ "kind": "sink", "message": error })),
             }
         }
+    }
+}
+
+/// 目标库的表清单（ADR-0038 §3）。source 仍**不建 MySQL 连接**——查询在 sink 那侧跑，
+/// `CONTEXT.md` 那条不对称原样保留。结果纯瞬态：不进任务定义、不进 SQLite（ADR-0038 §8）。
+fn handle_target_tables(request: &mut Request, state: &ServerState<'_>) -> HttpResponse {
+    let input: TargetMetadataInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    let target = match state.datasources.target_connection(&input.datasource_id) {
+        Ok(target) => target,
+        Err(error) => return bad_request(error),
+    };
+    match post_to_sink(
+        &state.config.sink_base_url,
+        "/v1/target/tables",
+        &serde_json::to_value(&target).expect("target connection must serialize"),
+    ) {
+        Ok(body) => json_response(200, &body),
+        Err(error) => json_response(502, &json!({ "kind": "sink", "message": error })),
+    }
+}
+
+/// 一张目标表的列清单与唯一性约束（ADR-0038 §3）。**表不存在回空清单，不是错误**（§9）。
+fn handle_target_columns(request: &mut Request, state: &ServerState<'_>) -> HttpResponse {
+    let input: TargetMetadataInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    if input.target_table.trim().is_empty() {
+        return bad_request("target_table 不能为空".to_owned());
+    }
+    let target = match state.datasources.target_connection(&input.datasource_id) {
+        Ok(target) => target,
+        Err(error) => return bad_request(error),
+    };
+    match post_to_sink(
+        &state.config.sink_base_url,
+        "/v1/target/columns",
+        &json!({ "target": target, "target_table": input.target_table }),
+    ) {
+        Ok(body) => json_response(200, &body),
+        Err(error) => json_response(502, &json!({ "kind": "sink", "message": error })),
+    }
+}
+
+/// 往 sink 发一个「不属于任何 run」的元数据请求，把 JSON 回话原样带回来。
+///
+/// 与 [`test_target_connection`] 同一条通道、同一条部署前提（ADR-0037 §4：通道必须可信），
+/// 只是多一个「把响应体读回来」——`test-connection` 只关心成没成。
+fn post_to_sink(sink_base_url: &str, path: &str, body: &Value) -> Result<Value, String> {
+    let url = format!("{}{path}", sink_base_url.trim_end_matches('/'));
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(10))
+        .timeout_read(Duration::from_secs(30))
+        .redirects(0)
+        .build();
+    match agent.post(&url).send_json(body.clone()) {
+        Ok(response) => response
+            .into_json::<Value>()
+            .map_err(|error| format!("目标端回话不是 JSON：{error}")),
+        Err(ureq::Error::Status(_, response)) => Err(response
+            .into_json::<Value>()
+            .ok()
+            .and_then(|body| {
+                body.get("error")?
+                    .get("message")?
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "目标端拒绝了元数据请求".to_owned())),
+        Err(ureq::Error::Transport(error)) => Err(format!("连不上 sink：{error}")),
     }
 }
 

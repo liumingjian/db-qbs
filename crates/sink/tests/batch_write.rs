@@ -433,6 +433,8 @@ fn golden_columns() -> (Vec<SourceColumn>, Vec<TargetColumn>) {
                 nullable: *name != "D_BIZ",
                 character_set: length.map(|_| "utf8mb4".to_owned()),
                 ordinal: (specs.len() - index) as u64,
+                default_value: None,
+                extra: String::new(),
             },
         )
         .collect();
@@ -470,5 +472,7 @@ fn target_column(
         nullable: name != "D_BIZ",
         character_set: length.map(|_| "utf8mb4".to_owned()),
         ordinal,
+        default_value: None,
+        extra: String::new(),
     }
 }

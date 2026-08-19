@@ -44,6 +44,8 @@ impl Destination for FakeDestination {
             nullable: false,
             character_set: None,
             ordinal: 1,
+            default_value: None,
+            extra: String::new(),
         }])
     }
 

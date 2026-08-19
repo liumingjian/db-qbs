@@ -125,6 +125,40 @@ export interface BuilderColumn {
   nullable: boolean;
 }
 
+/**
+ * 目标表的一列（`information_schema.COLUMNS`）。
+ *
+ * `length` 是**字节**（MySQL 的 `CHARACTER_MAXIMUM_LENGTH` 在 utf8mb4 下按字符给、
+ * 但映射预检按字节判——两套单位的账见 ADR-0033，界面只标注不修）。
+ */
+export interface TargetColumn {
+  name: string;
+  column_type: string;
+  data_type: string;
+  precision: number | null;
+  scale: number | null;
+  length: number | null;
+  datetime_precision: number | null;
+  nullable: boolean;
+  character_set: string | null;
+  ordinal: number;
+  /** 无默认值时是 `null`。它与 `extra` 是 ADR-0038 §5 第 3 分支的判据。 */
+  default_value: string | null;
+  /** `auto_increment` / `DEFAULT_GENERATED` 之类，没有就是空串。 */
+  extra: string;
+}
+
+/** 目标表上一条唯一性约束（`PRIMARY KEY` 或 `UNIQUE`）覆盖的列。 */
+export interface TargetKey {
+  name: string;
+  columns: string[];
+}
+
+export interface TargetTableMetadata {
+  columns: TargetColumn[];
+  keys: TargetKey[];
+}
+
 /** `POST /api/builder/sql` 回的一条运行参数声明。 */
 export interface RunParameter {
   parameter: string;
@@ -440,6 +474,33 @@ export async function fetchBuilderColumns(input: {
   table: string;
 }): Promise<BuilderColumn[]> {
   return postJson<BuilderColumn[]>("/api/builder/columns", input, "读取 Oracle 列失败");
+}
+
+/**
+ * 目标端元数据面（ADR-0038 §3）。**结果纯瞬态**：只活在页面状态里，
+ * 不进任务定义、不进 SQLite，刷新即丢（§8）。映射关系本身要存，目标表结构快照不存。
+ *
+ * 界面只报数据源 id——凭据由 source 解一次再过线，前端一次也不碰。
+ */
+export async function fetchTargetTables(datasourceId: string): Promise<string[]> {
+  const body = await postJson<{ tables: string[] }>(
+    "/api/target/tables",
+    { datasource_id: datasourceId },
+    "读取目标表清单失败",
+  );
+  return body.tables;
+}
+
+/** 一张目标表的列清单与唯一性约束。**表不存在回空清单，不是错误**（ADR-0038 §9）。 */
+export async function fetchTargetColumns(
+  datasourceId: string,
+  targetTable: string,
+): Promise<TargetTableMetadata> {
+  return postJson<TargetTableMetadata>(
+    "/api/target/columns",
+    { datasource_id: datasourceId, target_table: targetTable },
+    "读取目标列失败",
+  );
 }
 
 export async function generateBuilderSql(spec: TaskSpec): Promise<BuilderSql> {

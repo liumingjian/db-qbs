@@ -54,6 +54,8 @@ fn target_column(
         nullable,
         character_set: character_set.map(str::to_owned),
         ordinal,
+        default_value: None,
+        extra: String::new(),
     }
 }
 

@@ -8,6 +8,8 @@ import {
   fetchBuilderColumns,
   fetchBuilderTables,
   fetchColumns,
+  fetchTargetColumns,
+  fetchTargetTables,
   generateBuilderSql,
   cancelRun,
   fetchRun,
@@ -295,6 +297,56 @@ describe("SQL builder API", () => {
       }),
     }));
     expect(columns[0]).not.toHaveProperty("supported");
+  });
+
+  it("asks the target end for tables and columns by datasource id alone", async () => {
+    // 界面只报数据源 id——凭据由 source 解一次再过线，前端一次也不碰（ADR-0037 §1/§8）。
+    const metadata = {
+      columns: [
+        {
+          name: "CREATE_TIME",
+          column_type: "datetime",
+          data_type: "datetime",
+          precision: null,
+          scale: null,
+          length: null,
+          datetime_precision: 0,
+          nullable: false,
+          character_set: null,
+          ordinal: 1,
+          default_value: "CURRENT_TIMESTAMP",
+          extra: "DEFAULT_GENERATED",
+        },
+      ],
+      keys: [{ name: "PRIMARY", columns: ["ID"] }],
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ tables: ["T_POSITION"] }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(metadata), { status: 200 }))
+      // 表不存在回空清单，不是错误（ADR-0038 §9）。
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ columns: [], keys: [] }), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchTargetTables("ds-mysql")).resolves.toEqual(["T_POSITION"]);
+    await expect(fetchTargetColumns("ds-mysql", "T_POSITION")).resolves.toEqual(metadata);
+    await expect(fetchTargetColumns("ds-mysql", "NO_SUCH_TABLE")).resolves.toEqual({
+      columns: [],
+      keys: [],
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/target/tables", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ datasource_id: "ds-mysql" }),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/target/columns", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ datasource_id: "ds-mysql", target_table: "T_POSITION" }),
+    }));
   });
 
   it("exchanges a spec for the read-only SQL and its run parameters", async () => {

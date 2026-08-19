@@ -8,8 +8,8 @@ use serde_json::json;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::{
-    ApiError, BatchPayload, CommitRequest, DestinationFactory, MysqlDestination, MysqlFactory,
-    OpenRunRequest, SinkConfig, SinkService, TargetConnection,
+    ApiError, BatchPayload, CommitRequest, Destination, DestinationFactory, MysqlDestination,
+    MysqlFactory, OpenRunRequest, SinkConfig, SinkService, TargetConnection,
 };
 
 const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
@@ -72,6 +72,10 @@ fn handle_request<F: DestinationFactory>(mut request: Request, service: &SinkSer
         handle_open(&mut request, service)
     } else if method == Method::Post && path == "/v1/target/test-connection" {
         handle_test_connection(&mut request)
+    } else if method == Method::Post && path == "/v1/target/tables" {
+        handle_target_tables(&mut request)
+    } else if method == Method::Post && path == "/v1/target/columns" {
+        handle_target_columns(&mut request)
     } else if method == Method::Post {
         match run_action(&path) {
             Some((run_id, "batches")) => handle_batch(&mut request, service, run_id),
@@ -214,6 +218,81 @@ fn handle_test_connection(request: &mut Request) -> HttpResponse {
     }
 }
 
+/// `POST /v1/target/columns` 的请求体。
+///
+/// 连接**嵌在 `target` 里**，不 flatten 进顶层：`OpenRunRequest` 已经是这个形状，
+/// 而 serde 的 `flatten` 与 `deny_unknown_fields` 不能共存——拼字段名的错就会静默通过。
+/// `/v1/target/tables` 没有第二个字段，所以它原样收一个 `TargetConnection`，
+/// 与 `/v1/target/test-connection` 一致。
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetColumnsRequest {
+    target: TargetConnection,
+    target_table: String,
+}
+
+/// 目标端元数据面（ADR-0038 §3）：ADR-0027 §3 那道封条到这里完整解除。
+///
+/// 与 `test-connection` 同属「不属于任何 run 的端点」——**不产生 `run_id`、不进 run 注册表、
+/// 不留 tombstone、不写任何存储**，连接按请求建、用完即弃（`MysqlDestination` 出作用域即断）。
+/// 它喂的是**选择面**，不是判定面：拦截层仍然只有映射预检一处（ADR-0009 增补 §3 一字不改）。
+fn handle_target_tables(request: &mut Request) -> HttpResponse {
+    if !has_json_content_type(request) {
+        return error_response(unsupported_media_type(None));
+    }
+    let target: TargetConnection = match read_json(request) {
+        Ok(target) => target,
+        Err(error) => return error_response(error),
+    };
+    let destination = match MysqlDestination::connect(&target) {
+        Ok(destination) => destination,
+        Err(message) => return error_response(target_environment(message)),
+    };
+    match destination.target_tables() {
+        Ok(tables) => json_response(200, &json!({ "tables": tables })),
+        Err(message) => error_response(target_environment(message)),
+    }
+}
+
+/// 一张目标表的列清单与唯一性约束（ADR-0038 §3）。
+///
+/// **表不存在不是错误**：`information_schema` 查不到就是空清单（ADR-0038 §9）。
+/// 构建器只亮不判——「这张表能不能用」的结论归映射预检出。
+fn handle_target_columns(request: &mut Request) -> HttpResponse {
+    if !has_json_content_type(request) {
+        return error_response(unsupported_media_type(None));
+    }
+    let payload: TargetColumnsRequest = match read_json(request) {
+        Ok(payload) => payload,
+        Err(error) => return error_response(error),
+    };
+    let destination = match MysqlDestination::connect(&payload.target) {
+        Ok(destination) => destination,
+        Err(message) => return error_response(target_environment(message)),
+    };
+    let columns = match destination.target_columns(&payload.target_table) {
+        Ok(columns) => columns,
+        Err(message) => return error_response(target_environment(message)),
+    };
+    let keys = match destination.target_keys(&payload.target_table) {
+        Ok(keys) => keys,
+        Err(message) => return error_response(target_environment(message)),
+    };
+    json_response(200, &json!({ "columns": columns, "keys": keys }))
+}
+
+/// 错误码闭集不增（ADR-0010 十五码，ADR-0038 §9）：目标端连不上或查不动，
+/// 都是目标端环境故障，与 `test-connection` 同一个码、同一个 `details.kind`。
+fn target_environment(message: String) -> ApiError {
+    ApiError {
+        status: 500,
+        code: "SINK_ENVIRONMENT",
+        message: format!("读取目标端元数据失败：{message}"),
+        run_id: None,
+        details: json!({ "kind": "OTHER" }),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EmptyBody {}
@@ -341,6 +420,8 @@ mod tests {
                 nullable: false,
                 character_set: None,
                 ordinal: 1,
+                default_value: None,
+                extra: String::new(),
             }])
         }
 
@@ -479,6 +560,60 @@ mod tests {
             exchange_method(service, "GET", "/v1/runs/20260814091531_b4e20d", "");
         assert_eq!(status, 404);
         assert_eq!(unknown["error"]["code"], "RUN_UNKNOWN");
+    }
+
+    #[test]
+    fn the_target_metadata_face_fails_as_an_environment_fault_and_leaves_no_run_behind() {
+        // 连不上目标端 → SINK_ENVIRONMENT + details.kind = "OTHER"，码闭集不增
+        // （ADR-0038 §9，与 test-connection 同一个码）。127.0.0.1:1 上没有 MySQL。
+        let service = Arc::new(SinkService::new(
+            "qbs",
+            Arc::new(FakeDestination::default()),
+        ));
+        let target = r#"{"host":"127.0.0.1","port":1,"username":"sink","password":"x","database":"qbs"}"#;
+
+        let (status, body) = exchange(service.clone(), "/v1/target/tables", target);
+        assert_eq!(status, 500, "{body}");
+        assert_eq!(body["error"]["code"], "SINK_ENVIRONMENT");
+        assert_eq!(body["error"]["details"]["kind"], "OTHER");
+        // 不属于任何 run：报文里没有 run_id，注册表里也没多出东西（ADR-0038 §3）。
+        assert!(body["error"]["run_id"].is_null(), "{body}");
+
+        let (status, body) = exchange(
+            service.clone(),
+            "/v1/target/columns",
+            &format!(r#"{{"target":{target},"target_table":"T_POSITION"}}"#),
+        );
+        assert_eq!(status, 500, "{body}");
+        assert_eq!(body["error"]["code"], "SINK_ENVIRONMENT");
+
+        let (status, unknown) =
+            exchange_method(service, "GET", "/v1/runs/20260814091530_a3f19c", "");
+        assert_eq!(status, 404);
+        assert_eq!(unknown["error"]["code"], "RUN_UNKNOWN");
+    }
+
+    #[test]
+    fn the_columns_endpoint_nests_the_connection_and_refuses_a_stray_field() {
+        // 连接嵌在 `target` 里（与 OpenRunRequest 同形），顶层只多一个 `target_table`。
+        // flatten 进顶层就得放弃 `deny_unknown_fields`，拼错字段名会静默通过。
+        let service = Arc::new(SinkService::new(
+            "qbs",
+            Arc::new(FakeDestination::default()),
+        ));
+        let target = r#"{"host":"127.0.0.1","port":1,"username":"sink","password":"x","database":"qbs"}"#;
+
+        let (status, flattened) = exchange(
+            service.clone(),
+            "/v1/target/columns",
+            &format!(r#"{{{TARGET_JSON}"target_table":"T","host":"127.0.0.1"}}"#),
+        );
+        assert_eq!(status, 400, "{flattened}");
+        assert_eq!(flattened["error"]["code"], "BAD_REQUEST");
+
+        let (status, missing_table) =
+            exchange(service, "/v1/target/columns", &format!(r#"{{"target":{target}}}"#));
+        assert_eq!(status, 400, "{missing_table}");
     }
 
     fn exchange(

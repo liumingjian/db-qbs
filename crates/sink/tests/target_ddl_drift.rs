@@ -343,6 +343,8 @@ fn parse_target_columns(ddl: &str) -> Vec<TargetColumn> {
                 nullable,
                 character_set,
                 ordinal: u64::try_from(index + 1).unwrap(),
+                default_value: None,
+                extra: String::new(),
             }
         })
         .collect()
@@ -407,5 +409,7 @@ fn target_column(
         nullable: true,
         character_set: None,
         ordinal: 1,
+        default_value: None,
+        extra: String::new(),
     }
 }

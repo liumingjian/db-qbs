@@ -832,6 +832,70 @@ fn column_fetch_oracle_failure_does_not_create_a_run_touch_sink_or_write_storage
     fs::remove_dir_all(directory).unwrap();
 }
 
+#[test]
+fn the_target_metadata_proxy_resolves_credentials_and_writes_nothing() {
+    // 目标端元数据面（ADR-0038 §3）：source 仍不建 MySQL 连接，只把解出来的凭据转给 sink。
+    // 本用例买三件事——凭据由 datasource_id 解、请求确实过线到 sink、**一个字节都不落盘**
+    // （结果纯瞬态，ADR-0038 §8）。真查到什么列归台架的 C 系列去证，那要一个活的 MySQL。
+    let directory = temp_directory();
+    let sink = TcpListener::bind("127.0.0.1:0").unwrap();
+    let sink_url = format!("http://{}", sink.local_addr().unwrap());
+    drop(sink); // 端口留空：请求发得出去、连不上，回话必须是 502 kind=sink。
+    let (port, _config, child, _ready) = start_source_ready(|port| {
+        write_config_with_oracle(
+            &directory,
+            &format!("127.0.0.1:{port}"),
+            &sink_url,
+            "/db-qbs-missing-oracle-client",
+        )
+    });
+    let (source_datasource_id, target_datasource_id) = seed_datasources(port);
+    let files_before = directory_entries(&directory);
+
+    // Oracle 数据源上没有目标端连接——按名字拒，不编一份出来。
+    let wrong_kind = post(
+        port,
+        "/api/target/tables",
+        &format!(r#"{{"datasource_id":"{source_datasource_id}"}}"#),
+    )
+    .unwrap();
+    assert_eq!(wrong_kind.status, 400, "{}", wrong_kind.body);
+
+    // 取列面必须点名一张表：不给库清单端点、也不替用户猜表（ADR-0038 §3）。
+    let missing_table = post(
+        port,
+        "/api/target/columns",
+        &format!(r#"{{"datasource_id":"{target_datasource_id}"}}"#),
+    )
+    .unwrap();
+    assert_eq!(missing_table.status, 400, "{}", missing_table.body);
+    assert!(missing_table.body.contains("target_table"), "{}", missing_table.body);
+
+    for (path, body) in [
+        (
+            "/api/target/tables",
+            format!(r#"{{"datasource_id":"{target_datasource_id}"}}"#),
+        ),
+        (
+            "/api/target/columns",
+            format!(r#"{{"datasource_id":"{target_datasource_id}","target_table":"T_POSITION"}}"#),
+        ),
+    ] {
+        let response = post(port, path, &body).unwrap();
+        assert_eq!(response.status, 502, "{}", response.body);
+        let parsed: Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(parsed["kind"], "sink");
+        // 不属于任何 run：回话里没有 run_id（ADR-0038 §3）。
+        assert!(parsed.get("run_id").is_none(), "{}", response.body);
+    }
+
+    // 不进任务定义、不进 SQLite、不留临时文件——目录里一个新条目都没有。
+    assert_eq!(directory_entries(&directory), files_before);
+
+    assert_success(&terminate(child));
+    fs::remove_dir_all(directory).unwrap();
+}
+
 fn start_source(config: &Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_db-qbs-source"))
         .args(["--config"])

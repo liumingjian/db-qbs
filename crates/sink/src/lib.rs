@@ -66,13 +66,13 @@ impl SinkConfig {
 ///
 /// 撤掉 DELETE 之后，幂等全靠它：目标表上**没有**对应约束时，
 /// `ON DUPLICATE KEY UPDATE` 不报错、写得进去、重跑就出重复行（ADR-0035 §2）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TargetKey {
     pub name: String,
     pub columns: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TargetColumn {
     pub name: String,
     pub column_type: String,
@@ -84,6 +84,15 @@ pub struct TargetColumn {
     pub nullable: bool,
     pub character_set: Option<String>,
     pub ordinal: u64,
+    /// `information_schema.COLUMNS.COLUMN_DEFAULT`——没有默认值时是 `NULL`。
+    ///
+    /// 它与 [`Self::extra`] 是 ADR-0038 §5 第 3 分支的判据：未被映射的列
+    /// `NOT NULL` 且**无默认值且非 auto_increment** 才拒，否则放行。
+    /// 跟着原来那条 `information_schema.COLUMNS` 查询一起取，不多一次来回。
+    pub default_value: Option<String>,
+    /// `information_schema.COLUMNS.EXTRA`——`auto_increment` / `DEFAULT_GENERATED` 之类，
+    /// 没有就是空串（这一列在 MySQL 里 `NOT NULL`）。
+    pub extra: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -25,6 +25,8 @@ type MetadataRow = (
     String,
     Option<String>,
     u64,
+    Option<String>,
+    String,
 );
 
 pub struct MysqlDestination {
@@ -55,6 +57,29 @@ impl MysqlDestination {
             database: target.database.clone(),
             pool,
         })
+    }
+
+    /// 这个库里有哪些表（ADR-0038 §3）——构建器的目标表下拉喂的就是它。
+    ///
+    /// **不进 [`Destination`] trait**：搬运那条链一次也用不到它，进 trait 只会让
+    /// 二十几个测试夹具各补一个用不上的实现。库名取连接自己的 `database`——
+    /// 不做库清单端点、也不收第二个库名，否则任务就能推翻数据源的定义（ADR-0038 §3）。
+    ///
+    /// 表不存在这件事在这里不成立：查不到就是空清单，不是错误（ADR-0038 §9）。
+    pub fn target_tables(&self) -> Result<Vec<String>, String> {
+        self.pool
+            .with_conn(|connection| {
+                connection.exec(
+                    r#"
+SELECT TABLE_NAME
+  FROM information_schema.TABLES
+ WHERE TABLE_SCHEMA = :database
+ ORDER BY TABLE_NAME
+"#,
+                    params! { "database" => &self.database },
+                )
+            })
+            .map_err(|error| error.to_string())
     }
 
     /// 「测试连接」：建一条连接、跑一遍开连接仪式，成了就算通（ADR-0037 §9）。
@@ -92,7 +117,8 @@ impl Destination for MysqlDestination {
                     r#"
 SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
        NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH,
-       DATETIME_PRECISION, IS_NULLABLE, CHARACTER_SET_NAME, ORDINAL_POSITION
+       DATETIME_PRECISION, IS_NULLABLE, CHARACTER_SET_NAME, ORDINAL_POSITION,
+       COLUMN_DEFAULT, EXTRA
   FROM information_schema.COLUMNS
  WHERE TABLE_SCHEMA = :database AND TABLE_NAME = :target_table
  ORDER BY ORDINAL_POSITION
@@ -112,6 +138,8 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
                         is_nullable,
                         character_set,
                         ordinal,
+                        default_value,
+                        extra,
                     ): MetadataRow| TargetColumn {
                         name,
                         column_type,
@@ -123,6 +151,8 @@ SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
                         nullable: is_nullable == "YES",
                         character_set,
                         ordinal,
+                        default_value,
+                        extra,
                     },
                 )
             })
