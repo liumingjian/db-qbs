@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -1072,6 +1072,14 @@ fn get(port: u16, path: &str) -> std::io::Result<HttpResponse> {
     request(port, "GET", path, None)
 }
 
+/// 一次请求的三段（连、写、读）各自的上限。
+///
+/// 取 15 秒的依据：本文件里最慢的一档是 `/api/target/*` 与 `/api/columns`——它们要往 sink 或
+/// Oracle 发连接，而这两处在测试里都是打不通的（sink 端口空着、Oracle 客户端库路径是假的），
+/// 失败在秒级内就回；其余端点是纯本地 SQLite，亚秒级。15 秒明显大于正常值，又明显小于 CI 的
+/// 外层耐心（分钟级），所以卡住时是本进程自己报出「哪条请求超时」，而不是被外层砍掉。
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
 fn request(
     port: u16,
     method: &str,
@@ -1079,15 +1087,39 @@ fn request(
     body: Option<&str>,
 ) -> std::io::Result<HttpResponse> {
     let body = body.unwrap_or("");
-    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
-    stream.write_all(
-        format!(
-            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    // 三段都要设：被测的 source 在某条路径上不回响应、也不关连接时，无超时的 `read_to_string`
+    // 会永久阻塞——挂死的不是这一条用例，是整个测试二进制。
+    let mut stream = TcpStream::connect_timeout(&address, REQUEST_TIMEOUT)
+        .map_err(|error| annotate(method, path, "连接", error))?;
+    stream
+        .set_write_timeout(Some(REQUEST_TIMEOUT))
+        .and_then(|()| stream.set_read_timeout(Some(REQUEST_TIMEOUT)))
+        .map_err(|error| annotate(method, path, "设超时", error))?;
+    stream
+        .write_all(
+            format!(
+                "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
         )
-        .as_bytes(),
-    )?;
-    read_response(&mut stream)
+        .map_err(|error| annotate(method, path, "发请求", error))?;
+    read_response(&mut stream).map_err(|error| annotate(method, path, "读回话", error))
+}
+
+/// 超时（以及任何 I/O 失败）的信息里必须点名是哪条 `method path` 的哪一段——
+/// 否则挂死只是换成了一句「某条请求超时」，排障省不下多少。
+fn annotate(
+    method: &str,
+    path: &str,
+    stage: &str,
+    error: std::io::Error,
+) -> std::io::Error {
+    std::io::Error::new(
+        error.kind(),
+        format!("{method} {path} 的{stage}阶段失败（上限 {REQUEST_TIMEOUT:?}）：{error}"),
+    )
 }
 
 fn post(port: u16, path: &str, body: &str) -> std::io::Result<HttpResponse> {

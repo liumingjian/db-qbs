@@ -7,3 +7,4 @@ node_modules/
 /docs/spikes/fixtures/local-rig/spike-bc-date/target/
 /.claude/
 /.playwright/
+/.venv/
