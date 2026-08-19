@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
-"""第一版渲染面走查 X1–X8 的机器观察（配 `v1-mock.py` 的桩后端）。
+"""第一版渲染面走查 X1–X8 的机器观察。
 
 按 ADR-0028 §1 的先例：**只观察，不断言**；一行 DOM 断言都不进验收套件。
 输出是给人抄进走查记录的实际观察，不是 pass/fail。
 
-X5 / X6 / X7 的对象（构建器增量）归 #131，本轮**还没建成**——探针照实报 `not_built`，
-不许报「通过」，也不许跳过。
+## 两种造态源
+
+* **桩后端**（`v1-mock.py`，默认）：态是编出来的，只答「渲染出来没有」。
+* **活台架**（`X_RIG=1`，指向 `run-v1-acceptance.sh` 跑完留下的真服务）：
+  X3 的测连失败是 Oracle 真回的报错、X4 点名的是真建的那个任务、X5/X6/X7 的列面
+  来自真表。**#136 判的是后者**（所有者 2026-08-19 裁定，Q5）——第一版整体验收要答的是
+  「这一版交付的东西真能用」，用桩证 X3/X4 等于自己给自己发证。
+
+两种源共用同一套观察代码，差异全收在下面这几个常量里，**选择器一律认标签文字或
+`aria-*`，不认位置**——位置写法（`:nth-of-type(3)`）会随 Oracle / MySQL 两套字段集变形。
 """
 
 import json
@@ -15,7 +23,37 @@ import sys
 from playwright.sync_api import sync_playwright
 
 BASE = f"http://127.0.0.1:{sys.argv[1] if len(sys.argv) > 1 else 18098}"
-SHOTS = "/tmp/v1-visual"
+SHOTS = os.environ.get("X_SHOTS", "/tmp/v1-visual")
+RIG = os.environ.get("X_RIG") == "1"
+
+# X3 要新建的那条数据源：桩里是一条连不通的 MySQL，活台架上是**真的 Oracle**——
+# 错口令换来的是 ORA-01017，不是桩里那句编好的话。
+NEW_DS = json.loads(os.environ["X_NEW_DS"]) if "X_NEW_DS" in os.environ else (
+    {
+        "name": "V1 走查新建（Oracle）",
+        "kind": "oracle",
+        "fields": {"连接串": "//127.0.0.1:1521/XE", "用户名": "spike"},
+        "bad_password": "definitely-wrong",
+        "good_password": "spike123",
+    } if RIG else {
+        "name": "新库",
+        "kind": "mysql",
+        "fields": {"主机": "10.0.0.99", "库名": "dw_new", "用户名": "u"},
+        "bad_password": "wrong",
+        "good_password": "right",
+    }
+)
+
+# X5 的目标表列参考要一张**真存在、且当前任务没把它的列全映射掉**的表，
+# 否则 `tr.is-unmapped` 这一态没有对象。
+REFERENCE_TABLE = os.environ.get("X_REFERENCE_TABLE", "V1_C4" if RIG else "HOLDING")
+
+
+def field_input(page, label):
+    """按字段标签取输入框——不认位置。"""
+    return page.query_selector(
+        f'.modal label.form-field:has(span.field-label:text-is("{label}")) input'
+    )
 
 
 def open_datasources(page, width=1440, height=1200):
@@ -62,19 +100,18 @@ def observe_new_dialog(page):
     open_datasources(page)
     page.click('#datasources .card-header button')
     page.wait_for_selector(".modal")
-    page.fill('.modal .form-field:nth-of-type(1) input', "新库")
-    page.select_option(".modal select", "mysql")
+    field_input(page, "名称").fill(NEW_DS["name"])
+    page.select_option(".modal select", NEW_DS["kind"])
+    for label, value in NEW_DS["fields"].items():
+        field_input(page, label).fill(value)
+    password = page.query_selector('.modal input[type="password"]')
+    password.fill(NEW_DS["bad_password"])
     fields = page.query_selector_all(".modal .form-field input")
-    # 名称 / 主机 / 端口 / 库名 / 用户名 / 口令
-    page.fill('.modal .form-field:nth-of-type(3) input', "10.0.0.99")
-    page.fill('.modal .form-field:nth-of-type(5) input', "dw_new")
-    page.fill('.modal .form-field:nth-of-type(6) input', "u")
-    page.fill('.modal .form-field:nth-of-type(7) input', "wrong")
     submit = page.query_selector('.modal button[type="submit"]')
     before = {"submit_disabled": submit.is_disabled(), "field_count": len(fields)}
 
     page.click('.modal .row-actions button')
-    page.wait_for_selector(".modal .form-error")
+    page.wait_for_selector(".modal .form-error", timeout=60000)
     failed_text = page.query_selector(".modal .form-error").inner_text()
     failed = {
         "form_error": failed_text,
@@ -84,9 +121,9 @@ def observe_new_dialog(page):
     }
     page.screenshot(path=f"{SHOTS}/x3-test-failed.png", full_page=True)
 
-    page.fill('.modal .form-field:nth-of-type(7) input', "right")
+    password.fill(NEW_DS["good_password"])
     page.click('.modal .row-actions button')
-    page.wait_for_selector(".modal .inline-result")
+    page.wait_for_selector(".modal .inline-result", timeout=60000)
     result = page.query_selector(".modal .inline-result")
     style = result.evaluate(
         "(el) => { const cs = getComputedStyle(el);"
@@ -100,14 +137,34 @@ def observe_new_dialog(page):
         "form_errors": len(page.query_selector_all(".modal .form-error")),
     }
     page.screenshot(path=f"{SHOTS}/x3-test-passed.png", full_page=True)
-    return {"before_test": before, "wrong_password": failed, "right_password": passed}
+    page.click('.modal .modal-footer button.is-ghost')
+    return {"source": "rig" if RIG else "mock", "datasource": NEW_DS["name"],
+            "kind": NEW_DS["kind"], "before_test": before,
+            "wrong_password": failed, "right_password": passed}
 
 
 def observe_rename_and_delete(page):
-    """X4：只改名称免测连即可保存；删除被拒且点名任务。"""
+    """X4：只改名称免测连即可保存；删除被拒且点名任务。
+
+    **认「被引用」列，不认行号**：桩里被引用的恰好是第一行，活台架上未必——
+    C1 建的两条里被 C2 的任务引用的是哪一条，取决于建的顺序。
+    """
     open_datasources(page)
-    # 第一行「生产核心库」被 1 个任务引用。
-    page.click('#datasources tbody tr:nth-child(1) button[aria-label="编辑数据源"]')
+    rows = page.query_selector_all("#datasources tbody tr")
+    referenced_index = None
+    reference_cells = []
+    for index, row in enumerate(rows):
+        cells = [c.inner_text().strip() for c in row.query_selector_all("td")]
+        reference_cells.append({"name": cells[0], "referenced": cells[5] if len(cells) > 5 else None})
+        if referenced_index is None and len(cells) > 5 and cells[5] != "未被引用":
+            referenced_index = index
+    if referenced_index is None:
+        return {"skipped": "没有一条数据源被任务引用——X4 的对象不存在",
+                "rows": reference_cells}
+    target_row = f"#datasources tbody tr:nth-child({referenced_index + 1})"
+    picked = reference_cells[referenced_index]
+
+    page.click(f'{target_row} button[aria-label="编辑数据源"]')
     page.wait_for_selector(".modal")
     submit = page.query_selector('.modal button[type="submit"]')
     password_badge = page.query_selector(".modal .field-badge")
@@ -116,29 +173,33 @@ def observe_rename_and_delete(page):
         " return {text: el.innerText, color: cs.color, background: cs.backgroundColor,"
         " border: cs.borderColor, className: el.className}; }"
     )
-    password_input = page.query_selector_all(".modal .form-field input")[-1]
+    password_input = page.query_selector('.modal input[type="password"]')
     rename = {
+        "picked_row": picked,
         "submit_disabled_on_open": submit.is_disabled(),
         "password_field_value": password_input.input_value(),
         "password_badge": badge_style,
-        "kind_field_readonly": page.query_selector(".modal .form-field:nth-of-type(2) input") is not None,
+        "kind_field_readonly": field_input(page, "类型") is not None
+        and field_input(page, "类型").get_attribute("readonly") is not None,
     }
-    page.fill('.modal .form-field:nth-of-type(1) input', "生产核心库（改名）")
+    field_input(page, "名称").fill(picked["name"] + "（改名）")
     rename["submit_disabled_after_rename"] = submit.is_disabled()
     page.screenshot(path=f"{SHOTS}/x4-rename.png", full_page=True)
     page.click('.modal .modal-footer button.is-ghost')
 
-    page.click('#datasources tbody tr:nth-child(1) button[aria-label="删除数据源"]')
+    page.click(f'{target_row} button[aria-label="删除数据源"]')
     page.wait_for_selector(".delete-copy")
     page.click(".modal-footer button.is-danger")
-    page.wait_for_selector(".delete-copy .form-error")
+    page.wait_for_selector(".delete-copy .form-error", timeout=30000)
     delete = {
         "form_error": page.query_selector(".delete-copy .form-error").inner_text(),
         "named_tasks": [li.inner_text() for li in page.query_selector_all(".delete-copy li")],
         "still_open": page.query_selector(".modal") is not None,
     }
     page.screenshot(path=f"{SHOTS}/x4-delete-refused.png", full_page=True)
-    return {"rename": rename, "delete": delete}
+    page.click('.modal .modal-footer button.is-ghost')
+    return {"source": "rig" if RIG else "mock", "rows": reference_cells,
+            "rename": rename, "delete": delete}
 
 
 def open_builder(page, width):
@@ -236,7 +297,7 @@ def observe_builder(page, width):
     }
 
     # 目标列参考表：填一张真表再失焦。
-    target_input.fill("HOLDING")
+    target_input.fill(REFERENCE_TABLE)
     target_input.evaluate("(el) => el.blur()")
     page.wait_for_selector(".modal table.data-grid tr.is-unmapped", timeout=5000)
     reference_rows = []

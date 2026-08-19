@@ -51,13 +51,31 @@ def observe_run_screen(page, width, label):
 
 
 def open_builder(page, target_table):
+    """打开构建器、填目标表、取列。
+
+    **选择器跟着第一版的构建器走，不是 M3 那套**（ADR-0039 §5/§6，实现在 #131）：
+
+    * 目标表从普通输入框换成了原生 `<input list>` + `<datalist>`。旧写法
+      `.form-field:has(input[value="M3_B1"]) input` 认的是 `value` **属性**，而 React 的
+      受控输入只写 property、不反射属性，在 v1 构建器上永远选不中。改认 `list` 属性——
+      它是静态写死的，不随输入变。
+    * `.column-fetch-section` 在 v1 有**两处**（「目标表建表 SQL」与新增的「目标表列参考」
+      共用这个类），裸选会命中歧义。认 `aria-labelledby="column-fetch-title"` 才是唯一那一个。
+    * 「拿建表 SQL」按钮在 v1 落到了模态框滚动区的**视口之外**（1440x1200 下 y≈1568）。
+      `page.click()` 会自己滚过去再点，但填完目标表名触发的 `/api/builder/sql` 会在滚动途中
+      重渲染这一段，点击落空——**一次 `/api/columns` 都不发**，`.fetch-ready` 永远等不到。
+      改成先等 SQL 回来、把按钮滚进视野，再走 DOM 的 `click()`：不依赖坐标，就不怕重渲染。
+    """
     page.set_viewport_size({"width": 1440, "height": 1200})
     page.goto(BASE, wait_until="networkidle")
     page.wait_for_selector("#tasks tbody tr")
     page.click('button[aria-label="编辑任务定义"]')
     page.wait_for_selector(".builder-guide")
-    page.fill('.form-field:has(input[value="M3_B1"]) input', target_table)
-    page.click(".column-fetch-section button")
+    page.fill('input[list="target-table-options"]', target_table)
+    page.wait_for_timeout(500)
+    button = page.query_selector('section[aria-labelledby="column-fetch-title"] header button')
+    button.scroll_into_view_if_needed()
+    button.evaluate("(el) => el.click()")
     page.wait_for_selector(".fetch-ready")
 
 
@@ -74,8 +92,14 @@ def observe_column_fetch(page):
                 " return {color: cs.color, background: cs.backgroundColor, className: el.className}; }"
             )
             marks.append({"text": text, **style})
-    placeholders = page.query_selector_all(".ddl-placeholder")
-    ddl = page.query_selector(".ddl-output").inner_text()
+    # `.ddl-output` 在 v1 有**两处**：构建器上方的「生成的 SQL」也用这个类
+    # （`App.tsx` 的 `GeneratedSql`）。裸选命中的是它——9 行源 SQL，不是建表 SQL。
+    # 作用域收进 `.fetch-ready` 才是取列卡里那一份。
+    placeholders = page.query_selector_all(".fetch-ready .ddl-placeholder")
+    ddl = page.query_selector(".fetch-ready .ddl-output").inner_text()
+    # 模态框有自己的滚动条：不先把 DDL 区块滚进来，截出来的只是构建器上半截，
+    # W4 那条「整份 DDL 照给」在图上无从看起。
+    page.query_selector(".fetch-ready .ddl-output").scroll_into_view_if_needed()
     page.screenshot(path=f"{SHOTS}/w3-w4-column-fetch.png", full_page=True)
     return {
         "type_column": [c.inner_text() for c in type_cells],
@@ -84,6 +108,8 @@ def observe_column_fetch(page):
         "placeholders": [p.inner_text() for p in placeholders],
         "ddl_given_in_full": ddl.strip().endswith("DEFAULT CHARSET=utf8mb4;"),
         "ddl_lines": ddl.count("\n") + 1,
+        "ddl_first_line": ddl.strip().splitlines()[0] if ddl.strip() else None,
+        "ddl_last_line": ddl.strip().splitlines()[-1] if ddl.strip() else None,
     }
 
 
@@ -92,10 +118,13 @@ def observe_rejected_fetch(page):
     open_builder(page, "REJECTED")
     listed = [c.inner_text() for c in page.query_selector_all(".fetch-ready tbody tr td:nth-child(1)")]
     crit = page.query_selector(".row-size-warning.is-crit")
+    if crit is not None:
+        crit.scroll_into_view_if_needed()
     page.screenshot(path=f"{SHOTS}/w5-rejected.png", full_page=True)
     return {
         "columns_still_listed": listed,
-        "ddl_block_present": page.query_selector(".ddl-output") is not None,
+        # 同上：判「DDL 区块换成整份不给」只能看取列卡里那一份。
+        "ddl_block_present": page.query_selector(".fetch-ready .ddl-output") is not None,
         "crit_block_text": crit.inner_text() if crit else None,
     }
 

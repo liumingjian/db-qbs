@@ -16,7 +16,7 @@ Single-context — `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agen
 
 ## Visual gates
 
-Three walkthroughs, one table. Rules 1-3 below apply to all three; they are not
+Three walkthroughs, one table. Rules 1-4 below apply to all three; they are not
 per-milestone concessions.
 
 | Walkthrough | Cases | Run it when |
@@ -34,6 +34,14 @@ per-milestone concessions.
    file spells out its own record format; a report of "W2 passed" is not a report.
 3. **If nothing triggered, say "not run" and why.** An acceptance whose changes touch
    no UI-affecting code (docs/ADR/fixture-only) may skip — but silence is not a skip.
+   A walkthrough already run and sealed for this release is a legitimate "not run", but
+   only with the seal cited **and** the evidence that nothing has changed since it
+   (ADR-0040 §6.1 sealed V1-V25 on #133; §6.2 landed W1-W6 on #132).
+4. **The tooling that drives a walkthrough lives in the repo.** Stubs, probes and
+   runners belong under `docs/spikes/fixtures/local-rig/walkthrough/`, tracked. A hard
+   gate whose tooling only exists in one machine's untracked directory is not a gate —
+   it is a gate the next machine silently skips. Nothing new goes into `.playwright/`;
+   that path keeps local browser config only.
 
 ## Commit trailer
 
