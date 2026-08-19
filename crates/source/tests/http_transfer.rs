@@ -4,7 +4,7 @@ use std::thread;
 
 use db_qbs_source::{
     run_transfer, ColumnSupport, HttpSinkClient, OpenRunRequest, RowSource, SinkClient,
-    SinkErrorKind, SourceColumn, SourceReadError, TransferRequest,
+    SinkErrorKind, SourceColumn, SourceReadError, TargetConnection, TransferRequest,
 };
 use serde_json::{json, Value};
 
@@ -45,6 +45,13 @@ fn rows_cross_the_http_protocol_then_commit() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
+            target: TargetConnection {
+                host: "127.0.0.1".to_owned(),
+                port: 3306,
+                username: "sink".to_owned(),
+                password: "change-me".to_owned(),
+                database: "qbs".to_owned(),
+            },
             primary_key: vec!["ID".to_owned()],
         },
         |_| {},
@@ -104,6 +111,13 @@ fn error_response_preserves_sink_diagnostics() {
         .open(&OpenRunRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
+            target: TargetConnection {
+                host: "127.0.0.1".to_owned(),
+                port: 3306,
+                username: "sink".to_owned(),
+                password: "change-me".to_owned(),
+                database: "qbs".to_owned(),
+            },
             primary_key: vec!["ID".to_owned()],
             source_columns: Vec::new(),
             range_check_results: None,

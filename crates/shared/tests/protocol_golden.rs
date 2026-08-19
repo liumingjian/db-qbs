@@ -10,7 +10,7 @@
 use db_qbs_shared::{
     AbortResponse, BatchPayload, BatchResponse, ColumnSupport, CommitRequest, CommitResponse,
     ErrorBody, ErrorEnvelope, OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn,
-    RangeCheckResult, RunResponse, SourceColumn, Terminal,
+    RangeCheckResult, RunResponse, SourceColumn, TargetConnection, Terminal,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -26,6 +26,28 @@ where
 
     let decoded: T = serde_json::from_value(expected).expect("样本必须能反序列化");
     assert_eq!(decoded, value, "反序列化结果与原值不一致");
+}
+
+/// 目标端连接（ADR-0037 §1）。**口令在线上是明文**——这份样本把它钉死，
+/// 免得日后有人「顺手」在报文里做一层编码就以为过线也加密了。
+fn target() -> TargetConnection {
+    TargetConnection {
+        host: "10.0.0.9".to_owned(),
+        port: 3306,
+        username: "sink".to_owned(),
+        password: "change-me".to_owned(),
+        database: "qbs".to_owned(),
+    }
+}
+
+fn target_json() -> serde_json::Value {
+    json!({
+        "host": "10.0.0.9",
+        "port": 3306,
+        "username": "sink",
+        "password": "change-me",
+        "database": "qbs"
+    })
 }
 
 fn column_full() -> SourceColumn {
@@ -167,6 +189,7 @@ fn open_run_request_shape_with_range_check_results() {
         OpenRunRequest {
             run_id: "20260818120000_a1b2c3".to_owned(),
             target_table: "ORDERS".to_owned(),
+            target: target(),
             primary_key: vec!["ID".to_owned()],
             source_columns: vec![column_minimal()],
             range_check_results: Some(vec![RangeCheckResult {
@@ -177,6 +200,7 @@ fn open_run_request_shape_with_range_check_results() {
         json!({
             "run_id": "20260818120000_a1b2c3",
             "target_table": "ORDERS",
+            "target": target_json(),
             "primary_key": ["ID"],
             "source_columns": [{
                 "name": "ID",
@@ -196,6 +220,7 @@ fn open_run_request_shape_omits_absent_range_check_results() {
         OpenRunRequest {
             run_id: "20260818120000_a1b2c3".to_owned(),
             target_table: "ORDERS".to_owned(),
+            target: target(),
             primary_key: vec!["ID".to_owned()],
             source_columns: vec![],
             range_check_results: None,
@@ -203,6 +228,7 @@ fn open_run_request_shape_omits_absent_range_check_results() {
         json!({
             "run_id": "20260818120000_a1b2c3",
             "target_table": "ORDERS",
+            "target": target_json(),
             "primary_key": ["ID"],
             "source_columns": []
         }),

@@ -47,8 +47,51 @@ export interface TaskSpec {
   order_by: OrderTerm[];
 }
 
+/**
+ * 数据源（ADR-0037）。**响应里永远没有 `password`，连密文都没有**（§5）——
+ * 界面上只看得到 `has_password` 的「已设置 / 未设置」。
+ */
+export type DatasourceKind = "oracle" | "mysql";
+
+export interface OracleDatasourceView {
+  kind: "oracle";
+  connect_string: string;
+  username: string;
+  has_password: boolean;
+}
+
+export interface MysqlDatasourceView {
+  kind: "mysql";
+  host: string;
+  port: number;
+  username: string;
+  database: string;
+  has_password: boolean;
+}
+
+export type Datasource = { datasource_id: string; name: string } & (
+  | OracleDatasourceView
+  | MysqlDatasourceView
+);
+
+/** 写入面。`password` 留空 = 不改（新建时 = 没有口令），见 ADR-0037 §5。 */
+export type DatasourceInput = { name: string } & (
+  | { kind: "oracle"; connect_string: string; username: string; password: string }
+  | {
+      kind: "mysql";
+      host: string;
+      port: number;
+      username: string;
+      password: string;
+      database: string;
+    }
+);
+
 export interface TaskInput {
   name: string;
+  /** 绑定，不是规格（ADR-0037 §8）：规格只描述搬什么，这两个 id 说的是从哪搬到哪。 */
+  source_datasource_id: string;
+  target_datasource_id: string;
   spec: TaskSpec;
 }
 
@@ -237,7 +280,55 @@ export function taskInputFrom(
   task: TaskInput,
   overrides: Partial<TaskInput> = {},
 ): TaskInput {
-  return { name: task.name, spec: task.spec, ...overrides };
+  return {
+    name: task.name,
+    source_datasource_id: task.source_datasource_id,
+    target_datasource_id: task.target_datasource_id,
+    spec: task.spec,
+    ...overrides,
+  };
+}
+
+export async function listDatasources(): Promise<Datasource[]> {
+  const response = await fetch("/api/datasources", {
+    headers: { Accept: "application/json" },
+  });
+  return readJson<Datasource[]>(response, "加载数据源失败");
+}
+
+export async function createDatasource(input: DatasourceInput): Promise<Datasource> {
+  return postJson<Datasource>("/api/datasources", input, "新建数据源失败");
+}
+
+export async function updateDatasource(
+  datasourceId: string,
+  input: DatasourceInput,
+): Promise<Datasource> {
+  const response = await fetch(
+    `/api/datasources/${encodeURIComponent(datasourceId)}`,
+    {
+      method: "PUT",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  return readJson<Datasource>(response, "更新数据源失败");
+}
+
+export async function deleteDatasource(datasourceId: string): Promise<Datasource> {
+  const response = await fetch(
+    `/api/datasources/${encodeURIComponent(datasourceId)}`,
+    { method: "DELETE", headers: { Accept: "application/json" } },
+  );
+  return readJson<Datasource>(response, "删除数据源失败");
+}
+
+export async function testDatasource(datasourceId: string): Promise<{ ok: true }> {
+  return postJson<{ ok: true }>(
+    `/api/datasources/${encodeURIComponent(datasourceId)}/test-connection`,
+    {},
+    "测试连接失败",
+  );
 }
 
 export async function listTasks(): Promise<Task[]> {
@@ -322,11 +413,19 @@ export async function deleteTask(taskId: string): Promise<Task> {
   return readJson<Task>(response, "删除任务失败");
 }
 
-export async function fetchBuilderTables(dblink: string): Promise<BuilderTable[]> {
-  return postJson<BuilderTable[]>("/api/builder/tables", { dblink }, "读取 Oracle 表失败");
+export async function fetchBuilderTables(
+  datasourceId: string,
+  dblink: string,
+): Promise<BuilderTable[]> {
+  return postJson<BuilderTable[]>(
+    "/api/builder/tables",
+    { datasource_id: datasourceId, dblink },
+    "读取 Oracle 表失败",
+  );
 }
 
 export async function fetchBuilderColumns(input: {
+  datasource_id: string;
   dblink: string;
   owner: string;
   table: string;
@@ -339,14 +438,15 @@ export async function generateBuilderSql(spec: TaskSpec): Promise<BuilderSql> {
 }
 
 export async function fetchColumns(
+  datasourceId: string,
   spec: TaskSpec,
   columnPrecision?: ColumnPrecision,
 ): Promise<ColumnFetchResult> {
   return postJson<ColumnFetchResult>(
     "/api/columns",
     columnPrecision === undefined
-      ? { spec }
-      : { spec, column_precision: columnPrecision },
+      ? { datasource_id: datasourceId, spec }
+      : { datasource_id: datasourceId, spec, column_precision: columnPrecision },
     "取列失败",
   );
 }

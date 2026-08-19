@@ -8,8 +8,8 @@ use serde_json::json;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::{
-    ApiError, BatchPayload, CommitRequest, Destination, MysqlDestination, OpenRunRequest,
-    SinkConfig, SinkService,
+    ApiError, BatchPayload, CommitRequest, DestinationFactory, MysqlDestination, MysqlFactory,
+    OpenRunRequest, SinkConfig, SinkService, TargetConnection,
 };
 
 const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
@@ -32,14 +32,30 @@ pub fn serve(config: SinkConfig) -> Result<(), String> {
             json!({
                 "listen": &config.listen,
                 "message": format!(
-                    "本服务无鉴权，能连上者可清空并重写任意暂存表与目标表；当前监听地址：{}",
+                    "本服务无鉴权，能连上者可用调用方给的凭据清空并重写任意暂存表与目标表；当前监听地址：{}",
                     config.listen
                 ),
             }),
         );
     }
-    let destination = Arc::new(MysqlDestination::new(&config)?);
-    let service = Arc::new(SinkService::new(config.database.clone(), destination));
+    // 退役字段仍能解析，但一个字都不读（ADR-0037 §2）。留一条 warn，
+    // 否则部署者会以为 `sink.toml` 里那份凭据仍然是生效的那一份。
+    if config.mysql_dsn.is_some() || config.database.is_some() {
+        let stdout = io::stdout();
+        let mut writer = stdout.lock();
+        let _ = write_log_line_with_fields(
+            &mut writer,
+            LogLevel::Warn,
+            LogEvent::SinkStarted,
+            None,
+            None,
+            json!({
+                "message": "sink.toml 的 mysql_dsn / database 已退役且不再被读取（ADR-0037 §2）：目标端凭据随每个 run 的请求过线，请从配置文件里删掉这两个字段",
+            }),
+        );
+    }
+    // sink 启动**不再连 MySQL**：连接按 run 建，连不上的失败点在 POST /v1/runs。
+    let service = Arc::new(SinkService::with_factory(MysqlFactory));
     let server = Server::http(&config.listen)
         .map_err(|error| format!("监听 {} 失败：{error}", config.listen))?;
 
@@ -49,11 +65,13 @@ pub fn serve(config: SinkConfig) -> Result<(), String> {
     Ok(())
 }
 
-fn handle_request<D: Destination>(mut request: Request, service: &SinkService<D>) {
+fn handle_request<F: DestinationFactory>(mut request: Request, service: &SinkService<F>) {
     let method = request.method().clone();
     let path = request.url().to_owned();
     let response = if method == Method::Post && path == "/v1/runs" {
         handle_open(&mut request, service)
+    } else if method == Method::Post && path == "/v1/target/test-connection" {
+        handle_test_connection(&mut request)
     } else if method == Method::Post {
         match run_action(&path) {
             Some((run_id, "batches")) => handle_batch(&mut request, service, run_id),
@@ -102,7 +120,10 @@ fn run_action(path: &str) -> Option<(&str, &str)> {
     Some((run_id, action))
 }
 
-fn handle_open(request: &mut Request, service: &SinkService<impl Destination>) -> HttpResponse {
+fn handle_open(
+    request: &mut Request,
+    service: &SinkService<impl DestinationFactory>,
+) -> HttpResponse {
     if !has_json_content_type(request) {
         return error_response(unsupported_media_type(None));
     }
@@ -118,7 +139,7 @@ fn handle_open(request: &mut Request, service: &SinkService<impl Destination>) -
 
 fn handle_batch(
     request: &mut Request,
-    service: &SinkService<impl Destination>,
+    service: &SinkService<impl DestinationFactory>,
     run_id: &str,
 ) -> HttpResponse {
     let payload: BatchPayload = match read_run_json(request, run_id) {
@@ -133,7 +154,7 @@ fn handle_batch(
 
 fn handle_abort(
     request: &mut Request,
-    service: &SinkService<impl Destination>,
+    service: &SinkService<impl DestinationFactory>,
     run_id: &str,
 ) -> HttpResponse {
     if !has_json_content_type(request) {
@@ -150,7 +171,7 @@ fn handle_abort(
 
 fn handle_commit(
     request: &mut Request,
-    service: &SinkService<impl Destination>,
+    service: &SinkService<impl DestinationFactory>,
     run_id: &str,
 ) -> HttpResponse {
     let payload: CommitRequest = match read_run_json(request, run_id) {
@@ -163,10 +184,33 @@ fn handle_commit(
     }
 }
 
-fn handle_get(service: &SinkService<impl Destination>, run_id: &str) -> HttpResponse {
+fn handle_get(service: &SinkService<impl DestinationFactory>, run_id: &str) -> HttpResponse {
     match service.get(run_id) {
         Ok(response) => json_response(200, &response),
         Err(error) => error_response(error),
+    }
+}
+
+/// 「测试连接」（ADR-0037 §9）——**不属于任何 run**，所以它不进 run 注册表、
+/// 不留 tombstone，也不需要服务实例。source 侧的数据源管理面靠它验 MySQL 那一侧。
+fn handle_test_connection(request: &mut Request) -> HttpResponse {
+    if !has_json_content_type(request) {
+        return error_response(unsupported_media_type(None));
+    }
+    let target: TargetConnection = match read_json(request) {
+        Ok(target) => target,
+        Err(error) => return error_response(error),
+    };
+    match MysqlDestination::test_connection(&target) {
+        Ok(()) => json_response(200, &json!({ "ok": true })),
+        // 码闭集不增：连不上是目标端环境故障（ADR-0037 §9）。
+        Err(message) => error_response(ApiError {
+            status: 500,
+            code: "SINK_ENVIRONMENT",
+            message: format!("连接目标端失败：{message}"),
+            run_id: None,
+            details: json!({ "kind": "OTHER" }),
+        }),
     }
 }
 
@@ -270,9 +314,13 @@ mod tests {
 
     use super::*;
     use crate::{
-        AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, CreateStagingError, DropStagingError,
-        TargetColumn, TargetKey, WriteBatchError,
+        AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, CreateStagingError, Destination,
+        DropStagingError, FixedDestination, TargetColumn, TargetKey, WriteBatchError,
     };
+
+    /// 报文里的目标端连接（ADR-0037 §1）。夹具走 `FixedDestination`，这份值被忽略，
+    /// 但**必须带**——`OpenRunRequest` 的 `deny_unknown_fields` 与必填字段一起把它钉住了。
+    const TARGET_JSON: &str = r#""target":{"host":"127.0.0.1","port":3306,"username":"sink","password":"change-me","database":"qbs"},"#;
 
     #[derive(Default)]
     struct FakeDestination {
@@ -366,7 +414,7 @@ mod tests {
         ));
         let run_id = "20260814091530_a3f19c";
         let open_body = format!(
-            r#"{{"run_id":"{run_id}","target_table":"T_POSITION","primary_key":["D_BIZ"],"source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
+            r#"{{"run_id":"{run_id}",{TARGET_JSON}"target_table":"T_POSITION","primary_key":["D_BIZ"],"source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
         );
 
         let (status, opened) = exchange(service.clone(), "/v1/runs", &open_body);
@@ -403,7 +451,7 @@ mod tests {
         ));
         let run_id = "20260814091530_a3f19c";
         let open_body = format!(
-            r#"{{"run_id":"{run_id}","target_table":"T_POSITION","primary_key":["D_BIZ"],"source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
+            r#"{{"run_id":"{run_id}",{TARGET_JSON}"target_table":"T_POSITION","primary_key":["D_BIZ"],"source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
         );
         exchange(service.clone(), "/v1/runs", &open_body);
         exchange(
@@ -434,7 +482,7 @@ mod tests {
     }
 
     fn exchange(
-        service: Arc<SinkService<FakeDestination>>,
+        service: Arc<SinkService<FixedDestination<FakeDestination>>>,
         path: &str,
         body: &str,
     ) -> (u16, Value) {
@@ -442,7 +490,7 @@ mod tests {
     }
 
     fn exchange_method(
-        service: Arc<SinkService<FakeDestination>>,
+        service: Arc<SinkService<FixedDestination<FakeDestination>>>,
         method: &str,
         path: &str,
         body: &str,

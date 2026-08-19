@@ -6,7 +6,7 @@ use rand::RngCore;
 
 use crate::{
     BatchPayload, FailureKind, OpenRunRequest, RangeCheckColumn, RangeCheckResult, RunResponse,
-    SinkClient, SinkError, SinkErrorKind, SourceColumn, Terminal,
+    SinkClient, SinkError, SinkErrorKind, SourceColumn, TargetConnection, Terminal,
 };
 
 pub const FETCH_ARRAY_SIZE: u32 = 100;
@@ -100,6 +100,8 @@ pub trait RowSource {
 pub struct TransferRequest {
     pub run_id: String,
     pub target_table: String,
+    /// 目标端连接（ADR-0037 §1）：由编排进程按任务的目标数据源解出来，原样过线给 sink。
+    pub target: TargetConnection,
     /// upsert 的去重键（ADR-0035 §2），原样过线交给 sink 侧预检核对。
     pub primary_key: Vec<String>,
 }
@@ -275,6 +277,7 @@ pub fn run_transfer(
     let mut open_request = OpenRunRequest {
         run_id: request.run_id.clone(),
         target_table: request.target_table,
+        target: request.target,
         primary_key: request.primary_key,
         source_columns: source.columns().to_vec(),
         range_check_results: None,

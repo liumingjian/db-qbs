@@ -78,6 +78,9 @@ fn the_task_file_carries_a_spec_and_this_run_parameters_and_nothing_else() {
     assert_eq!(loaded.spec.owner, "APP");
     assert_eq!(loaded.spec.primary_key, vec!["ID".to_owned()]);
     assert_eq!(loaded.run_params["d_biz"], "2026-08-14");
+    // 两端连接由编排进程解好写进来（ADR-0037 §1/§8）——子进程不碰数据源库、也不碰密钥。
+    assert_eq!(loaded.oracle.username, "source");
+    assert_eq!(loaded.target.database, "qbs");
     // SQL 由规格现算（ADR-0036 §2）——两端算的是同一份，不存在「存下来的那份对不上」。
     assert!(loaded.source_sql().contains("TO_DATE(:d_biz,'YYYY-MM-DD')"));
     assert_eq!(
@@ -147,6 +150,19 @@ fn valid_task() -> &'static str {
      parameter = \"d_biz\"\n\
      value_source = \"runtime\"\n\
      constant = \"\"\n\
+     \n\
+     [oracle]\n\
+     connect_string = \"//oracle:1521/XE\"\n\
+     username = \"source\"\n\
+     password = \"secret\"\n\
+     client_lib_dir = \"/opt/oracle\"\n\
+     \n\
+     [target]\n\
+     host = \"127.0.0.1\"\n\
+     port = 3306\n\
+     username = \"sink\"\n\
+     password = \"change-me\"\n\
+     database = \"qbs\"\n\
      \n\
      [run_params]\n\
      d_biz = \"2026-08-14\"\n"

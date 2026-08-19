@@ -24,6 +24,7 @@ import {
   fetchBuilderColumns,
   fetchBuilderTables,
   fetchColumns,
+  listDatasources,
   generateBuilderSql,
   listTasks,
   taskInputFrom,
@@ -38,6 +39,7 @@ import type {
   FetchedColumn,
   OrderTerm,
   Task,
+  Datasource,
   TaskInput,
   TaskSpec,
   TargetDdlIssue,
@@ -73,13 +75,21 @@ function pageFromHash(hash: string): Page {
   return hash === "#history" ? "history" : "tasks";
 }
 
-const emptyTask: TaskInput = { name: "", spec: emptySpec() };
+const emptyTask: TaskInput = {
+  name: "",
+  source_datasource_id: "",
+  target_datasource_id: "",
+  spec: emptySpec(),
+};
 
 export function App() {
   const [page, setPage] = useState<Page>(() =>
     pageFromHash(window.location.hash),
   );
   const [tasks, setTasks] = useState<Task[] | null>(null);
+  // 数据源清单（ADR-0037）。**管理屏归 #123**——本版只把清单读进来供构建器选，
+  // 建数据源仍只能走 `/api/datasources`。这是有意的中间态。
+  const [datasources, setDatasources] = useState<Datasource[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(true);
   const [query, setQuery] = useState("");
@@ -104,6 +114,13 @@ export function App() {
   useEffect(() => {
     void loadTasks();
   }, [loadTasks]);
+
+  useEffect(() => {
+    // 读不到数据源不该把整个任务屏打成错误——构建器会以「没有可选的数据源」自陈。
+    void listDatasources()
+      .then(setDatasources)
+      .catch(() => setDatasources([]));
+  }, []);
 
   useEffect(() => {
     function handleHashChange() {
@@ -343,6 +360,7 @@ export function App() {
           <TaskFormDialog
             title="新建任务"
             initial={emptyTask}
+            datasources={datasources}
             submitLabel="新建"
             onClose={closeDialog}
             onSubmit={handleCreate}
@@ -352,6 +370,7 @@ export function App() {
           <TaskFormDialog
             title={`编辑 · ${dialog.task.name}`}
             initial={taskInputFrom(dialog.task)}
+            datasources={datasources}
             submitLabel="保存"
             hideName
             onClose={closeDialog}
@@ -560,6 +579,7 @@ type ColumnFetchState =
 function TaskFormDialog({
   title,
   initial,
+  datasources,
   submitLabel,
   hideName = false,
   onClose,
@@ -567,12 +587,19 @@ function TaskFormDialog({
 }: {
   title: string;
   initial: TaskInput;
+  datasources: Datasource[];
   submitLabel: string;
   hideName?: boolean;
   onClose: () => void;
   onSubmit: (input: TaskInput) => Promise<void>;
 }) {
   const [name, setName] = useState(initial.name);
+  const [sourceDatasourceId, setSourceDatasourceId] = useState(
+    initial.source_datasource_id,
+  );
+  const [targetDatasourceId, setTargetDatasourceId] = useState(
+    initial.target_datasource_id,
+  );
   const [spec, setSpec] = useState<TaskSpec>(() => ({ ...initial.spec }));
   const [tables, setTables] = useState<BuilderTable[]>([]);
   const [columns, setColumns] = useState<BuilderColumn[]>([]);
@@ -585,6 +612,12 @@ function TaskFormDialog({
   const [submitting, setSubmitting] = useState(false);
 
   const dblink = spec.dblink ?? "";
+  const oracleDatasources = datasources.filter(
+    (datasource) => datasource.kind === "oracle",
+  );
+  const mysqlDatasources = datasources.filter(
+    (datasource) => datasource.kind === "mysql",
+  );
   const tableKey = spec.owner === "" ? "" : tableKeyFor({ owner: spec.owner, name: spec.table });
   const dictionary = useMemo(
     () => new Map(columns.map((column) => [column.name, column])),
@@ -642,7 +675,7 @@ function TaskFormDialog({
     setLoading("tables");
     setBuilderError(null);
     try {
-      setTables(await fetchBuilderTables(dblink));
+      setTables(await fetchBuilderTables(sourceDatasourceId, dblink));
     } catch (loadError) {
       setBuilderError(messageFrom(loadError));
     } finally {
@@ -659,6 +692,7 @@ function TaskFormDialog({
     try {
       setColumns(
         await fetchBuilderColumns({
+          datasource_id: sourceDatasourceId,
           dblink,
           owner: spec.owner,
           table: spec.table,
@@ -768,7 +802,10 @@ function TaskFormDialog({
   async function handleColumnFetch() {
     setColumnFetch({ kind: "loading" });
     try {
-      setColumnFetch({ kind: "ready", result: await fetchColumns(spec) });
+      setColumnFetch({
+        kind: "ready",
+        result: await fetchColumns(sourceDatasourceId, spec),
+      });
     } catch (fetchError) {
       const targetDdlFailure = targetDdlFailureFrom(fetchError);
       if (targetDdlFailure !== null) {
@@ -784,7 +821,12 @@ function TaskFormDialog({
     setSubmitting(true);
     setError(null);
     try {
-      await onSubmit({ name, spec });
+      await onSubmit({
+        name,
+        source_datasource_id: sourceDatasourceId,
+        target_datasource_id: targetDatasourceId,
+        spec,
+      });
       onClose();
     } catch (submitError) {
       setError(messageFrom(submitError));
@@ -807,6 +849,60 @@ function TaskFormDialog({
               />
             </FormField>
           )}
+
+          <section className="builder-guide" aria-labelledby="builder-datasource-title">
+            <header>
+              <div>
+                <strong id="builder-datasource-title">数据源</strong>
+                <span>凭据存在本机、口令加密落盘；目标端凭据随本次运行交给 sink</span>
+              </div>
+            </header>
+            <div className="builder-controls">
+              <FormField label="源端（Oracle）">
+                <select
+                  required
+                  value={sourceDatasourceId}
+                  onChange={(event) => {
+                    setSourceDatasourceId(event.target.value);
+                    // 换源端等于换一个库：表清单与列字典都是上一个库的，留着会选出不存在的表。
+                    setTables([]);
+                    setColumns([]);
+                  }}
+                >
+                  <option value="">
+                    {oracleDatasources.length === 0 ? "尚无 Oracle 数据源" : "请选择"}
+                  </option>
+                  {oracleDatasources.map((datasource) => (
+                    <option
+                      key={datasource.datasource_id}
+                      value={datasource.datasource_id}
+                    >
+                      {datasource.name}
+                    </option>
+                  ))}
+                </select>
+              </FormField>
+              <FormField label="目标端（MySQL）">
+                <select
+                  required
+                  value={targetDatasourceId}
+                  onChange={(event) => setTargetDatasourceId(event.target.value)}
+                >
+                  <option value="">
+                    {mysqlDatasources.length === 0 ? "尚无 MySQL 数据源" : "请选择"}
+                  </option>
+                  {mysqlDatasources.map((datasource) => (
+                    <option
+                      key={datasource.datasource_id}
+                      value={datasource.datasource_id}
+                    >
+                      {datasource.name}
+                    </option>
+                  ))}
+                </select>
+              </FormField>
+            </div>
+          </section>
 
           <section className="builder-guide" aria-labelledby="builder-source-title">
             <header>
@@ -832,7 +928,7 @@ function TaskFormDialog({
                 className="button is-ghost"
                 type="button"
                 onClick={() => void loadTables()}
-                disabled={loading !== null}
+                disabled={loading !== null || sourceDatasourceId === ""}
               >
                 {loading === "tables" ? (
                   <LoaderCircle className="is-spinning" size={15} />
@@ -869,7 +965,9 @@ function TaskFormDialog({
                 className="button is-ghost"
                 type="button"
                 onClick={() => void loadColumns()}
-                disabled={spec.owner === "" || loading !== null}
+                disabled={
+                  spec.owner === "" || loading !== null || sourceDatasourceId === ""
+                }
               >
                 {loading === "columns" ? (
                   <LoaderCircle className="is-spinning" size={15} />
@@ -986,7 +1084,9 @@ function TaskFormDialog({
                 className="button is-primary"
                 type="button"
                 onClick={() => void handleColumnFetch()}
-                disabled={columnFetch.kind === "loading"}
+                disabled={
+                  columnFetch.kind === "loading" || sourceDatasourceId === ""
+                }
               >
                 {columnFetch.kind === "loading" ? (
                   <LoaderCircle className="is-spinning" size={15} aria-hidden="true" />

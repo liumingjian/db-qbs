@@ -92,12 +92,45 @@ pub struct PrecheckIssue {
     pub suggestion: Option<String>,
 }
 
+/// 目标端 MySQL 的连接信息。**由 source 侧的数据源库读出、随请求过线**（ADR-0037 §1）——
+/// sink 不再持有自己的那一份凭据。
+///
+/// **口令在这里是明文**，因为它已经过了线：静态加密只管落盘那一段（ADR-0037 §3），
+/// 过线这一段靠的是部署前提（ADR-0037 §4：通道必须可信）。
+/// **不许把它打进日志、历史或任何错误明细**——那是 ADR-0037 §1 认下的唯一流出路径之外的第二条。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetConnection {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub database: String,
+}
+
+/// 手写 `Debug`：派生版会把口令原样打进任何 `{:?}`，而这个结构会经过错误路径。
+impl std::fmt::Debug for TargetConnection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TargetConnection")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("database", &self.database)
+            .finish()
+    }
+}
+
 /// `POST /v1/runs` 的请求体。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenRunRequest {
     pub run_id: String,
     pub target_table: String,
+    /// 本次运行的目标端连接（ADR-0037 §1/§2）。`sink.toml` 的 `mysql_dsn` / `database` 已退役，
+    /// 库名也随本字段过来——暂存表 DDL 的库名限定按它取。
+    pub target: TargetConnection,
     /// upsert 的去重键（ADR-0035 §2）。用户在构建器里勾，sink 侧预检去目标表核对
     /// 「约束确有、列在选中列里、列 NOT NULL」三条——缺约束时
     /// `ON DUPLICATE KEY UPDATE` 会**静默退化成纯 INSERT**，重跑就出重复行。

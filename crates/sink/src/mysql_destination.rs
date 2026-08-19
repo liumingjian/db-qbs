@@ -1,5 +1,5 @@
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use mysql::prelude::Queryable;
@@ -9,8 +9,9 @@ use mysql::{
 
 use crate::service::quote_identifier;
 use crate::{
-    AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, CreateStagingError, Destination,
-    DropStagingError, SinkConfig, TargetColumn, TargetKey, WriteBatchError,
+    AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, ConnectedDestination, CreateStagingError,
+    Destination, DestinationFactory, DropStagingError, TargetColumn, TargetConnection, TargetKey,
+    WriteBatchError,
 };
 
 type MetadataRow = (
@@ -32,17 +33,53 @@ pub struct MysqlDestination {
 }
 
 impl MysqlDestination {
-    pub fn new(config: &SinkConfig) -> Result<Self, String> {
-        if config.database.is_empty() {
-            return Err("sink 配置 database 不能为空".to_owned());
+    /// 按一份过线来的连接信息建目的地（ADR-0037 §1/§2）。
+    ///
+    /// **不拼 DSN 串**：口令要单独加密存放，拼串就得在两端各做一次 URL 转义，
+    /// 多一层无谓的转义面。`OptsBuilder` 本来就收分量。
+    pub fn connect(target: &TargetConnection) -> Result<Self, String> {
+        if target.database.is_empty() {
+            return Err("数据源的 database 不能为空".to_owned());
         }
-        let base = Opts::from_url(&config.mysql_dsn)
-            .map_err(|error| format!("sink 配置 mysql_dsn 无效：{error}"))?;
-        let opts = OptsBuilder::from_opts(base).db_name(Some(config.database.clone()));
+        if target.host.is_empty() {
+            return Err("数据源的 host 不能为空".to_owned());
+        }
+        let opts = OptsBuilder::new()
+            .ip_or_hostname(Some(target.host.clone()))
+            .tcp_port(target.port)
+            .user(Some(target.username.clone()))
+            .pass(Some(target.password.clone()))
+            .db_name(Some(target.database.clone()));
         let pool = RitualPool::new(Opts::from(opts))?;
         Ok(Self {
-            database: config.database.clone(),
+            database: target.database.clone(),
             pool,
+        })
+    }
+
+    /// 「测试连接」：建一条连接、跑一遍开连接仪式，成了就算通（ADR-0037 §9）。
+    ///
+    /// `RitualPool::new` 本来就是**急建**的——它当场开一条连接并跑完仪式
+    /// （utf8mb4 / `sql_mode` / `max_allowed_packet` 三项回读），所以「建得起来」
+    /// 与「能用」在这里是同一件事，不必另设探针查询。
+    pub fn test_connection(target: &TargetConnection) -> Result<(), String> {
+        Self::connect(target).map(|_| ())
+    }
+}
+
+/// 生产路径的工厂：每个 run 现连一次（ADR-0037 §2）。
+pub struct MysqlFactory;
+
+impl DestinationFactory for MysqlFactory {
+    type Dest = MysqlDestination;
+
+    fn connect(
+        &self,
+        target: &TargetConnection,
+    ) -> Result<ConnectedDestination<Self::Dest>, String> {
+        Ok(ConnectedDestination {
+            database: target.database.clone(),
+            destination: Arc::new(MysqlDestination::connect(target)?),
         })
     }
 }

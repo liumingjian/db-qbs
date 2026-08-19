@@ -99,7 +99,7 @@ fn run() -> bool {
             ),
         ],
     );
-    let mut source = match OracleRowSource::connect(&source_config, &task) {
+    let mut source = match OracleRowSource::connect(&task) {
         Ok(source) => source,
         Err(error) => {
             emit_with_run(
@@ -141,6 +141,9 @@ fn run() -> bool {
     let request = TransferRequest {
         run_id: run_id.clone(),
         target_table: task.spec.target_table.clone(),
+        // 目标端连接是编排进程解好写进临时任务文件的（ADR-0037 §1/§8）——
+        // 子进程不碰数据源库、也不碰密钥文件。
+        target: task.target.clone(),
         primary_key: task.spec.primary_key.clone(),
     };
     let result = run_transfer(&mut source, &mut sink, request, |event| {

@@ -17,7 +17,7 @@ use serde_json::Value;
 pub use db_qbs_shared::{
     AbortResponse, BatchPayload, BatchResponse, ColumnSupport, CommitRequest, CommitResponse,
     ErrorBody, ErrorEnvelope, OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn,
-    RangeCheckResult, RunResponse, SourceColumn, Terminal,
+    RangeCheckResult, RunResponse, SourceColumn, TargetConnection, Terminal,
 };
 // 九行形态的推导也只有一份定义（#125）——判定式仍两端各一份。
 pub use db_qbs_shared::{
@@ -25,7 +25,7 @@ pub use db_qbs_shared::{
     is_supported_decimal_shape, ColumnShape, ShapeRejection, TargetShape,
 };
 pub use http::serve;
-pub use mysql_destination::{check_connection_settings, MysqlDestination};
+pub use mysql_destination::{check_connection_settings, MysqlDestination, MysqlFactory};
 // `precheck` 是不带主键那一支，只给「生成的表喂回预检必过」那道漂移闸用；
 // 带主键那一支同样导出，因为漂移闸现在还要守「生成的 DDL 带主键，ADR-0035 §2 三条得过」。
 pub use precheck::{precheck, precheck_with_primary_key};
@@ -37,8 +37,14 @@ const TOMBSTONE_LIMIT: usize = 32;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SinkConfig {
-    pub mysql_dsn: String,
-    pub database: String,
+    /// **已退役**（ADR-0037 §2）：目标端凭据随每个 run 的请求过线，sink 不再持有自己的那一份。
+    /// 字段留着只为让现存部署与三份验收台架的 `sink.toml` 仍能解析——启动时打 `warn` 提示删除，
+    /// 值本身**不被任何代码读取**。硬报错换来的只是一次无谓的中断。
+    #[serde(default)]
+    pub mysql_dsn: Option<String>,
+    /// 已退役，同 `mysql_dsn`。库名现在随 [`TargetConnection`] 过来，逐 run 取值。
+    #[serde(default)]
+    pub database: Option<String>,
     pub listen: String,
 }
 
@@ -156,8 +162,60 @@ pub trait Destination: Send + Sync {
     fn drop_staging(&self, staging_table: &str) -> Result<(), DropStagingError>;
 }
 
-#[derive(Clone)]
-struct ActiveRun {
+/// 一条按 run 建起来的目标端连接：库名 + 目的地。
+///
+/// 库名与连接一起出自工厂，**不是**从请求里另取一份：`FixedDestination`（测试与既有夹具）
+/// 要的是「固定库名 + 固定目的地」，[`MysqlFactory`] 要的是「按请求里的库名连」。
+/// 让工厂一次给全，调用方就没有第二处能把这两者配错。
+pub struct ConnectedDestination<D> {
+    pub database: String,
+    pub destination: Arc<D>,
+}
+
+/// 按 run 建目标端连接（ADR-0037 §2）。sink 启动不再连 MySQL，
+/// 连不上的失败点从进程启动挪到 `POST /v1/runs`。
+pub trait DestinationFactory: Send + Sync {
+    type Dest: Destination;
+
+    fn connect(
+        &self,
+        target: &TargetConnection,
+    ) -> Result<ConnectedDestination<Self::Dest>, String>;
+}
+
+/// 固定一份目的地的工厂：忽略请求里的连接信息，永远给同一个。
+///
+/// 它是**测试与夹具用**的（`SinkService::new` 就构造它），也是既有那二十几处
+/// `SinkService::new("qbs", destination)` 一个字都不用改的原因。生产路径走 [`MysqlFactory`]。
+pub struct FixedDestination<D> {
+    database: String,
+    destination: Arc<D>,
+}
+
+impl<D> FixedDestination<D> {
+    pub fn new(database: impl Into<String>, destination: Arc<D>) -> Self {
+        Self {
+            database: database.into(),
+            destination,
+        }
+    }
+}
+
+impl<D: Destination> DestinationFactory for FixedDestination<D> {
+    type Dest = D;
+
+    fn connect(
+        &self,
+        _target: &TargetConnection,
+    ) -> Result<ConnectedDestination<Self::Dest>, String> {
+        Ok(ConnectedDestination {
+            database: self.database.clone(),
+            destination: Arc::clone(&self.destination),
+        })
+    }
+}
+
+struct ActiveRun<D> {
     staging_table: String,
     source_columns: Vec<String>,
     swap_columns: Vec<String>,
@@ -167,12 +225,32 @@ struct ActiveRun {
     next_seq: u64,
     rows_written: u64,
     sealed: bool,
+    /// 本次 run 的目标端连接（ADR-0037 §2）。**每个 run 各持一份**——
+    /// 进程里不再有「那个 MySQL 连接」这种东西。
+    destination: Arc<D>,
 }
 
-pub struct SinkService<D: Destination> {
-    database: String,
-    destination: Arc<D>,
-    active_runs: Mutex<HashMap<String, ActiveRun>>,
+// 手写 `Clone`：派生版会给 `D` 加上 `D: Clone` 约束，而目的地本来就只按 `Arc` 共享。
+impl<D> Clone for ActiveRun<D> {
+    fn clone(&self) -> Self {
+        Self {
+            staging_table: self.staging_table.clone(),
+            source_columns: self.source_columns.clone(),
+            swap_columns: self.swap_columns.clone(),
+            target_table: self.target_table.clone(),
+            primary_key: self.primary_key.clone(),
+            max_rows_per_insert: self.max_rows_per_insert,
+            next_seq: self.next_seq,
+            rows_written: self.rows_written,
+            sealed: self.sealed,
+            destination: Arc::clone(&self.destination),
+        }
+    }
+}
+
+pub struct SinkService<F: DestinationFactory> {
+    factory: F,
+    active_runs: Mutex<HashMap<String, ActiveRun<F::Dest>>>,
     tombstones: Mutex<VecDeque<RunResponse>>,
 }
 

@@ -133,6 +133,19 @@ fn write_task(directory: &Path) -> PathBuf {
          value_source = \"runtime\"\n\
          constant = \"\"\n\
          \n\
+         [oracle]\n\
+         connect_string = \"//oracle:1521/XE\"\n\
+         username = \"source\"\n\
+         password = \"secret\"\n\
+         client_lib_dir = \"/db-qbs-missing-oracle-client\"\n\
+         \n\
+         [target]\n\
+         host = \"127.0.0.1\"\n\
+         port = 3306\n\
+         username = \"sink\"\n\
+         password = \"change-me\"\n\
+         database = \"qbs\"\n\
+         \n\
          [run_params]\n\
          biz_day = \"2026-08-14\"\n",
     )

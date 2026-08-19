@@ -2,8 +2,20 @@ use db_qbs_source::{
     generate_run_id, run_transfer, BatchPayload, BatchResponse, ColumnSupport, CommitResponse,
     FailureKind, OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn,
     RangeCheckResult, RowSource, RunResponse, SinkClient, SinkError, SinkErrorKind, SourceColumn,
-    SourceReadError, Terminal, TransferEvent, TransferRequest, BATCH_BYTE_BUDGET,
+    SourceReadError, TargetConnection, Terminal, TransferEvent, TransferRequest, BATCH_BYTE_BUDGET,
 };
+
+/// 目标端连接（ADR-0037 §1）。搬运骨架不读它，只是原样塞进 `OpenRunRequest`——
+/// 这些用例照旧只钉搬运行为。
+fn target() -> TargetConnection {
+    TargetConnection {
+        host: "127.0.0.1".to_owned(),
+        port: 3306,
+        username: "sink".to_owned(),
+        password: "change-me".to_owned(),
+        database: "qbs".to_owned(),
+    }
+}
 
 const RUN_ID: &str = "20260814153000_a3f19c";
 
@@ -21,6 +33,7 @@ fn streams_rows_in_order_then_commits_the_fetch_accumulator() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
+            target: target(),
             primary_key: vec!["ID".to_owned()],
         },
         |_| {},
@@ -49,6 +62,7 @@ fn batch_events_include_the_cumulative_source_row_count() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
+            target: target(),
             primary_key: vec!["ID".to_owned()],
         },
         |event| events.push(event),
@@ -88,6 +102,7 @@ fn open_failure_does_not_abort_before_staging_exists() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
+            target: target(),
             primary_key: vec!["ID".to_owned()],
         },
         |event| events.push(event),
@@ -125,6 +140,7 @@ fn commit_transport_failure_gets_once_and_never_aborts() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
+            target: target(),
             primary_key: vec!["ID".to_owned()],
         },
         |event| events.push(event),
@@ -158,6 +174,7 @@ fn empty_result_commits_without_sending_a_batch() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
+            target: target(),
             primary_key: vec!["ID".to_owned()],
         },
         |_| {},
@@ -196,6 +213,7 @@ fn range_check_runs_between_two_open_requests_and_emits_scan_event() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
+            target: target(),
             primary_key: vec!["ID".to_owned()],
         },
         |event| events.push(event),
@@ -244,6 +262,7 @@ fn fetch_failure_aborts_and_does_not_commit() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
+            target: target(),
             primary_key: vec!["ID".to_owned()],
         },
         |_| {},
@@ -269,6 +288,7 @@ fn byte_budget_splits_wide_rows_before_the_row_limit() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
+            target: target(),
             primary_key: vec!["ID".to_owned()],
         },
         |_| {},
@@ -297,6 +317,7 @@ fn commit_diagnostic_distinguishes_discarded_and_unknown() {
             TransferRequest {
                 run_id: RUN_ID.to_owned(),
                 target_table: "ORDERS".to_owned(),
+                target: target(),
                 primary_key: vec!["ID".to_owned()],
             },
             |_| {},
@@ -335,6 +356,7 @@ fn rows_written_mismatch_aborts_before_commit() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
+            target: target(),
             primary_key: vec!["ID".to_owned()],
         },
         |_| {},
@@ -364,6 +386,7 @@ fn abort_failure_is_reported_before_the_failed_stage() {
         TransferRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
+            target: target(),
             primary_key: vec!["ID".to_owned()],
         },
         |event| events.push(event),

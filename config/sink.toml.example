@@ -1,4 +1,4 @@
 # Store the real sink.toml outside version control and chmod it 0600.
-mysql_dsn = "mysql://sink:change-me@127.0.0.1:3306"
-database = "qbs"
+# mysql_dsn / database 已退役（ADR-0037 §2）：目标端凭据随每个 run 的请求过线，
+# sink 不再持有自己的那一份。旧字段仍能解析，但一个字都不读，启动时会打一条 warn。
 listen = "127.0.0.1:8080"

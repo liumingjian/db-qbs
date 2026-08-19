@@ -15,8 +15,9 @@ use chrono::Utc;
 use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
 use db_qbs_source::{
     embedded_web_asset, generate_target_ddl, load_source_config, validate_builder_dblink,
-    ColumnPrecision, HistoryChange, HistoryStore, OracleRowSource, RunHistory, RunParams,
-    SourceConfig, Task, TaskConfig, TaskInput, TaskSpec, TaskStore, UnknownReason,
+    ColumnPrecision, DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess,
+    OracleRowSource, RunHistory, RunParams, SourceConfig, TargetConnection, Task, TaskConfig,
+    TaskInput, TaskSpec, TaskStore, UnknownReason,
 };
 use rand::RngCore;
 use serde::de::DeserializeOwned;
@@ -54,6 +55,7 @@ struct ServerState<'a> {
     config: &'a SourceConfig,
     config_path: &'a Path,
     tasks: &'a TaskStore,
+    datasources: &'a DatasourceStore,
     history: &'a HistoryStore,
     runs: &'a RunRegistry,
 }
@@ -69,12 +71,15 @@ struct StartRunInput {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BuilderLinkInput {
+    /// 取哪个 Oracle 数据源的表清单（ADR-0037 §1）。构建器不再吃进程级凭据。
+    datasource_id: String,
     dblink: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BuilderColumnsInput {
+    datasource_id: String,
     dblink: Option<String>,
     owner: String,
     table: String,
@@ -85,6 +90,7 @@ struct BuilderColumnsInput {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ColumnFetchInput {
+    datasource_id: String,
     spec: TaskSpec,
     #[serde(default)]
     column_precision: Option<ColumnPrecision>,
@@ -123,6 +129,8 @@ fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
     }
 
     let task_store = TaskStore::open(&config.data_dir)?;
+    let datasource_store = DatasourceStore::open(&config.data_dir)?;
+    migrate_legacy_oracle_datasource(&config, &datasource_store)?;
     let history_store = HistoryStore::open(&config.data_dir)?;
     history_store.seal_incomplete(
         UnknownReason::ProcessDisappeared,
@@ -148,7 +156,7 @@ fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
             json!({
                 "listen": config.listen,
                 "message": format!(
-                    "本服务无鉴权；能连上者可对源库跑任意 SQL 并清空重写目标表；运行历史含源库真实业务值；当前监听地址：{}",
+                    "本服务无鉴权；能连上者等价于持有**全部已配置数据源**的凭据与写权限：可对任一源库跑任意 SQL 并清空重写任一目标表；运行历史含源库真实业务值；当前监听地址：{}",
                     config.listen
                 ),
             }),
@@ -162,6 +170,7 @@ fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
         config: &config,
         config_path: &config_path,
         tasks: &task_store,
+        datasources: &datasource_store,
         history: &history_store,
         runs: &runs,
     };
@@ -180,6 +189,29 @@ fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
         config.history_retention_days,
     )?;
     clean_run_tasks(&config.data_dir)?;
+    Ok(())
+}
+
+/// `source.toml` 里那三个已退役字段的一次性迁移（ADR-0037 §10）。
+fn migrate_legacy_oracle_datasource(
+    config: &SourceConfig,
+    datasources: &DatasourceStore,
+) -> Result<(), String> {
+    let migrated = datasources.migrate_legacy_oracle(
+        config.oracle_connect_string.as_deref(),
+        config.oracle_username.as_deref(),
+        config.oracle_password.as_deref(),
+    )?;
+    if let Some(datasource_id) = migrated {
+        emit(
+            LogLevel::Warn,
+            LogEvent::SourceStarted,
+            json!({
+                "datasource_id": datasource_id,
+                "message": "source.toml 的 oracle_connect_string / oracle_username / oracle_password 已退役（ADR-0037 §10），本次已迁成一条名为「默认」的 Oracle 数据源；请从配置文件里删掉这三个字段。oracle_client_lib_dir 不退役",
+            }),
+        );
+    }
     Ok(())
 }
 
@@ -251,15 +283,41 @@ fn route_api_request(
     query: Option<&str>,
 ) -> HttpResponse {
     if method == Method::Post && path == "/api/columns" {
-        return handle_column_fetch(request, state.config);
+        return handle_column_fetch(request, state);
     }
 
     if method == Method::Post && path == "/api/builder/tables" {
-        return handle_builder_tables(request, state.config);
+        return handle_builder_tables(request, state);
     }
 
     if method == Method::Post && path == "/api/builder/columns" {
-        return handle_builder_columns(request, state.config);
+        return handle_builder_columns(request, state);
+    }
+
+    if path == "/api/datasources" {
+        return match method {
+            Method::Get => handle_list_datasources(state.datasources),
+            Method::Post => handle_create_datasource(request, state.datasources),
+            _ => not_found(),
+        };
+    }
+
+    if method == Method::Post {
+        if let Some(datasource_id) = test_connection_id_from_path(path) {
+            return handle_test_datasource(state, datasource_id);
+        }
+    }
+
+    if path.starts_with("/api/datasources/") {
+        let Some(datasource_id) = resource_id_from_path(path, "/api/datasources/") else {
+            return not_found();
+        };
+        return match method {
+            Method::Get => handle_get_datasource(state.datasources, datasource_id),
+            Method::Put => handle_update_datasource(request, state.datasources, datasource_id),
+            Method::Delete => handle_delete_datasource(state, datasource_id),
+            _ => not_found(),
+        };
     }
 
     if method == Method::Post && path == "/api/builder/sql" {
@@ -313,6 +371,16 @@ fn resource_id_from_path<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
     Some(resource_id)
 }
 
+fn test_connection_id_from_path(path: &str) -> Option<&str> {
+    let datasource_id = path
+        .strip_prefix("/api/datasources/")?
+        .strip_suffix("/test-connection")?;
+    if datasource_id.is_empty() || datasource_id.contains('/') {
+        return None;
+    }
+    Some(datasource_id)
+}
+
 fn cancel_run_id_from_path(path: &str) -> Option<&str> {
     let run_record_id = path.strip_prefix("/api/runs/")?.strip_suffix("/cancel")?;
     if run_record_id.is_empty() || run_record_id.contains('/') {
@@ -336,10 +404,25 @@ fn handle_start_run(request: &mut Request, state: &ServerState<'_>) -> HttpRespo
         return bad_request(error);
     }
 
+    // 两端连接在发起时解一次（ADR-0037 §8）：解不开就当场拒，不要等到子进程起来了才炸。
+    let access = match oracle_access(state, &task.source_datasource_id) {
+        Ok(access) => access,
+        Err(error) => return bad_request(error),
+    };
+    let target = match state
+        .datasources
+        .target_connection(&task.target_datasource_id)
+    {
+        Ok(target) => target,
+        Err(error) => return bad_request(error),
+    };
+
     match start_run(
         state.config,
         state.config_path,
         &task,
+        access,
+        target,
         input.run_params,
         state.history,
         state.runs,
@@ -476,6 +559,8 @@ fn start_run(
     config: &SourceConfig,
     config_path: &Path,
     task: &Task,
+    access: OracleAccess,
+    target: TargetConnection,
     run_params: RunParams,
     history_store: &HistoryStore,
     runs: &RunRegistry,
@@ -499,16 +584,17 @@ fn start_run(
         .live_histories
         .insert(run_record_id.clone(), history.clone());
 
-    let task_path = match materialize_task(config, task, &run_params, &run_record_id) {
-        Ok(path) => path,
-        Err(error) => {
-            history.mark_parent_failure(error.clone(), Utc::now());
-            let _ = history_store.save(&history, Utc::now(), config.history_retention_days);
-            remove_live_history(runs, &run_record_id);
-            remove_active_run(runs, &run_record_id);
-            return Err(StartRunError::Internal(error));
-        }
-    };
+    let task_path =
+        match materialize_task(config, task, access, target, &run_params, &run_record_id) {
+            Ok(path) => path,
+            Err(error) => {
+                history.mark_parent_failure(error.clone(), Utc::now());
+                let _ = history_store.save(&history, Utc::now(), config.history_retention_days);
+                remove_live_history(runs, &run_record_id);
+                remove_active_run(runs, &run_record_id);
+                return Err(StartRunError::Internal(error));
+            }
+        };
     let mut child = match Command::new(&config.run_executable)
         .arg("--config")
         .arg(config_path)
@@ -561,13 +647,15 @@ fn start_run(
 fn materialize_task(
     config: &SourceConfig,
     task: &Task,
+    access: OracleAccess,
+    target: TargetConnection,
     run_params: &RunParams,
     run_record_id: &str,
 ) -> Result<PathBuf, String> {
     let directory = config.data_dir.join(RUN_TASKS_DIRECTORY);
     fs::create_dir_all(&directory).map_err(|error| format!("创建临时任务目录失败：{error}"))?;
     let path = directory.join(format!("task-{run_record_id}.toml"));
-    let task_config = task_config_from_task(task, run_params);
+    let task_config = task_config_from_task(task, access, target, run_params);
     let contents = toml::to_string(&task_config)
         .map_err(|error| format!("序列化临时任务定义失败：{error}"))?;
     let mut file = OpenOptions::new()
@@ -583,9 +671,18 @@ fn materialize_task(
     Ok(path)
 }
 
-fn task_config_from_task(task: &Task, run_params: &RunParams) -> TaskConfig {
+/// 临时任务文件里带着**解出来的明文凭据**（ADR-0037 §1/§8）。
+/// 落盘形态由 [`materialize_task`] 保证：0600、跑完即删、启动与退出各扫一次。
+fn task_config_from_task(
+    task: &Task,
+    access: OracleAccess,
+    target: TargetConnection,
+    run_params: &RunParams,
+) -> TaskConfig {
     TaskConfig {
         spec: task.spec.clone(),
+        oracle: access,
+        target,
         run_params: run_params.clone(),
     }
 }
@@ -762,6 +859,143 @@ fn handle_delete_task(store: &TaskStore, task_id: &str) -> HttpResponse {
     }
 }
 
+fn handle_list_datasources(store: &DatasourceStore) -> HttpResponse {
+    match store.list() {
+        // 只出 view：口令连密文都不回（ADR-0037 §5）。
+        Ok(datasources) => json_response(
+            200,
+            &datasources
+                .iter()
+                .map(|datasource| datasource.view())
+                .collect::<Vec<_>>(),
+        ),
+        Err(error) => internal_error(error),
+    }
+}
+
+fn handle_create_datasource(request: &mut Request, store: &DatasourceStore) -> HttpResponse {
+    let input: DatasourceInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    match store.create(input) {
+        Ok(datasource) => json_response(201, &datasource.view()),
+        Err(error) => bad_request(error),
+    }
+}
+
+fn handle_get_datasource(store: &DatasourceStore, datasource_id: &str) -> HttpResponse {
+    match store.get(datasource_id) {
+        Ok(Some(datasource)) => json_response(200, &datasource.view()),
+        Ok(None) => not_found(),
+        Err(error) => internal_error(error),
+    }
+}
+
+fn handle_update_datasource(
+    request: &mut Request,
+    store: &DatasourceStore,
+    datasource_id: &str,
+) -> HttpResponse {
+    let input: DatasourceInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    match store.update(datasource_id, input) {
+        Ok(Some(datasource)) => json_response(200, &datasource.view()),
+        Ok(None) => not_found(),
+        Err(error) => bad_request(error),
+    }
+}
+
+/// 删数据源：还有任务引着就拒（ADR-0037 §7），措辞点名是哪几个任务——
+/// 只说「有任务在用」会让用户挨个点开去找。
+fn handle_delete_datasource(state: &ServerState<'_>, datasource_id: &str) -> HttpResponse {
+    match state.tasks.names_referencing(datasource_id) {
+        Ok(names) if !names.is_empty() => {
+            return json_response(
+                409,
+                &json!({
+                    "error": {
+                        "message": format!("数据源仍被 {} 个任务引用：{}；请先改这些任务的数据源", names.len(), names.join("、")),
+                        "tasks": names,
+                    }
+                }),
+            )
+        }
+        Ok(_) => {}
+        Err(error) => return internal_error(error),
+    }
+    match state.datasources.delete(datasource_id) {
+        Ok(Some(datasource)) => json_response(200, &datasource.view()),
+        Ok(None) => not_found(),
+        Err(error) => internal_error(error),
+    }
+}
+
+/// 「测试连接」（ADR-0037 §9）：Oracle 在本机直连，MySQL 走 sink 的新端点——
+/// source 仍不建 MySQL 连接，`CONTEXT.md` 那条不对称在这一点上保留。
+fn handle_test_datasource(state: &ServerState<'_>, datasource_id: &str) -> HttpResponse {
+    let datasource = match state.datasources.get(datasource_id) {
+        Ok(Some(datasource)) => datasource,
+        Ok(None) => return not_found(),
+        Err(error) => return internal_error(error),
+    };
+    match datasource.settings {
+        db_qbs_source::DatasourceSettings::Oracle { .. } => {
+            let access = match oracle_access(state, datasource_id) {
+                Ok(access) => access,
+                Err(error) => return bad_request(error),
+            };
+            match OracleRowSource::test_connection(&access) {
+                Ok(()) => json_response(200, &json!({ "ok": true })),
+                Err(error) => oracle_failure(error),
+            }
+        }
+        db_qbs_source::DatasourceSettings::Mysql { .. } => {
+            let target = match state.datasources.target_connection(datasource_id) {
+                Ok(target) => target,
+                Err(error) => return bad_request(error),
+            };
+            match test_target_connection(&state.config.sink_base_url, &target) {
+                Ok(()) => json_response(200, &json!({ "ok": true })),
+                Err(error) => json_response(502, &json!({ "kind": "sink", "message": error })),
+            }
+        }
+    }
+}
+
+/// 把连接信息交给 sink 试一把。**口令在这里过线**——这是 ADR-0037 §1 认下的那条路径，
+/// 与发起运行走同一个通道、同一条部署前提（§4：通道必须可信）。
+fn test_target_connection(sink_base_url: &str, target: &TargetConnection) -> Result<(), String> {
+    let url = format!(
+        "{}/v1/target/test-connection",
+        sink_base_url.trim_end_matches('/')
+    );
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(10))
+        .timeout_read(Duration::from_secs(30))
+        .redirects(0)
+        .build();
+    match agent
+        .post(&url)
+        .send_json(serde_json::to_value(target).expect("target connection must serialize"))
+    {
+        Ok(_) => Ok(()),
+        Err(ureq::Error::Status(_, response)) => Err(response
+            .into_json::<Value>()
+            .ok()
+            .and_then(|body| {
+                body.get("error")?
+                    .get("message")?
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "目标端拒绝了测试连接请求".to_owned())),
+        Err(ureq::Error::Transport(error)) => Err(format!("连不上 sink：{error}")),
+    }
+}
+
 fn read_json_body<T: DeserializeOwned>(request: &mut Request) -> Result<T, String> {
     let mut body = Vec::new();
     request
@@ -818,7 +1052,14 @@ fn embedded_response(body: Vec<u8>, content_type: &str, path: &str) -> HttpRespo
         .with_header(cache_control_header)
 }
 
-fn handle_builder_tables(request: &mut Request, config: &SourceConfig) -> HttpResponse {
+/// 解出某个 Oracle 数据源的连接信息：数据源那三样 + 进程级的 client 库目录（ADR-0037 §6）。
+fn oracle_access(state: &ServerState<'_>, datasource_id: &str) -> Result<OracleAccess, String> {
+    state
+        .datasources
+        .oracle_access(datasource_id, &state.config.oracle_client_lib_dir)
+}
+
+fn handle_builder_tables(request: &mut Request, state: &ServerState<'_>) -> HttpResponse {
     let input: BuilderLinkInput = match read_json_body(request) {
         Ok(input) => input,
         Err(error) => return bad_request(error),
@@ -826,13 +1067,17 @@ fn handle_builder_tables(request: &mut Request, config: &SourceConfig) -> HttpRe
     if let Err(error) = validate_builder_dblink(input.dblink.as_deref()) {
         return bad_request(error);
     }
-    match OracleRowSource::list_builder_tables(config, input.dblink.as_deref()) {
+    let access = match oracle_access(state, &input.datasource_id) {
+        Ok(access) => access,
+        Err(error) => return bad_request(error),
+    };
+    match OracleRowSource::list_builder_tables(&access, input.dblink.as_deref()) {
         Ok(tables) => json_response(200, &tables),
         Err(error) => oracle_failure(error),
     }
 }
 
-fn handle_builder_columns(request: &mut Request, config: &SourceConfig) -> HttpResponse {
+fn handle_builder_columns(request: &mut Request, state: &ServerState<'_>) -> HttpResponse {
     let input: BuilderColumnsInput = match read_json_body(request) {
         Ok(input) => input,
         Err(error) => return bad_request(error),
@@ -843,8 +1088,12 @@ fn handle_builder_columns(request: &mut Request, config: &SourceConfig) -> HttpR
     if let Err(error) = validate_builder_dblink(input.dblink.as_deref()) {
         return bad_request(error);
     }
+    let access = match oracle_access(state, &input.datasource_id) {
+        Ok(access) => access,
+        Err(error) => return bad_request(error),
+    };
     match OracleRowSource::list_builder_columns(
-        config,
+        &access,
         input.dblink.as_deref(),
         &input.owner,
         &input.table,
@@ -897,7 +1146,7 @@ fn oracle_failure(error: db_qbs_source::SourceReadError) -> HttpResponse {
     )
 }
 
-fn handle_column_fetch(request: &mut Request, config: &SourceConfig) -> HttpResponse {
+fn handle_column_fetch(request: &mut Request, state: &ServerState<'_>) -> HttpResponse {
     let mut body = String::new();
     if let Err(error) = request.as_reader().read_to_string(&mut body) {
         return json_response(
@@ -918,7 +1167,11 @@ fn handle_column_fetch(request: &mut Request, config: &SourceConfig) -> HttpResp
         return json_response(400, &json!({ "kind": "request", "message": error }));
     }
 
-    let columns = match OracleRowSource::describe(config, &input.spec) {
+    let access = match oracle_access(state, &input.datasource_id) {
+        Ok(access) => access,
+        Err(error) => return json_response(400, &json!({ "kind": "request", "message": error })),
+    };
+    let columns = match OracleRowSource::describe(&access, &input.spec) {
         Ok(columns) => columns,
         Err(error) => return oracle_failure(error),
     };

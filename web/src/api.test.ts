@@ -17,7 +17,18 @@ import {
   taskInputFrom,
   updateTask,
 } from "./api";
-import type { TaskSpec } from "./api";
+import type { TaskInput, TaskSpec } from "./api";
+
+/** 两个数据源 id 是绑定、不是规格（ADR-0037 §8），但它们跟 `name` 一样属于任务定义。 */
+function taskInput(overrides: Partial<TaskInput> = {}): TaskInput {
+  return {
+    name: "持仓明细",
+    source_datasource_id: "ds-oracle",
+    target_datasource_id: "ds-mysql",
+    spec: spec(),
+    ...overrides,
+  };
+}
 
 function spec(overrides: Partial<TaskSpec> = {}): TaskSpec {
   return {
@@ -53,7 +64,7 @@ describe("task API", () => {
   });
 
   it("creates a task as a name plus one structured spec", async () => {
-    const input = { name: "持仓明细", spec: spec() };
+    const input = taskInput();
     const created = { task_id: "task-01", ...input };
     const fetchMock = vi
       .fn()
@@ -72,7 +83,7 @@ describe("task API", () => {
   });
 
   it("never sends a SQL string with the task definition", async () => {
-    const input = {
+    const input = taskInput({
       name: "持仓明细",
       spec: spec({
         conditions: [
@@ -86,7 +97,7 @@ describe("task API", () => {
           },
         ],
       }),
-    };
+    });
     const fetchMock = vi
       .fn()
       .mockResolvedValue(new Response(JSON.stringify({ task_id: "t", ...input }), { status: 201 }));
@@ -101,7 +112,10 @@ describe("task API", () => {
   });
 
   it("updates and deletes a task by its stable identity", async () => {
-    const input = { name: "持仓日明细", spec: spec({ target_table: "HOLDINGS_DAILY" }) };
+    const input = taskInput({
+      name: "持仓日明细",
+      spec: spec({ target_table: "HOLDINGS_DAILY" }),
+    });
     const task = { task_id: "task/id", ...input };
     const fetchMock = vi
       .fn()
@@ -137,15 +151,17 @@ describe("task API", () => {
     );
 
     await expect(
-      createTask({ name: "", spec: emptySpec() }),
+      createTask(taskInput({ name: "", spec: emptySpec() })),
     ).rejects.toThrow("任务定义请求体无效");
   });
 
   it("projects a stored task to name plus spec without its identity", () => {
-    const task = { task_id: "task-01", name: "持仓明细", spec: spec() };
+    const task = { task_id: "task-01", ...taskInput() };
 
     expect(taskInputFrom(task, { name: "持仓日明细" })).toEqual({
       name: "持仓日明细",
+      source_datasource_id: "ds-oracle",
+      target_datasource_id: "ds-mysql",
       spec: task.spec,
     });
   });
@@ -253,17 +269,27 @@ describe("SQL builder API", () => {
       .mockResolvedValueOnce(new Response(JSON.stringify(columns), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(fetchBuilderTables("FA")).resolves.toEqual(tables);
+    await expect(fetchBuilderTables("ds-oracle", "FA")).resolves.toEqual(tables);
     await expect(
-      fetchBuilderColumns({ dblink: "FA", owner: "HTBR45", table: "T_R_FR_ASTSTAT" }),
+      fetchBuilderColumns({
+        datasource_id: "ds-oracle",
+        dblink: "FA",
+        owner: "HTBR45",
+        table: "T_R_FR_ASTSTAT",
+      }),
     ).resolves.toEqual(columns);
     expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/builder/tables", expect.objectContaining({
       method: "POST",
-      body: JSON.stringify({ dblink: "FA" }),
+      body: JSON.stringify({ datasource_id: "ds-oracle", dblink: "FA" }),
     }));
     expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/builder/columns", expect.objectContaining({
       method: "POST",
-      body: JSON.stringify({ dblink: "FA", owner: "HTBR45", table: "T_R_FR_ASTSTAT" }),
+      body: JSON.stringify({
+        datasource_id: "ds-oracle",
+        dblink: "FA",
+        owner: "HTBR45",
+        table: "T_R_FR_ASTSTAT",
+      }),
     }));
     expect(columns[0]).not.toHaveProperty("supported");
   });
@@ -314,15 +340,21 @@ describe("SQL builder API", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const input = spec();
-    await expect(fetchColumns(input)).resolves.toEqual(columns);
-    await expect(fetchColumns(input, { N_AMT: [20, 4] })).resolves.toEqual(columns);
+    await expect(fetchColumns("ds-oracle", input)).resolves.toEqual(columns);
+    await expect(
+      fetchColumns("ds-oracle", input, { N_AMT: [20, 4] }),
+    ).resolves.toEqual(columns);
 
     expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/columns", expect.objectContaining({
       method: "POST",
-      body: JSON.stringify({ spec: input }),
+      body: JSON.stringify({ datasource_id: "ds-oracle", spec: input }),
     }));
     expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/columns", expect.objectContaining({
-      body: JSON.stringify({ spec: input, column_precision: { N_AMT: [20, 4] } }),
+      body: JSON.stringify({
+        datasource_id: "ds-oracle",
+        spec: input,
+        column_precision: { N_AMT: [20, 4] },
+      }),
     }));
   });
 
@@ -340,7 +372,7 @@ describe("SQL builder API", () => {
       ),
     );
 
-    const error = await fetchColumns(spec()).catch(
+    const error = await fetchColumns("ds-oracle", spec()).catch(
       (requestError: unknown) => requestError,
     );
 

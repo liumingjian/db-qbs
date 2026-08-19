@@ -7,20 +7,27 @@ use serde_json::json;
 use crate::precheck::{precheck_with_primary_key, range_check_columns, range_check_issue};
 use crate::{
     AbortResponse, ActiveRun, ApiError, AtomicSwapError, AtomicSwapRequest, BatchPayload,
-    BatchResponse, CommitResponse, CreateStagingError, Destination, DropStagingError,
-    OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn, RangeCheckResult,
-    RunResponse, SinkService, SourceColumn, TargetColumn, Terminal, WriteBatchError,
-    MAX_PREPARED_STATEMENT_PLACEHOLDERS, TOMBSTONE_LIMIT,
+    BatchResponse, CommitResponse, CreateStagingError, Destination, DestinationFactory,
+    DropStagingError, FixedDestination, OpenRunRequest, OpenRunResponse, PrecheckIssue,
+    RangeCheckColumn, RangeCheckResult, RunResponse, SinkService, SourceColumn, TargetColumn,
+    Terminal, WriteBatchError, MAX_PREPARED_STATEMENT_PLACEHOLDERS, TOMBSTONE_LIMIT,
 };
 
 static RUN_ID_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[0-9]{14}_[0-9a-f]{6}$").expect("run id regex must compile"));
 
-impl<D: Destination> SinkService<D> {
+impl<D: Destination> SinkService<FixedDestination<D>> {
+    /// 固定一份目的地的服务：请求里的连接信息被忽略。测试与夹具走这条。
     pub fn new(database: impl Into<String>, destination: Arc<D>) -> Self {
+        Self::with_factory(FixedDestination::new(database, destination))
+    }
+}
+
+impl<F: DestinationFactory> SinkService<F> {
+    /// 生产路径：每个 run 按请求里的连接信息现建目的地（ADR-0037 §2）。
+    pub fn with_factory(factory: F) -> Self {
         Self {
-            database: database.into(),
-            destination,
+            factory,
             active_runs: Mutex::new(HashMap::new()),
             tombstones: Mutex::new(VecDeque::new()),
         }
@@ -29,20 +36,27 @@ impl<D: Destination> SinkService<D> {
     pub fn open(&self, request: OpenRunRequest) -> Result<OpenRunResponse, ApiError> {
         validate_open_request(&request)?;
 
-        let target_columns = self
-            .destination
-            .target_columns(&request.target_table)
-            .map_err(|message| ApiError {
-                status: 500,
-                code: "STAGING_CREATE_FAILED",
-                message: format!(
-                    "读取目标表元数据失败：{message}。这是目标端环境故障，目标表未被改动"
-                ),
-                run_id: Some(request.run_id.clone()),
-                details: json!({ "kind": "OTHER" }),
-            })?;
-        let target_keys = self
-            .destination
+        // 连接先建起来：目标端元数据、暂存表 DDL、写批次、切换全在这一条连接上跑。
+        // 连不上是目标端环境故障，复用 `SINK_ENVIRONMENT`（ADR-0037 §9，码闭集不增）。
+        let connected = self
+            .factory
+            .connect(&request.target)
+            .map_err(|message| target_connect_error(&request.run_id, message))?;
+        let destination = connected.destination;
+
+        let target_columns =
+            destination
+                .target_columns(&request.target_table)
+                .map_err(|message| ApiError {
+                    status: 500,
+                    code: "STAGING_CREATE_FAILED",
+                    message: format!(
+                        "读取目标表元数据失败：{message}。这是目标端环境故障，目标表未被改动"
+                    ),
+                    run_id: Some(request.run_id.clone()),
+                    details: json!({ "kind": "OTHER" }),
+                })?;
+        let target_keys = destination
             .target_keys(&request.target_table)
             .map_err(|message| ApiError {
                 status: 500,
@@ -91,8 +105,8 @@ impl<D: Destination> SinkService<D> {
         }
 
         let staging_table = format!("{}__stg_{}", request.target_table, request.run_id);
-        let ddl = build_staging_ddl(&self.database, &staging_table, &target_columns);
-        self.destination
+        let ddl = build_staging_ddl(&connected.database, &staging_table, &target_columns);
+        destination
             .create_staging(&staging_table, &ddl)
             .map_err(|error| create_staging_api_error(&request.run_id, &staging_table, error))?;
 
@@ -117,6 +131,7 @@ impl<D: Destination> SinkService<D> {
             next_seq: 1,
             rows_written: 0,
             sealed: false,
+            destination,
         };
         self.active_runs
             .lock()
@@ -188,7 +203,7 @@ impl<D: Destination> SinkService<D> {
             });
         }
 
-        let rows_written = self
+        let rows_written = run
             .destination
             .write_batch(
                 &run.staging_table,
@@ -255,7 +270,7 @@ impl<D: Destination> SinkService<D> {
             received_batches,
         };
 
-        match self.destination.atomic_swap(&swap_request) {
+        match run.destination.atomic_swap(&swap_request) {
             Ok(result) => {
                 self.finish_run(
                     run_id,
@@ -264,7 +279,7 @@ impl<D: Destination> SinkService<D> {
                     result.purged_rows,
                     result.swapped_rows,
                 );
-                self.drop_after_swap(run_id, &run.staging_table)?;
+                self.drop_after_swap(run.destination.as_ref(), run_id, &run.staging_table)?;
                 Ok(CommitResponse {
                     source_rows: total_rows,
                     staged_rows: result.staged_rows,
@@ -285,7 +300,7 @@ impl<D: Destination> SinkService<D> {
                     run.rows_written,
                     count_ms,
                 );
-                self.drop_after_discard(&run.staging_table, &mut error);
+                self.drop_after_discard(run.destination.as_ref(), &run.staging_table, &mut error);
                 Err(error)
             }
             Err(AtomicSwapError::TargetBusy { errno }) => {
@@ -303,7 +318,7 @@ impl<D: Destination> SinkService<D> {
                         "errno": errno,
                     }),
                 };
-                self.drop_after_discard(&run.staging_table, &mut error);
+                self.drop_after_discard(run.destination.as_ref(), &run.staging_table, &mut error);
                 Err(error)
             }
             Err(AtomicSwapError::Other(message)) => {
@@ -317,7 +332,7 @@ impl<D: Destination> SinkService<D> {
                     run_id: Some(run_id.to_owned()),
                     details: json!({}),
                 };
-                self.drop_after_discard(&run.staging_table, &mut error);
+                self.drop_after_discard(run.destination.as_ref(), &run.staging_table, &mut error);
                 Err(error)
             }
         }
@@ -353,7 +368,7 @@ impl<D: Destination> SinkService<D> {
             return Err(run_sealed_error(run_id, active_run_response(run_id, &run)));
         }
 
-        self.destination
+        run.destination
             .drop_staging(&run.staging_table)
             .map_err(|error| drop_staging_api_error(run_id, &run.staging_table, error))?;
         self.push_tombstone(terminal_response(run_id, &run, Terminal::Discarded, 0, 0));
@@ -380,8 +395,13 @@ impl<D: Destination> SinkService<D> {
         }
     }
 
-    fn drop_after_swap(&self, run_id: &str, staging_table: &str) -> Result<(), ApiError> {
-        self.destination.drop_staging(staging_table).map_err(|error| {
+    fn drop_after_swap(
+        &self,
+        destination: &F::Dest,
+        run_id: &str,
+        staging_table: &str,
+    ) -> Result<(), ApiError> {
+        destination.drop_staging(staging_table).map_err(|error| {
             let (message, details) = match error {
                 DropStagingError::PermissionDenied => (
                     format!(
@@ -408,8 +428,8 @@ impl<D: Destination> SinkService<D> {
 
     // 失败路径上的 DROP 失败不得顶替主错误（VERIFY_FAILED 的五个门禁数、SWAP_FAILED 的
     // 回滚措辞都比清理失败重要）；残留暂存表按 ADR-0010 §6 的口径留给手工清。
-    fn drop_after_discard(&self, staging_table: &str, error: &mut ApiError) {
-        if let Err(drop_error) = self.destination.drop_staging(staging_table) {
+    fn drop_after_discard(&self, destination: &F::Dest, staging_table: &str, error: &mut ApiError) {
+        if let Err(drop_error) = destination.drop_staging(staging_table) {
             let reason = match drop_error {
                 DropStagingError::PermissionDenied => "sink 的 MySQL 账号缺少 DROP 权限".to_owned(),
                 DropStagingError::Other(message) => message,
@@ -435,7 +455,7 @@ impl<D: Destination> SinkService<D> {
     fn finish_run(
         &self,
         run_id: &str,
-        run: &ActiveRun,
+        run: &ActiveRun<F::Dest>,
         terminal: Terminal,
         purged_rows: u64,
         swapped_rows: u64,
@@ -528,7 +548,7 @@ fn range_check_results_error(run_id: &str, message: String) -> ApiError {
     }
 }
 
-fn active_run_response(run_id: &str, run: &ActiveRun) -> RunResponse {
+fn active_run_response<D>(run_id: &str, run: &ActiveRun<D>) -> RunResponse {
     RunResponse {
         run_id: run_id.to_owned(),
         staging_table: run.staging_table.clone(),
@@ -541,9 +561,9 @@ fn active_run_response(run_id: &str, run: &ActiveRun) -> RunResponse {
     }
 }
 
-fn terminal_response(
+fn terminal_response<D>(
     run_id: &str,
-    run: &ActiveRun,
+    run: &ActiveRun<D>,
     terminal: Terminal,
     purged_rows: u64,
     swapped_rows: u64,
@@ -553,6 +573,20 @@ fn terminal_response(
         purged_rows: Some(purged_rows),
         swapped_rows: Some(swapped_rows),
         ..active_run_response(run_id, run)
+    }
+}
+
+/// 连不上目标端。**不增错误码**（ADR-0037 §9）：`SINK_ENVIRONMENT` 的本义就是
+/// 「目标端环境配置错误，不要排查业务数据」，连不上正属这一类。
+fn target_connect_error(run_id: &str, message: String) -> ApiError {
+    ApiError {
+        status: 500,
+        code: "SINK_ENVIRONMENT",
+        message: format!(
+            "连接目标端失败：{message}。这是目标端环境或数据源配置错误，目标表未被改动"
+        ),
+        run_id: Some(run_id.to_owned()),
+        details: json!({ "kind": "OTHER" }),
     }
 }
 

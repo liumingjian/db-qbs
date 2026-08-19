@@ -13,12 +13,46 @@ use serde_json::Value;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 /// 任务定义在线上恰好三样：名字、结构化规格、身份。SQL 不在里面（ADR-0036 §2）。
-const TASK_FIELDS: [&str; 3] = ["name", "spec", "task_id"];
+const TASK_FIELDS: [&str; 5] = [
+    "name",
+    "source_datasource_id",
+    "spec",
+    "target_datasource_id",
+    "task_id",
+];
+
+/// 建任务前先备好两端数据源（ADR-0037 §8）。Oracle 那条由 `source.toml` 的退役字段
+/// 首启迁移出来（§10）；MySQL 那条这里现建——它不必连得上，本文件不跑真 MySQL。
+fn seed_datasources(port: u16) -> (String, String) {
+    let listed = json_body(&get(port, "/api/datasources").unwrap());
+    let source_id = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|datasource| datasource["kind"] == "oracle")
+        .expect("首启迁移必须留下一条 Oracle 数据源")["datasource_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let created = post(
+        port,
+        "/api/datasources",
+        r#"{"name":"目标库","kind":"mysql","host":"127.0.0.1","port":3306,"username":"sink","password":"change-me","database":"qbs"}"#,
+    )
+    .unwrap();
+    assert_eq!(created.status, 201, "{}", created.body);
+    let target_id = json_body(&created)["datasource_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (source_id, target_id)
+}
 
 /// 一份任务定义的请求体。规格是唯一真相源，条件带一个「运行时填」的日期参数 `d_biz`。
-fn task_json(name: &str, target_table: &str) -> String {
+fn task_json(name: &str, target_table: &str, datasources: &(String, String)) -> String {
+    let (source_datasource_id, target_datasource_id) = datasources;
     format!(
-        r#"{{"name":"{name}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"{target_table}","columns":["ID","D_BIZ"],"primary_key":["ID"],"conditions":[{{"column":"D_BIZ","operator":"eq","value_type":"date","parameter":"d_biz","value_source":"runtime","constant":""}}],"order_by":[]}}}}"#
+        r#"{{"name":"{name}","source_datasource_id":"{source_datasource_id}","target_datasource_id":"{target_datasource_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"{target_table}","columns":["ID","D_BIZ"],"primary_key":["ID"],"conditions":[{{"column":"D_BIZ","operator":"eq","value_type":"date","parameter":"d_biz","value_source":"runtime","constant":""}}],"order_by":[]}}}}"#
     )
 }
 
@@ -30,12 +64,13 @@ fn task_crud_persists_stable_identity_without_exposing_credentials() {
     let directory = temp_directory();
     let (port, config, child, _ready) =
         start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
+    let datasources = seed_datasources(port);
 
     let created = request(
         port,
         "POST",
         "/api/tasks",
-        Some(&task_json("持仓明细", "HOLDINGS")),
+        Some(&task_json("持仓明细", "HOLDINGS", &datasources)),
     )
     .unwrap();
     assert_eq!(created.status, 201, "{}", created.body);
@@ -56,7 +91,7 @@ fn task_crud_persists_stable_identity_without_exposing_credentials() {
         port,
         "PUT",
         &format!("/api/tasks/{task_id}"),
-        Some(&task_json("持仓日明细", "HOLDINGS_DAILY")),
+        Some(&task_json("持仓日明细", "HOLDINGS_DAILY", &datasources)),
     )
     .unwrap();
     assert_eq!(updated.status, 200, "{}", updated.body);
@@ -107,6 +142,7 @@ fn task_writes_reject_client_identity_and_incomplete_definitions() {
     let directory = temp_directory();
     let (port, _config, child, _ready) =
         start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
+    let datasources = seed_datasources(port);
 
     let client_identity = request(
         port,
@@ -114,7 +150,7 @@ fn task_writes_reject_client_identity_and_incomplete_definitions() {
         "/api/tasks",
         Some(&format!(
             r#"{{"task_id":"chosen-by-client",{}"#,
-            &task_json("持仓明细", "HOLDINGS")[1..]
+            &task_json("持仓明细", "HOLDINGS", &datasources)[1..]
         )),
     )
     .unwrap();
@@ -164,7 +200,13 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
     );
     let (port, config, source, _ready) =
         start_source_ready(|port| write_run_config(&directory, port, &fake_child));
-    let created = post(port, "/api/tasks", &task_json("holdings", "HOLDINGS")).unwrap();
+    let datasources = seed_datasources(port);
+    let created = post(
+        port,
+        "/api/tasks",
+        &task_json("holdings", "HOLDINGS", &datasources),
+    )
+    .unwrap();
     assert_eq!(created.status, 201, "{}", created.body);
     let task_id = json_body(&created)["task_id"].as_str().unwrap().to_owned();
     let audit = rusqlite::Connection::open(directory.join("db-qbs.sqlite3")).unwrap();
@@ -236,8 +278,15 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
     }
     // SQL 不落进任务文件（ADR-0036 §2）：子进程从同一份规格现算。
     assert!(!task_toml.contains("SELECT"), "{task_toml}");
-    for secret in ["name", "task_id", "oracle_password", "secret"] {
-        assert!(!task_toml.contains(secret), "{task_toml}");
+    // 任务身份仍不落进去——子进程按规格干活，不需要知道自己是哪条任务。
+    for absent in ["holdings", "task_id"] {
+        assert!(!task_toml.contains(absent), "{task_toml}");
+    }
+    // **两端凭据现在落进去了**（ADR-0037 §1/§8，推翻了原来那条「任务文件不含凭据」的断言）：
+    // 编排进程解一次，子进程不碰数据源库、也不碰密钥文件。兜底是上面那条 0600
+    // 与「启动 / 退出各扫一次 run-tasks」的清扫。
+    for present in ["[oracle]", "[target]", "client_lib_dir"] {
+        assert!(task_toml.contains(present), "{task_toml}");
     }
 
     let args = fs::read_to_string(invocation).unwrap();
@@ -603,13 +652,21 @@ fn non_loopback_listen_emits_the_required_warning() {
     assert_eq!(response.status, 200);
     let output = terminate(child);
     let lines = json_lines(&output.stdout);
-    let warning = lines.iter().find(|line| line["level"] == "warn").unwrap();
-    let message = warning["message"].as_str().unwrap();
     let address = format!("0.0.0.0:{port}");
+    // 按 `listen` 字段挑，不能按「第一条 warn」挑：退役字段的首启迁移告警（ADR-0037 §10）
+    // 排在这条之前，且它不带 `listen`。用告警自己的措辞去挑则是循环论证。
+    let warning = lines
+        .iter()
+        .find(|line| line["level"] == "warn" && line["listen"] == address)
+        .unwrap_or_else(|| panic!("没有带 listen={address} 的 warn 行：{lines:?}"));
+    let message = warning["message"].as_str().unwrap();
+    // 措辞按 ADR-0037 §5 ③ 加码：暴露面从「该 source 的」放大到「全部已配置数据源」，
+    // 这句话本身是那条裁定的唯一可观测物，必须钉住，连带两个「任一」的量词。
     for phrase in [
         "无鉴权",
-        "源库跑任意 SQL",
-        "清空重写目标表",
+        "全部已配置数据源",
+        "任一源库跑任意 SQL",
+        "清空重写任一目标表",
         "运行历史含源库真实业务值",
         address.as_str(),
     ] {
@@ -634,6 +691,7 @@ fn column_fetch_rejects_an_invalid_spec_before_reaching_oracle() {
         port,
         "/api/columns",
         r#"{
+          "datasource_id":"unused-the-spec-gate-runs-first",
           "spec":{
             "owner":"APP","table":"ORDERS","target_table":"ORDERS",
             "columns":["ID"],"primary_key":["MISSING"],
@@ -710,7 +768,12 @@ fn builder_rejects_an_invalid_dblink_before_connecting_to_oracle() {
     let (port, _config, child, _ready) =
         start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
 
-    let response = post(port, "/api/builder/tables", r#"{"dblink":"FA WHERE 1=1"}"#).unwrap();
+    let response = post(
+        port,
+        "/api/builder/tables",
+        r#"{"datasource_id":"unused-the-dblink-gate-runs-first","dblink":"FA WHERE 1=1"}"#,
+    )
+    .unwrap();
 
     assert_eq!(response.status, 400);
     let body: Value = serde_json::from_str(&response.body).unwrap();
@@ -737,18 +800,23 @@ fn column_fetch_oracle_failure_does_not_create_a_run_touch_sink_or_write_storage
             "/db-qbs-missing-oracle-client",
         )
     });
+    // 数据源要真存在：本用例买的是「Oracle 连不上时不留痕」，不是「数据源解不出来」。
+    let (source_datasource_id, _) = seed_datasources(port);
     let files_before = directory_entries(&directory);
 
     let response = post(
         port,
         "/api/columns",
-        r#"{
-          "spec":{
+        &format!(
+            r#"{{
+          "datasource_id":"{source_datasource_id}",
+          "spec":{{
             "owner":"APP","table":"MISSING_ORDERS","target_table":"ORDERS",
             "columns":["ID","BIZ_DAY"],"primary_key":["ID"],
             "conditions":[],"order_by":[]
-          }
-        }"#,
+          }}
+        }}"#
+        ),
     )
     .unwrap();
 
@@ -926,7 +994,13 @@ fn assert_task_fields(task: &Value) {
 }
 
 fn create_task(port: u16) -> String {
-    let response = post(port, "/api/tasks", &task_json("holdings", "HOLDINGS")).unwrap();
+    let datasources = seed_datasources(port);
+    let response = post(
+        port,
+        "/api/tasks",
+        &task_json("holdings", "HOLDINGS", &datasources),
+    )
+    .unwrap();
     assert_eq!(response.status, 201, "{}", response.body);
     json_body(&response)["task_id"].as_str().unwrap().to_owned()
 }

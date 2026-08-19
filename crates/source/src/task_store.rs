@@ -10,11 +10,17 @@ use crate::TaskSpec;
 
 const DATABASE_FILE: &str = "db-qbs.sqlite3";
 
-/// 一条任务定义。**规格是全部内容**——SQL 不存（ADR-0036 §2），现算。
+/// 一条任务定义：**规格**（搬什么）+ **绑定**（从哪搬到哪）。
+///
+/// SQL 不存（ADR-0036 §2），现算。两个数据源 id 是**绑定，不是规格**（ADR-0037 §8）——
+/// 它们一个都不参与规格那三个派生面，所以不进 [`TaskSpec`]；
+/// 好处是同一份规格可以换绑定指到测试库或生产库，而不必改规格本身。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Task {
     pub task_id: String,
     pub name: String,
+    pub source_datasource_id: String,
+    pub target_datasource_id: String,
     pub spec: TaskSpec,
 }
 
@@ -22,7 +28,21 @@ pub struct Task {
 #[serde(deny_unknown_fields)]
 pub struct TaskInput {
     pub name: String,
+    pub source_datasource_id: String,
+    pub target_datasource_id: String,
     pub spec: TaskSpec,
+}
+
+impl TaskInput {
+    fn validate(&self) -> Result<(), String> {
+        if self.source_datasource_id.trim().is_empty() {
+            return Err("必须选一个源端数据源".to_owned());
+        }
+        if self.target_datasource_id.trim().is_empty() {
+            return Err("必须选一个目标端数据源".to_owned());
+        }
+        self.spec.validate()
+    }
 }
 
 pub struct TaskStore {
@@ -47,13 +67,15 @@ impl TaskStore {
 
         let connection = Connection::open(&database_path)
             .map_err(|error| format!("打开 SQLite 库文件失败：{error}"))?;
-        drop_legacy_task_table(&connection)?;
+        drop_incompatible_task_table(&connection)?;
         connection
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS tasks (
-                    task_id TEXT PRIMARY KEY NOT NULL,
-                    name    TEXT NOT NULL,
-                    spec    TEXT NOT NULL
+                    task_id              TEXT PRIMARY KEY NOT NULL,
+                    name                 TEXT NOT NULL,
+                    source_datasource_id TEXT NOT NULL,
+                    target_datasource_id TEXT NOT NULL,
+                    spec                 TEXT NOT NULL
                 );",
             )
             .map_err(|error| format!("初始化 SQLite 任务表失败：{error}"))?;
@@ -62,16 +84,25 @@ impl TaskStore {
     }
 
     pub fn create(&self, input: TaskInput) -> Result<Task, String> {
-        input.spec.validate()?;
+        input.validate()?;
         let task = Task {
             task_id: generate_task_id(),
             name: input.name,
+            source_datasource_id: input.source_datasource_id,
+            target_datasource_id: input.target_datasource_id,
             spec: input.spec,
         };
         self.connection
             .execute(
-                "INSERT INTO tasks (task_id, name, spec) VALUES (?1, ?2, ?3)",
-                params![task.task_id, task.name, spec_json(&task.spec)?],
+                "INSERT INTO tasks (task_id, name, source_datasource_id, target_datasource_id, spec)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    task.task_id,
+                    task.name,
+                    task.source_datasource_id,
+                    task.target_datasource_id,
+                    spec_json(&task.spec)?
+                ],
             )
             .map_err(|error| format!("写入 SQLite 任务失败：{error}"))?;
         Ok(task)
@@ -80,7 +111,10 @@ impl TaskStore {
     pub fn list(&self) -> Result<Vec<Task>, String> {
         let mut statement = self
             .connection
-            .prepare("SELECT task_id, name, spec FROM tasks ORDER BY rowid")
+            .prepare(
+                "SELECT task_id, name, source_datasource_id, target_datasource_id, spec
+                   FROM tasks ORDER BY rowid",
+            )
             .map_err(|error| format!("准备 SQLite 任务列表查询失败：{error}"))?;
         let tasks = statement
             .query_map([], task_from_row)
@@ -93,7 +127,8 @@ impl TaskStore {
     pub fn get(&self, task_id: &str) -> Result<Option<Task>, String> {
         self.connection
             .query_row(
-                "SELECT task_id, name, spec FROM tasks WHERE task_id = ?1",
+                "SELECT task_id, name, source_datasource_id, target_datasource_id, spec
+                   FROM tasks WHERE task_id = ?1",
                 [task_id],
                 task_from_row,
             )
@@ -102,12 +137,20 @@ impl TaskStore {
     }
 
     pub fn update(&self, task_id: &str, input: TaskInput) -> Result<Option<Task>, String> {
-        input.spec.validate()?;
+        input.validate()?;
         let updated_rows = self
             .connection
             .execute(
-                "UPDATE tasks SET name = ?2, spec = ?3 WHERE task_id = ?1",
-                params![task_id, input.name, spec_json(&input.spec)?],
+                "UPDATE tasks
+                    SET name = ?2, source_datasource_id = ?3, target_datasource_id = ?4, spec = ?5
+                  WHERE task_id = ?1",
+                params![
+                    task_id,
+                    input.name,
+                    input.source_datasource_id,
+                    input.target_datasource_id,
+                    spec_json(&input.spec)?
+                ],
             )
             .map_err(|error| format!("更新 SQLite 任务失败：{error}"))?;
         if updated_rows == 0 {
@@ -127,6 +170,27 @@ impl TaskStore {
     }
 }
 
+/// 删数据源前的引用检查（ADR-0037 §7）：还有任务引着就拒绝，不做级联、不做软删。
+/// 悬空引用会把失败推迟到发起运行那一刻才炸，那时用户手上只有一条「连不上」。
+impl TaskStore {
+    pub fn names_referencing(&self, datasource_id: &str) -> Result<Vec<String>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT name FROM tasks
+                  WHERE source_datasource_id = ?1 OR target_datasource_id = ?1
+                  ORDER BY rowid",
+            )
+            .map_err(|error| format!("准备 SQLite 数据源引用查询失败：{error}"))?;
+        let names = statement
+            .query_map([datasource_id], |row| row.get(0))
+            .map_err(|error| format!("查询 SQLite 数据源引用失败：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("读取 SQLite 数据源引用失败：{error}"))?;
+        Ok(names)
+    }
+}
+
 fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
     let encoded: String = row.get("spec")?;
     let spec = serde_json::from_str(&encoded).map_err(|error| {
@@ -141,14 +205,22 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
     Ok(Task {
         task_id: row.get("task_id")?,
         name: row.get("name")?,
+        source_datasource_id: row.get("source_datasource_id")?,
+        target_datasource_id: row.get("target_datasource_id")?,
         spec,
     })
 }
 
-/// 旧的四字段任务表（ADR-0016 §2）整表丢弃、换新数据结构——ADR-0036 §4 的原判，
+/// 形态对不上的任务表整表丢弃、换新数据结构——ADR-0036 §4 的原判，
 /// 前提是第一版尚无真实用户数据。**不做就地翻译**（反解析任意 Oracle SQL 正是 ADR-0023 §2
 /// 否掉的那件事），**不做 legacy 并存**（会把「两种任务形态」永久焊进发起链路）。
-fn drop_legacy_task_table(connection: &Connection) -> Result<(), String> {
+///
+/// 判据两条，缺任一即丢：
+/// - 没有 `spec` 列 —— 旧的四字段形态（ADR-0016 §2）。
+/// - 没有 `source_datasource_id` 列 —— 数据源绑定之前的形态。**旧行没有可推导的取值**：
+///   目标端数据源的凭据在对端的 `sink.toml` 里，source 拿不到，任何自动填都是编造
+///   （ADR-0037 §7）。
+fn drop_incompatible_task_table(connection: &Connection) -> Result<(), String> {
     let table_exists: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks')",
@@ -159,14 +231,17 @@ fn drop_legacy_task_table(connection: &Connection) -> Result<(), String> {
     if !table_exists {
         return Ok(());
     }
-    let has_spec_column: bool = connection
+    let compatible: bool = connection
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'spec')",
+            "SELECT
+               EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'spec')
+               AND
+               EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'source_datasource_id')",
             [],
             |row| row.get(0),
         )
-        .map_err(|error| format!("检查 SQLite 任务列 spec 失败：{error}"))?;
-    if has_spec_column {
+        .map_err(|error| format!("检查 SQLite 任务表形态失败：{error}"))?;
+    if compatible {
         return Ok(());
     }
     connection
@@ -229,6 +304,8 @@ mod tests {
         let created = store
             .create(TaskInput {
                 name: "holdings".to_owned(),
+                source_datasource_id: "src1".to_owned(),
+                target_datasource_id: "tgt1".to_owned(),
                 spec: sample_spec(),
             })
             .unwrap();
@@ -251,6 +328,8 @@ mod tests {
         let error = store
             .create(TaskInput {
                 name: "holdings".to_owned(),
+                source_datasource_id: "src1".to_owned(),
+                target_datasource_id: "tgt1".to_owned(),
                 spec,
             })
             .unwrap_err();

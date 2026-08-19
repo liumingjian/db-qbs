@@ -5,8 +5,8 @@ use oracle::{Connection, InitParams, ResultSet, Row};
 
 use crate::{
     builder_column_query, builder_table_query, classify_column, column_support, BuilderColumn,
-    BuilderTable, FailureKind, RangeCheckColumn, RangeCheckResult, RowSource, SourceColumn,
-    SourceConfig, SourceReadError, TaskConfig, TaskSpec, FETCH_ARRAY_SIZE,
+    BuilderTable, FailureKind, OracleAccess, RangeCheckColumn, RangeCheckResult, RowSource,
+    SourceColumn, SourceReadError, TaskConfig, TaskSpec, FETCH_ARRAY_SIZE,
 };
 
 /// 一次查询的绑定变量取值：参数名 → 值。全部值都走绑定（ADR-0011 §2「不发明第二套转义」），
@@ -24,7 +24,7 @@ pub struct OracleRowSource {
     rows: ResultSet<'static, Row>,
     columns: Vec<SourceColumn>,
     value_kinds: Vec<ValueKind>,
-    config: SourceConfig,
+    access: OracleAccess,
     source_sql: String,
     bindings: Bindings,
 }
@@ -38,19 +38,19 @@ enum ValueKind {
 }
 
 impl OracleRowSource {
-    pub fn connect(config: &SourceConfig, task: &TaskConfig) -> Result<Self, SourceReadError> {
+    pub fn connect(task: &TaskConfig) -> Result<Self, SourceReadError> {
         let source_sql = task.source_sql();
         let bindings = task
             .bindings()
             .map_err(|message| SourceReadError::with_kind(&message, None, FailureKind::Config))?;
-        let rows = open_result_set(config, &source_sql, &bindings)?;
+        let rows = open_result_set(&task.oracle, &source_sql, &bindings)?;
         let (columns, value_kinds) = describe_columns(rows.column_info());
 
         Ok(Self {
             rows,
             columns,
             value_kinds,
-            config: config.clone(),
+            access: task.oracle.clone(),
             source_sql,
             bindings,
         })
@@ -61,21 +61,33 @@ impl OracleRowSource {
     /// 投影里**结构性只有真列**（`a.C AS C`），所以旧那段「表达式列要抹掉精度再重分类」
     /// 的归一化随生成器一起退役了——构建器根本产不出表达式列（ADR-0036 §5 第 5/6 条）。
     pub fn describe(
-        config: &SourceConfig,
+        access: &OracleAccess,
         spec: &TaskSpec,
     ) -> Result<Vec<SourceColumn>, SourceReadError> {
-        let rows = open_result_set(config, &spec.source_sql(), &spec.describe_bindings())?;
+        let rows = open_result_set(access, &spec.source_sql(), &spec.describe_bindings())?;
         let (columns, _) = describe_columns(rows.column_info());
         Ok(columns)
     }
 
+    /// 「测试连接」（ADR-0037 §9）：开一条连接、跑一条最便宜的查询，用完即关。
+    ///
+    /// `SELECT 1 FROM DUAL` 而不是只 `Connection::connect`：登录成功之后仍可能因为
+    /// 会话级的东西（NLS、权限）在第一条语句上才炸，那时用户已经以为「连通了」。
+    pub fn test_connection(access: &OracleAccess) -> Result<(), SourceReadError> {
+        let connection = open_connection(access)?;
+        connection
+            .query_row("SELECT 1 FROM DUAL", &[])
+            .map_err(oracle_error)?;
+        Ok(())
+    }
+
     pub fn list_builder_tables(
-        config: &SourceConfig,
+        access: &OracleAccess,
         dblink: Option<&str>,
     ) -> Result<Vec<BuilderTable>, SourceReadError> {
         let query = builder_table_query(dblink)
             .map_err(|error| SourceReadError::with_kind(error, None, FailureKind::Config))?;
-        let connection = open_connection(config)?;
+        let connection = open_connection(access)?;
         let rows = connection.query(&query, &[]).map_err(oracle_error)?;
         let mut tables = Vec::new();
         for row in rows {
@@ -89,14 +101,14 @@ impl OracleRowSource {
     }
 
     pub fn list_builder_columns(
-        config: &SourceConfig,
+        access: &OracleAccess,
         dblink: Option<&str>,
         owner: &str,
         table: &str,
     ) -> Result<Vec<BuilderColumn>, SourceReadError> {
         let query = builder_column_query(dblink)
             .map_err(|error| SourceReadError::with_kind(error, None, FailureKind::Config))?;
-        let connection = open_connection(config)?;
+        let connection = open_connection(access)?;
         let rows = connection
             .query(&query, &[&owner, &table])
             .map_err(oracle_error)?;
@@ -125,7 +137,7 @@ impl OracleRowSource {
         columns: &[RangeCheckColumn],
     ) -> Result<(Vec<RangeCheckResult>, u64), SourceReadError> {
         let query = build_range_check_query(&self.source_sql, columns);
-        let connection = open_connection(&self.config)?;
+        let connection = open_connection(&self.access)?;
         let statement = connection.statement(&query).build().map_err(oracle_error)?;
         let mut rows = statement
             .into_result_set_named(&named_params(&self.bindings))
@@ -194,11 +206,11 @@ fn aggregate_count(row: &Row, index: usize, label: &str) -> Result<u64, SourceRe
 }
 
 fn open_result_set(
-    config: &SourceConfig,
+    access: &OracleAccess,
     source_sql: &str,
     bindings: &Bindings,
 ) -> Result<ResultSet<'static, Row>, SourceReadError> {
-    let connection = open_connection(config)?;
+    let connection = open_connection(access)?;
     let statement = connection
         .statement(source_sql)
         .fetch_array_size(FETCH_ARRAY_SIZE)
@@ -210,20 +222,19 @@ fn open_result_set(
     Ok(rows)
 }
 
-fn open_connection(config: &SourceConfig) -> Result<Connection, SourceReadError> {
+/// **`client_lib_dir` 只有第一次调用生效**：ODPI-C 的 `dpiContext` 全进程唯一，
+/// 已初始化后再调 `init()` 返回 `Ok(false)` 且参数被**静默忽略**（ADR-0037 §6 的查证）。
+/// 这也正是它不能做成数据源级字段的原因。
+fn open_connection(access: &OracleAccess) -> Result<Connection, SourceReadError> {
     std::env::set_var("NLS_LANG", ".AL32UTF8");
     let mut init = InitParams::new();
-    init.oracle_client_lib_dir(&config.oracle_client_lib_dir)
+    init.oracle_client_lib_dir(&access.client_lib_dir)
         .and_then(|params| params.default_driver_name("db-qbs-source : 0.1.0"))
         .and_then(|params| params.init())
         .map_err(oracle_connect_error)?;
 
-    Connection::connect(
-        &config.oracle_username,
-        &config.oracle_password,
-        &config.oracle_connect_string,
-    )
-    .map_err(oracle_connect_error)
+    Connection::connect(&access.username, &access.password, &access.connect_string)
+        .map_err(oracle_connect_error)
 }
 
 fn describe_columns(infos: &[oracle::ColumnInfo]) -> (Vec<SourceColumn>, Vec<ValueKind>) {

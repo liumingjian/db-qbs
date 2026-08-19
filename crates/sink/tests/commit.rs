@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use db_qbs_sink::{
     AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, BatchPayload, CreateStagingError,
     Destination, DropStagingError, OpenRunRequest, SinkService, SourceColumn, TargetColumn,
-    TargetKey, WriteBatchError,
+    TargetConnection, TargetKey, WriteBatchError,
 };
 
 const RUN_ID: &str = "20260814091530_a3f19c";
@@ -109,6 +109,13 @@ fn open_request_for(run_id: &str) -> OpenRunRequest {
     OpenRunRequest {
         run_id: run_id.to_owned(),
         target_table: "T_POSITION".to_owned(),
+        target: TargetConnection {
+            host: "127.0.0.1".to_owned(),
+            port: 3306,
+            username: "sink".to_owned(),
+            password: "change-me".to_owned(),
+            database: "qbs".to_owned(),
+        },
         primary_key: vec!["D_BIZ".to_owned()],
         source_columns: vec![SourceColumn {
             name: "D_BIZ".to_owned(),

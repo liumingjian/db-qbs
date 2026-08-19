@@ -1,12 +1,13 @@
 use std::fs;
-use std::process::Command;
+use std::io::{BufRead, BufReader};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use db_qbs_sink::{
     build_staging_ddl, check_connection_settings, precheck, AtomicSwapError, AtomicSwapRequest,
     AtomicSwapResult, CreateStagingError, Destination, DropStagingError, OpenRunRequest,
     RangeCheckColumn, RangeCheckResult, SinkConfig, SinkService, SourceColumn, TargetColumn,
-    TargetKey, WriteBatchError,
+    TargetConnection, TargetKey, WriteBatchError,
 };
 
 const RUN_ID: &str = "20260814091530_a3f19c";
@@ -134,16 +135,37 @@ fn startup_warns_about_the_unauthenticated_write_surface_before_connecting() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_db-qbs-sink"))
+    // sink 启动**不再连 MySQL**（ADR-0037 §2），所以它不会再因为连不上而退出——
+    // 这里必须读完想要的行就走人。`.output()` 会等进程结束，在新语义下是永久阻塞。
+    let mut child = Command::new(env!("CARGO_BIN_EXE_db-qbs-sink"))
         .args(["--config"])
         .arg(&config_path)
-        .output()
+        .stdout(Stdio::piped())
+        .spawn()
         .unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    let mut banner_line = String::new();
+    reader.read_line(&mut banner_line).unwrap();
+    let mut retired_line = String::new();
+    reader.read_line(&mut retired_line).unwrap();
+    // 横幅打在任何连接动作之前——而现在启动压根没有连接动作，所以进程还活着。
+    // 这一条正是 ADR-0037 §2 把「启动即连库」拆掉之后新的可观测判据。
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "sink 启动不该再因为连不上 MySQL 而退出"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
     fs::remove_file(config_path).unwrap();
 
-    assert!(!output.status.success());
-    let lines = String::from_utf8(output.stdout).unwrap();
-    let banner: serde_json::Value = serde_json::from_str(lines.lines().next().unwrap()).unwrap();
+    // 第二行：退役字段仍能解析，但一个字都不读，必须留声（ADR-0037 §2）。
+    let retired: serde_json::Value = serde_json::from_str(retired_line.trim()).unwrap();
+    assert_eq!(retired["level"], "warn");
+    let retired_message = retired["message"].as_str().unwrap();
+    assert!(retired_message.contains("mysql_dsn"), "{retired_message}");
+    assert!(retired_message.contains("已退役"), "{retired_message}");
+
+    let banner: serde_json::Value = serde_json::from_str(banner_line.trim()).unwrap();
     assert_eq!(banner["level"], "warn");
     assert_eq!(banner["event"], "sink_started");
     assert_eq!(banner["listen"], "127.0.0.1:0");
@@ -569,6 +591,13 @@ fn open_request(source_columns: Vec<SourceColumn>) -> OpenRunRequest {
     OpenRunRequest {
         run_id: RUN_ID.to_owned(),
         target_table: "T_POSITION".to_owned(),
+        target: TargetConnection {
+            host: "127.0.0.1".to_owned(),
+            port: 3306,
+            username: "sink".to_owned(),
+            password: "change-me".to_owned(),
+            database: "qbs".to_owned(),
+        },
         primary_key: vec!["D_BIZ".to_owned()],
         source_columns,
         range_check_results: None,
