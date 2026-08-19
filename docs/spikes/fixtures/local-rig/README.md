@@ -389,3 +389,31 @@ fixture 是新建的 `acceptance/oracle-v1.sql` 与 `acceptance/mysql-v1.sql`，
 （所有者裁定），随后是逐场景结果、C6 的六个内存数、逐条断言证据，以及两节交代边界的正文：
 台架能证到哪儿（C1② / C2② / C3③ 有一半在界面上，归 X 走查），以及三份视觉走查在本入口的
 触发情况。**不许写「通过」**——贴的是实际观察，没跑的写明「未跑及为什么」。
+
+## 三份视觉走查的驱动脚本（`walkthrough/`）
+
+`CLAUDE.md` 的 Visual gates 把 V1–V25 / W1–W6 / X1–X8 定成硬门禁，但驱动它们的桩后端与探针
+一直只躺在某台机器未跟踪的 `.playwright/` 下——**门禁是硬的、跑门禁的工具却换台机器就没了**。
+2026-08-19 起这套脚本挪进 `walkthrough/`，与四份 acceptance 台架同处一棵树、一起入库。
+`.playwright/` 只留 `cli.config.json` 这类本机配置，继续不跟踪。
+
+```bash
+cd docs/spikes/fixtures/local-rig
+./walkthrough/run-v-walkthrough.sh    # V1–V25：起 v-mock.py  → 跑 v-probe.py（端口 18097）
+./walkthrough/run-w-walkthrough.sh    # W1–W6： 起 m3-mock.py → 跑 m3-probe.py（端口 18099）
+./walkthrough/run-x-walkthrough.sh    # X1–X8： 起 v1-mock.py → 跑 v1-probe.py（端口 18098）
+```
+
+- **桩后端 + 真实构建产物**：三份 mock 各自把对应态原样造出来，喂的是仓库根 `npm run build`
+  产出的**真实 `web/dist`**（mock 沿父链找它，找不到就明说要先构建）。造态是假的，渲染面是真的。
+- **只观察、不断言**（ADR-0028 §1）：探针把 JSON 打到 stdout 给人抄进走查记录，
+  一行 DOM 断言都不进验收套件；**判据已退役的条目照实报 `retired`**，不许报「通过」、不许跳过。
+- **playwright 装在仓库外**：探针默认用 `~/pwvenv/bin/python`，换个位置传 `PW_PYTHON=...`；
+  端口传 `PORT=...`。三支 runner 都会先查这个解释器在不在，不在就直说，不会跑到一半才炸。
+- `*-summary.py` 是把探针输出挑重点打出来的小工具，读 `/tmp/{v,w,x}-obs.json`，
+  换路径传 `OBS_JSON=...`。
+- `switch-child-mode.sh` 是 M2 走查专用：`M2_KEEP_RIG` 交出来的台架固定停在 `hang-streaming`，
+  V2/V6/V7/V10–V12/V15/V22 要 `real`，用它按 `start_source` 同一套参数重起 source。
+  **work_root 必须传**（或设 `M2_WORK_ROOT`）——那是每次都不同的临时目录。
+- `wt-runs.py` / `walkthrough-history.py` / `walkthrough-tasks.py` / `wt-extra.py` 是对着
+  **真台架**（18088）取观察的几支，不配桩后端。
