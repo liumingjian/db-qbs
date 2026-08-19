@@ -122,7 +122,10 @@ fn write_task(directory: &Path) -> PathBuf {
          owner = \"APP\"\n\
          table = \"ORDERS\"\n\
          target_table = \"ORDERS\"\n\
-         columns = [\"ID\", \"BIZ_DAY\"]\n\
+         columns = [\n\
+         { source = \"ID\", target = \"ID\" },\n\
+         { source = \"BIZ_DAY\", target = \"BIZ_DAY\" },\n\
+         ]\n\
          primary_key = [\"ID\"]\n\
          \n\
          [[spec.conditions]]\n\

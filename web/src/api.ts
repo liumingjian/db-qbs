@@ -35,14 +35,23 @@ export interface OrderTerm {
  *
  * SQL 不在里面：它由规格现算，界面上只读，v1 没有编辑入口。
  */
+export interface ColumnMapping {
+  source: string;
+  /** 目标列名，默认预填 = `source`（ADR-0038 §2）。落到 SQL 上就是投影的别名。 */
+  target: string;
+}
+
 export interface TaskSpec {
   dblink?: string;
   owner: string;
   table: string;
   target_table: string;
-  columns: string[];
-  /** upsert 的去重键，必选（所有者 2026-08-18 裁定）。 */
+  /**
+   * upsert 的去重键，必选（所有者 2026-08-18 裁定）。存的是**目标列名**（ADR-0038 §2/§6），
+   * 与 `columns[].target` 同一个名字空间。
+   */
   primary_key: string[];
+  columns: ColumnMapping[];
   conditions: Condition[];
   order_by: OrderTerm[];
 }

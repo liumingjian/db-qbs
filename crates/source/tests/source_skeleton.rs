@@ -52,7 +52,7 @@ fn seed_datasources(port: u16) -> (String, String) {
 fn task_json(name: &str, target_table: &str, datasources: &(String, String)) -> String {
     let (source_datasource_id, target_datasource_id) = datasources;
     format!(
-        r#"{{"name":"{name}","source_datasource_id":"{source_datasource_id}","target_datasource_id":"{target_datasource_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"{target_table}","columns":["ID","D_BIZ"],"primary_key":["ID"],"conditions":[{{"column":"D_BIZ","operator":"eq","value_type":"date","parameter":"d_biz","value_source":"runtime","constant":""}}],"order_by":[]}}}}"#
+        r#"{{"name":"{name}","source_datasource_id":"{source_datasource_id}","target_datasource_id":"{target_datasource_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"{target_table}","columns":[{{"source":"ID","target":"ID"}},{{"source":"D_BIZ","target":"D_BIZ"}}],"primary_key":["ID"],"conditions":[{{"column":"D_BIZ","operator":"eq","value_type":"date","parameter":"d_biz","value_source":"runtime","constant":""}}],"order_by":[]}}}}"#
     )
 }
 
@@ -161,7 +161,7 @@ fn task_writes_reject_client_identity_and_incomplete_definitions() {
         "POST",
         "/api/tasks",
         Some(
-            r#"{"spec":{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":["ID"],"primary_key":["ID"],"conditions":[],"order_by":[]}}"#,
+            r#"{"spec":{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{"source":"ID","target":"ID"}],"primary_key":["ID"],"conditions":[],"order_by":[]}}"#,
         ),
     )
     .unwrap();
@@ -694,7 +694,7 @@ fn column_fetch_rejects_an_invalid_spec_before_reaching_oracle() {
           "datasource_id":"unused-the-spec-gate-runs-first",
           "spec":{
             "owner":"APP","table":"ORDERS","target_table":"ORDERS",
-            "columns":["ID"],"primary_key":["MISSING"],
+            "columns":[{"source":"ID","target":"ID"}],"primary_key":["MISSING"],
             "conditions":[],"order_by":[]
           }
         }"#,
@@ -726,7 +726,7 @@ fn builder_sql_is_derived_from_the_spec_and_never_travels_back() {
           "owner":"HTBR45",
           "table":"T_R_FR_ASTSTAT",
           "target_table":"T_POSITION",
-          "columns":["N_VA_PRICE","D_BIZ"],
+          "columns":[{"source":"N_VA_PRICE","target":"N_VA_PRICE"},{"source":"D_BIZ","target":"D_BIZ"}],
           "primary_key":["D_BIZ"],
           "conditions":[{"column":"D_BIZ","operator":"eq","value_type":"date","parameter":"d_biz","value_source":"runtime","constant":""}],
           "order_by":[{"column":"D_BIZ","direction":"desc"}]
@@ -812,7 +812,7 @@ fn column_fetch_oracle_failure_does_not_create_a_run_touch_sink_or_write_storage
           "datasource_id":"{source_datasource_id}",
           "spec":{{
             "owner":"APP","table":"MISSING_ORDERS","target_table":"ORDERS",
-            "columns":["ID","BIZ_DAY"],"primary_key":["ID"],
+            "columns":[{{"source":"ID","target":"ID"}},{{"source":"BIZ_DAY","target":"BIZ_DAY"}}],"primary_key":["ID"],
             "conditions":[],"order_by":[]
           }}
         }}"#

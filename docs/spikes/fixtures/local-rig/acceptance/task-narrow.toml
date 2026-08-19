@@ -9,7 +9,13 @@
 owner = "SPIKE"
 table = "T_M1_NARROW"
 target_table = "M1_NARROW"
-columns = ["ROW_ID", "V_TEXT", "D_BIZ"]
+# 目标字段与源列同名——恒等映射（ADR-0038 §2）。台架搬的是同名列，
+# 所以每条映射的 target 就是 source；改名那一路归 C 系列去证。
+columns = [
+  { source = "ROW_ID", target = "ROW_ID" },
+  { source = "V_TEXT", target = "V_TEXT" },
+  { source = "D_BIZ", target = "D_BIZ" },
+]
 # 主键必选（所有者 2026-08-18 裁定）：撤掉 DELETE 之后，幂等全靠它。
 primary_key = ["ROW_ID"]
 

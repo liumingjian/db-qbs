@@ -1,13 +1,21 @@
 //! 构建器两件事：元数据查询，与「结构化规格 → 源端 SQL」的生成（ADR-0036 §1）。
 //!
 //! SQL 形状预检的六条规则已随 ADR-0036 §5 整段取消，原来那个「生成的 SQL 必须过六条」的
-//! 断言随之失去对象。顶上来的判据是**生成即合法**：投影恒是 `a.C AS C`，值恒是绑定变量，
+//! 断言随之失去对象。顶上来的判据是**生成即合法**：投影恒是 `a.<源列> AS <目标字段>`，值恒是绑定变量，
 //! 标识符恒过白名单——这些由生成器结构性保证，下面逐条钉住。
 
 use db_qbs_source::{
-    builder_column_query, builder_table_query, validate_builder_dblink, Comparison, Condition,
-    Direction, OrderTerm, RunParams, TaskSpec, ValueSource, ValueType,
+    builder_column_query, builder_table_query, validate_builder_dblink, ColumnMapping, Comparison,
+    Condition, Direction, OrderTerm, RunParams, TaskSpec, ValueSource, ValueType,
 };
+
+/// 恒等映射：目标字段预填成源列名（ADR-0038 §2）。改形状之前的规格就是这一份。
+fn identity(column: &str) -> ColumnMapping {
+    ColumnMapping {
+        source: column.to_owned(),
+        target: column.to_owned(),
+    }
+}
 
 fn spec() -> TaskSpec {
     TaskSpec {
@@ -15,7 +23,7 @@ fn spec() -> TaskSpec {
         owner: "HTBR45".to_owned(),
         table: "T_R_FR_ASTSTAT".to_owned(),
         target_table: "T_POSITION".to_owned(),
-        columns: vec!["N_VA_PRICE".to_owned(), "D_BIZ".to_owned()],
+        columns: vec![identity("N_VA_PRICE"), identity("D_BIZ")],
         primary_key: vec!["D_BIZ".to_owned()],
         conditions: Vec::new(),
         order_by: Vec::new(),
@@ -49,6 +57,34 @@ fn a_spec_without_conditions_reads_the_whole_table() {
     );
     assert!(spec.runtime_parameters().is_empty());
     assert!(spec.bindings(&RunParams::new()).unwrap().is_empty());
+}
+
+#[test]
+fn a_renamed_column_shows_up_as_the_alias_and_nothing_else_moves() {
+    // ADR-0038 §1：映射就是投影的别名，搬运语义一个字节不变。所以「改了目标字段」
+    // 在 SQL 上的全部痕迹就是 `AS` 右边那个词——WHERE / ORDER BY 仍然按**源列名**走
+    // （条件挑的是源表的列，改目标字段名不该动它们）。
+    let mut renamed = spec();
+    renamed.columns = vec![
+        ColumnMapping {
+            source: "C_NAME".to_owned(),
+            target: "CUST_NAME".to_owned(),
+        },
+        identity("D_BIZ"),
+    ];
+    renamed.primary_key = vec!["CUST_NAME".to_owned()];
+    renamed.conditions = vec![condition("D_BIZ", "d_biz", ValueType::Date)];
+    renamed.validate().unwrap();
+
+    assert_eq!(
+        renamed.source_sql(),
+        concat!(
+            "SELECT a.C_NAME AS CUST_NAME,\n",
+            "       a.D_BIZ AS D_BIZ\n",
+            "  FROM HTBR45.T_R_FR_ASTSTAT@FA a\n",
+            " WHERE a.D_BIZ = TO_DATE(:d_biz,'YYYY-MM-DD')"
+        )
+    );
 }
 
 #[test]
@@ -164,7 +200,7 @@ fn describe_bindings_cover_every_parameter_with_a_typed_dummy() {
 }
 
 #[test]
-fn validation_refuses_the_four_ways_a_spec_can_be_unusable() {
+fn validation_refuses_the_six_ways_a_spec_can_be_unusable() {
     let mut no_key = spec();
     no_key.primary_key.clear();
     assert_eq!(
@@ -177,6 +213,34 @@ fn validation_refuses_the_four_ways_a_spec_can_be_unusable() {
     assert_eq!(
         key_outside.validate().unwrap_err(),
         "主键列 ID 不在选中的列里"
+    );
+
+    // 主键存的是**目标字段**：改过名的列上，源列名才是那个「不在选中的列里」的。
+    let mut key_by_source_name = spec();
+    key_by_source_name.columns = vec![ColumnMapping {
+        source: "C_NAME".to_owned(),
+        target: "CUST_NAME".to_owned(),
+    }];
+    key_by_source_name.primary_key = vec!["C_NAME".to_owned()];
+    assert_eq!(
+        key_by_source_name.validate().unwrap_err(),
+        "主键列 C_NAME 不在选中的列里"
+    );
+    key_by_source_name.primary_key = vec!["CUST_NAME".to_owned()];
+    key_by_source_name.validate().unwrap();
+
+    // 两列映到同一个目标字段会生成两个同名别名，按名字对齐时后一列静默盖掉前一列。
+    let mut duplicate_target = spec();
+    duplicate_target.columns = vec![
+        identity("N_VA_PRICE"),
+        ColumnMapping {
+            source: "D_BIZ".to_owned(),
+            target: "N_VA_PRICE".to_owned(),
+        },
+    ];
+    assert_eq!(
+        duplicate_target.validate().unwrap_err(),
+        "目标字段 N_VA_PRICE 重复"
     );
 
     let mut duplicate_parameter = spec();

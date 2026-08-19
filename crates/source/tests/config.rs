@@ -77,6 +77,16 @@ fn the_task_file_carries_a_spec_and_this_run_parameters_and_nothing_else() {
     let loaded = load_task_config(&path).unwrap();
     assert_eq!(loaded.spec.owner, "APP");
     assert_eq!(loaded.spec.primary_key, vec!["ID".to_owned()]);
+    // 映射逐条读进来：目标字段是规格里的一等字段，不是从源列名推出来的（ADR-0038 §2）。
+    assert_eq!(
+        loaded
+            .spec
+            .columns
+            .iter()
+            .map(|mapping| (mapping.source.as_str(), mapping.target.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("ID", "ID"), ("D_BIZ", "D_BIZ")]
+    );
     assert_eq!(loaded.run_params["d_biz"], "2026-08-14");
     // 两端连接由编排进程解好写进来（ADR-0037 §1/§8）——子进程不碰数据源库、也不碰密钥。
     assert_eq!(loaded.oracle.username, "source");
@@ -112,8 +122,10 @@ fn column_precision_is_not_a_task_definition_field_any_more() {
 
 #[test]
 fn a_materialized_task_file_survives_a_serialize_reload_round_trip() {
-    // 临时任务定义是父进程写、子进程读的。`conditions` / `order_by` 是 array-of-tables，
-    // 必须排在所有标量之后，否则 `toml::to_string` 直接失败——这条用例就是那道闸。
+    // 临时任务定义是父进程写、子进程读的。`columns` / `conditions` / `order_by` 是
+    // array-of-tables，必须排在所有标量之后，否则 `toml::to_string` 直接失败——这条用例就是那道闸。
+    // `columns` 自 ADR-0038 §2 换成 `ColumnMapping` 之后也归这一类，所以它在结构体里排到了
+    // `primary_key` 之后；把它挪回去这条用例就会红。
     let directory = temp_directory();
     let path = write(&directory, "task.toml", valid_task());
     let loaded = load_task_config(&path).unwrap();
@@ -140,7 +152,10 @@ fn valid_task() -> &'static str {
      owner = \"APP\"\n\
      table = \"ORDERS\"\n\
      target_table = \"ORDERS\"\n\
-     columns = [\"ID\", \"D_BIZ\"]\n\
+     columns = [\n\
+     { source = \"ID\", target = \"ID\" },\n\
+     { source = \"D_BIZ\", target = \"D_BIZ\" },\n\
+     ]\n\
      primary_key = [\"ID\"]\n\
      \n\
      [[spec.conditions]]\n\

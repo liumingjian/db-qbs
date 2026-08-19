@@ -9,6 +9,7 @@ import {
   runParamsSummary,
   runtimeConditions,
   sameRunParams,
+  targetFieldOf,
 } from "./spec";
 
 function condition(overrides: Partial<Condition> = {}): Condition {
@@ -92,5 +93,25 @@ describe("run parameter sets", () => {
 
   it("says so out loud when a task takes no parameters", () => {
     expect(runParamsSummary({})).toBe("—");
+  });
+});
+
+describe("column mapping lookup", () => {
+  const columns = [
+    { source: "C_NAME", target: "CUST_NAME" },
+    { source: "D_BIZ", target: "D_BIZ" },
+  ];
+
+  it("answers with the target field, not the source column", () => {
+    // 界面上一行是源列、主键存的是目标字段：这一层换不掉，改过名的列上省掉它就会错。
+    expect(targetFieldOf(columns, "C_NAME")).toBe("CUST_NAME");
+    expect(targetFieldOf(columns, "D_BIZ")).toBe("D_BIZ");
+  });
+
+  it("says undefined for a column that is not selected", () => {
+    expect(targetFieldOf(columns, "N_VA_PRICE")).toBeUndefined();
+    expect(targetFieldOf([], "C_NAME")).toBeUndefined();
+    // 目标名不是入口：拿目标字段去查也查不出来。
+    expect(targetFieldOf(columns, "CUST_NAME")).toBeUndefined();
   });
 });

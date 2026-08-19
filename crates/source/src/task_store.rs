@@ -215,11 +215,16 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
 /// 前提是第一版尚无真实用户数据。**不做就地翻译**（反解析任意 Oracle SQL 正是 ADR-0023 §2
 /// 否掉的那件事），**不做 legacy 并存**（会把「两种任务形态」永久焊进发起链路）。
 ///
-/// 判据两条，缺任一即丢：
+/// 判据三条，缺任一即丢：
 /// - 没有 `spec` 列 —— 旧的四字段形态（ADR-0016 §2）。
 /// - 没有 `source_datasource_id` 列 —— 数据源绑定之前的形态。**旧行没有可推导的取值**：
 ///   目标端数据源的凭据在对端的 `sink.toml` 里，source 拿不到，任何自动填都是编造
 ///   （ADR-0037 §7）。
+/// - `spec` 列里有一行反序列化不出当前的 [`TaskSpec`] —— ADR-0038 §2 把 `columns` 从
+///   `Vec<String>` 换成了 `Vec<ColumnMapping>`，表的列名没变、JSON 的形状变了，所以前两条查不出它。
+///   **这不是兼容层**：不翻译、不加 serde 容错，与前两条走同一条「整表丢弃」的路
+///   （ADR-0036 §4）。不加这一条的话旧行会让 `list()` 直接报错——那既不是「丢弃」，
+///   也没有从界面上恢复的办法。
 fn drop_incompatible_task_table(connection: &Connection) -> Result<(), String> {
     let table_exists: bool = connection
         .query_row(
@@ -241,13 +246,35 @@ fn drop_incompatible_task_table(connection: &Connection) -> Result<(), String> {
             |row| row.get(0),
         )
         .map_err(|error| format!("检查 SQLite 任务表形态失败：{error}"))?;
-    if compatible {
+    if compatible && every_spec_parses(connection)? {
         return Ok(());
     }
     connection
         .execute("DROP TABLE tasks", [])
         .map_err(|error| format!("丢弃旧 SQLite 任务表失败：{error}"))?;
     Ok(())
+}
+
+/// 每一行的 `spec` 都还能反序列化成当前的 [`TaskSpec`]？一行不行就等于整表形态对不上。
+fn every_spec_parses(connection: &Connection) -> Result<bool, String> {
+    let mut statement = connection
+        .prepare("SELECT spec FROM tasks")
+        .map_err(|error| format!("准备 SQLite 任务规格形态查询失败：{error}"))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| format!("查询 SQLite 任务规格形态失败：{error}"))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("读取 SQLite 任务规格形态失败：{error}"))?
+    {
+        let encoded: String = row
+            .get(0)
+            .map_err(|error| format!("读取 SQLite 任务规格失败：{error}"))?;
+        if serde_json::from_str::<TaskSpec>(&encoded).is_err() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn spec_json(spec: &TaskSpec) -> Result<String, String> {
@@ -273,16 +300,23 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
-    use crate::task_spec::{Comparison, Condition, ValueSource, ValueType};
+    use crate::task_spec::{ColumnMapping, Comparison, Condition, ValueSource, ValueType};
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    fn mapping(column: &str) -> ColumnMapping {
+        ColumnMapping {
+            source: column.to_owned(),
+            target: column.to_owned(),
+        }
+    }
 
     fn sample_spec() -> TaskSpec {
         TaskSpec {
             dblink: Some("FA".to_owned()),
             owner: "HTBR45".to_owned(),
             table: "T_R_FR_ASTSTAT".to_owned(),
-            columns: vec!["ID".to_owned(), "D_BIZ".to_owned()],
+            columns: vec![mapping("ID"), mapping("D_BIZ")],
             primary_key: vec!["ID".to_owned()],
             conditions: vec![Condition {
                 column: "D_BIZ".to_owned(),
@@ -365,6 +399,39 @@ mod tests {
         let store = TaskStore::open(&directory).unwrap();
         assert!(store.list().unwrap().is_empty());
         assert_eq!(store.get("legacy").unwrap(), None);
+
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_task_row_whose_spec_predates_column_mapping_is_dropped_whole() {
+        // ADR-0038 §2 换了 `columns` 的形状，表的列名一个没变——所以按列名查形态查不出它。
+        // 判据是「spec 反序列化不出来」，处置与前两条一样：整表丢弃（ADR-0036 §4）。
+        let directory = temp_directory();
+        let database = directory.join(DATABASE_FILE);
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE tasks (
+                    task_id              TEXT PRIMARY KEY NOT NULL,
+                    name                 TEXT NOT NULL,
+                    source_datasource_id TEXT NOT NULL,
+                    target_datasource_id TEXT NOT NULL,
+                    spec                 TEXT NOT NULL
+                );
+                INSERT INTO tasks VALUES (
+                    'stale', 'stale task', 'src1', 'tgt1',
+                    '{\"owner\":\"HTBR45\",\"table\":\"T\",\"target_table\":\"M\",\"columns\":[\"ID\"],\"primary_key\":[\"ID\"]}'
+                );",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = TaskStore::open(&directory).unwrap();
+        // 报错就说明没丢干净：那既不是「丢弃」，也没有从界面上恢复的办法。
+        assert!(store.list().unwrap().is_empty());
+        assert_eq!(store.get("stale").unwrap(), None);
 
         drop(store);
         std::fs::remove_dir_all(directory).unwrap();

@@ -47,7 +47,8 @@ pub use sql_builder::{
 };
 pub use target_ddl::{generate_target_ddl, TargetDdlColumnError, TargetDdlError};
 pub use task_spec::{
-    Comparison, Condition, Direction, OrderTerm, RunParams, TaskSpec, ValueSource, ValueType,
+    ColumnMapping, Comparison, Condition, Direction, OrderTerm, RunParams, TaskSpec, ValueSource,
+    ValueType,
 };
 pub use task_store::{Task, TaskInput, TaskStore};
 pub use transfer::{

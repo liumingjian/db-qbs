@@ -57,6 +57,7 @@ import {
   comparisonSymbol,
   defaultParameterName,
   defaultValueType,
+  targetFieldOf,
   VALUE_TYPE_LABELS,
 } from "./spec";
 import { StartRunDialog } from "./StartRunDialog";
@@ -627,9 +628,9 @@ function TaskFormDialog({
   // 只是字典那几列显示为未知。不读一次 Oracle 就改不了条件，是没必要的门槛。
   const columnNames = useMemo(() => {
     const names = columns.map((column) => column.name);
-    for (const column of spec.columns) {
-      if (!names.includes(column)) {
-        names.push(column);
+    for (const mapping of spec.columns) {
+      if (!names.includes(mapping.source)) {
+        names.push(mapping.source);
       }
     }
     return names;
@@ -720,23 +721,30 @@ function TaskFormDialog({
     });
   }
 
+  // 勾一列就是加一条恒等映射（`target` 预填成源列名，ADR-0038 §2）。改目标字段的入口归 ⑤（#131），
+  // 本票只把形状换过来，屏幕上看不出变化。
   function toggleColumn(column: string) {
-    const selected = spec.columns.includes(column);
+    const mapping = spec.columns.find((candidate) => candidate.source === column);
+    if (mapping === undefined) {
+      updateSpec({ columns: [...spec.columns, { source: column, target: column }] });
+      return;
+    }
+    // 主键存的是目标字段，取消勾选时按目标名摘——恒等映射下两者同名，但别把这一层省掉。
     updateSpec({
-      columns: selected
-        ? spec.columns.filter((name) => name !== column)
-        : [...spec.columns, column],
-      primary_key: selected
-        ? spec.primary_key.filter((name) => name !== column)
-        : spec.primary_key,
+      columns: spec.columns.filter((candidate) => candidate.source !== column),
+      primary_key: spec.primary_key.filter((name) => name !== mapping.target),
     });
   }
 
   function toggleKey(column: string) {
+    const target = targetFieldOf(spec.columns, column);
+    if (target === undefined) {
+      return;
+    }
     updateSpec({
-      primary_key: spec.primary_key.includes(column)
-        ? spec.primary_key.filter((name) => name !== column)
-        : [...spec.primary_key, column],
+      primary_key: spec.primary_key.includes(target)
+        ? spec.primary_key.filter((name) => name !== target)
+        : [...spec.primary_key, target],
     });
   }
 
@@ -998,7 +1006,8 @@ function TaskFormDialog({
                   <tbody>
                     {columnNames.map((columnName) => {
                       const column = dictionary.get(columnName);
-                      const selected = spec.columns.includes(columnName);
+                      const target = targetFieldOf(spec.columns, columnName);
+                      const selected = target !== undefined;
                       return (
                         <tr key={columnName}>
                           <td>
@@ -1012,7 +1021,7 @@ function TaskFormDialog({
                           <td>
                             <input
                               type="checkbox"
-                              checked={spec.primary_key.includes(columnName)}
+                              checked={target !== undefined && spec.primary_key.includes(target)}
                               disabled={!selected}
                               onChange={() => toggleKey(columnName)}
                               aria-label={`把 ${columnName} 设为主键列`}

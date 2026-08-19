@@ -3,7 +3,27 @@
 // 构建器、发起面、运行历史三处都要把同一批概念摆出来：比较符怎么写、参数名默认叫什么、
 // 一组运行参数怎么读。各写一份迟早漂成三种说法，所以都从这里取。
 
-import type { Comparison, Condition, RunParams, TaskSpec, ValueType } from "./api";
+import type {
+  ColumnMapping,
+  Comparison,
+  Condition,
+  RunParams,
+  TaskSpec,
+  ValueType,
+} from "./api";
+
+/**
+ * 这个源列映到哪个目标字段——没选中就是 `undefined`（ADR-0038 §2）。
+ *
+ * 界面上一行代表一个**源列**，而主键存的是**目标字段**，两个名字空间要在这里换一次。
+ * 恒等映射下它们同名，省掉这一层在改过名的列上就会错。
+ */
+export function targetFieldOf(
+  columns: ReadonlyArray<ColumnMapping>,
+  source: string,
+): string | undefined {
+  return columns.find((mapping) => mapping.source === source)?.target;
+}
 
 export function comparisonSymbol(operator: Comparison): string {
   switch (operator) {

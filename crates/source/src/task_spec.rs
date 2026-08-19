@@ -122,6 +122,21 @@ pub struct OrderTerm {
     pub direction: Direction,
 }
 
+/// 一列的映射：源列名 → 目标列名（ADR-0038 §2）。
+///
+/// 「默认同名映射」就是 `target` 预填成 `source`——那不是将就的默认值，它就是恒等映射的
+/// 正确表达（ADR-0009 增补第 5 条：别名即目标列名），与改形状之前的语义逐字一致。
+///
+/// 落到 SQL 上是投影的别名 `a.{source} AS {target}`，**不引入映射表**：目标列名本来就是
+/// `SELECT` 投影的别名，在协议层再表达一遍等于让两端各留一份判定式（ADR-0038 §1）。
+/// 因此报文里仍然只有一份列名——目标名，协议不增字段。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ColumnMapping {
+    pub source: String,
+    pub target: String,
+}
+
 /// 任务定义的全部内容。旧的四字段形态（ADR-0016 §2）已由 ADR-0036 §4 判定直接丢弃。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -131,13 +146,15 @@ pub struct TaskSpec {
     pub owner: String,
     pub table: String,
     pub target_table: String,
-    /// 选中的源列。恒等映射：别名即目标列名（ADR-0009 增补第 5 条）。
-    pub columns: Vec<String>,
-    /// upsert 去重用的主键列，必选（所有者 2026-08-18 裁定）。目标端是否真有对应约束
-    /// 由 sink 侧预检核对（ADR-0035 §2）——这里只记用户选了什么。
+    /// upsert 去重用的主键列，必选（所有者 2026-08-18 裁定）。存的是**目标列名**
+    /// （ADR-0038 §2/§6）——与 [`ColumnMapping::target`]、过线报文、sink 侧比对同一个名字空间。
+    /// 目标端是否真有对应约束由 sink 侧预检核对（ADR-0035 §2）——这里只记用户选了什么。
     pub primary_key: Vec<String>,
-    // 下面两个是 TOML 里的 array-of-tables，**必须排在所有标量之后**：
+    // 下面三个是 TOML 里的 array-of-tables，**必须排在所有标量之后**：
     // 临时任务定义走 TOML 落盘，值排在表之后会直接序列化失败。
+    // `columns` 自 ADR-0038 §2 换成结构之后也归这一类，所以它排到了 `primary_key` 之后。
+    /// 选中的列及其目标字段（ADR-0038 §2）。
+    pub columns: Vec<ColumnMapping>,
     #[serde(default)]
     pub conditions: Vec<Condition>,
     #[serde(default)]
@@ -191,7 +208,7 @@ impl TaskSpec {
         let projection = self
             .columns
             .iter()
-            .map(|column| format!("a.{column} AS {column}"))
+            .map(|mapping| format!("a.{} AS {}", mapping.source, mapping.target))
             .collect::<Vec<_>>()
             .join(",\n       ");
         let dblink_suffix = self
@@ -236,11 +253,19 @@ impl TaskSpec {
         if self.columns.is_empty() {
             return Err("至少要选一列".to_owned());
         }
+        // 两个名字空间各查一次重复：源列重复是「勾了两遍」，目标字段重复会生成两个同名别名，
+        // Oracle 不拒、sink 侧按名字对齐时后一列静默盖掉前一列——那正是 ADR-0038 §1 说的
+        // 「最难排的错」，在源端就能判，所以在源端判。
         let mut selected = BTreeSet::new();
-        for column in &self.columns {
-            validate_identifier(column, "column")?;
-            if !selected.insert(column.to_ascii_uppercase()) {
-                return Err(format!("选中的列 {column} 重复"));
+        let mut targets = BTreeSet::new();
+        for mapping in &self.columns {
+            validate_identifier(&mapping.source, "column")?;
+            validate_identifier(&mapping.target, "target column")?;
+            if !selected.insert(mapping.source.to_ascii_uppercase()) {
+                return Err(format!("选中的列 {} 重复", mapping.source));
+            }
+            if !targets.insert(mapping.target.to_ascii_uppercase()) {
+                return Err(format!("目标字段 {} 重复", mapping.target));
             }
         }
         if self.primary_key.is_empty() {
@@ -253,9 +278,10 @@ impl TaskSpec {
             if !key_columns.insert(normalized.clone()) {
                 return Err(format!("主键列 {column} 重复"));
             }
-            // 主键列必须落在选中的列里（ADR-0035 §2 第 2 条）。目标端约束是否真的存在
-            // 由 sink 侧核对，这一条在源端就能判，所以在源端判。
-            if !selected.contains(&normalized) {
+            // 主键列必须落在选中的列里（ADR-0035 §2 第 2 条）。比的是**目标字段**——
+            // `primary_key` 存目标名（ADR-0038 §6），拿它去比源列名会在改过名的列上误判。
+            // 目标端约束是否真的存在由 sink 侧核对，这一条在源端就能判，所以在源端判。
+            if !targets.contains(&normalized) {
                 return Err(format!("主键列 {column} 不在选中的列里"));
             }
         }

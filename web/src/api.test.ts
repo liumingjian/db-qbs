@@ -36,7 +36,10 @@ function spec(overrides: Partial<TaskSpec> = {}): TaskSpec {
     owner: "APP",
     table: "HOLDINGS",
     target_table: "HOLDINGS",
-    columns: ["ID", "D_BIZ"],
+    columns: [
+      { source: "ID", target: "ID" },
+      { source: "D_BIZ", target: "D_BIZ" },
+    ],
     primary_key: ["ID"],
     ...overrides,
   };
