@@ -20,8 +20,8 @@
 #                               它对 /v1/runs/<不存在> 回的是产品自己的错误信封
 #                               （code=RUN_UNKNOWN）——**源端自检 S8 判的就是那个码**，
 #                               桩回不出来，所以 #155 的「自检全绿」要用 real。
-#                               注意：`rehearsal-tunnel-check.sh` 的 T3/T5/T7 按桩的标记判，
-#                               `real` 下那三条会红在标记上，那是预期的，不是隧道坏了。
+#                               判据脚本也带同一个开关：`rehearsal-tunnel-check.sh --sink real`
+#                               按产品的 RUN_UNKNOWN 认落点（#156），T3/T5/T7 不再红在桩的标记上。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$(cd ../../../.. && pwd)"

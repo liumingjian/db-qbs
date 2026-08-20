@@ -599,6 +599,7 @@ fixture 是新建的 `acceptance/oracle-v1.sql` 与 `acceptance/mysql-v1.sql`，
   装到目标端，因为**源端自检 S8 判的是产品自己的错误码 `RUN_UNKNOWN`**，桩 sink 回不出来。
   代价是 `rehearsal-tunnel-check.sh` 的 T3/T5/T7 按桩的标记判，`--sink real` 下那三条会红在标记上——
   那是预期的，不是隧道坏了。**隧道那一段的加密取证仍以 #153 的实录为准，本票不重做。**
+  （#156 起判据脚本也带 `--sink real`，按产品的 `RUN_UNKNOWN` 认落点，那三条不再红——见下一节。）
 - **回放脚本不是第二套装法**：每一段与手册里那一步逐字对应，两边不一致时以手册为准、
   回来改脚本（与 `rehearsal-tunnel-up.sh` 对 `packaging/stunnel/README.md` 同一条纪律）。
 - **静态自检守的是「手册与回放说的是同一件事」**：自检的 S1–S8 一条不落地出现在手册里、
@@ -610,6 +611,39 @@ fixture 是新建的 `acceptance/oracle-v1.sql` 与 `acceptance/mysql-v1.sql`，
   `DPI-1047 ... libnnz19.so`**——手册补了那一步，`preflight-source.sh` 的 S4 也改成
   按产品自己的搜索路径判（原先它在查之前先塞 `LD_LIBRARY_PATH`，查的不是产品会遇到的那件事）。
 - **S 不是第五个台架字母**，与 R / T / P 同理（ADR-0041 增补 4(a)）：源端装机的判据落在实录里，
+  一条搬运语义都不碰。
+
+### 目标端装机（#156）
+
+手册在 [`docs/install/target-centos7.md`](../../../install/target-centos7.md)，实录在
+[`docs/install/records/`](../../../install/records/)——与源端那一份同一条纪律：**手册与实录同处一个文档区**，
+台架这边只放「在演练台上走它」的那一半。**两份手册的顺序是先目标端、后源端**（源端自检 S8 要摸到目标端回环上的 sink）。
+
+```bash
+./scripts/up.sh                                  # 两个库
+./scripts/rehearsal-up.sh                        # 两台主机 + 切断
+./scripts/rehearsal-topology-check.sh --reset    # R0–R10（**装隧道之前**跑）
+./scripts/rehearsal-tunnel-up.sh --side source   # 只把对端准备好：源端的 stunnel 客户端 + 证书 + openssl
+./scripts/rehearsal-target-install.sh            # 照手册在目标端主机上从零装一遍（真 sink、真 stunnel 服务端）
+./scripts/rehearsal-tunnel-check.sh --sink real  # T0–T11 在**真 sink** 上重走一遍（票面「只有经 stunnel 能到达 sink」）
+./scripts/test-rehearsal-target-install.sh       # 不起台架的静态自检
+```
+
+- **对端换了个方向**：#155 由台架准备目标端（`--side target --sink real`）、人敲源端；本票由台架准备源端
+  （`--side source`，stunnel 客户端 + 证书 + `openssl`）、人敲目标端。目标端自己的自检 D1–D9 **不依赖源端**，
+  源端只在手册第 10 步「从公网侧核一眼」时用到——那四条命令在源端那台上敲，演练台上由回放脚本代为打出。
+- **真 sink 上的隧道取证第一次成立**：`rehearsal-tunnel-check.sh` 新增 `--sink stub|real`，
+  落点是真 sink 时 T3/T5/T7 认它 404 里的 `RUN_UNKNOWN`（与 S8/D2 同一个指纹），不再认桩的标记。
+  #155 写明的那条代价（`--sink real` 下三条红在标记上）就此收回；#153 那份桩 sink 的实录照旧是隧道加密取证的
+  第一份证据，本票在真 sink 上重走一遍是第二份。
+- **D4–D7 第一次在真 sink 上转绿**：三项开连接仪式前提是问 sink 要的（#154），此前台架上只有桩给的分档（C1–C9）。
+  演练台的 MySQL 天然满足三项（compose 起的 `utf8mb4`、8.0 默认 `max_allowed_packet=64M`），
+  真机上三项都是客户 DBA 的事——手册第 7 步是给他的纸条，行李清单第 11 项。
+- **静态自检守的仍是「手册与回放说的是同一件事」**：D1–D9 一条不落出现在手册里、真机差异标记不少于规格点名的五类
+  加目标端独有的两类（白名单端口由客户给、MySQL 是客户的库）、端口与路径两边同值、占位符集合与目标端模板一致、
+  `MIN_PACKET` 三处（sink / 自检 / 手册）同一个数、vault 换源那一段与构建镜像指同一个存档（这段现在有五份实现）。
+- **实录**：见 `docs/install/records/` 下 `rehearsal-target-*.md`。
+- **D 不是第五个台架字母**，与 R / T / P / S 同理（ADR-0041 增补 4(a)）：目标端装机的判据落在实录里，
   一条搬运语义都不碰。
 
 ## 三份视觉走查的驱动脚本（`walkthrough/`）
