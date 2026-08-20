@@ -13,8 +13,11 @@
 packaging/centos7/build.sh
 ```
 
-它做四件事：构建 `centos:7` 构建镜像 → 出 `web/dist` → 在容器里 `cargo build --release --locked`
-→ 把产物丢进一个**干净的 `centos:7`** 里启动一次。产物落在 `packaging/centos7/out/bin/`（不进版本库）：
+它对 **`linux/amd64` 与 `linux/arm64` 各走一遍**：出 `web/dist`（平台无关，两边共用一份）→
+构建该平台的 `centos:7` 构建镜像 → 容器里 `cargo build --release --locked` →
+把产物丢进**同架构的干净 `centos:7`** 里启动一次。产物落在
+`packaging/centos7/out/bin/linux-amd64/` 与 `packaging/centos7/out/bin/linux-arm64/`（不进版本库），
+每个目录三个二进制：
 
 | 二进制 | 装在哪 |
 | --- | --- |
@@ -28,19 +31,23 @@ packaging/centos7/build.sh
 常用参数：
 
 ```sh
-packaging/centos7/build.sh --platform linux/arm64   # 默认 linux/amd64
+packaging/centos7/build.sh --platform linux/arm64   # 只编一个平台（可重复给）
 packaging/centos7/build.sh --skip-web               # 复用现成的 web/dist
 packaging/centos7/build.sh --no-verify              # 只编不验
-packaging/centos7/verify.sh                         # 只验现成产物（平台取 out/platform）
+packaging/centos7/verify.sh                         # 只验现成产物（out/bin/ 下有几个平台就验几个）
 ```
 
 **构建在 mac 的 Docker 上跑**（服务器内存不够，走 `rexec` 派发）。
 
-## 目标架构：默认 x86_64
+## 目标架构：两个都出，现场按机器挑
 
-`--platform` 默认 `linux/amd64`，因为 CentOS 7 的服务器几乎都是 x86_64。
-mac 上这一步走模拟层，比原生慢。**若客户那台是 ARM，必须改成 `--platform linux/arm64` 重编**——
-架构错了的二进制在现场同样是启动即死，而且报的不是 GLIBC 而是 `Exec format error`。
+默认把 `linux/amd64` 与 `linux/arm64` **都编出来**，行李清单里两套一起带走——
+到了现场 `uname -m` 一看就知道拿哪个目录，不必赌客户那台是什么架构，也不必现场重编
+（架构挑错的二进制同样是启动即死，报的不是 GLIBC 而是 `Exec format error`）。
+
+在 mac（arm64）上，`linux/arm64` 是原生编译，`linux/amd64` 走模拟层、慢得多。
+两个平台的 cargo target 与 registry 各用一个 docker volume——共用一个会让每次换平台整棵重编。
+`arm64` 的 CentOS 7 存档在 vault 的 `altarch/` 下，路径与 x86_64 不同，脚本按平台自动选。
 
 ## 镜像里为什么装这些
 
