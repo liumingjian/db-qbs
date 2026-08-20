@@ -31,6 +31,9 @@ REPS=7 ./scripts/run-cpu-probe.sh        # 跑 #5 的客户端每行 CPU 探针�
 ./scripts/rehearsal-tunnel-up.sh         # 在两台主机上装 stunnel 双端隧道（#153，先跑拓扑判据再跑它）
 ./scripts/rehearsal-tunnel-check.sh      # 跑隧道的 T0–T11 判据
 ./scripts/test-rehearsal-tunnel.sh       # 上面两支脚本与两份配置模板的静态自检（不碰 docker）
+./scripts/rehearsal-preflight-check.sh   # 跑两端环境自检的 P0–P11 判据（#154，--phase both 会推倒重建）
+./scripts/test-preflight-classify.sh     # 目标端自检按 sink 回答分档的 C1–C9（不碰 docker，几秒钟）
+./scripts/test-rehearsal-preflight.sh    # 两支自检脚本与上面两支的静态自检（不碰 docker）
 ./scripts/sqlplus.sh   # 进 sqlplus
 ./scripts/down.sh      # 拆掉，连卷一起删
 ```
@@ -536,6 +539,42 @@ fixture 是新建的 `acceptance/oracle-v1.sql` 与 `acceptance/mysql-v1.sql`，
 - **T 不是第五个台架字母**，与 R 同理（ADR-0041 增补 4(a)）：它编的是演练台上隧道那一段的自检，
   一条搬运语义都不碰。
 
+
+### 两端环境自检（#154）
+
+上机第一件事跑的那两支脚本 **在 [`packaging/preflight/`](../../../../packaging/preflight/)**，
+随行李清单带走——与 stunnel 模板同一条纪律：工具不进仓库的门禁，下一台机器会静默跳过。
+这里只放**在演练台上验它**的那一半。
+
+```bash
+./scripts/test-preflight-classify.sh                 # C1–C9，不碰 docker，几秒钟
+./scripts/test-rehearsal-preflight.sh                # 静态自检（覆盖清单、进仓库、跨文件耦合）
+./scripts/rehearsal-preflight-check.sh --phase both  # P0–P11：推倒重建 → 先红 → 装隧道 → 该转绿的转绿
+```
+
+- **「先红」不等于「全红」**：干净的 `centos:7` 上 glibc 就是 2.17（S1 本来就该绿），
+  演练台上两个库也确实够得着（S5 / D1 本来就该绿）。所以 P1b/P5b 判的不是「一片红」，
+  而是**逐条与一张期望表对齐**——一张「全红」的表会把「脚本恒红」这种假绿放进来，
+  而恒红的自检和恒绿的门禁一样没用。
+- **P9–P11 是它的对偶**：装上隧道之后 S6/S7 与 D8/D9 **转绿**，证明先红不是写死的。
+  而 S8/D2 在这一阶段**仍然该红**——#153 的桩 sink 不是真 sink，自检判的是
+  「那头真是 sink（回 `RUN_UNKNOWN` 那个错误码）」而不是「有人应答」。P11 判的就是这个理由。
+  真 sink 装上来是 #156 的事。
+- **C1–C9 补的是台架够不着的那一档**：目标端三项开连接仪式前提是**问 sink 要的**，
+  按它的报错措辞分档；真 sink 装上来之前，除「连不上」外每一档在演练台上一次都没被走过。
+  `preflight-sink-stub.py` 把每一档的原话（抄自 `crates/sink/src/mysql_destination.rs`）喂进去，
+  逼自检当场把判定说出来。**仪式是有先后的**，而三条判词说的都是「回读回来是这个值」——
+  所以**只有回读跑完那一档才产生得了 PASS**：仪式在回读之前停下时，卡住的那一步记 FAIL、
+  其余记未判定（「设过了」不等于「就是这个值」）。把未判定记成 PASS 是这里最危险的假绿，
+  C3–C5 判的就是它，C9 判的是同一件事的另一面（认不出的回答也不许算合格）。
+- **实录**：[`rehearsal-preflight-20260820T035846Z.md`](rehearsal-preflight-20260820T035846Z.md)
+  ——C1–C9 9/9、P0–P11 13/13、隧道 T0–T11 照旧 17/17，跑在一套被 Docker Desktop 升级
+  清空之后从零重建的台架上。那一趟还抓到两件事并当场修掉：`${var}` 不加花括号、
+  紧挨着中文时在 mac 的 bash 3.2 上会炸（判据脚本自己先炸，等于把整份判据吞掉），
+  以及 `vault.centos.org` 的 CDN 开始对 `*.sqlite.bz2` 回 403 导致 `yum install` 全线失败
+  （改成三源 failover + `failovermethod=priority`，这条本来会在 #157 的终局演练上炸）。
+- **P 不是第五个台架字母**，与 R / T 同理（ADR-0041 增补 4(a)）：它编的是演练台上自检那一段，
+  一条搬运语义都不碰。
 
 ## 三份视觉走查的驱动脚本（`walkthrough/`）
 
