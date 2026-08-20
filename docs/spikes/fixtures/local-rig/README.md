@@ -33,6 +33,9 @@ REPS=7 ./scripts/run-cpu-probe.sh        # 跑 #5 的客户端每行 CPU 探针�
 ./scripts/test-rehearsal-tunnel.sh       # 上面两支脚本与两份配置模板的静态自检（不碰 docker）
 ./scripts/rehearsal-source-install.sh     # 照源端装机手册在源端主机上从零装一遍（#155）
 ./scripts/test-rehearsal-source-install.sh # 手册与回放脚本的静态自检（不碰 docker）
+./scripts/rehearsal-target-install.sh    # 照目标端装机手册在目标端主机上从零装一遍（#156）
+./scripts/rehearsal-final.sh             # 终局：只照两份手册装完两端 + 一次真实搬运（#157）
+./scripts/test-rehearsal-final.sh        # 上面那支的静态自检（不碰 docker）
 ./scripts/rehearsal-preflight-check.sh   # 跑两端环境自检的 P0–P11 判据（#154，--phase both 会推倒重建）
 ./scripts/test-preflight-classify.sh     # 目标端自检按 sink 回答分档的 C1–C9（不碰 docker，几秒钟）
 ./scripts/test-rehearsal-preflight.sh    # 两支自检脚本与上面两支的静态自检（不碰 docker）
@@ -645,6 +648,49 @@ fixture 是新建的 `acceptance/oracle-v1.sql` 与 `acceptance/mysql-v1.sql`，
 - **实录**：见 `docs/install/records/` 下 `rehearsal-target-*.md`。
 - **D 不是第五个台架字母**，与 R / T / P / S 同理（ADR-0041 增补 4(a)）：目标端装机的判据落在实录里，
   一条搬运语义都不碰。
+
+### 终局从零演练（#157）
+
+把两份手册连起来跑的那一趟：两台主机推倒重来，**只照两份手册**装完两端，再经隧道跑通
+**一次真实搬运**。实录在 [`docs/install/records/`](../../../install/records/)，与两份手册同处一个文档区。
+
+```bash
+cd docs/spikes/fixtures/local-rig
+./scripts/up.sh                 # 两个库
+../../../../packaging/centos7/build.sh --platform linux/amd64   # 三个二进制（与本趟同一个任务里出，见下）
+./scripts/rehearsal-final.sh    # 推倒重建 → 行李清单 → 拓扑 → 目标端 → 源端 → 隧道 → 一次真实搬运
+./scripts/test-rehearsal-final.sh   # 不起台架的静态自检
+```
+
+- **编排脚本自己不装任何东西**：目标端那一趟出自 `rehearsal-target-install.sh`、源端那一趟出自
+  `rehearsal-source-install.sh`，装机命令只有一份来源——两份手册。抄第二遍装法，等于给自己发一张
+  「手册没写也能装完」的通行证，而这正是 ADR-0041 §6 判据要挡的东西。静态自检第 2 条盯的就是它
+  （编排脚本里出现 `yum -y install` / `ldconfig` / 占位符替换之类，当场红）。
+- **两个新开关都在目标端那支回放上**：`--defer-step10` 与 `--only-step10`。目标端手册第 10 步那四条
+  要在**源端那台**上敲，而终局演练里源端也得照它自己那份手册装——装目标端时它还是干净机器。
+  于是第 10 步延后，源端装完再回来补。不带参数时那支脚本与 #156 落地时一字不差。
+- **一次真实搬运是本票唯一的新东西**（规格 #149 User Story 14）：建两条数据源（目标库那条的测连
+  经隧道走到 sink 再由 sink 连 MySQL）→ 构建器查表取列 → **产品生成的建表 DDL** 交给 DBA 建表
+  （v1 手工建表，台架里不另写一份 `CREATE TABLE`，否则建表 SQL 生成器那一步没被演练到）→
+  建任务并加一条**运行时填**的过滤条件 → 发起 → 轮询看阶段与已推行数 → 目标库逐值核对。
+  断言面是产品自己的 `/api/*`（ADR-0028 §1），在**源端主机容器里**用 `curl` 打——
+  与所有者经 `ssh -L 8088` 点界面是同一条路径。
+- **过滤生效要有反面**：fixture `acceptance/oracle-v2-final.sql` 里两个业务日期**行数不等量**
+  （08-20 五行、08-19 两行），核对时除了行数与逐值，还判「过滤外的那两行没被搬过去」——
+  只数行数的话，「整表搬了一遍又恰好只有五行」这种巧合会被记成绿。
+- **构建与演练必须在同一个 rexec 任务里**：`packaging/centos7/out/` 只在**根** `.gitignore` 里以
+  锚定式出现，而 rexec 的 rsync 是逐目录合并过滤，分成两个任务时中途那次 `--delete` 会把二进制抹掉
+  （#156 实录里记着这一笔）。
+- **跑完不清场**：两台主机、隧道、搬完的目标表全留着，实录照着它们抄（与「跑完默认不清场」同一条裁定）。
+  要归零跑 `./scripts/rehearsal-reset.sh`。
+- **实录**：[`rehearsal-final-20260820T081300Z.md`](../../../install/records/rehearsal-final-20260820T081300Z.md)
+  ——**手册零回写**：拓扑 4/4 + 24/24，目标端 `1/8 → 9/0`、源端 `2/6 → 8/0`，
+  隧道 `--sink real` 17/17，搬运 `SUCCEEDED`/`SWAPPED`、五行逐值一致、过滤外 0 行。
+  实录里连**跑了三趟、每趟为什么重跑**一起记着（判据是过程性的，重跑的理由也是记录的一部分）：
+  第一趟整趟绿但脚本随后按 code review 改了七处，第二趟栽在 `jq` 的 `//` 把 `false` 当「缺失」
+  （搬运其实成了、脚本判不出终态），第三趟才是仓库里这版脚本跑出来的那一趟。
+  另一处如实记下的边界：五行数据太快，**进行中的帧只采到 `PREPARING` 一帧**——
+  长时间的进行中态归 M2 走查的 V1/V16/V17 与 M1 的 10 万行档，本入口不拿一帧冒充「看完了进度」。
 
 ## 三份视觉走查的驱动脚本（`walkthrough/`）
 
