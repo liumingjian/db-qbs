@@ -177,6 +177,15 @@ report R3b 不通 "$(tcp "$SRC" "$sql_def" 3306)" "源端主机 → MySQL ${sql_
 report R5b 不通 "$(tcp "$DST" "$ora_def" 1521)" "目标端主机 → Oracle ${ora_def}:1521（default 网那个 IP）"
 
 echo "==> R7a/R8a 正对照：目标端两个监听端确实活着（负判据全靠它们才有意义）"
+# 15443 已经有人听的话，下面的探针监听端 bind 不上，R6a/R7/R7a 会红成「监听端不活」、
+# R10 会红成「还有人听」—— 四条红的真实成因是同一个，而且都不是拓扑出了问题。
+# 最常见的占用者是 #153 的 stunnel 服务端（隧道装完就归它了）。先说出来，别让人去查网络。
+if [[ "$(tcp "$DST" 127.0.0.1 "$WHITELIST_PORT")" == 通 ]]; then
+  echo "    !! ${WHITELIST_PORT} 已经有人在听 —— 多半是 #153 的 stunnel 服务端（隧道已装）。"
+  echo "       探针监听端 bind 不上，R6a/R7/R7a/R10 会红在这个成因上，跟拓扑无关。"
+  echo "       顺序是**先跑拓扑判据、再装隧道**；要现在复核拓扑，先 ./scripts/rehearsal-reset.sh"
+  echo "       推倒重建（隧道随可写层一起归零），再跑本脚本。"
+fi
 listen_token "$DST" "$WHITELIST_PORT" "$MARKER-WHITELIST"
 listen_token "$DST" "$BLOCKED_PORT"   "$MARKER-BLOCKED"
 # Rosetta 下 python 冷启动慢，轮询到能自连为止，别用定长 sleep 赌。
