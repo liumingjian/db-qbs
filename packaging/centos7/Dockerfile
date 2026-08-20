@@ -11,6 +11,15 @@ FROM ${BASE_IMAGE}
 # 装任何包之前必须先把 yum 源改指 vault 存档源，否则 yum 第一条命令就 404。
 # aarch64 的存档在 altarch 下，故留成构建参数由 build.sh 按平台传。
 ARG VAULT_BASE=http://vault.centos.org/7.9.2009
+# 后备镜像：空格分隔的若干个「与 VAULT_BASE 同布局」的根，由 build.sh 按平台传。
+# **不是冗余，是必需**：2026-08-20 下午 vault.centos.org 前面那层 CDN 对
+# `*.sqlite.bz2` 回了几个小时 403（同一批 `*.xml.gz` 照常 200），而 yum 优先取 sqlite 元数据 ——
+# 那几个小时里这个镜像根本构建不出来；当晚复测它自己好了。
+# **正因为它会自己好、也会自己再坏**，单源就是一颗随时引爆的雷，而装机当天在客户现场引爆
+# 没有第二次机会。存档内容是冻结的，镜像之间不会各说各话。同一份换法在
+# docs/spikes/fixtures/local-rig/scripts/rehearsal-tunnel-up.sh 里也有一份，
+# 两处的镜像集合由 test-rehearsal-tunnel.sh 第 11 条盯着。
+ARG VAULT_MIRRORS="https://linuxsoft.cern.ch/centos-vault/7.9.2009 https://archive.kernel.org/centos-vault/7.9.2009"
 # 签名 key 按架构不同：x86_64 是 RPM-GPG-KEY-CentOS-7，aarch64 的 altarch 包另用
 # RPM-GPG-KEY-CentOS-7-aarch64（key ID 305d49d6）。镜像里有几个就全导入、全列进
 # gpgkey，别为了省事关掉 gpgcheck —— 这是装到客户机上的东西的来源凭证。
@@ -23,10 +32,13 @@ RUN set -eux; \
     gpgkey_line="$(printf 'file://%s ' ${keys})"; \
     for repo in os:base:Base updates:updates:Updates extras:extras:Extras; do \
       dir="${repo%%:*}"; rest="${repo#*:}"; id="${rest%%:*}"; label="${rest#*:}"; \
+      urls="${VAULT_BASE}/${dir}/\$basearch/"; \
+      for m in ${VAULT_MIRRORS}; do urls="${urls} ${m}/${dir}/\$basearch/"; done; \
       { \
         echo "[${id}]"; \
         echo "name=CentOS-7.9.2009 - ${label} - vault"; \
-        echo "baseurl=${VAULT_BASE}/${dir}/\$basearch/"; \
+        echo "baseurl=${urls}"; \
+        echo 'failovermethod=priority'; \
         echo 'gpgcheck=1'; \
         echo "gpgkey=${gpgkey_line}"; \
         echo 'enabled=1'; \

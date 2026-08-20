@@ -58,9 +58,10 @@ for repo in os:base:Base updates:updates:Updates extras:extras:Extras; do
   {
     echo "[${id}]"
     echo "name=CentOS-7.9.2009 - ${label} - vault"
-    # 三个源，yum 按顺序 failover。**不是冗余，是必需**：2026-08-20 实测
-    # vault.centos.org 前面那层 CDN 开始对 `*.sqlite.bz2` 回 403（`*.xml.gz` 照常 200），
-    # 而 yum 优先取 sqlite 元数据——单源写法当天下午起就装不上任何包了。
+    # 三个源，yum 按 failovermethod=priority 顺序 failover。**不是冗余，是必需**：
+    # 2026-08-20 下午 vault.centos.org 前面那层 CDN 对 `*.sqlite.bz2` 回了几个小时 403
+    # （`*.xml.gz` 照常 200），而 yum 优先取 sqlite 元数据——那几个小时里这里装不上任何包；
+    # 当晚复测它自己好了。**正因为它会自己好、也会自己再坏**，单源就是一颗随时引爆的雷。
     # 存档内容本身是冻结的，镜像之间不会各说各话；第一个仍是 vault，另两个只在它拿不到时才轮到。
     echo "baseurl=http://vault.centos.org/7.9.2009/${dir}/\$basearch/ https://linuxsoft.cern.ch/centos-vault/7.9.2009/${dir}/\$basearch/ https://archive.kernel.org/centos-vault/7.9.2009/${dir}/\$basearch/"
     # yum 的 failovermethod 默认是 roundrobin —— 从 URL 列表里**随机**挑起点。

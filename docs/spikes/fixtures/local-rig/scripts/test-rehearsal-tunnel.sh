@@ -106,11 +106,35 @@ for f in "$check" "$TPL/README.md" README.md; do
   grep -qE 'T1–T1[12]' "$f" && { echo "$f 里还留着旧的判据区间写法" >&2; exit 1; }
 done
 
-# 11. vault 换源那一段与构建镜像里的必须指同一个存档 —— 这段现在有两份实现
-#     （Dockerfile 一份、up 脚本内嵌一份），源地址一变要改两处，没门禁就会各走各的。
-vault_docker=$(grep -oE 'vault\.centos\.org/[0-9.]+' "$ROOT/packaging/centos7/Dockerfile" | head -1)
+# 11. vault 换源那一段与构建镜像里的必须指同一个存档 —— 这段现在有三份实现
+#     （Dockerfile 一份、build.sh 按平台算一份、up 脚本内嵌一份），源地址一变要改三处，
+#     没门禁就会各走各的。**后备镜像与 failovermethod 一并盯着**：
+#     2026-08-20 那次 vault 的 CDN 对 *.sqlite.bz2 回 403，少一个后备镜像
+#     就是「那一天起这条路装不上任何包」，而它只在真去装包的时候才炸。
+dockerfile="$ROOT/packaging/centos7/Dockerfile"
+buildsh="$ROOT/packaging/centos7/build.sh"
+vault_docker=$(grep -oE 'vault\.centos\.org/[0-9.]+' "$dockerfile" | head -1)
 vault_up=$(grep -oE 'vault\.centos\.org/[0-9.]+' "$up" | head -1)
 [[ -n "$vault_docker" && "$vault_docker" == "$vault_up" ]] || {
   echo "vault 存档源对不上：Dockerfile=[$vault_docker] up=[$vault_up]" >&2; exit 1; }
+
+# 后备镜像集合（x86_64 那条腿）三处必须一致。build.sh 里是拼出来的，
+# 所以按「主机 + 到 7.9.2009 为止的路径」比，不比后面按平台变的那一截。
+# 先把按平台变的那两截归一（build.sh 里是 `${vault_leg}`，aarch64 那条腿多一层 altarch），
+# 再抽 URL —— 反过来做的话 build.sh 里一个都抽不出来，比较会在「两边都空」上假绿。
+mirror_set() { sed -e 's|\${vault_leg}|7.9.2009|g' -e 's|/altarch/7\.9\.2009|/7.9.2009|g' "$1" \
+                 | grep -ohE 'https://[a-z0-9.-]+/[a-z0-9./_-]*7\.9\.2009' \
+                 | grep -v 'vault\.centos\.org' | sort -u | tr '\n' ' ' | sed 's/ $//'; }
+m_docker=$(mirror_set "$dockerfile"); m_build=$(mirror_set "$buildsh"); m_up=$(mirror_set "$up")
+[[ -n "$m_docker" ]] || { echo "Dockerfile 没有后备镜像了（vault 的 CDN 一抽风就构建不出镜像）" >&2; exit 1; }
+[[ "$m_docker" == "$m_build" && "$m_docker" == "$m_up" ]] || {
+  echo "后备镜像集合三处对不上" >&2
+  printf '  Dockerfile: %s\n  build.sh:   %s\n  up:         %s\n' "$m_docker" "$m_build" "$m_up" >&2
+  exit 1; }
+for f in "$dockerfile" "$up"; do
+  grep -q 'failovermethod=priority' "$f" || {
+    echo "$f 少了 failovermethod=priority —— yum 默认 roundrobin 是随机挑起点，「vault 优先」不成立" >&2
+    exit 1; }
+done
 
 echo "rehearsal tunnel 静态自检 PASS"
