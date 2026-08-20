@@ -7,7 +7,7 @@
 |---|---|
 | [`target-centos7.md`](target-centos7.md) | **目标端装机手册**（[#156](https://github.com/liumingjian/db-qbs/issues/156)）：CentOS 7 上从零装出 `sink`（只绑回环）+ stunnel 服务端，连上 MySQL 8.0。**先装这一台** |
 | [`source-centos7.md`](source-centos7.md) | **源端装机手册**（[#155](https://github.com/liumingjian/db-qbs/issues/155)）：CentOS 7 上从零装出 `source` + Oracle Instant Client 19c + stunnel 客户端 |
-| [`records/`](records/) | 演练实录。**手册是走过的记录，不是照着想象写的**（ADR-0041 §6） |
+| [`records/`](records/) | 演练实录。**手册是走过的记录，不是照着想象写的**（ADR-0041 §6）。终局那一份是 `rehearsal-final-*.md`（[#157](https://github.com/liumingjian/db-qbs/issues/157)）：两台主机推倒重来，只照这两份手册装完两端，再经隧道跑通一次真实搬运 |
 
 **先看行李清单**：[`packaging/PACKING-LIST.md`](../../packaging/PACKING-LIST.md)。
 两份手册都从它开头，清单只此一份。
@@ -21,6 +21,13 @@
 自检从红转绿，跑通一次搬运。**中途任何一次「手册没写、临场解决」都算判据未达成**——
 回写手册，重走。
 
+**终局那一趟把两份手册连起来跑**（#157）：`scripts/rehearsal-final.sh` 从推倒重建起步，
+先目标端（`--defer-step10`）、后源端，两端都只照手册装；目标端手册第 10 步那四条要在
+**照手册装出来的**源端上敲，所以延后到源端装完再补（`--only-step10`）。装完之后行李清单逐项核对、
+隧道判据在真 sink 上重走，最后经隧道跑通一次真实搬运——建数据源、查数据、拿产品生成的建表 DDL
+交给 DBA 建表、建任务并加过滤条件、发起、看进度、核对目标库数据。**它自己不装任何东西**，
+装法只有一份来源：这两份手册。
+
 演练台是 mac Docker 上的两台 `centos:7` 容器，起法与判据见
 [`docs/spikes/fixtures/local-rig/README.md`](../spikes/fixtures/local-rig/README.md) 的「装机演练台」一节。
 每份手册各配一支可执行回放与一支不起台架的静态自检（手册与回放说的必须是同一件事）：
@@ -29,6 +36,7 @@
 |---|---|---|
 | 目标端 | `scripts/rehearsal-target-install.sh` | `scripts/test-rehearsal-target-install.sh` |
 | 源端 | `scripts/rehearsal-source-install.sh` | `scripts/test-rehearsal-source-install.sh` |
+| 两份连起来跑（#157） | `scripts/rehearsal-final.sh` | `scripts/test-rehearsal-final.sh` |
 
 演练里**对端由台架准备、本端由人照手册敲**（`rehearsal-tunnel-up.sh --side source|target`）：
 脚本代劳本端，「手册是走过的记录」这句话就当场作废。

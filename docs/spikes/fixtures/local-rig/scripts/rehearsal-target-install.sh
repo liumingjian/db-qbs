@@ -21,7 +21,9 @@
 #                                                     「手册是走过的记录」这句话就当场作废。
 #   packaging/centos7/build.sh --platform linux/amd64 sink 二进制（行李清单第 2 项）
 #
-# 用法：./scripts/rehearsal-target-install.sh
+# 用法：./scripts/rehearsal-target-install.sh [--defer-step10 | --only-step10]
+#       两个开关是 #157 的终局演练开的（那趟里源端也照手册装，第 10 步得等它装完再回来补）；
+#       不带参数时与 #156 落地时一字不差。
 #
 # **没有「接着上次往下跑」这种开关**：第 1 步判的是干净机器上的先红形状，
 # 在装过一半的机器上它必然不成立；第 6/8 步的 sink 与 stunnel 还会撞上上一轮占着的端口，
@@ -42,7 +44,25 @@ MYSQL_PASSWORD=spike123
 MYSQL_DATABASE=qbs
 BIN_DIR="$ROOT/packaging/centos7/out/bin/linux-amd64"
 
-[[ $# -eq 0 ]] || { echo "用法：$0   （不带参数；要重跑先 ./scripts/rehearsal-reset.sh）"; exit 2; }
+# 三种跑法。默认那一种（不带参数）与 #156 落地时**一个字节不差**：
+#   （不带参数）  第 0–10 步整趟走完——对端由 rehearsal-tunnel-up.sh --side source 准备
+#   --defer-step10 第 0–9 步走完，**第 10 步延后**：那四条要在源端那台上敲，而 #157 的终局演练里
+#                  源端也得照它自己那份手册装，此刻还没装。给 #157 用。
+#   --only-step10  只走第 10 步（目标端已装完、源端也照手册装完之后回来补这一笔）。给 #157 用。
+# 两个开关互斥；**它们不是「接着上次往下跑」**——见上面那段：装过一半的机器上先红判不了。
+MODE=full
+set_mode() {  # 两个开关**互斥**：后一个静默覆盖前一个的话，`--defer-step10 --only-step10`
+              # 会解析成 only10 —— 装机那九步整个跳过，第 10 步却对着一台没装过的机器判。
+  [[ "$MODE" == full ]] || { echo "--defer-step10 与 --only-step10 互斥，只能给一个"; exit 2; }
+  MODE=$1
+}
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --defer-step10) set_mode defer10; shift ;;
+    --only-step10)  set_mode only10;  shift ;;
+    *) echo "用法：$0 [--defer-step10 | --only-step10]   （要重跑先 ./scripts/rehearsal-reset.sh）"; exit 2 ;;
+  esac
+done
 
 step() { echo; echo "######## $* ########"; }
 x()    { echo "  \$ $*"; docker exec "$DST" bash -lc "$*"; }        # 手册里的一条命令，原样跑
@@ -65,8 +85,10 @@ done
   || { echo "!! 缺 $TPL/out/target-side/ 的证书材料 —— 先跑 ./scripts/rehearsal-tunnel-up.sh --side source（它顺手出证书）"; exit 1; }
 # 对端在不在：源端的 stunnel 客户端要在它自己的回环 8080 上听着，第 10 步的第 4 条才判得了；
 # 它没起的话那条红的成因与目标端无关——先说出来。
-if ! docker exec "$SRC" bash -c "timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$SINK_PORT'" 2>/dev/null; then
+# **`--defer-step10` 下这一条不查**：那趟里源端还没装（它自己那份手册还没走），第 10 步本来就延后。
+if [[ "$MODE" != defer10 ]] && ! docker exec "$SRC" bash -c "timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$SINK_PORT'" 2>/dev/null; then
   echo "!! 源端 127.0.0.1:${SINK_PORT} 没人听 —— 先跑 ./scripts/rehearsal-tunnel-up.sh --side source"
+  echo "   （#157 的终局演练里源端照手册装，那一趟应传 --defer-step10）"
   exit 1
 fi
 
@@ -78,6 +100,7 @@ echo "==> 演练台代入的现场参数"
 echo "    MySQL        = $MYSQL_HOST:3306/${MYSQL_DATABASE}，账号 ${MYSQL_USER}（手册：客户给的 MySQL 地址 / 账号 / 库名）"
 echo "    白名单口      = ${WHITELIST_PORT}，「公网」落点 = ${GW}（手册：客户给的白名单端口 / 公网 IP）"
 
+if [[ "$MODE" != only10 ]]; then
 # ---------------------------------------------------------------- 第 0 步：把行李搬进机器
 step "第 0 步：把行李搬进机器（真机是 U 盘 / scp，演练台是 docker cp）"
 {
@@ -220,7 +243,10 @@ second_rc=$?
 echo "$second_out"
 echo "  （退出码 ${second_rc}）"
 
+fi   # MODE != only10：第 0–9 步到此为止
+
 # ---------------------------------------------------------------- 第 10 步：从公网侧核一眼
+if [[ "$MODE" != defer10 ]]; then
 step "第 10 步：从「公网」侧核一眼——只有经隧道才到得了 sink（在源端那台上敲）"
 xs "curl -sS --max-time 8 http://$GW:$WHITELIST_PORT/v1/runs/__probe__; echo \"exit=\$?\""
 plain=$(docker exec "$SRC" bash -lc "curl -s --max-time 8 http://$GW:$WHITELIST_PORT/v1/runs/__probe__ 2>/dev/null | grep -o -m1 RUN_UNKNOWN"; true)
@@ -233,37 +259,59 @@ echo "  ${no_cert:-0}"
 xs 'curl -sS http://127.0.0.1:8080/v1/runs/__probe__; echo'
 via_tunnel=$(docker exec "$SRC" bash -lc "curl -s --max-time 8 http://127.0.0.1:$SINK_PORT/v1/runs/__probe__ 2>/dev/null | grep -o -m1 RUN_UNKNOWN"; true)
 
+fi   # MODE != defer10：第 10 步那四条到此为止
+
 # ---------------------------------------------------------------- 收尾核对
+if [[ "$MODE" != only10 ]]; then
 step "收尾核对"
 x "ss -ltnp | grep -E '8080|15443'"
 ss_out=$(xq "ss -ltn | grep -E ':8080[[:space:]]' || true")
 x 'ls -l /etc/db-qbs/sink.toml /etc/stunnel/db-qbs/target.key /root/.qbs-mysql-pass'
 
+fi   # MODE != only10：收尾核对到此为止
+
 # ---------------------------------------------------------------- 总账
 step "总账"
-green=$(grep -cE '^  D[0-9] +PASS' <<<"$second_out")
-red=$(grep -cE '^  D[0-9] +FAIL' <<<"$second_out")
 ok=0
 verdict() { # $1=说明 $2=期望 $3=实测
   if [[ "$3" == "$2" ]]; then printf '  PASS  %-50s 实测=%s\n' "$1" "$3"
   else printf '  FAIL  %-50s 期望=%s 实测=%s\n' "$1" "$2" "$3"; ok=1; fi
 }
-verdict "第 1 步：干净机器上的先红逐条对齐期望表" 0 "$pre_fail"
-verdict "第 2 步：yum 源换成了（vault 三源）" 0 "$yum_rc"
-verdict "第 3 步：那几个包都装上了" 0 "$pkg_rc"
-verdict "第 6 步：sink 在回环上应答（认 RUN_UNKNOWN）" RUN_UNKNOWN "$(grep -o -m1 RUN_UNKNOWN <<<"$local_probe" || echo 无)"
-verdict "第 9 步：自检 D1–D9 全绿（含 D4–D7 三前提）" "9/0" "$green/$red"
-verdict "第 9 步：自检退出码" 0 "$second_rc"
-verdict "第 10 步①：明文打白名单口拿不到 sink" 无 "${plain:-无}"
-verdict "第 10 步②：带客户端证书握手拿到 RUN_UNKNOWN" RUN_UNKNOWN "${with_cert:-无}"
-verdict "第 10 步③：不带客户端证书被拒" 0 "${no_cert:-0}"
-verdict "第 10 步④：经源端隧道入口拿到 RUN_UNKNOWN" RUN_UNKNOWN "${via_tunnel:-无}"
-# 「只绑回环」按 ss 的实际监听地址判：8080 只许出现在 127.0.0.1 上。
-verdict "收尾：8080 只绑回环（ss 实测）" 只在回环 \
-  "$( { grep -q '127.0.0.1:8080' <<<"$ss_out" && ! grep -qE '(0\.0\.0\.0|\*|\[::\]):8080' <<<"$ss_out"; } && echo 只在回环 || echo 不是)"
+# 每个开关只对自己走过的那几步下判定 —— **没走过的一条都不许出现在这张表里**，
+# 否则「没跑」会以一条绿或一条红的面目混进总账（`--only-step10` 那趟尤其危险：
+# 装机那九步是上一趟的事，在这里判等于把上一趟的结论重记一遍）。
+if [[ "$MODE" != only10 ]]; then
+  green=$(grep -cE '^  D[0-9] +PASS' <<<"$second_out")
+  red=$(grep -cE '^  D[0-9] +FAIL' <<<"$second_out")
+  verdict "第 1 步：干净机器上的先红逐条对齐期望表" 0 "$pre_fail"
+  verdict "第 2 步：yum 源换成了（vault 三源）" 0 "$yum_rc"
+  verdict "第 3 步：那几个包都装上了" 0 "$pkg_rc"
+  verdict "第 6 步：sink 在回环上应答（认 RUN_UNKNOWN）" RUN_UNKNOWN "$(grep -o -m1 RUN_UNKNOWN <<<"$local_probe" || echo 无)"
+  verdict "第 9 步：自检 D1–D9 全绿（含 D4–D7 三前提）" "9/0" "$green/$red"
+  verdict "第 9 步：自检退出码" 0 "$second_rc"
+fi
+if [[ "$MODE" != defer10 ]]; then
+  verdict "第 10 步①：明文打白名单口拿不到 sink" 无 "${plain:-无}"
+  verdict "第 10 步②：带客户端证书握手拿到 RUN_UNKNOWN" RUN_UNKNOWN "${with_cert:-无}"
+  verdict "第 10 步③：不带客户端证书被拒" 0 "${no_cert:-0}"
+  verdict "第 10 步④：经源端隧道入口拿到 RUN_UNKNOWN" RUN_UNKNOWN "${via_tunnel:-无}"
+else
+  echo "  ——    第 10 步那四条延后（要在源端那台上敲，而源端要照它自己那份手册装；#157 装完源端后"
+  echo "        回来跑 $0 --only-step10）"
+fi
+if [[ "$MODE" != only10 ]]; then
+  # 「只绑回环」按 ss 的实际监听地址判：8080 只许出现在 127.0.0.1 上。
+  verdict "收尾：8080 只绑回环（ss 实测）" 只在回环 \
+    "$( { grep -q '127.0.0.1:8080' <<<"$ss_out" && ! grep -qE '(0\.0\.0\.0|\*|\[::\]):8080' <<<"$ss_out"; } && echo 只在回环 || echo 不是)"
+fi
 echo
+case "$MODE" in
+  full)    done_what="自检 D1–D9 全绿、三前提经真 sink 判过、公网侧只有经隧道到得了 sink" ;;
+  defer10) done_what="自检 D1–D9 全绿、三前提经真 sink 判过；第 10 步延后" ;;
+  only10)  done_what="第 10 步四条：公网侧只有经隧道到得了 sink" ;;
+esac
 if (( ok )); then
   echo "==== 目标端装机演练：未达成（上面 FAIL 那几条就是手册还欠的地方）===="
   exit 1
 fi
-echo "==== 目标端装机演练：达成（自检 D1–D9 全绿、三前提经真 sink 判过、公网侧只有经隧道到得了 sink）===="
+echo "==== 目标端装机演练：达成（${done_what}）===="
