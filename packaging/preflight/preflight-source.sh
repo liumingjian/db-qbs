@@ -178,21 +178,58 @@ else
   report S3 FAIL "Instant Client 架构与本机一致" "前提未满足（S2 先红）" "先按 S2 处置"
 fi
 
-# 动态依赖解析得开——CentOS 7 上最常见的那一条是 libaio.so.1 缺失（yum install libaio）。
+# 动态依赖解析得开——两条最常见的：libaio.so.1 缺失（yum install libaio），
+# 以及**同一个包里的 libnnz19.so 找不到**（Instant Client 目录没进 ldconfig）。
+#
+# **按产品自己的搜索路径判，别替它加 LD_LIBRARY_PATH。** ODPI-C 按全路径 dlopen
+# libclntsh.so，其余几个兄弟库（libnnz19 / libclntshcore）由动态链接器按**它自己的**
+# 搜索路径找——`ldconfig` 里没有那个目录时就找不到。自检若在查之前先把目录塞进
+# LD_LIBRARY_PATH，查的就不是产品会遇到的那件事：2026-08-20 的源端装机演练上，
+# S1–S8 全绿之后「测试连接」当场 `DPI-1047 ... libnnz19.so: cannot open shared object file`
+# ——「自检说 OK 之后不该再出现环境类失败」那条判据当场破了（#155）。
 if [[ -n "$libclntsh" ]]; then
   # `ldd` 的**退出码也要收**：它跑失败时 stdout 是空的，只看「有没有 not found」
   # 会把「压根没查成」判成「依赖都齐了」——那是给运维的一句假保证。
-  ldd_out=$(LD_LIBRARY_PATH="$client_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-            ldd "$libclntsh" 2>&1); ldd_rc=$?
-  missing=$(awk '/not found/{print $1}' <<<"$ldd_out" | sort -u | paste -sd, -)
-  if (( ldd_rc != 0 )) && [[ -z "$missing" ]]; then
+  #
+  # **`env -u LD_LIBRARY_PATH`，不只是「本脚本不加」**：把
+  # `export LD_LIBRARY_PATH=/opt/oracle/instantclient` 写进 root 的 profile 是这类机器上最常见的
+  # 习惯，而 systemd 拉起来的 `db-qbs-source` 不继承任何 profile。留着继承来的那一份，
+  # 自检查到的是「运维当前这个 shell 里能不能加载」，产品要的是「服务进程里能不能加载」。
+  ldd_out=$(env -u LD_LIBRARY_PATH ldd "$libclntsh" 2>&1); ldd_rc=$?
+  missing=$(awk '/not found/{print $1}' <<<"$ldd_out" | sort -u)
+  # 缺的那几个里，哪些是「把 Instant Client 目录加进搜索路径就有了」——那部分的成因不是没装包，
+  # 而是那个目录没进 ldconfig。两种成因的处置完全不同，**而且可能同时成立**：
+  # 合成一句话就等于让运维清完一条再撞下一条，正是脚本头那条「一次列全」禁止的往返。
+  with_dir_missing=""
+  with_dir_rc=0
+  if [[ -n "$missing" ]]; then
+    with_dir_out=$(env LD_LIBRARY_PATH="$client_dir" ldd "$libclntsh" 2>&1); with_dir_rc=$?
+    with_dir_missing=$(awk '/not found/{print $1}' <<<"$with_dir_out" | sort -u)
+  fi
+  # 「加上目录就有了」的那一批 = 两次结果之差。
+  ldconfig_only=$(comm -23 <(printf '%s\n' $missing) <(printf '%s\n' $with_dir_missing) | paste -sd, -)
+  still_missing=$(printf '%s' "$with_dir_missing" | paste -sd, -)
+  all_missing=$(printf '%s' "$missing" | paste -sd, -)
+  fix_ldconfig="Instant Client 目录没进动态链接器的搜索路径：echo $client_dir > /etc/ld.so.conf.d/oracle-instantclient.conf && ldconfig"
+  fix_install="装上缺的库（CentOS 7 上多半是 yum install libaio），或把它们所在目录写进 ldconfig"
+  if (( ldd_rc != 0 )) && [[ -z "$all_missing" ]]; then
     report S4 FAIL "Instant Client 的动态依赖全解析得开" "未判定（ldd 以 ${ldd_rc} 退出）" \
       "ldd 没查成，多半不是一个动态库或读不了：$(head -1 <<<"$ldd_out")"
-  elif [[ -z "$missing" ]]; then
+  elif [[ -z "$all_missing" ]]; then
     report S4 PASS "Instant Client 的动态依赖全解析得开" 无缺失
+  elif (( with_dir_rc != 0 )); then
+    # 第二趟没查成，就分不出这几个缺的是哪种成因 —— **别猜**，两条处置一起给。
+    report S4 FAIL "Instant Client 的动态依赖全解析得开" "缺=${all_missing}（成因未判定，第二趟 ldd 以 ${with_dir_rc} 退出）" \
+      "两种成因都要排：${fix_install}；以及 ${fix_ldconfig}"
+  elif [[ -z "$still_missing" ]]; then
+    report S4 FAIL "Instant Client 的动态依赖全解析得开" "缺=${ldconfig_only}（加上 ${client_dir} 就都在）" \
+      "$fix_ldconfig"
+  elif [[ -z "$ldconfig_only" ]]; then
+    report S4 FAIL "Instant Client 的动态依赖全解析得开" "缺=${still_missing}" "$fix_install"
   else
-    report S4 FAIL "Instant Client 的动态依赖全解析得开" "缺=$missing" \
-      "装上缺的库（CentOS 7 上多半是 yum install libaio），或把它们所在目录写进 ldconfig"
+    # 两种成因同时成立 —— 一次列全，别让人清完一条再来撞下一条。
+    report S4 FAIL "Instant Client 的动态依赖全解析得开" "缺=${still_missing}；另有 ${ldconfig_only} 加上 ${client_dir} 就都在" \
+      "两条都要做：${fix_install}；以及 ${fix_ldconfig}"
   fi
 else
   report S4 FAIL "Instant Client 的动态依赖全解析得开" "前提未满足（S2 先红）" "先按 S2 处置"
