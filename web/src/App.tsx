@@ -40,6 +40,7 @@ import type {
   Condition,
   FetchedColumn,
   OrderTerm,
+  RunParams,
   Task,
   Datasource,
   TargetColumn,
@@ -74,7 +75,11 @@ type DialogState =
   | { kind: "edit"; task: Task }
   | { kind: "rename"; task: Task }
   | { kind: "delete"; task: Task }
-  | { kind: "start"; task: Task }
+  /**
+   * `rerun` 非空 = 从运行历史点「重跑」进来的：同一个发起对话框，只是按那次的运行参数
+   * 预填（ADR-0041 增补 2）。重跑本身不是一种新的发起，所以这里不另开一个 kind。
+   */
+  | { kind: "start"; task: Task; rerun?: { runRecordId: string; runParams: RunParams } }
   | null;
 
 type Page = "tasks" | "history" | "datasources";
@@ -394,7 +399,19 @@ export function App() {
           )}
 
           {activeRun === null && page === "history" && (
-            <HistoryScreen tasks={tasks ?? []} />
+            <HistoryScreen
+              tasks={tasks}
+              onRerun={(task, row) =>
+                setDialog({
+                  kind: "start",
+                  task,
+                  rerun: {
+                    runRecordId: row.run_record_id,
+                    runParams: row.run_params,
+                  },
+                })
+              }
+            />
           )}
 
           {activeRun === null && page === "datasources" && (
@@ -445,6 +462,7 @@ export function App() {
         {dialog?.kind === "start" && (
           <StartRunDialog
             task={dialog.task}
+            rerun={dialog.rerun}
             onClose={closeDialog}
             onStarted={(runRecordId) => {
               setActiveRun({ task: dialog.task, runRecordId });

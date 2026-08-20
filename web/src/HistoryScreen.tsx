@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
+import { ChevronDown, ChevronRight, RefreshCw, RotateCcw } from "lucide-react";
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 
 import { listRunHistory } from "./api";
@@ -11,9 +11,24 @@ import {
 import { messageFrom } from "./errors";
 import { historyPresentation, runIdPresentation } from "./history";
 import type { HistoryPresentation } from "./history";
+import { rerunAction } from "./rerun";
 import { runParamsSummary } from "./spec";
+import { ActionButton } from "./ui";
 
-export function HistoryScreen({ tasks }: { tasks: Task[] }) {
+/** 点了「重跑」之后由 `App` 打开发起对话框——本屏不发请求（规格 #149 A3）。 */
+export type RerunRequest = (task: Task, row: RunHistory) => void;
+
+/**
+ * `tasks` 是**可空**的：`null` 表示任务清单还没读到，不是「一个任务都没有」。
+ * 两者混为一谈会让刚进屏的那一瞬间每一行都报「任务已删除」。
+ */
+export function HistoryScreen({
+  tasks,
+  onRerun,
+}: {
+  tasks: Task[] | null;
+  onRerun: RerunRequest;
+}) {
   const [history, setHistory] = useState<RunHistory[] | null>(null);
   const [taskId, setTaskId] = useState("");
   const [refreshing, setRefreshing] = useState(true);
@@ -37,7 +52,7 @@ export function HistoryScreen({ tasks }: { tasks: Task[] }) {
   }, [loadHistory]);
 
   const taskOptions = useMemo(() => {
-    const names = new Map(tasks.map((task) => [task.task_id, task.name]));
+    const names = new Map((tasks ?? []).map((task) => [task.task_id, task.name]));
     for (const row of history ?? []) {
       if (!names.has(row.task_id)) {
         names.set(row.task_id, row.task_id);
@@ -51,7 +66,7 @@ export function HistoryScreen({ tasks }: { tasks: Task[] }) {
     );
   }, [history, taskId, tasks]);
   const taskNames = useMemo(
-    () => new Map(tasks.map((task) => [task.task_id, task.name])),
+    () => new Map((tasks ?? []).map((task) => [task.task_id, task.name])),
     [tasks],
   );
 
@@ -115,7 +130,9 @@ export function HistoryScreen({ tasks }: { tasks: Task[] }) {
         refreshing={refreshing}
         expandedId={expandedId}
         taskNames={taskNames}
+        tasks={tasks}
         onToggle={toggleDetails}
+        onRerun={onRerun}
       />
     </section>
   );
@@ -126,7 +143,9 @@ interface HistoryResultsProps {
   refreshing: boolean;
   expandedId: string | null;
   taskNames: ReadonlyMap<string, string>;
+  tasks: Task[] | null;
   onToggle: (runRecordId: string) => void;
+  onRerun: RerunRequest;
 }
 
 function HistoryResults({
@@ -134,7 +153,9 @@ function HistoryResults({
   refreshing,
   expandedId,
   taskNames,
+  tasks,
   onToggle,
+  onRerun,
 }: HistoryResultsProps) {
   if (history === null) {
     return (
@@ -161,6 +182,7 @@ function HistoryResults({
             <th className="numeric-column">行数</th>
             <th className="numeric-column">耗时</th>
             <th>发起于</th>
+            <th>操作</th>
             <th className="expand-column">
               <span className="visually-hidden">详情</span>
             </th>
@@ -173,7 +195,9 @@ function HistoryResults({
               row={row}
               expanded={expandedId === row.run_record_id}
               taskName={taskNames.get(row.task_id)}
+              tasks={tasks}
               onToggle={onToggle}
+              onRerun={onRerun}
             />
           ))}
         </tbody>
@@ -186,14 +210,18 @@ interface HistoryTableRowProps {
   row: RunHistory;
   expanded: boolean;
   taskName: string | undefined;
+  tasks: Task[] | null;
   onToggle: (runRecordId: string) => void;
+  onRerun: RerunRequest;
 }
 
 function HistoryTableRow({
   row,
   expanded,
   taskName,
+  tasks,
   onToggle,
+  onRerun,
 }: HistoryTableRowProps) {
   const presentation = historyPresentation(row);
   const detailToggleLabel = expanded ? "收起详情" : "展开详情";
@@ -233,6 +261,9 @@ function HistoryTableRow({
         <td className="numeric-column mono">{formatElapsed(row)}</td>
         <td className="mono history-time">{formatTimestamp(row.started_at)}</td>
         <td>
+          <RerunCell row={row} tasks={tasks} onRerun={onRerun} />
+        </td>
+        <td>
           <button
             className="detail-toggle"
             type="button"
@@ -251,7 +282,7 @@ function HistoryTableRow({
       </tr>
       {expanded && (
         <tr className="history-detail-row">
-          <td colSpan={10}>
+          <td colSpan={11}>
             <RunHistoryDetail
               row={row}
               taskName={taskName}
@@ -261,6 +292,52 @@ function HistoryTableRow({
         </tr>
       )}
     </Fragment>
+  );
+}
+
+/**
+ * 「重跑」动作位。三态由 `rerunAction` 判，本组件只负责摆出来：
+ * 没资格的给一个占位破折号（**不是空白**，空白会让人以为这列漏渲染了），
+ * 任务没了的给禁用按钮 + 原因（规格 #149 A6）——入口不许凭空消失。
+ */
+function RerunCell({
+  row,
+  tasks,
+  onRerun,
+}: {
+  row: RunHistory;
+  tasks: Task[] | null;
+  onRerun: RerunRequest;
+}) {
+  const action = rerunAction(row, tasks);
+  if (action.kind === "hidden") {
+    return <span className="empty-value">—</span>;
+  }
+  if (action.kind === "disabled") {
+    // 原因挂在**外层 span** 上：浏览器不给 `disabled` 控件派发指针事件，
+    // 挂在按钮自己的 `title` 上等于没写（悬停永远不出提示）。
+    // `aria-label` 也把原因带上，否则屏幕阅读器只听见一个按不动的「重跑」。
+    const label = `重跑（不可用）：${action.reason}`;
+    return (
+      <span className="row-actions" title={label}>
+        <ActionButton
+          label={label}
+          icon={<RotateCcw size={15} />}
+          disabled
+          onClick={() => {}}
+        />
+      </span>
+    );
+  }
+  return (
+    <span className="row-actions">
+      <ActionButton
+        label="重跑"
+        title="重跑：按这次的运行参数预填发起对话框"
+        icon={<RotateCcw size={15} />}
+        onClick={() => onRerun(action.task, row)}
+      />
+    </span>
   );
 }
 

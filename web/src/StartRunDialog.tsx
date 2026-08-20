@@ -5,6 +5,8 @@ import type { FormEvent } from "react";
 import { listRunHistory, startRun } from "./api";
 import type { Condition, RunHistory, RunParams, Task } from "./api";
 import { messageFrom } from "./errors";
+import { historyPresentation } from "./history";
+import { rerunPrefill } from "./rerun";
 import { comparisonSymbol, runtimeConditions, sameRunParams } from "./spec";
 
 /** 已跑多久。提示条本身就自称可能滞后，所以这里给个粗粒度就够，不做秒级跳动。 */
@@ -29,20 +31,24 @@ const INPUT_TYPES: Readonly<Record<Condition["value_type"], string>> = {
   date: "date",
 };
 
+/**
+ * 发起运行。重跑走的是**同一个**对话框（ADR-0041 增补 2）：区别只有初值——
+ * `rerun` 非空时按那次的运行参数预填，确认键仍是「发起」，并发提示与后端闸门原样都在。
+ */
 export function StartRunDialog({
   task,
+  rerun,
   onClose,
   onStarted,
 }: {
   task: Task;
+  rerun?: { runRecordId: string; runParams: RunParams };
   onClose: () => void;
   onStarted: (runRecordId: string) => void;
 }) {
   const parameters = useMemo(() => runtimeConditions(task.spec), [task.spec]);
   const [values, setValues] = useState<RunParams>(() =>
-    Object.fromEntries(
-      runtimeConditions(task.spec).map((condition) => [condition.parameter, ""]),
-    ),
+    rerunPrefill(task.spec, rerun?.runParams ?? {}),
   );
   // 存的是那条进行中的记录本身，不是一个布尔——提示条要报出它的 run_record_id 和已跑时长，
   // 否则人只知道「可能有一个 run」，却没有任何办法去看它。
@@ -68,7 +74,12 @@ export function StartRunDialog({
             setRunningRow(
               rows.find(
                 (row) =>
-                  row.outcome === null && sameRunParams(row.run_params, values),
+                  // 「进行中」问 `historyPresentation`，不自己看 `outcome === null`——
+                  // 结局不明的行 `outcome` 也是 null，而它恰恰是**可以重跑**的那一类：
+                  // 自己看会让重跑一条结局不明的记录时，提示条指着你刚点的那一条说
+                  // 「可能已有一个 run 进行中」，而那个 run 早就没了（#150 审查所见）。
+                  historyPresentation(row).kind === "live" &&
+                  sameRunParams(row.run_params, values),
               ) ?? null,
             );
           }
@@ -105,7 +116,10 @@ export function StartRunDialog({
         <header className="modal-header">
           <div>
             <h2>发起运行 · {task.name}</h2>
-            <span className="modal-context mono">{task.task_id}</span>
+            <span className="modal-context mono">
+              {task.task_id}
+              {rerun !== undefined && ` · 重跑自 ${rerun.runRecordId}`}
+            </span>
           </div>
           <button
             className="icon-button"

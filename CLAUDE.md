@@ -23,7 +23,7 @@ per-milestone concessions.
 |---|---|---|
 | `docs/spikes/fixtures/local-rig/m2-visual-walkthrough.md` | V1-V25 | every M2 acceptance; **any** change to `docs/design-system/README.md` or `docs/design-system/tokens.css` |
 | `docs/spikes/fixtures/local-rig/m3-visual-walkthrough.md` | W1-W6 | every M3 acceptance; any change to the `.precheck-reports` layout in `web/src/app.css` or to the `DiagnosticTable` column structure |
-| `docs/spikes/fixtures/local-rig/v1-visual-walkthrough.md` | X1-X8 | every v1 acceptance; any change to the datasource screen, the builder mapping columns / target dropdown, or the four `app.css` rules in ADR-0039 §9 |
+| `docs/spikes/fixtures/local-rig/v1-visual-walkthrough.md` | X1-X9 | every v1 acceptance; any change to the datasource screen, the builder mapping columns / target dropdown, the run-history rerun entry / start-dialog prefill, or the four `app.css` rules in ADR-0039 §9 |
 
 1. **A trigger fires, you run it — no exemptions.** Whether an edit is "just text"
    costs more to adjudicate than running the walkthrough. Rulings: ADR-0032 §8

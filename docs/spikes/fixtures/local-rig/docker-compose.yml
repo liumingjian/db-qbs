@@ -19,6 +19,7 @@ services:
       - "1521:1521"
     volumes:
       - ./oracle:/container-entrypoint-initdb.d:ro
+    networks: [default, src-side]   # default 是既有台架那张网，一个字节不变
     healthcheck:
       test: ["CMD", "healthcheck.sh"]
       interval: 10s
@@ -41,6 +42,7 @@ services:
       - "3306:3306"
     volumes:
       - ./mysql:/docker-entrypoint-initdb.d:ro
+    networks: [default, dst-side]
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pspike123"]
       interval: 10s
@@ -71,3 +73,47 @@ services:
     volumes:
       - ../../../..:/workspace:ro   # 仓库根，方便在容器里直接看 fixtures
     working_dir: /workspace
+
+  # ---- 演练台（#152 / ADR-0041 增补 1）：两台 centos:7「主机」容器 ----
+  # 客户现场是两台 CentOS 7：源端装 source（挨着 Oracle），目标端装 sink（挨着 MySQL），
+  # 两库之间网络不通，只有 source → sink 一跳走公网、且只开白名单端口。这里把那张拓扑搭出来。
+  #
+  # **拓扑图与「三件刻意为之的事」的正文在 README「装机演练台」一节**，只此一份——
+  # 抄成三份的话，改了一处另两处就开始说不同的话。下面每个字段只注它自己那一句为什么。
+  host-source:
+    image: centos:7                  # 不 build 自定义镜像、不挂仓库 —— 演练要的是「干净机器」
+    platform: linux/amd64            # 客户机是 x86_64 CentOS 7，#151 的 glibc 2.17 下界也在这架构上
+    container_name: qbs-host-source
+    profiles: ["rehearsal"]          # 默认 up.sh 不起它们，四份既有台架的起停不受影响
+    init: true                       # PID 1 要能接 SIGTERM，也要收养 stunnel / source 的孤儿进程
+    command: ["sleep", "infinity"]
+    networks: [src-side]
+    extra_hosts:
+      # 「公网」那一跳的落点：宿主上暴露出来的白名单端口
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      oracle:
+        condition: service_healthy
+
+  host-target:
+    image: centos:7
+    platform: linux/amd64
+    container_name: qbs-host-target
+    profiles: ["rehearsal"]
+    init: true
+    command: ["sleep", "infinity"]
+    networks: [dst-side]
+    ports:
+      # 白名单口：目标端**唯一**对外露出的端口，给 #153 的 stunnel 服务端用。
+      # sink 本身仍然只绑目标端主机的回环，ADR-0024 的兜底形态原样成立。
+      - "127.0.0.1:15443:15443"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+networks:
+  default:
+  src-side:
+    name: qbs-src-side
+  dst-side:
+    name: qbs-dst-side
