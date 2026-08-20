@@ -34,7 +34,7 @@ QBS_MYSQL_PASSWORD_FILE=/root/.qbs-mysql-pass ./preflight-target.sh
 | S1 | glibc ≥ 2.17 | `getconf GNU_LIBC_VERSION` |
 | S2 | Instant Client 目录里有 `libclntsh.so` **且读得到** | 目录里找，软链必须解得开 |
 | S3 | Instant Client 架构与本机一致 | 读 ELF 头的 `e_machine` |
-| S4 | Instant Client 的动态依赖全解析得开 | `ldd` 找 `not found`（CentOS 7 上最常见的是 `libaio`） |
+| S4 | Instant Client 的动态依赖全解析得开 | `ldd` 找 `not found`，**按产品自己的搜索路径查、不替它加 `LD_LIBRARY_PATH`**（两条常见成因：缺 `libaio`；目录没进 `ldconfig`，症状是 `libnnz19.so` 找不到） |
 | S5 | Oracle 监听口可达 | TCP。地址取 `QBS_ORACLE_HOST`；取不到就记「未判定」，**不猜 `127.0.0.1`** |
 | S6 | stunnel 客户端进程在跑 | pid 文件 + `/proc` |
 | S7 | 隧道入口端口在听 | TCP |

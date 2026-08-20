@@ -31,6 +31,8 @@ REPS=7 ./scripts/run-cpu-probe.sh        # 跑 #5 的客户端每行 CPU 探针�
 ./scripts/rehearsal-tunnel-up.sh         # 在两台主机上装 stunnel 双端隧道（#153，先跑拓扑判据再跑它）
 ./scripts/rehearsal-tunnel-check.sh      # 跑隧道的 T0–T11 判据
 ./scripts/test-rehearsal-tunnel.sh       # 上面两支脚本与两份配置模板的静态自检（不碰 docker）
+./scripts/rehearsal-source-install.sh     # 照源端装机手册在源端主机上从零装一遍（#155）
+./scripts/test-rehearsal-source-install.sh # 手册与回放脚本的静态自检（不碰 docker）
 ./scripts/rehearsal-preflight-check.sh   # 跑两端环境自检的 P0–P11 判据（#154，--phase both 会推倒重建）
 ./scripts/test-preflight-classify.sh     # 目标端自检按 sink 回答分档的 C1–C9（不碰 docker，几秒钟）
 ./scripts/test-rehearsal-preflight.sh    # 两支自检脚本与上面两支的静态自检（不碰 docker）
@@ -574,6 +576,40 @@ fixture 是新建的 `acceptance/oracle-v1.sql` 与 `acceptance/mysql-v1.sql`，
   以及 `vault.centos.org` 的 CDN 开始对 `*.sqlite.bz2` 回 403 导致 `yum install` 全线失败
   （改成三源 failover + `failovermethod=priority`，这条本来会在 #157 的终局演练上炸）。
 - **P 不是第五个台架字母**，与 R / T 同理（ADR-0041 增补 4(a)）：它编的是演练台上自检那一段，
+  一条搬运语义都不碰。
+
+### 源端装机（#155）
+
+手册在 [`docs/install/source-centos7.md`](../../../install/source-centos7.md)，实录在
+[`docs/install/records/`](../../../install/records/)——**手册与实录同处一个文档区**（规格 #149 E.17），
+台架这边只放「在演练台上走它」的那一半。
+
+```bash
+./scripts/up.sh                                  # 两个库
+./scripts/rehearsal-up.sh                        # 两台主机 + 切断
+./scripts/rehearsal-topology-check.sh --reset    # R0–R10（**装隧道之前**跑）
+./scripts/rehearsal-tunnel-up.sh --side target --sink real   # 只把对端准备好
+./scripts/rehearsal-source-install.sh            # 照手册在源端主机上从零装一遍
+./scripts/test-rehearsal-source-install.sh       # 不起台架的静态自检
+```
+
+- **`--side` 与 `--sink` 是给装机演练开的两个口子**（默认值与 #153 落地时一个字不差）：
+  `--side target` 只装对端——源端那一头必须由人照手册一条条敲，脚本代劳了，
+  「手册是走过的记录」这句话就当场作废；`--sink real` 把 #151 编出来的 `db-qbs-sink`
+  装到目标端，因为**源端自检 S8 判的是产品自己的错误码 `RUN_UNKNOWN`**，桩 sink 回不出来。
+  代价是 `rehearsal-tunnel-check.sh` 的 T3/T5/T7 按桩的标记判，`--sink real` 下那三条会红在标记上——
+  那是预期的，不是隧道坏了。**隧道那一段的加密取证仍以 #153 的实录为准，本票不重做。**
+- **回放脚本不是第二套装法**：每一段与手册里那一步逐字对应，两边不一致时以手册为准、
+  回来改脚本（与 `rehearsal-tunnel-up.sh` 对 `packaging/stunnel/README.md` 同一条纪律）。
+- **静态自检守的是「手册与回放说的是同一件事」**：自检的 S1–S8 一条不落地出现在手册里、
+  真机差异标记不少于点名的五类、端口与路径两边同值、vault 换源那一段与构建镜像指同一个存档
+  （这段现在有四份实现，`test-rehearsal-tunnel.sh` 第 11 条盯前三处、本支盯手册这一处）。
+- **实录**：[`rehearsal-source-20260820T050049Z.md`](../../../install/records/rehearsal-source-20260820T050049Z.md)
+  ——干净容器上自检先红 `2/6`（逐条对期望表）→ 装完 `8/0`、退出码 0 → 测试连接 `ok:true`。
+  那一趟抓到的最重要一条：**只解包不 `ldconfig`，自检照样全绿而产品当场
+  `DPI-1047 ... libnnz19.so`**——手册补了那一步，`preflight-source.sh` 的 S4 也改成
+  按产品自己的搜索路径判（原先它在查之前先塞 `LD_LIBRARY_PATH`，查的不是产品会遇到的那件事）。
+- **S 不是第五个台架字母**，与 R / T / P 同理（ADR-0041 增补 4(a)）：源端装机的判据落在实录里，
   一条搬运语义都不碰。
 
 ## 三份视觉走查的驱动脚本（`walkthrough/`）
