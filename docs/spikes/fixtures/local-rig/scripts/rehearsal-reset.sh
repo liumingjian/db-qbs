@@ -5,22 +5,22 @@
 # 装过的包、改过的配置、落下的二进制全在可写层里，删容器即归零。
 # 演练判据是「只照手册装完」（ADR-0041 §6），每走一遍都得从同一个起点走，
 # 否则上一遍手工补的那步会悄悄留在机器上，把手册的缺口盖住。
+#
+# **删在前、起在后，且删不看库的脸色**：回到干净态跟两个库在不在跑没有关系
+# （主机不挂卷，删掉就归零）。演练翻车时恰恰最想重来，那时库可能正好也是倒的——
+# 把「库没起就 exit 1」挡在删之前，等于在最需要重来的时刻不让重来。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# 两台主机 depends_on 两个库的健康检查：库没起时 `up` 会顺手把 Oracle 拉起来并阻塞等健康
-# （首次可达几分钟）。先点名说清楚，别让调用方对着一个没有输出的进程猜它是不是卡死了。
-echo "==> 确认两个库在跑"
-for c in qbs-oracle11 qbs-mysql8; do
-  docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null | grep -qx running \
-    || { echo "!! $c 没起，先跑 ./scripts/up.sh"; exit 1; }
-done
-
 echo "==> 删掉两台主机容器（连可写层一起）"
 docker compose --profile rehearsal rm -sfv host-source host-target
+echo "== 两台主机已回到干净机器态（容器已删）=="
 
-echo "==> 重建"
-docker compose --profile rehearsal up -d host-source host-target
-
-docker compose --profile rehearsal ps host-source host-target
-echo "== 两台主机已回到干净机器态 =="
+echo "==> 重建（起的那一半与 rehearsal-up.sh 是同一段，别抄第二遍）"
+if ./scripts/rehearsal-up.sh; then
+  echo "== 已回到干净机器态，并重建就位 =="
+else
+  echo "!! 两台主机已删除（干净态已达成），但**重建没成**——多半是两个库没起。"
+  echo "   跑 ./scripts/up.sh 起库，再跑 ./scripts/rehearsal-up.sh 把两台主机拉起来。"
+  exit 1
+fi

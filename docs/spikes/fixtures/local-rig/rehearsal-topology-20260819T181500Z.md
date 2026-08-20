@@ -1,5 +1,13 @@
 # 演练台拓扑实录 —— #152（V2③）
 
+> **⚠️ 这份实录的 R3 / R5 / R6 三条负判据后来被判定为假绿（2026-08-20）。**
+> 三条都按**容器名**判，得出的「不通」成因是名字解析失败、不是路由被切断；
+> 改成按 IP 判之后 R6 当场 FAIL——Docker Desktop 在两张 bridge 网之间是转发的，
+> 「跨容器直达是切断的」这句话在当时**并不成立**。下面的 PASS 20 / FAIL 0 原样保留
+> （记录就是记录，不回头改数），但请以
+> [`rehearsal-topology-20260820T012000Z.md`](rehearsal-topology-20260820T012000Z.md)
+> 为准，裁定见 ADR-0041 增补 4。
+
 - **日期（UTC）**：2026-08-19T18:15:00Z
 - **在哪跑**：所有者的 mac，Docker Desktop 29.3.1（rexec 派发；ADR-0041 增补 1「演练台改用 mac Docker」）
 - **判定来源**：`docs/adr/0041-v2-scope-trial-readiness.md` §8 的事实前提、规格 [#149](https://github.com/liumingjian/db-qbs/issues/149) C.10

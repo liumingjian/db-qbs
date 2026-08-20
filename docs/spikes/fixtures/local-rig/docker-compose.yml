@@ -76,25 +76,15 @@ services:
 
   # ---- 演练台（#152 / ADR-0041 增补 1）：两台 centos:7「主机」容器 ----
   # 客户现场是两台 CentOS 7：源端装 source（挨着 Oracle），目标端装 sink（挨着 MySQL），
-  # 两库之间网络不通，只有 source → sink 一跳走公网、且只开白名单端口。这里把那张拓扑搭出来：
+  # 两库之间网络不通，只有 source → sink 一跳走公网、且只开白名单端口。这里把那张拓扑搭出来。
   #
-  #   host-source ── src-side ── oracle          host-target ── dst-side ── mysql
-  #        └── 宿主暴露端口（扮演白名单）──▶ host-target:15443
-  #
-  # **跨容器直达是切断的**：两台主机不在同一张网上，源端只能经宿主上暴露出来的那个端口
-  # 到目标端 —— 暴露端口扮演客户侧的白名单，没暴露的端口就等于白名单外的端口。
-  #
-  # 三件刻意为之的事：
-  #   1. `profiles: rehearsal` —— 默认 `up.sh` 不起它们，四份既有台架的起停不受影响。
-  #   2. **不挂仓库、不 build 自定义镜像** —— 演练要的是「干净机器」。挂上仓库，手册就能
-  #      靠 `/workspace` 里现成的东西蒙混过关；东西必须像现场那样 `docker cp` 搬进去（行李）。
-  #   3. `linux/amd64` —— 客户机是 x86_64 CentOS 7，glibc 2.17 的下界也是在那个架构上兑现的
-  #      （#151）。演练台跟着客户机走，免得演练跑的是一套二进制、带去现场的是另一套。
+  # **拓扑图与「三件刻意为之的事」的正文在 README「装机演练台」一节**，只此一份——
+  # 抄成三份的话，改了一处另两处就开始说不同的话。下面每个字段只注它自己那一句为什么。
   host-source:
-    image: centos:7
-    platform: linux/amd64
+    image: centos:7                  # 不 build 自定义镜像、不挂仓库 —— 演练要的是「干净机器」
+    platform: linux/amd64            # 客户机是 x86_64 CentOS 7，#151 的 glibc 2.17 下界也在这架构上
     container_name: qbs-host-source
-    profiles: ["rehearsal"]
+    profiles: ["rehearsal"]          # 默认 up.sh 不起它们，四份既有台架的起停不受影响
     init: true                       # PID 1 要能接 SIGTERM，也要收养 stunnel / source 的孤儿进程
     command: ["sleep", "infinity"]
     networks: [src-side]
