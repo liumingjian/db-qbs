@@ -25,28 +25,45 @@ echo "==> 施加「跨容器直达切断」——客户现场那道防火墙的�
 # 为什么要显式切：Docker Desktop 在两张 bridge 网之间**是转发的**。两台主机各在自己那张网上
 # 并不构成隔离——2026-08-20 实测 172.30.0.3 直连 172.29.0.3:15443 拿得到令牌（ADR-0041 增补 4）。
 # 不切的话演练就跑在一张比客户现场宽松的网上，手册里缺的那几步要到现场才炸。
-#
-# 为什么从外部施加：被演练的那两台机器必须是**干净的 centos:7**——里面连 `ip` 都没有，
-# 更不该为台架自己的布线往里装东西。所以借一个一次性 alpine 共享它的网络命名空间打路由：
-# 机器本身一个字节没动，切断像现场的防火墙那样是外部事实。删容器即归零，这里每次起完重打。
 CUT_IMAGE=alpine:3
 subnet() { docker network inspect "$1" -f '{{(index .IPAM.Config 0).Subnet}}'; }
 DEFAULT_NET=$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' qbs-oracle11 | grep -v -- -side | head -1)
 
-cut_off() {  # $1=容器 $2...=要黑洞掉的子网 —— 幂等（replace），起完重复跑安全
-  docker run --rm --network "container:$1" --cap-add NET_ADMIN "$CUT_IMAGE" \
-    sh -c 'for n; do ip route replace blackhole "$n"; done' sh "${@:2}"
+# 切断分两层，缺一条都不成立：
+#   1. **路由黑洞**——把对面那张网、以及 default 网的网段整段黑掉（两个库在 default 上各还有
+#      一个 IP，只挡侧网等于没挡）。这一层挡的是「对面那台机器/那个库的所有端口」。
+#   2. **端口级封堵**——源端主机封死一切 3306 出向，目标端封死一切 1521 出向。
+#      这一层挡的是**绕过路由的那条路**：`host.docker.internal` 在 Docker Desktop 上给的是
+#      一个 IPv6 网关地址（实测 `fdc4:f303:9324::254`），宿主上 `1521:1521` / `3306:3306`
+#      两个发布端口就挂在它后面——2026-08-20 实测源端经它连 MySQL 3306 **是通的**，
+#      「两库之间网络不通」在只有第 1 层时从来没成立过（ADR-0041 增补 5）。
+#      路由黑洞管不了它：那是另一个地址、且要按端口区分（同一个网关上的 15443 正是白名单那一跳，
+#      必须留着）。所以第 2 层按端口判，IPv4 / IPv6 两张表都打。
+#      两台主机各自那一侧的库用的是**另一个**端口（源端 1521、目标端 3306），不受影响。
+#
+# 为什么从外部施加：被演练的那两台机器必须是**干净的 centos:7**——里面连 `ip` 都没有，
+# 更不该为台架自己的布线往里装东西。所以借一个一次性 alpine 共享它的网络命名空间打路由与规则：
+# 机器本身一个字节没动，切断像现场的防火墙那样是外部事实。删容器即归零，这里每次起完重打。
+cut_off() {  # $1=容器 $2=要黑洞掉的网段（空格分隔） $3=要封死的出向 TCP 端口（空格分隔）
+  docker run --rm --network "container:$1" --cap-add NET_ADMIN \
+    -e NETS="$2" -e PORTS="$3" "$CUT_IMAGE" sh -euc '
+      for n in $NETS; do ip route replace blackhole "$n"; done
+      apk add --no-cache iptables ip6tables >/dev/null
+      # 幂等：有同样的规则就不再加一条，起完重复跑安全。
+      for p in $PORTS; do
+        for t in iptables ip6tables; do
+          $t -C OUTPUT -p tcp --dport "$p" -j DROP 2>/dev/null \
+            || $t -A OUTPUT -p tcp --dport "$p" -j DROP
+        done
+      done'
 }
 
 SRC_SUB=$(subnet qbs-src-side)
 DST_SUB=$(subnet qbs-dst-side)
 DEF_SUB=$(subnet "$DEFAULT_NET")
 echo "    src-side=$SRC_SUB  dst-side=$DST_SUB  default=$DEF_SUB"
-# 源端黑洞掉目标端那张网和 default（mysql 在 default 上也有一个 IP，不挡就等于没挡）；
-# 目标端反过来。各自那一侧的库走同网直连，前缀更长，不受 /16 黑洞影响。
-# 「公网一跳」走 host.docker.internal，Docker Desktop 给的是 IPv6 地址，与这几条 IPv4 黑洞无关。
-cut_off qbs-host-source "$DST_SUB" "$DEF_SUB"
-cut_off qbs-host-target "$SRC_SUB" "$DEF_SUB"
+cut_off qbs-host-source "$DST_SUB $DEF_SUB" 3306
+cut_off qbs-host-target "$SRC_SUB $DEF_SUB" 1521
 
 docker compose --profile rehearsal ps host-source host-target
 echo "== 演练台就位；拓扑判据跑 ./scripts/rehearsal-topology-check.sh =="

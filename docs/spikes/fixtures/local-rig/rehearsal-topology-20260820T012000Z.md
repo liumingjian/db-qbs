@@ -1,5 +1,13 @@
 # 演练台拓扑判据实录（2026-08-20 01:20Z，改判后重跑）
 
+> **⚠️ 这一轮仍然缺一条：宿主网关那条路（2026-08-20 01:45Z 判定）。**
+> 黑洞路由挡的是 IPv4 侧网与 default 网，而两个库在**宿主**上各发布了一个端口，
+> 「公网一跳」的落点正是宿主——实测源端主机经 `host.docker.internal:3306` **连得上 MySQL**。
+> 下面的 PASS 25 / FAIL 0 原样保留（记录就是记录，不回头改数），
+> 但「两库之间网络不通」要以
+> [`rehearsal-topology-20260820T014500Z.md`](rehearsal-topology-20260820T014500Z.md)
+> 为准（切断改为两层，第 2 层按端口判，裁定见 ADR-0041 增补 5）。
+
 - **驱动脚本**：`scripts/rehearsal-topology-check.sh --reset`（进仓库，视觉门禁通则 4 的同一条纪律）
 - **落点**：mac Docker Desktop（rexec 派发），Docker OperatingSystem = `Docker Desktop`
 - **结果**：**PASS 25 / FAIL 0**
