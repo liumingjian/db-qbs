@@ -28,6 +28,9 @@ REPS=7 ./scripts/run-cpu-probe.sh        # 跑 #5 的客户端每行 CPU 探针�
 ./scripts/rehearsal-reset.sh             # 把两台主机推倒重建回干净机器态
 ./scripts/rehearsal-topology-check.sh    # 跑演练台的 R0–R10 拓扑判据
 ./scripts/test-rehearsal-topology.sh     # 上面三支脚本的静态自检（不碰 docker）（--reset 才判 R9，会推倒重建）
+./scripts/rehearsal-tunnel-up.sh         # 在两台主机上装 stunnel 双端隧道（#153，先跑拓扑判据再跑它）
+./scripts/rehearsal-tunnel-check.sh      # 跑隧道的 T0–T11 判据
+./scripts/test-rehearsal-tunnel.sh       # 上面两支脚本与两份配置模板的静态自检（不碰 docker）
 ./scripts/sqlplus.sh   # 进 sqlplus
 ./scripts/down.sh      # 拆掉，连卷一起删
 ```
@@ -485,6 +488,54 @@ fixture 是新建的 `acceptance/oracle-v1.sql` 与 `acceptance/mysql-v1.sql`，
 `centos:7` 容器与客户那台真机**同样**装不上任何包（`yum install stunnel` 直接失败），
 都得先把 repo 指到 `vault.centos.org`（`packaging/centos7/Dockerfile`（#151）里已经有这段改源）。
 演练台在这一点上**不比真机宽松**，正好——手册怎么写这一步是 #155/#156 的事，不在本票。
+
+### stunnel 双端隧道（#153）
+
+演练台上把 `source → sink` 那条「公网」一跳换成加密隧道，兑现的是
+[ADR-0037](../../../adr/0037-datasource-model-and-credential-boundary.md) §4
+那条至今没人还过的账（MySQL 口令明文过线，通道必须可信）。
+**双端配置模板、证书生成、装法说明在 [`packaging/stunnel/`](../../../../packaging/stunnel/)**，
+随行李清单带走——工具不进仓库的门禁，下一台机器会静默跳过（`CLAUDE.md` 视觉门禁通则 4 的同一条纪律）。
+
+```bash
+./scripts/up.sh                        # 两个库
+./scripts/rehearsal-up.sh              # 两台主机 + 切断
+./scripts/rehearsal-topology-check.sh  # R0–R10（**要在装隧道之前跑**，见下）
+./scripts/rehearsal-tunnel-up.sh       # 照 packaging/stunnel/README.md 的六步装两端
+./scripts/rehearsal-tunnel-check.sh    # T0–T11，逐条打印实测
+./scripts/test-rehearsal-tunnel.sh     # 不起台架的静态自检（含「产品代码零改动」）
+```
+
+- **落点形态**：源端 stunnel 客户端只绑 `127.0.0.1:8080`，目标端 stunnel 服务端在白名单口
+  `15443` 上收、落到 `127.0.0.1:8080` 的 sink。`source` 的 `sink_base_url` 仍是
+  `http://127.0.0.1:8080`——**`config/source.toml.example` 里本来就是这个值**，
+  scheme 仍是 `http`，`protocol.rs` 那条「非 http 一律拒」的校验一个字不动。
+  **sink 仍然只绑回环**，ADR-0024 的兜底形态原样成立（判据 T4）。
+- **桩 sink，不是真 sink**：真 `sink` 要等 #156 装上来。本票要证的是隧道那一段，
+  落点是不是真产品不影响判据——但**「只绑回环」这条必须一模一样**，桩就是照
+  `config/sink.toml.example` 的 `127.0.0.1:8080` 绑的，T4 判的就是它。
+- **加密那一条怎么判**：同一个地址上，明文 HTTP 打上去拿不到任何东西（T6），
+  对端首字节不是 `48 54 54 50`（"HTTP"，T6b），而带客户端证书握手拿得到（T7）、
+  协商出来的是 TLS 1.2（T7c）、对端证书 CN 是钉住的那一张（T7b）、
+  不带客户端证书则被拒（T8）。**T6/T6b 的正对照就是 T7**——没有它，
+  「明文拿不到」可能只是那儿压根没人听，那正是负判据最常见的假绿成因。
+- **两份判据有先后**：`rehearsal-topology-check.sh` 的 R7a/R8a 要在目标端**自己起一个探针监听端**
+  占用 `15443`，而隧道装完之后那个端口归 stunnel。所以顺序是
+  **先跑拓扑判据、再装隧道**；已经装完还想复核拓扑，先 `./scripts/rehearsal-reset.sh`
+  推倒重建（隧道随可写层一起归零），再按上面的顺序走一遍。
+- **证书不进版本库**：`packaging/stunnel/gen-certs.sh` 就地出两张自签证书，两端互相钉住对方那张
+  （`verify = 2` + `CAfile`，CentOS 7 的 stunnel 4.56 没有 `checkHost`，**钉住证书文件本身就是身份校验**）。
+  产物落 `packaging/stunnel/out/`，被同目录 `.gitignore` 挡着。私钥不走网络，
+  所有者本人到场装机时随身拷贝。
+- **真机差异**：防火墙（`firewall-cmd --add-port=15443/tcp`）、SELinux、客户给的公网 IP
+  取代 `host.docker.internal`、`8080` 可能已被占——四条逐条列在
+  [`packaging/stunnel/README.md`](../../../../packaging/stunnel/README.md#真机上会不一样的地方)。
+- **实录**：[`rehearsal-tunnel-20260820T022000Z.md`](rehearsal-tunnel-20260820T022000Z.md)
+  ——从 `rehearsal-reset.sh` 推倒重建的干净机器起，stunnel 与证书全部在那一趟里从零装出来，
+  拓扑 19/19、隧道 17/17。顺序颠倒时那四条红也一并记在里面，作为上一条裁定的证据。
+- **T 不是第五个台架字母**，与 R 同理（ADR-0041 增补 4(a)）：它编的是演练台上隧道那一段的自检，
+  一条搬运语义都不碰。
+
 
 ## 三份视觉走查的驱动脚本（`walkthrough/`）
 

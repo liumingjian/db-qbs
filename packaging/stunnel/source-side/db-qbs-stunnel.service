@@ -1,0 +1,25 @@
+# db-qbs 隧道（source 端）—— **真机用**。演练台的 centos:7 容器里没有 systemd，
+# 那边是直接 `stunnel <conf>` 起的（见 ../README.md「演练台上怎么起」）。
+#
+# 装法：
+#   cp db-qbs-stunnel.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now db-qbs-stunnel
+#
+# Type=forking 配 PIDFile，对上的是配置里的 `foreground = no`：CentOS 7 的
+# stunnel 是 4.56，**没有把自己拉回前台的命令行开关**（4.x 只有 -fd/-help/-version/-sockets），
+# 所以前台/后台只能由配置决定，unit 跟着它走。改配置里那一行的话，这里的
+# Type 也要一起改成 simple，否则 systemd 会一直等一个不会退出的父进程。
+[Unit]
+Description=db-qbs stunnel (source side)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+PIDFile=/var/run/db-qbs-stunnel-sink.pid
+ExecStart=/usr/bin/stunnel /etc/stunnel/db-qbs/stunnel-sink.conf
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
