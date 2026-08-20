@@ -36,6 +36,11 @@ SQL `AS` 别名。**尚未在生产环境部署过。**
 `linux/arm64` 两套都编出来，并各自在同架构的干净 `centos:7` 上验一次启动，
 见 `packaging/centos7/README.md`。
 
+装到客户机器上的那条路还有三件东西在 `packaging/` 下：出发前逐项核对的**行李清单**
+（`packaging/PACKING-LIST.md`）、上机第一件事跑的**两端环境自检**
+（`packaging/preflight/`，缺什么一次列全）、以及把 `source → sink` 那一跳加密起来的
+**stunnel 双端模板**（`packaging/stunnel/`）。
+
 ```sh
 cargo build --release
 

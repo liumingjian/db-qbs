@@ -31,7 +31,11 @@ done
 
 # ---------------------------------------------------------------- 0 + 1：换源、装 stunnel
 # CentOS 7 已 EOL，mirrorlist 停服，不换源第一条 yum 就 404。这段与
-# packaging/centos7/Dockerfile 顶部那条 RUN 是同一份换法（vault 存档源，gpgcheck 不关）。
+# packaging/centos7/Dockerfile 顶部那条 RUN 是同一份换法（vault 存档源，gpgcheck 不关），
+# **只有一处已经不同**：下面的 baseurl 加了两个后备镜像（成因见那几行注释）。
+# Dockerfile 那份还是单源，而且它的 VAULT_BASE 按架构分（aarch64 在 altarch 下），
+# 后备镜像的路径也得跟着分——那是 #151 的镜像，改它要连着重建一次才算数，本票不动它。
+# 下次构建镜像撞上同一个 403 时，照这里的写法补过去。
 # 演练台在这一点上**不比真机宽松**：客户那台机器同样装不上任何包。
 install_stunnel() {  # $1=容器
   echo "==> [$1] 换 yum 源到 vault，装 stunnel + openssl"
@@ -54,7 +58,14 @@ for repo in os:base:Base updates:updates:Updates extras:extras:Extras; do
   {
     echo "[${id}]"
     echo "name=CentOS-7.9.2009 - ${label} - vault"
-    echo "baseurl=http://vault.centos.org/7.9.2009/${dir}/\$basearch/"
+    # 三个源，yum 按顺序 failover。**不是冗余，是必需**：2026-08-20 实测
+    # vault.centos.org 前面那层 CDN 开始对 `*.sqlite.bz2` 回 403（`*.xml.gz` 照常 200），
+    # 而 yum 优先取 sqlite 元数据——单源写法当天下午起就装不上任何包了。
+    # 存档内容本身是冻结的，镜像之间不会各说各话；第一个仍是 vault，另两个只在它拿不到时才轮到。
+    echo "baseurl=http://vault.centos.org/7.9.2009/${dir}/\$basearch/ https://linuxsoft.cern.ch/centos-vault/7.9.2009/${dir}/\$basearch/ https://archive.kernel.org/centos-vault/7.9.2009/${dir}/\$basearch/"
+    # yum 的 failovermethod 默认是 roundrobin —— 从 URL 列表里**随机**挑起点。
+    # 不写这一行的话「vault 优先，另两个才轮到」只是句愿望，排障时按它推断会走偏。
+    echo 'failovermethod=priority'
     echo 'gpgcheck=1'
     echo "gpgkey=${gpgkey_line}"
     echo 'enabled=1'
