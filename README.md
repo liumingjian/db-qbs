@@ -32,8 +32,9 @@ SQL `AS` 别名。**尚未在生产环境部署过。**
 1.85 以下的 Cargo 解析不动；node 16 编不过 `npm run build`）。
 
 要装到 **CentOS 7（glibc 2.17）** 上的产物不能在这台构建机上直接编 —— 装上去启动即
-`GLIBC_2.xx not found`。那条路走 `packaging/centos7/build.sh`（一条命令编完并在干净
-`centos:7` 上验一次启动），见 `packaging/centos7/README.md`。
+`GLIBC_2.xx not found`。那条路走 `packaging/centos7/build.sh`：一条命令把 `linux/amd64` 与
+`linux/arm64` 两套都编出来，并各自在同架构的干净 `centos:7` 上验一次启动，
+见 `packaging/centos7/README.md`。
 
 ```sh
 cargo build --release

@@ -11,30 +11,29 @@ FROM ${BASE_IMAGE}
 # 装任何包之前必须先把 yum 源改指 vault 存档源，否则 yum 第一条命令就 404。
 # aarch64 的存档在 altarch 下，故留成构建参数由 build.sh 按平台传。
 ARG VAULT_BASE=http://vault.centos.org/7.9.2009
+# 签名 key 按架构不同：x86_64 是 RPM-GPG-KEY-CentOS-7，aarch64 的 altarch 包另用
+# RPM-GPG-KEY-CentOS-7-aarch64（key ID 305d49d6）。镜像里有几个就全导入、全列进
+# gpgkey，别为了省事关掉 gpgcheck —— 这是装到客户机上的东西的来源凭证。
+# （注意：RUN 的续行会把后面所有行并成一条 shell 命令，注释只能写在 RUN 外面。）
 RUN set -eux; \
     rm -f /etc/yum.repos.d/*.repo; \
-    { \
-      echo '[base]'; \
-      echo 'name=CentOS-7.9.2009 - Base - vault'; \
-      echo "baseurl=${VAULT_BASE}/os/\$basearch/"; \
-      echo 'gpgcheck=1'; \
-      echo 'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-7'; \
-      echo 'enabled=1'; \
-      echo; \
-      echo '[updates]'; \
-      echo 'name=CentOS-7.9.2009 - Updates - vault'; \
-      echo "baseurl=${VAULT_BASE}/updates/\$basearch/"; \
-      echo 'gpgcheck=1'; \
-      echo 'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-7'; \
-      echo 'enabled=1'; \
-      echo; \
-      echo '[extras]'; \
-      echo 'name=CentOS-7.9.2009 - Extras - vault'; \
-      echo "baseurl=${VAULT_BASE}/extras/\$basearch/"; \
-      echo 'gpgcheck=1'; \
-      echo 'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-7'; \
-      echo 'enabled=1'; \
-    } > /etc/yum.repos.d/CentOS-Vault.repo; \
+    keys="$(ls /etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-7*)"; \
+    test -n "${keys}"; \
+    rpm --import ${keys}; \
+    gpgkey_line="$(printf 'file://%s ' ${keys})"; \
+    for repo in os:base:Base updates:updates:Updates extras:extras:Extras; do \
+      dir="${repo%%:*}"; rest="${repo#*:}"; id="${rest%%:*}"; label="${rest#*:}"; \
+      { \
+        echo "[${id}]"; \
+        echo "name=CentOS-7.9.2009 - ${label} - vault"; \
+        echo "baseurl=${VAULT_BASE}/${dir}/\$basearch/"; \
+        echo 'gpgcheck=1'; \
+        echo "gpgkey=${gpgkey_line}"; \
+        echo 'enabled=1'; \
+        echo; \
+      } >> /etc/yum.repos.d/CentOS-Vault.repo; \
+    done; \
+    cat /etc/yum.repos.d/CentOS-Vault.repo; \
     yum -y install gcc make curl ca-certificates binutils tar; \
     yum clean all; \
     rm -rf /var/cache/yum
