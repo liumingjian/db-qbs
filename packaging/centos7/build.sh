@@ -76,11 +76,18 @@ test -f "$ROOT/web/dist/index.html" || { echo "!! web/dist/index.html 缺失，�
 
 for platform in "${PLATFORMS[@]}"; do
   slug="${platform//\//-}"
-  # aarch64 的 CentOS 7 存档在 altarch 下，路径与 x86_64 不同。
+  # aarch64 的 CentOS 7 存档在 altarch 下，路径与 x86_64 不同 —— 后备镜像也一样要分。
+  # 后备镜像不是冗余：vault.centos.org 前面那层 CDN 会对 `*.sqlite.bz2` 回 403
+  # （2026-08-20 下午实测，持续几个小时后自愈），而 yum 优先取 sqlite 元数据，
+  # 单源时这一步当场装不上任何包。成因与三处换法的关系见 Dockerfile 里 VAULT_MIRRORS 的注释。
   case "$platform" in
-    */arm64|*/arm64/*|*/aarch64) vault_base="http://vault.centos.org/altarch/7.9.2009" ;;
-    *)                           vault_base="http://vault.centos.org/7.9.2009" ;;
+    */arm64|*/arm64/*|*/aarch64)
+      vault_leg="altarch/7.9.2009" ;;
+    *)
+      vault_leg="7.9.2009" ;;
   esac
+  vault_base="http://vault.centos.org/${vault_leg}"
+  vault_mirrors="https://linuxsoft.cern.ch/centos-vault/${vault_leg} https://archive.kernel.org/centos-vault/${vault_leg}"
   image="db-qbs-build-centos7:${RUST_VERSION}-${slug}"
   bin_out="$OUT/bin/$slug"
 
@@ -92,11 +99,12 @@ for platform in "${PLATFORMS[@]}"; do
   echo "==> 拉基础镜像 ${BASE_IMAGE}（${platform}）"
   docker pull --platform "$platform" "$BASE_IMAGE" >/dev/null
 
-  echo "==> 构建 centos:7 构建镜像 ${image}（yum 源 ${vault_base}）"
+  echo "==> 构建 centos:7 构建镜像 ${image}（yum 源 ${vault_base}，后备 ${vault_mirrors}）"
   docker build --platform "$platform" \
     --build-arg "BASE_IMAGE=$BASE_IMAGE" \
     --build-arg "RUST_VERSION=$RUST_VERSION" \
     --build-arg "VAULT_BASE=$vault_base" \
+    --build-arg "VAULT_MIRRORS=$vault_mirrors" \
     -t "$image" "$HERE"
 
   echo "==> 在 centos:7 里 cargo build --release --locked"
