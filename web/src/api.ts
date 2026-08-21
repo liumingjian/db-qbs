@@ -568,6 +568,13 @@ export async function generateBuilderSql(spec: TaskSpec): Promise<BuilderSql> {
   return postJson<BuilderSql>("/api/builder/sql", spec, "生成 SQL 失败");
 }
 
+/**
+ * 取列面（`POST /api/columns`）。
+ *
+ * **当前没有 UI 调用方**：构建器里那张取列卡随 `47a2fed` 摘掉，所有者 2026-08-21
+ * 裁定判废（ADR-0043 「两条收尾裁定」第一条）。**端点与本函数都留着**——
+ * 端点是协议面的东西，不因为界面上暂时没人调就删；真要接回建表 SQL 时从这里起步。
+ */
 export async function fetchColumns(
   datasourceId: string,
   spec: TaskSpec,

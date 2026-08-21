@@ -458,7 +458,8 @@ def tasks_and_builder(page, out):
     if fetch_button is None:
         missing = {
             "object_missing": "构建器里没有「拿建表 SQL」按钮与 .fetch-ready 区块——"
-                              "整段在 47a2fed 被摘掉，V19 / V20 的对象不存在",
+                              "整段在 47a2fed 被摘掉；所有者 2026-08-21 裁定判废（ADR-0043），"
+                              "V19 / V20 已写 N/A",
             "column_fetch_sections_on_screen": page.evaluate(
                 "() => [...document.querySelectorAll('.modal .column-fetch-section')]"
                 ".map(el => el.getAttribute('aria-labelledby'))"),
@@ -523,6 +524,9 @@ def main():
         "V12": "形状预检屏不存在，「这一屏没有错误码标签」无对象",
         "V18": "源端 SQL 随 ADR-0036 §2 改为由规格现算、只读，手改入口与确认模态一并没了",
         "V21": "ADR-0038 §3 / ADR-0039 §5 明文开出目标表下拉与目标列参考表，判据方向已反",
+        "V19": "构建器的建表 SQL 区块随 47a2fed 摘掉，所有者 2026-08-21 裁定判废（ADR-0043）；"
+               "本函数仍会去取一次并如实回一条 object_missing，别把它读成崩了",
+        "V20": "同 V19：取列卡与它的两句说明一起没了对象",
     }
     print(json.dumps(out, ensure_ascii=False, indent=2))
 
