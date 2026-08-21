@@ -42,7 +42,7 @@ sha256sum db-qbs-source-linux-amd64-<版本>.tar.gz
 - 目标端服务器能访问 MySQL。
 - 源端服务器能访问目标端服务器的 sink 端口，默认本文使用 `18080`。
 
-源端还需要 Oracle Instant Client Basic，建议 19c x86_64。该组件受 Oracle 许可约束，通常由客户 DBA 或运维提供。
+源端包内已包含 Oracle Instant Client Basic 19c x86_64 zip。客户机器仍需要 `libaio` 和 `unzip`，如系统没有，请由客户内网 yum 源或离线 rpm 安装。
 
 ## 3. 目标端安装 sink
 
@@ -133,29 +133,27 @@ firewall-cmd --reload
 
 以下命令在**源端服务器**执行。
 
-### 4.1 安装 Oracle Instant Client
+### 4.1 检查 Oracle Client 依赖
 
-如果客户已安装 Oracle Instant Client，确认目录即可。
+源端压缩包内已带：
 
-如果未安装，示例：
-
-```sh
-mkdir -p /opt/tools/db-qbs/oracle
-unzip instantclient-basic-linux.x64-19*.zip -d /opt/tools/db-qbs/oracle
-ln -sfn /opt/tools/db-qbs/oracle/instantclient_19_* /opt/tools/db-qbs/oracle/instantclient
+```text
+oracle/instantclient-basic-linux.x64-19*.zip
 ```
 
-把 Instant Client 注册给动态链接器：
+安装脚本会自动解压到：
 
-```sh
-echo /opt/tools/db-qbs/oracle/instantclient > /etc/ld.so.conf.d/db-qbs-oracle.conf
-ldconfig
-ldconfig -p | grep libclntsh
+```text
+/opt/tools/db-qbs/oracle/instantclient
 ```
 
-如果 `ldconfig -p | grep libclntsh` 没有输出，先不要继续，说明 Oracle Client 没装好。
+执行安装前，先确认源端机器有 `unzip` 和 `libaio`：
 
-CentOS/RHEL 系统如果缺 `libaio`，需要由客户内网 yum 源或离线 rpm 安装：
+```sh
+rpm -q unzip libaio
+```
+
+如果缺失，使用客户内网 yum 源或离线 rpm 安装：
 
 ```sh
 yum install -y libaio unzip
@@ -176,11 +174,20 @@ chmod +x scripts/*.sh
 ./scripts/install.sh
 ```
 
+安装脚本会同时完成：
+
+- 安装 `db-qbs-source` 和 `db-qbs-source-run`。
+- 解压包内 Oracle Instant Client。
+- 创建 `/opt/tools/db-qbs/oracle/instantclient` 软链。
+- 写入 `/etc/ld.so.conf.d/db-qbs-oracle.conf` 并执行 `ldconfig`。
+- 安装 systemd 服务模板。
+
 安装后文件在：
 
 ```text
 /opt/tools/db-qbs/bin/db-qbs-source
 /opt/tools/db-qbs/bin/db-qbs-source-run
+/opt/tools/db-qbs/oracle/instantclient
 /opt/tools/db-qbs/conf/source.toml
 /opt/tools/db-qbs/data/source/
 /opt/tools/db-qbs/logs/
@@ -210,6 +217,14 @@ history_retention_days = 90
 - `<目标端服务器IP>`：填写目标端服务器 IP。
 - `listen`：Web 界面端口，默认 `18088`。请只开放给管理员电脑。
 - `oracle_client_lib_dir`：填写 Oracle Instant Client 目录。
+
+安装后可以检查 Oracle Client 是否已被系统识别：
+
+```sh
+ldconfig -p | grep libclntsh
+```
+
+如果没有输出，先不要启动 source，重新检查 `unzip`、`libaio` 和安装脚本输出。
 
 ### 4.5 启动
 
