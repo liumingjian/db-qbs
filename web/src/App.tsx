@@ -1,8 +1,5 @@
 import {
-  Bell,
-  CalendarClock,
   Clock3,
-  Copy,
   Database,
   LoaderCircle,
   Pencil,
@@ -14,7 +11,7 @@ import {
   Tag,
   Trash2,
 } from "lucide-react";
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 
 import {
@@ -23,7 +20,6 @@ import {
   emptySpec,
   fetchBuilderColumns,
   fetchBuilderTables,
-  fetchColumns,
   fetchTargetColumns,
   fetchTargetTables,
   listDatasources,
@@ -36,9 +32,7 @@ import type {
   BuilderColumn,
   BuilderSql,
   BuilderTable,
-  ColumnFetchResult,
   Condition,
-  FetchedColumn,
   OrderTerm,
   RunParams,
   Task,
@@ -47,15 +41,9 @@ import type {
   TargetTableMetadata,
   TaskInput,
   TaskSpec,
-  TargetDdlIssue,
 } from "./api";
 import { messageFrom } from "./errors";
 import { HistoryScreen } from "./HistoryScreen";
-import {
-  ddlTextSegments,
-  fetchedColumnType,
-  targetDdlFailureFrom,
-} from "./m3";
 import { RunScreen } from "./RunScreen";
 import {
   COMPARISONS,
@@ -265,17 +253,6 @@ export function App() {
             <Server size={15} aria-hidden="true" />
             数据源
           </a>
-          <p className="nav-section">非 V1 范围</p>
-          <span className="nav-item is-disabled">
-            <CalendarClock size={15} aria-hidden="true" />
-            定时调度
-            <span className="nav-badge">M3+</span>
-          </span>
-          <span className="nav-item is-disabled">
-            <Bell size={15} aria-hidden="true" />
-            告警
-            <span className="nav-badge">M3+</span>
-          </span>
         </nav>
       </aside>
 
@@ -312,7 +289,7 @@ export function App() {
             数据导入 <span aria-hidden="true">/</span>{" "}
             <strong>{activeRun !== null ? "运行详情" : pageLabel(page)}</strong>
           </span>
-          <span className="environment">source · 当前实例</span>
+          <span className="environment">当前工作台</span>
         </header>
 
         <div className="content">
@@ -335,9 +312,7 @@ export function App() {
               runRecordId={activeRun.runRecordId}
               onBack={() => setActiveRun(null)}
               onRelaunch={() => setDialog({ kind: "start", task: activeRun.task })}
-              onOpenColumnFetch={() =>
-                setDialog({ kind: "edit", task: activeRun.task })
-              }
+              onEditTask={() => setDialog({ kind: "edit", task: activeRun.task })}
             />
           )}
 
@@ -637,13 +612,6 @@ type TargetMetaState =
   | { kind: "failed"; message: string }
   | { kind: "ready"; table: string; data: TargetTableMetadata };
 
-type ColumnFetchState =
-  | { kind: "idle" }
-  | { kind: "loading" }
-  | { kind: "oracle-failed"; message: string }
-  | { kind: "target-ddl-failed"; columns: FetchedColumn[]; issues: TargetDdlIssue[] }
-  | { kind: "ready"; result: ColumnFetchResult };
-
 /**
  * 任务定义编辑器 —— 构建器本身就是任务定义（ADR-0036 §1）。
  *
@@ -682,10 +650,11 @@ function TaskFormDialog({
   const [builderError, setBuilderError] = useState<string | null>(null);
   const [sql, setSql] = useState<BuilderSql | null>(null);
   const [sqlError, setSqlError] = useState<string | null>(null);
-  const [columnFetch, setColumnFetch] = useState<ColumnFetchState>({ kind: "idle" });
   // 目标端元数据（ADR-0038 §3/§8）。**结果纯瞬态**：只活在这里，不进任务定义、
   // 不进 SQLite，刷新即丢。映射关系本身要存，目标表结构快照不存。
   const [targetTables, setTargetTables] = useState<string[]>([]);
+  const [targetTablesLoading, setTargetTablesLoading] = useState(false);
+  const [targetTablesError, setTargetTablesError] = useState<string | null>(null);
   const [targetMeta, setTargetMeta] = useState<TargetMetaState>({ kind: "idle" });
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -713,40 +682,58 @@ function TaskFormDialog({
     }
     return names;
   }, [columns, spec.columns]);
+  const selectedSourceColumns = useMemo(
+    () => spec.columns.map((mapping) => mapping.source),
+    [spec.columns],
+  );
+  const mappedTargetsComplete = spec.columns.every(
+    (mapping) => mapping.target.trim() !== "",
+  );
+  const specComplete =
+    spec.owner !== "" &&
+    spec.columns.length > 0 &&
+    mappedTargetsComplete &&
+    spec.primary_key.length > 0;
 
   // 目标表清单跟着目标数据源走。取不到不打断建任务——`datalist` 空掉即可，
   // 目标表名**仍然能手打**（ADR-0039 §5：记得全名的人不必翻列表）。
   useEffect(() => {
     if (targetDatasourceId === "") {
       setTargetTables([]);
+      setTargetTablesError(null);
+      setTargetMeta({ kind: "idle" });
       return;
     }
-    let active = true;
-    void fetchTargetTables(targetDatasourceId)
-      .then((names) => {
-        if (active) {
-          setTargetTables(names);
-        }
-      })
-      .catch(() => {
-        if (active) {
-          setTargetTables([]);
-        }
-      });
-    return () => {
-      active = false;
-    };
+    void loadTargetTables();
   }, [targetDatasourceId]);
 
   // 目标列参考表按需取：**每次都真连一次 MySQL**（ADR-0038 §8 不缓存）。
   // 触发点是目标表名填完（失焦 / 从下拉选中），不是每敲一个字符——那会把库敲穿。
-  function loadTargetColumns() {
+  async function loadTargetTables() {
+    if (targetDatasourceId === "") {
+      setTargetTables([]);
+      setTargetTablesError(null);
+      return;
+    }
+    setTargetTablesLoading(true);
+    setTargetTablesError(null);
+    try {
+      setTargetTables(await fetchTargetTables(targetDatasourceId));
+    } catch (loadError) {
+      setTargetTables([]);
+      setTargetTablesError(messageFrom(loadError));
+    } finally {
+      setTargetTablesLoading(false);
+    }
+  }
+
+  function loadTargetColumns(force = false) {
     const table = spec.target_table.trim();
     if (targetDatasourceId === "" || table === "") {
       setTargetMeta({ kind: "idle" });
       return;
     }
-    if (targetMeta.kind === "ready" && targetMeta.table === table) {
+    if (!force && targetMeta.kind === "ready" && targetMeta.table === table) {
       return;
     }
     setTargetMeta({ kind: "loading" });
@@ -757,9 +744,17 @@ function TaskFormDialog({
       );
   }
 
+  function updateTargetTable(nextTable: string) {
+    updateSpec({
+      target_table: nextTable,
+      columns: spec.columns.map((mapping) => ({ ...mapping, target: "" })),
+      primary_key: [],
+    });
+    setTargetMeta({ kind: "idle" });
+  }
+
   // SQL 现算：规格一变就换一份（ADR-0036 §2 不存 SQL）。规格还没成形时不去打扰后端——
   // 它会拿 `validate()` 的报错回话，那不是「SQL 生成失败」，只是还没填完。
-  const specComplete = spec.owner !== "" && spec.columns.length > 0;
   useEffect(() => {
     if (!specComplete) {
       setSql(null);
@@ -790,7 +785,6 @@ function TaskFormDialog({
 
   function updateSpec(change: Partial<TaskSpec>) {
     setSpec((current) => ({ ...current, ...change }));
-    setColumnFetch({ kind: "idle" });
   }
 
   async function loadTables() {
@@ -842,15 +836,14 @@ function TaskFormDialog({
     });
   }
 
-  // 勾一列就是加一条恒等映射（`target` 预填成源列名，ADR-0038 §2）。改目标字段的入口归 ⑤（#131），
-  // 本票只把形状换过来，屏幕上看不出变化。
+  // 勾源列只表达“本次要搬这列”。目标字段要等目标表列读取后，在字段映射区明确选择。
   function toggleColumn(column: string) {
     const mapping = spec.columns.find((candidate) => candidate.source === column);
     if (mapping === undefined) {
-      updateSpec({ columns: [...spec.columns, { source: column, target: column }] });
+      updateSpec({ columns: [...spec.columns, { source: column, target: "" }] });
       return;
     }
-    // 主键存的是目标字段，取消勾选时按目标名摘——恒等映射下两者同名，但别把这一层省掉。
+    // 主键存的是目标字段，取消源列时按当前目标名摘掉。
     updateSpec({
       columns: spec.columns.filter((candidate) => candidate.source !== column),
       primary_key: spec.primary_key.filter((name) => name !== mapping.target),
@@ -863,9 +856,31 @@ function TaskFormDialog({
     updateSpec(renameTargetField(spec, column, nextTarget));
   }
 
+  function fillSameNameTargets() {
+    if (targetMeta.kind !== "ready") {
+      return;
+    }
+    const targetByUpper = new Map(
+      targetMeta.data.columns.map((column) => [
+        column.name.toUpperCase(),
+        column.name,
+      ]),
+    );
+    const next = spec.columns.reduce<Pick<TaskSpec, "columns" | "primary_key">>(
+      (current, mapping) => {
+        const target = targetByUpper.get(mapping.source.toUpperCase());
+        return target === undefined
+          ? current
+          : renameTargetField(current, mapping.source, target);
+      },
+      { columns: spec.columns, primary_key: spec.primary_key },
+    );
+    updateSpec(next);
+  }
+
   function toggleKey(column: string) {
     const target = targetFieldOf(spec.columns, column);
-    if (target === undefined) {
+    if (target === undefined || target.trim() === "") {
       return;
     }
     updateSpec({
@@ -934,23 +949,6 @@ function TaskFormDialog({
     });
   }
 
-  async function handleColumnFetch() {
-    setColumnFetch({ kind: "loading" });
-    try {
-      setColumnFetch({
-        kind: "ready",
-        result: await fetchColumns(sourceDatasourceId, spec),
-      });
-    } catch (fetchError) {
-      const targetDdlFailure = targetDdlFailureFrom(fetchError);
-      if (targetDdlFailure !== null) {
-        setColumnFetch({ kind: "target-ddl-failed", ...targetDdlFailure });
-      } else {
-        setColumnFetch({ kind: "oracle-failed", message: messageFrom(fetchError) });
-      }
-    }
-  }
-
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     setSubmitting(true);
@@ -989,7 +987,7 @@ function TaskFormDialog({
             <header>
               <div>
                 <strong id="builder-datasource-title">数据源</strong>
-                <span>凭据存在本机、口令加密落盘；目标端凭据随本次运行交给 sink</span>
+                <span>选择本任务使用的源端和目标端连接</span>
               </div>
             </header>
             <div className="builder-controls">
@@ -1022,7 +1020,18 @@ function TaskFormDialog({
                 <select
                   required
                   value={targetDatasourceId}
-                  onChange={(event) => setTargetDatasourceId(event.target.value)}
+                  onChange={(event) => {
+                    setTargetDatasourceId(event.target.value);
+                    updateSpec({
+                      target_table: "",
+                      columns: spec.columns.map((mapping) => ({
+                        ...mapping,
+                        target: "",
+                      })),
+                      primary_key: [],
+                    });
+                    setTargetMeta({ kind: "idle" });
+                  }}
                 >
                   <option value="">
                     {mysqlDatasources.length === 0 ? "尚无 MySQL 数据源" : "请选择"}
@@ -1045,7 +1054,7 @@ function TaskFormDialog({
             <header>
               <div>
                 <strong id="builder-source-title">源表</strong>
-                <span>Oracle 字典元数据仅展示，不判定类型是否可搬</span>
+                <span>读取源表后选择本次要同步的列</span>
               </div>
             </header>
             <div className="builder-controls">
@@ -1132,8 +1141,6 @@ function TaskFormDialog({
                           DECIMAL(10,2) 那种值读起来像一个长度。表下那句说明补齐口径。 */}
                       <th>精度 / 长度（字符）</th>
                       <th>可空</th>
-                      <th>目标字段</th>
-                      <th>主键</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1159,31 +1166,6 @@ function TaskFormDialog({
                           <td>
                             {column === undefined ? "—" : column.nullable ? "是" : "否"}
                           </td>
-                          {/* 常驻输入框，否掉「点开才编辑」：改名是常规动作不是例外动作
-                              （ADR-0039 §6）。默认预填源名——那不是将就的默认值，
-                              它就是恒等映射的正确表达（ADR-0038 §2）。 */}
-                          <td>
-                            <input
-                              className="cell-input mono"
-                              value={target ?? columnName}
-                              disabled={!selected}
-                              aria-label={`${columnName} 的目标字段`}
-                              onChange={(event) =>
-                                renameTarget(columnName, event.target.value)
-                              }
-                            />
-                          </td>
-                          {/* 主键勾选挨着它指的那个名字：主键存的是目标列名，
-                              停在最左会让人以为勾的是源列（ADR-0038 §6 / ADR-0039 §6）。 */}
-                          <td>
-                            <input
-                              type="checkbox"
-                              checked={target !== undefined && spec.primary_key.includes(target)}
-                              disabled={!selected}
-                              onChange={() => toggleKey(columnName)}
-                              aria-label={`把 ${columnName} 设为主键列`}
-                            />
-                          </td>
                         </tr>
                       );
                     })}
@@ -1195,19 +1177,92 @@ function TaskFormDialog({
                 也不因为某一列可能撞上就着色。 */}
             {columnNames.length > 0 && (
               <p className="target-side-note">
-                长度栏的单位是<strong>字符</strong>，而<strong>映射预检按字节判</strong>
-                （ADR-0033）：<code>utf8mb4</code> 下 10 个汉字是 30 字节。
-                第一版不统一两套口径，撞上时<strong>以预检结论为准</strong>。
+                长度栏的单位是<strong>字符</strong>。MySQL 使用 <code>utf8mb4</code> 时，
+                1 个汉字通常按 3 字节计算。
               </p>
             )}
             <footer>
               <span>
-                {spec.columns.length} 列已选 · {spec.primary_key.length} 列作主键
+                {spec.columns.length} 列已选 · 目标字段与主键在读取目标列后设置
               </span>
               <span className="builder-key-note">
-                主键必选：撤掉 DELETE 之后，去重全靠它（ADR-0035 §2）。
+                主键用于去重，必须至少选一列。
               </span>
             </footer>
+          </section>
+
+          <section className="builder-guide" aria-labelledby="builder-target-title">
+            <header>
+              <div>
+                <strong id="builder-target-title">目标表</strong>
+                <span>目标表需已在目标库中存在；新建后点刷新</span>
+              </div>
+            </header>
+            <div className="target-table-controls">
+              <FormField label="目标表">
+                <input
+                  required
+                  list="target-table-options"
+                  value={spec.target_table}
+                  placeholder={
+                    targetDatasourceId === ""
+                      ? "先选目标端数据源"
+                      : "键入片段可筛，也可以直接打全名"
+                  }
+                  onChange={(event) => updateTargetTable(event.target.value)}
+                  onBlur={() => loadTargetColumns()}
+                />
+              </FormField>
+              <button
+                className="button is-ghost"
+                type="button"
+                onClick={() => void loadTargetTables()}
+                disabled={targetDatasourceId === "" || targetTablesLoading}
+              >
+                {targetTablesLoading ? (
+                  <LoaderCircle className="is-spinning" size={15} />
+                ) : (
+                  <RefreshCw size={15} />
+                )}
+                {targetTablesLoading ? "读取中" : "读取表"}
+              </button>
+              <button
+                className="button is-ghost"
+                type="button"
+                onClick={() => loadTargetColumns(true)}
+                disabled={
+                  targetDatasourceId === "" ||
+                  spec.target_table.trim() === "" ||
+                  targetMeta.kind === "loading"
+                }
+              >
+                {targetMeta.kind === "loading" ? (
+                  <LoaderCircle className="is-spinning" size={15} />
+                ) : (
+                  <TableProperties size={15} />
+                )}
+                {targetMeta.kind === "loading" ? "读取中" : "读取列"}
+              </button>
+            </div>
+            <datalist id="target-table-options">
+              {targetTables.map((table) => (
+                <option key={table} value={table} />
+              ))}
+            </datalist>
+            {targetTablesError !== null && (
+              <div className="form-error" role="alert">
+                {targetTablesError}
+              </div>
+            )}
+            <TargetColumnReference
+              state={targetMeta}
+              spec={spec}
+              selectedSources={selectedSourceColumns}
+              onReload={() => loadTargetColumns(true)}
+              onTargetChange={renameTarget}
+              onToggleKey={toggleKey}
+              onFillSameName={fillSameNameTargets}
+            />
           </section>
 
           <ConditionEditor
@@ -1227,60 +1282,7 @@ function TaskFormDialog({
             onRemove={removeOrderTerm}
           />
 
-          {/* 原生 `<input list> + <datalist>`（ADR-0039 §5）：零新组件、零新 CSS，
-              浏览器自带子串过滤；**打字仍然能打**——记得全名的人不必翻列表。
-              代价写明：下拉样式归浏览器管，标不了副标，Safari 下略糙。 */}
-          <FormField label="目标表">
-            <input
-              required
-              list="target-table-options"
-              value={spec.target_table}
-              placeholder={
-                targetDatasourceId === ""
-                  ? "先选目标端数据源"
-                  : "键入片段可筛，也可以直接打全名"
-              }
-              onChange={(event) => updateSpec({ target_table: event.target.value })}
-              onBlur={loadTargetColumns}
-            />
-          </FormField>
-          <datalist id="target-table-options">
-            {targetTables.map((table) => (
-              <option key={table} value={table} />
-            ))}
-          </datalist>
-          <TargetColumnReference
-            state={targetMeta}
-            spec={spec}
-            onReload={loadTargetColumns}
-          />
-
           <GeneratedSql sql={sql} error={sqlError} ready={specComplete} />
-
-          <section className="column-fetch-section" aria-labelledby="column-fetch-title">
-            <header>
-              <div>
-                <strong id="column-fetch-title">目标表建表 SQL</strong>
-                <span>由当前规格生成的 SQL 开游标 describe 正向推导</span>
-              </div>
-              <button
-                className="button is-primary"
-                type="button"
-                onClick={() => void handleColumnFetch()}
-                disabled={
-                  columnFetch.kind === "loading" || sourceDatasourceId === ""
-                }
-              >
-                {columnFetch.kind === "loading" ? (
-                  <LoaderCircle className="is-spinning" size={15} aria-hidden="true" />
-                ) : (
-                  <TableProperties size={15} aria-hidden="true" />
-                )}
-                {columnFetch.kind === "loading" ? "取列中" : "拿建表 SQL"}
-              </button>
-            </header>
-            <ColumnFetchPanel state={columnFetch} />
-          </section>
 
           {error !== null && (
             <div className="form-error" role="alert">
@@ -1288,7 +1290,12 @@ function TaskFormDialog({
             </div>
           )}
         </div>
-        <ModalFooter onClose={onClose} busy={submitting} submitLabel={submitLabel} />
+        <ModalFooter
+          onClose={onClose}
+          busy={submitting}
+          submitLabel={submitLabel}
+          submitDisabled={!specComplete}
+        />
       </form>
     </Modal>
   );
@@ -1435,8 +1442,7 @@ function ConditionEditor({
         </ul>
       )}
       <small className="spec-note">
-        值一律走绑定变量，常量也有自己的参数名——理由不是防注入，是转义正确性（ADR-0011 §2）。
-        只有「运行时填」的参数进运行参数集与并发互斥键。
+        只有「运行时填」的参数需要在发起运行时填写。
       </small>
     </section>
   );
@@ -1538,7 +1544,7 @@ function GeneratedSql({
       <header>
         <div>
           <strong id="generated-sql-title">源端 SQL</strong>
-          <span>由规格现算，只读</span>
+          <span>只读预览</span>
         </div>
       </header>
       {error !== null ? (
@@ -1547,7 +1553,9 @@ function GeneratedSql({
         </div>
       ) : sql === null ? (
         <p className="spec-empty">
-          {ready ? "正在生成..." : "先选表、勾列，SQL 会自己长出来。"}
+          {ready
+            ? "正在生成..."
+            : "先选源表和源列，再读取目标列完成映射与主键。"}
         </p>
       ) : (
         <>
@@ -1584,107 +1592,6 @@ function columnOptions(columnNames: string[], current: string) {
   ));
 }
 
-function ColumnFetchPanel({ state }: { state: ColumnFetchState }) {
-  if (state.kind === "idle") {
-    return (
-      <p className="column-fetch-hint">
-        随时可取；目标表名为空时，DDL 会保留可见占位符。
-      </p>
-    );
-  }
-  if (state.kind === "loading") {
-    return (
-      <div className="fetch-progress">
-        <span />
-        正在连接 Oracle 并 describe 当前 SQL
-      </div>
-    );
-  }
-  if (state.kind === "oracle-failed") {
-    return (
-      <div className="fetch-failure" role="alert">
-        <strong>Oracle 取列失败</strong>
-        <span>{state.message}</span>
-      </div>
-    );
-  }
-
-  const columns = state.kind === "ready" ? state.result.columns : state.columns;
-  return (
-    <div className="fetch-ready">
-      <p className="fetch-scope-note">
-        这份取列结果<strong>刷新即丢</strong>：不进任务定义、不进存储，只是这一次的查看。
-      </p>
-      <div className="table-wrap">
-        <table className="data-grid">
-          <thead>
-            <tr>
-              <th>结果集列名</th>
-              <th>describe 类型</th>
-              <th>精度 / 长度</th>
-            </tr>
-          </thead>
-          <tbody>
-            {columns.map((column) => (
-              <tr key={column.name}>
-                <td className="mono">{column.name}</td>
-                <td className="mono">{fetchedColumnType(column)}</td>
-                <td className="mono">{columnShape(column)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="ddl-header">
-        <strong>CREATE TABLE</strong>
-        {state.kind === "ready" && (
-          <button
-            className="icon-button"
-            type="button"
-            title="复制建表 SQL"
-            aria-label="复制建表 SQL"
-            onClick={() =>
-              void navigator.clipboard.writeText(state.result.target_ddl)
-            }
-          >
-            <Copy size={15} aria-hidden="true" />
-          </button>
-        )}
-      </div>
-      {state.kind === "ready" ? (
-        <>
-          <pre className="ddl-output">
-            <DdlText ddl={state.result.target_ddl} />
-          </pre>
-          <div className="row-size-warning">
-            <strong>执行时若报 ERROR 1118 Row size too large</strong>
-            <span>
-              列宽合计超出 MySQL
-              单行上限，需缩窄字符列或拆表；这是静态提示，产品不预先判定行长。
-            </span>
-          </div>
-        </>
-      ) : (
-        <div className="row-size-warning is-crit">
-          <strong>这些列无法生成目标表定义，整份建表 SQL 不给。</strong>
-          {state.issues.map((issue, index) => (
-            <span key={`${issue.column}-${index}`}>
-              <span className="mono">{issue.column}</span>（
-              <span className="mono">{issue.source}</span>）：{issue.message}
-            </span>
-          ))}
-          <span>请按逐列原因修正后重新取列。</span>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/**
- * DDL 原样照给，只把待填写的占位符切出来单独标记。
- * target_table 留空时 source 会在 DDL 里保留它（`crates/source/src/target_ddl.rs`），
- * 裸 NUMBER 未配精度时也会保留 `DECIMAL(<p>,<s>)`。
- */
 /**
  * 目标表列参考（ADR-0038 §3、ADR-0039 §5）。
  *
@@ -1696,11 +1603,19 @@ function ColumnFetchPanel({ state }: { state: ColumnFetchState }) {
 function TargetColumnReference({
   state,
   spec,
+  selectedSources,
   onReload,
+  onTargetChange,
+  onToggleKey,
+  onFillSameName,
 }: {
   state: TargetMetaState;
   spec: TaskSpec;
+  selectedSources: string[];
   onReload: () => void;
+  onTargetChange: (source: string, target: string) => void;
+  onToggleKey: (source: string) => void;
+  onFillSameName: () => void;
 }) {
   if (state.kind === "idle") {
     return null;
@@ -1710,7 +1625,7 @@ function TargetColumnReference({
       <header>
         <div>
           <strong id="target-columns-title">目标表列参考</strong>
-          <span>只亮不判：约束一栏供参考，主键仍由你勾</span>
+          <span>目标表结构供参考，主键由你选择</span>
         </div>
         <button
           className="button is-ghost"
@@ -1733,41 +1648,168 @@ function TargetColumnReference({
       )}
       {state.kind === "ready" && state.data.columns.length === 0 && (
         <p className="column-fetch-hint">
-          目标库里没有 <code>{state.table}</code> 这张表——<strong>这不是错误</strong>：
-          表还没建时就是这个样子，用下面的建表 SQL 建出来再回来读一次。
+          目标库中没有 <code>{state.table}</code> 这张表。请在目标库中建好这张表，
+          然后点「重新读取」。
         </p>
       )}
       {state.kind === "ready" && state.data.columns.length > 0 && (
+        <>
+          <FieldMappingEditor
+            spec={spec}
+            selectedSources={selectedSources}
+            targetMeta={state.data}
+            onTargetChange={onTargetChange}
+            onToggleKey={onToggleKey}
+            onFillSameName={onFillSameName}
+          />
+          <div className="table-wrap">
+            <table className="data-grid">
+              <thead>
+                <tr>
+                  <th>目标表列</th>
+                  <th>类型</th>
+                  <th>长度（字符）</th>
+                  <th>可空</th>
+                  <th>默认值</th>
+                  <th>约束</th>
+                  <th>映射自</th>
+                </tr>
+              </thead>
+              <tbody>
+                {state.data.columns.map((column) => {
+                  const source = mappedSourceOf(spec, column.name);
+                  return (
+                    <tr
+                      key={column.name}
+                      className={source === undefined ? "is-unmapped" : ""}
+                    >
+                      <td className="mono">{column.name}</td>
+                      <td className="mono">{column.column_type}</td>
+                      <td className="mono">{column.length ?? "—"}</td>
+                      <td>{column.nullable ? "是" : "否"}</td>
+                      <td className="mono">{column.default_value ?? "—"}</td>
+                      <td className="mono">
+                        {constraintsOf(state.data, column) || "—"}
+                      </td>
+                      <td className="mono">{source ?? "（未映射）"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+      <footer>
+        <span>
+          目标表结构仅用于本次配置参考，不会写入任务定义。
+        </span>
+        <span className="builder-key-note">
+          长度栏同为字符；映射预检按字节判。
+        </span>
+      </footer>
+    </section>
+  );
+}
+
+function FieldMappingEditor({
+  spec,
+  selectedSources,
+  targetMeta,
+  onTargetChange,
+  onToggleKey,
+  onFillSameName,
+}: {
+  spec: TaskSpec;
+  selectedSources: string[];
+  targetMeta: TargetTableMetadata;
+  onTargetChange: (source: string, target: string) => void;
+  onToggleKey: (source: string) => void;
+  onFillSameName: () => void;
+}) {
+  const targetColumns = targetMeta.columns;
+  const targetByUpper = new Map(
+    targetColumns.map((column) => [column.name.toUpperCase(), column]),
+  );
+
+  return (
+    <section className="field-mapping-section" aria-labelledby="field-mapping-title">
+      <header>
+        <div>
+          <strong id="field-mapping-title">字段映射</strong>
+          <span>读取目标列后再把源列绑定到目标列</span>
+        </div>
+        <button
+          className="button is-ghost"
+          type="button"
+          onClick={onFillSameName}
+          disabled={selectedSources.length === 0 || targetColumns.length === 0}
+        >
+          同名填充
+        </button>
+      </header>
+      {selectedSources.length === 0 ? (
+        <p className="column-fetch-hint">
+          先在源表里勾选要搬的列，再到这里选择目标字段。
+        </p>
+      ) : (
         <div className="table-wrap">
           <table className="data-grid">
             <thead>
               <tr>
-                <th>目标表列</th>
-                <th>类型</th>
-                <th>长度（字符）</th>
-                <th>可空</th>
-                <th>默认值</th>
+                <th>源列</th>
+                <th>目标字段</th>
+                <th>目标类型</th>
                 <th>约束</th>
-                <th>映射自</th>
+                <th>主键</th>
               </tr>
             </thead>
             <tbody>
-              {state.data.columns.map((column) => {
-                const source = mappedSourceOf(spec, column.name);
+              {selectedSources.map((source) => {
+                const target = targetFieldOf(spec.columns, source) ?? "";
+                const targetColumn = targetByUpper.get(target.toUpperCase());
+                const targetExists =
+                  target === "" || targetColumn !== undefined;
                 return (
-                  <tr
-                    key={column.name}
-                    className={source === undefined ? "is-unmapped" : ""}
-                  >
-                    <td className="mono">{column.name}</td>
-                    <td className="mono">{column.column_type}</td>
-                    <td className="mono">{column.length ?? "—"}</td>
-                    <td>{column.nullable ? "是" : "否"}</td>
-                    <td className="mono">{column.default_value ?? "—"}</td>
-                    <td className="mono">
-                      {constraintsOf(state.data, column) || "—"}
+                  <tr key={source} className={!targetExists ? "is-unmapped" : ""}>
+                    <td className="mono">{source}</td>
+                    <td>
+                      <select
+                        className="cell-input mono"
+                        value={target}
+                        aria-label={`${source} 的目标字段`}
+                        onChange={(event) =>
+                          onTargetChange(source, event.target.value)
+                        }
+                      >
+                        <option value="">请选择目标字段</option>
+                        {!targetExists && (
+                          <option value={target}>
+                            当前：{target}（目标表未返回）
+                          </option>
+                        )}
+                        {targetColumns.map((column) => (
+                          <option key={column.name} value={column.name}>
+                            {column.name}
+                          </option>
+                        ))}
+                      </select>
                     </td>
-                    <td className="mono">{source ?? "（未映射）"}</td>
+                    <td className="mono">{targetColumn?.column_type ?? "—"}</td>
+                    <td className="mono">
+                      {targetColumn === undefined
+                        ? "—"
+                        : constraintsOf(targetMeta, targetColumn) || "—"}
+                    </td>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={target !== "" && spec.primary_key.includes(target)}
+                        disabled={target === ""}
+                        onChange={() => onToggleKey(source)}
+                        aria-label={`把 ${source} 映射的目标字段设为主键列`}
+                      />
+                    </td>
                   </tr>
                 );
               })}
@@ -1777,10 +1819,9 @@ function TargetColumnReference({
       )}
       <footer>
         <span>
-          这份结果<strong>刷新即丢</strong>：它不进任务定义、不进 SQLite（ADR-0038 §8）。
-        </span>
-        <span className="builder-key-note">
-          长度栏同为字符；映射预检按字节判。
+          {spec.columns.length} 列已选 ·{" "}
+          {spec.columns.filter((mapping) => mapping.target.trim() !== "").length}
+          {" "}列已映射 · {spec.primary_key.length} 列作主键
         </span>
       </footer>
     </section>
@@ -1801,23 +1842,6 @@ function constraintsOf(data: TargetTableMetadata, column: TargetColumn): string 
     .filter((key) => key.columns.some((name) => name.toUpperCase() === wanted))
     .map((key) => (key.name === "PRIMARY" ? "PRIMARY" : `UNIQUE ${key.name}`))
     .join(" · ");
-}
-
-function DdlText({ ddl }: { ddl: string }) {
-  const segments = ddlTextSegments(ddl);
-  return (
-    <>
-      {segments.map((segment, index) => (
-        <Fragment key={`${segment.kind}-${index}`}>
-          {segment.kind === "placeholder" ? (
-            <span className="ddl-placeholder">{segment.value}</span>
-          ) : (
-            segment.value
-          )}
-        </Fragment>
-      ))}
-    </>
-  );
 }
 
 /**

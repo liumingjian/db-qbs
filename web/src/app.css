@@ -30,8 +30,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .nav-item { height: 40px; display: flex; align-items: center; gap: 9px; padding: 0 16px; border-left: 3px solid transparent; color: var(--dim); text-decoration: none; }
 .nav-item.is-active { border-left-color: var(--brand); background: var(--brand-dim); color: var(--brand); font-weight: var(--weight-em); }
 .nav-item.is-disabled { color: var(--mute); cursor: default; }
-.nav-badge { margin-left: auto; padding: 0 4px; border: 1px solid var(--line-strong); border-radius: 2px; font-family: var(--font-num); font-size: 10px; }
-.nav-section { margin: 0; padding: 14px 16px 6px; color: var(--mute); font-size: var(--size-cap); }
 
 .main-column { min-width: 0; }
 .topbar { height: 52px; display: flex; align-items: center; gap: 12px; padding: 0 var(--pad); border-bottom: 1px solid var(--line); background: var(--panel); color: var(--dim); font-size: 13px; }
@@ -159,8 +157,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 /* ADR-0039 §9 第 4 条：未映射的目标列整行压暗——它是参考信息，不是待办项。
    压暗**不是拦截**：预检拒不拒是 sink 的事，构建器只亮不判（ADR-0023 §4）。 */
 .data-grid tr.is-unmapped td { color: var(--mute); }
-/* ADR-0039 §9 第 2 条：口令「已设置 / 未设置」是**事实陈述，不是成功或失败**——
-   既有 .field-badge 换三个中性色令牌，不新造组件（同 M3 .row-size-warning.is-crit 的走法）。 */
 .field-badge.is-neutral { border-color: var(--line-strong); background: var(--mute-bg); color: var(--mute); }
 /* ADR-0039 §9 第 3 条：测试连接成功是**一行纯文字**。不出错误码标签、不套 --ok-bg——
    test-connection 不属于任何 run，画成三轴里的任何一种形状都会被读成一次运行的结论。 */
@@ -175,20 +171,24 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .delete-copy p { margin: 0 0 6px; }
 .delete-copy strong { font-weight: var(--weight-em); }
 
-.builder-guide > header, .builder-guide > footer, .column-fetch-section > header, .ddl-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.builder-guide header > div, .column-fetch-section header > div { display: flex; flex-direction: column; gap: 2px; }
-.builder-guide strong, .column-fetch-section strong, .ddl-header strong { font-size: 13px; font-weight: var(--weight-em); }
-.builder-guide header span, .column-fetch-section header span { color: var(--mute); font-size: var(--size-meta); }
+.builder-guide > header, .builder-guide > footer, .column-fetch-section > header, .field-mapping-section > header, .field-mapping-section > footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.builder-guide header > div, .column-fetch-section header > div, .field-mapping-section header > div { display: flex; flex-direction: column; gap: 2px; }
+.builder-guide strong, .column-fetch-section strong, .field-mapping-section strong { font-size: 13px; font-weight: var(--weight-em); }
+.builder-guide header span, .column-fetch-section header span, .field-mapping-section header span { color: var(--mute); font-size: var(--size-meta); }
 .builder-guide { overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); }
 .builder-guide > header { min-height: 48px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
 .builder-controls { display: grid; grid-template-columns: minmax(150px, .7fr) auto minmax(240px, 1.3fr) auto; align-items: end; gap: 10px; padding: 12px; }
 .builder-controls select { width: 100%; height: var(--ctl-h); padding: 0 30px 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); }
+.target-table-controls { display: grid; grid-template-columns: minmax(260px, 1fr) auto auto; align-items: end; gap: 10px; padding: 12px; }
 .builder-columns { max-height: 300px; overflow: auto; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .builder-columns input { width: 15px; height: 15px; accent-color: var(--brand); }
 .builder-guide > .form-error { margin: 12px; }
 .builder-guide > footer { min-height: 50px; padding: 9px 12px; }
 .builder-guide > footer > span { color: var(--mute); font-family: var(--font-num); font-size: var(--size-meta); }
 .builder-guide > footer .builder-key-note { font-family: var(--font-cn); }
+.field-mapping-section { margin: 0 12px 12px; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); }
+.field-mapping-section > header { min-height: 48px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.field-mapping-section > footer { min-height: 40px; padding: 8px 12px; color: var(--mute); font-family: var(--font-num); font-size: var(--size-meta); }
 .spec-editor { overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); }
 .spec-editor > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
 .spec-editor > header > div { display: flex; flex-direction: column; gap: 2px; }
@@ -228,24 +228,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .column-fetch-section { overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); }
 .column-fetch-section > header { min-height: 54px; padding: 9px 12px; border-bottom: 1px solid var(--line); }
 .column-fetch-hint { margin: 0; padding: 14px 12px; color: var(--mute); font-size: var(--size-meta); }
-.fetch-progress { display: flex; align-items: center; gap: 10px; padding: 18px 12px; color: var(--dim); font-size: 13px; }
-.fetch-progress > span { width: 70px; height: 3px; overflow: hidden; background: var(--info-bg); }
-.fetch-progress > span::after { content: ""; display: block; width: 40%; height: 100%; background: var(--info); animation: fetch-slide 1s ease-in-out infinite alternate; }
-@keyframes fetch-slide { to { transform: translateX(150%); } }
-.fetch-failure { display: flex; flex-direction: column; gap: 10px; padding: 12px; border-left: 3px solid var(--crit); background: var(--crit-bg); color: var(--crit); font-size: 13px; }
-.fetch-failure strong { font-weight: var(--weight-em); }
-.fetch-failure .table-wrap { border: 1px solid var(--crit-bd); }
-.fetch-ready { display: flex; flex-direction: column; gap: 12px; padding: 12px; }
-.fetch-scope-note { margin: 0; color: var(--mute); font-size: var(--size-meta); line-height: var(--lh-copy); }
-.fetch-scope-note strong { color: var(--dim); font-weight: var(--weight-em); }
-.fetch-ready > .table-wrap { border: 1px solid var(--line); border-radius: var(--radius); }
-.ddl-header { padding-top: 2px; }
 .ddl-output { max-height: 280px; overflow: auto; margin: 0; padding: 12px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--mute-bg); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
-.ddl-placeholder { padding: 0 3px; border: 1px dashed var(--warn-bd); border-radius: 2px; background: var(--warn-bg); color: var(--warn); }
-.row-size-warning { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border: 1px solid var(--warn-bd); border-radius: var(--radius); background: var(--warn-bg); color: var(--dim); font-size: var(--size-meta); }
-.row-size-warning strong { color: var(--warn); font-weight: var(--weight-em); }
-.row-size-warning.is-crit { border-color: var(--crit-bd); background: var(--crit-bg); }
-.row-size-warning.is-crit strong { color: var(--crit); }
 
 .modal-context { display: block; margin-top: 2px; color: var(--mute); font-size: var(--size-cap); }
 .stale-run-hint { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border-left: 3px solid var(--warn); background: var(--warn-bg); color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-copy); }
@@ -348,7 +331,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .card-header, .toolbar { padding-inline: 12px; }
   .modal-backdrop { align-items: start; padding: 12px; }
   .modal { max-height: calc(100vh - 24px); }
-  .builder-controls { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
+  .builder-controls, .target-table-controls { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
   .spec-editor > header, .column-fetch-section > header { align-items: flex-start; flex-direction: column; }
   .spec-editor > header .button, .column-fetch-section > header .button { width: 100%; }
   .condition-row, .condition-row.is-order { grid-template-columns: minmax(0, 1fr); }

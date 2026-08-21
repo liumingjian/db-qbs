@@ -185,8 +185,6 @@ describe("run history presentation", () => {
   });
 
   it("explains a missing run id", () => {
-    expect(runIdPresentation(history({ run_id: null }))).toBe(
-      "未发起，目标端不知道这次运行",
-    );
+    expect(runIdPresentation(history({ run_id: null }))).toBe("未发起");
   });
 });

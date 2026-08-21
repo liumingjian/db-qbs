@@ -1,4 +1,4 @@
-import { ArrowLeft, Ban, Play, RefreshCw, TableProperties } from "lucide-react";
+import { ArrowLeft, Ban, Pencil, Play, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { cancelRun, fetchRun } from "./api";
@@ -23,13 +23,13 @@ export function RunScreen({
   runRecordId,
   onBack,
   onRelaunch,
-  onOpenColumnFetch,
+  onEditTask,
 }: {
   task: Task;
   runRecordId: string;
   onBack: () => void;
   onRelaunch: () => void;
-  onOpenColumnFetch: () => void;
+  onEditTask: () => void;
 }) {
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -125,7 +125,7 @@ export function RunScreen({
             返回任务
           </button>
           <h1 id="run-title">{task.name}</h1>
-          <span className="card-subtitle mono">run_record_id · {runRecordId}</span>
+          <span className="card-subtitle mono">运行记录 · {runRecordId}</span>
         </div>
         {detail?.live === true ? (
           <button
@@ -168,7 +168,7 @@ export function RunScreen({
             <FinishedRun
               detail={detail}
               presentation={presentation}
-              onOpenColumnFetch={onOpenColumnFetch}
+              onEditTask={onEditTask}
             />
           )}
         </div>
@@ -180,14 +180,14 @@ export function RunScreen({
 function RunIdentity({ task, detail }: { task: Task; detail: RunDetail }) {
   return (
     <dl className="run-identity">
-      <DetailValue label="run_record_id" value={detail.run_record_id} />
+      <DetailValue label="运行记录" value={detail.run_record_id} />
       <DetailValue
-        label="run_id"
-        value={detail.run_id ?? "未发起，目标端不知道这次运行"}
+        label="目标端运行号"
+        value={detail.run_id ?? "未发起"}
       />
-      <DetailValue label="task_id" value={task.task_id} />
-      <DetailValue label="run_params" value={runParamsSummary(detail.run_params)} />
-      <DetailValue label="staging_table" value={detail.staging_table ?? "—"} />
+      <DetailValue label="所属任务" value={task.task_id} />
+      <DetailValue label="运行参数" value={runParamsSummary(detail.run_params)} />
+      <DetailValue label="暂存表" value={detail.staging_table ?? "—"} />
     </dl>
   );
 }
@@ -208,7 +208,7 @@ function LiveRun({
         </div>
         <strong>{presentation.conclusion}</strong>
         {presentation.kind === "accepted" && (
-          <span>父进程已经受理，子进程尚未进入 PREPARING。</span>
+          <span>已受理，正在启动。</span>
         )}
       </section>
       <dl className="run-metrics">
@@ -224,11 +224,11 @@ function LiveRun({
 function FinishedRun({
   detail,
   presentation,
-  onOpenColumnFetch,
+  onEditTask,
 }: {
   detail: RunDetail & { live: false };
   presentation: RunPresentation;
-  onOpenColumnFetch: () => void;
+  onEditTask: () => void;
 }) {
   const mappingFailed = presentation.kind === "mapping-failed";
   return (
@@ -250,12 +250,11 @@ function FinishedRun({
       {mappingFailed && (
         <div className="precheck-exit">
           <span>
-            目标表和这段 SQL 对不上。建表 SQL 在取列那一步现取，这屏不重给——
-            免得你拿着旧的去撞 <code>ERROR 1050</code>。
+            目标表结构与本次取数的列对不上。请在目标库中调整目标表，或回到任务编辑修改字段映射。
           </span>
-          <button className="button is-ghost" type="button" onClick={onOpenColumnFetch}>
-            <TableProperties size={15} aria-hidden="true" />
-            回到取列拿建表 SQL
+          <button className="button is-ghost" type="button" onClick={onEditTask}>
+            <Pencil size={15} aria-hidden="true" />
+            编辑任务
           </button>
         </div>
       )}
@@ -290,7 +289,7 @@ function RunConclusion({
       <div className={`unknown-conclusion is-${detail.unknown_reason?.toLowerCase()}`}>
         <strong>结局不明</strong>
         <span>{presentation.conclusion}</span>
-        <small>没有错误码，也没有目标端终态块。</small>
+        <small>无法确认目标表是否被修改，请到目标库核对。</small>
       </div>
     );
   }
@@ -331,7 +330,7 @@ function PrecheckReports({
       <section className="is-failed">
         <header>
           <strong>映射预检</strong>
-          <span>sink</span>
+          <span>目标端</span>
         </header>
         <p>{detail.message ?? "目标端映射预检未通过。"}</p>
         <DiagnosticTable

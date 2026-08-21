@@ -441,7 +441,7 @@ function DatasourceFormDialog({
             <div className="form-error" role="alert">
               {test.message}
               <br />
-              连不上就存不进来：先确认地址、账号与网络放行，再回来测一次。
+              请确认地址、账号和网络放行后重新测试。
             </div>
           )}
           {error !== null && (
@@ -451,7 +451,7 @@ function DatasourceFormDialog({
           )}
           {!canSave && test.kind !== "failed" && (
             <p className="card-subtitle">
-              保存前必须先测试连接通过——库里存着的每一条都曾经真的连通过。
+              保存前请先测试连接。
             </p>
           )}
         </div>

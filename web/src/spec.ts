@@ -50,6 +50,12 @@ export function renameTargetField(
   if (!spec.primary_key.includes(previous)) {
     return { columns, primary_key: spec.primary_key };
   }
+  if (nextTarget.trim() === "") {
+    return {
+      columns,
+      primary_key: spec.primary_key.filter((name) => name !== previous),
+    };
+  }
   const primary_key: string[] = [];
   for (const name of spec.primary_key) {
     const renamed = name === previous ? nextTarget : name;

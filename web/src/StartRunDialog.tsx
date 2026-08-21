@@ -136,9 +136,7 @@ export function StartRunDialog({
             {parameters.length === 0 ? (
               <p className="run-params-empty">
                 这个任务没有「运行时填」的条件，发起时无需取值。
-                <span>
-                  并发互斥此时退化成「同一个任务不许并跑」（ADR-0036 §7）。
-                </span>
+                <span>同一任务不允许同时运行两次。</span>
               </p>
             ) : (
               <div className="run-params" aria-label="运行参数">
@@ -167,11 +165,11 @@ export function StartRunDialog({
             )}
             {runningRow !== null && (
               <div className="stale-run-hint">
-                <strong>该任务以同一组运行参数可能已有一个 run 进行中。</strong>
+                <strong>该任务以同一组运行参数可能已有一次运行正在进行。</strong>
                 <span className="mono">
                   {runningRow.run_record_id} · 已跑 {elapsedSince(runningRow.started_at)}
                 </span>
-                <span>这条提示可能滞后、不是门禁；真正的并发判断由后端在发起时完成。</span>
+                <span>状态可能有延迟，以发起结果为准。</span>
               </div>
             )}
             {error !== null && (

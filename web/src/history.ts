@@ -69,7 +69,7 @@ const UNKNOWN_CONCLUSIONS: Readonly<
 };
 
 export function runIdPresentation(history: RunHistory): string {
-  return history.run_id ?? "未发起，目标端不知道这次运行";
+  return history.run_id ?? "未发起";
 }
 
 export function historyPresentation(history: RunHistory): HistoryPresentation {

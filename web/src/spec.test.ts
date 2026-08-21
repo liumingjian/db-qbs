@@ -160,7 +160,7 @@ describe("renameTargetField（改目标名时主键跟着走）", () => {
   it("清空目标名不会留下「界面勾着、规格里是旧名」的中间态", () => {
     const next = renameTargetField(spec, "ID", "");
     expect(next.columns[0]).toEqual({ source: "ID", target: "" });
-    // 旧名 ID 已经不在主键里了——留着它就是那个被 ADR-0039 增补 1 明令禁止的中间态。
-    expect(next.primary_key).toEqual(["", "C_NAME"]);
+    // 没有目标字段就不能再作主键；留下空字符串只会把错误拖到提交时才爆。
+    expect(next.primary_key).toEqual(["C_NAME"]);
   });
 });

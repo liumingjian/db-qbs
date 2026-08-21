@@ -87,7 +87,7 @@ export function HistoryScreen({
           <h1 id="history-title">运行历史</h1>
           <span className="card-subtitle">
             {history === null ? "正在读取" : `共 ${history.length} 条`}
-            {" · 保留 90 天，按时间不按条数"}
+            {" · 保留最近 90 天"}
           </span>
         </div>
         <button
@@ -119,6 +119,25 @@ export function HistoryScreen({
             ))}
           </select>
         </label>
+        <button
+          className="button is-primary"
+          type="button"
+          onClick={() => void loadHistory({ taskId })}
+          disabled={refreshing}
+        >
+          查询
+        </button>
+        <button
+          className="button is-ghost"
+          type="button"
+          onClick={() => {
+            setTaskId("");
+            void loadHistory({});
+          }}
+          disabled={refreshing && taskId === ""}
+        >
+          重置
+        </button>
       </div>
       {error !== null && (
         <div className="history-error" role="alert">
@@ -173,8 +192,6 @@ function HistoryResults({
       <table className="data-grid history-grid">
         <thead>
           <tr>
-            <th>RUN_RECORD_ID</th>
-            <th>RUN_ID</th>
             <th>任务</th>
             <th>运行参数</th>
             <th className="outcome-column">结局</th>
@@ -229,22 +246,17 @@ function HistoryTableRow({
   return (
     <Fragment>
       <tr className={expanded ? "is-expanded" : ""}>
-        <td className="mono">
+        <td>
+          <span className="task-name">{taskName ?? row.task_id}</span>
+          <span className="task-id">{row.task_id}</span>
           <button
             className="history-link"
             type="button"
             aria-expanded={expanded}
             onClick={() => onToggle(row.run_record_id)}
           >
-            {row.run_record_id}
+            运行记录 · {row.run_record_id}
           </button>
-        </td>
-        <td className={row.run_id === null ? "missing-run-id" : "mono run-id-cell"}>
-          {runIdPresentation(row)}
-        </td>
-        <td>
-          <span className="task-name">{taskName ?? row.task_id}</span>
-          <span className="task-id">{row.task_id}</span>
         </td>
         <td className="mono run-params-cell" title={runParamsSummary(row.run_params)}>
           {runParamsSummary(row.run_params)}
@@ -282,7 +294,7 @@ function HistoryTableRow({
       </tr>
       {expanded && (
         <tr className="history-detail-row">
-          <td colSpan={11}>
+          <td colSpan={9}>
             <RunHistoryDetail
               row={row}
               taskName={taskName}
@@ -416,17 +428,17 @@ function RunHistoryDetail({
       aria-label={`${row.run_record_id} 运行详情`}
     >
       <dl className="identity-grid">
-        <DetailValue label="run_record_id" value={row.run_record_id} />
-        <DetailValue label="run_id" value={runIdPresentation(row)} />
-        <DetailValue label="task" value={taskName ?? row.task_id} />
-        <DetailValue label="run_params" value={runParamsSummary(row.run_params)} />
-        <DetailValue label="staging_table" value={row.staging_table ?? "—"} />
+        <DetailValue label="运行记录" value={row.run_record_id} />
+        <DetailValue label="目标端运行号" value={runIdPresentation(row)} />
+        <DetailValue label="任务" value={taskName ?? row.task_id} />
+        <DetailValue label="运行参数" value={runParamsSummary(row.run_params)} />
+        <DetailValue label="暂存表" value={row.staging_table ?? "—"} />
         <DetailValue
-          label="started_at"
+          label="发起时间"
           value={formatTimestamp(row.started_at, true)}
         />
         <DetailValue
-          label="finished_at"
+          label="结束时间"
           value={formatTimestamp(row.finished_at, true)}
         />
       </dl>
@@ -437,13 +449,13 @@ function RunHistoryDetail({
         >
           <strong>结局不明</strong>
           <span>{presentation.conclusion}</span>
-          <small>目标表效果未知；没有错误码，也没有目标端终态块。</small>
+          <small>无法确认目标表是否被修改，请到目标库核对。</small>
         </div>
       ) : (
         <>
           <div className="detail-status">
             <span className="outcome-label">
-              outcome <strong>{row.outcome ?? "进行中"}</strong>
+              运行结果 <strong>{row.outcome ?? "进行中"}</strong>
             </span>
             {presentation.terminalEffect !== null && (
               <TerminalBlock effect={presentation.terminalEffect} />
@@ -455,12 +467,12 @@ function RunHistoryDetail({
               row.target_table_effect !== null &&
               row.target_table_effect !== "UNKNOWN" && (
                 <span className="effect-text">
-                  target_table_effect <strong>{row.target_table_effect}</strong>
+                  目标表 <strong>{row.target_table_effect}</strong>
                 </span>
               )}
             {row.source_code !== null && (
               <span className="source-code">
-                source_code <strong>{row.source_code}</strong>
+                源端 <strong>{row.source_code}</strong>
               </span>
             )}
           </div>
@@ -480,8 +492,7 @@ function RunHistoryDetail({
       <section className="history-source-sql">
         <h2>当次执行的源端 SQL</h2>
         <p>
-          这是<strong>当时实际执行</strong>的语句快照（ADR-0036 §2），任务定义之后怎么改都不会改到它。
-          存的是未绑定的语句文本，参数值不内联——值看上面的 <code>run_params</code>。
+          本次运行实际执行的语句；参数值见上方运行参数。
         </p>
         <pre className="mono">{row.source_sql}</pre>
       </section>
@@ -502,22 +513,22 @@ function HistoryMetrics({ row }: { row: RunHistory }) {
   return (
     <div className="history-metric-groups">
       <section>
-        <h2>门禁四数</h2>
+        <h2>行数核对</h2>
         <dl className="metric-grid">
           <DetailValue
-            label="source_rows"
+            label="源端读取"
             value={formatOptionalCount(row.source_rows)}
           />
           <DetailValue
-            label="staged_rows"
+            label="暂存写入"
             value={formatOptionalCount(row.staged_rows)}
           />
           <DetailValue
-            label="sink_reported_rows"
+            label="目标端回报"
             value={formatOptionalCount(row.sink_reported_rows)}
           />
           <DetailValue
-            label="purged_rows"
+            label="清理行数"
             value={formatOptionalCount(row.purged_rows)}
           />
         </dl>
@@ -526,23 +537,23 @@ function HistoryMetrics({ row }: { row: RunHistory }) {
         <h2>分段耗时</h2>
         <dl className="metric-grid">
           <DetailValue
-            label="fetch_ms"
+            label="取数"
             value={formatMilliseconds(row.fetch_ms)}
           />
           <DetailValue
-            label="push_ms"
+            label="推送"
             value={formatMilliseconds(row.push_ms)}
           />
           <DetailValue
-            label="commit_ms"
+            label="提交"
             value={formatMilliseconds(row.commit_ms)}
           />
           <DetailValue
-            label="count_ms"
+            label="计数"
             value={formatMilliseconds(row.count_ms)}
           />
           <DetailValue
-            label="cursor_ms"
+            label="开游标"
             value={formatMilliseconds(row.cursor_ms)}
           />
         </dl>
