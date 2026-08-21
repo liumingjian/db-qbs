@@ -571,10 +571,8 @@ function JobResults({
             <th>迁移进度</th>
             <th>
               运行状态
-              {/* 这一列读一次就不动了（不轮询），把这一点当面说清，
-                  别让人拿它当实时看板（ADR-0042 后果 3 原样有效）。 */}
               <span className="visually-hidden">
-                状态可能有延迟，以发起结果为准。
+                有进行中任务时会自动刷新。
               </span>
             </th>
             <th>启动时间</th>

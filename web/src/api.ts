@@ -290,6 +290,8 @@ export interface LiveRunDetail {
   source_sql: string;
   staging_table: string | null;
   stage: string | null;
+  total_rows: number | null;
+  precount_ms: number | null;
   seq: number;
   rows_pushed: number;
   bytes: number;

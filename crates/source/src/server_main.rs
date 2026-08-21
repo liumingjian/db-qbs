@@ -375,7 +375,7 @@ fn route_api_request(
     }
 
     if method == Method::Get && path == "/api/runs" {
-        return handle_list_history(state.history, query);
+        return handle_list_history(state.runs, state.history, query);
     }
 
     if method == Method::Get {
@@ -556,6 +556,8 @@ fn handle_get_run(
                 "source_sql": record.source_sql,
                 "staging_table": record.staging_table,
                 "stage": record.stage,
+                "total_rows": record.total_rows,
+                "precount_ms": record.precount_ms,
                 "seq": record.seq,
                 "rows_pushed": record.rows_pushed,
                 "bytes": record.bytes,
@@ -572,7 +574,11 @@ fn handle_get_run(
     }
 }
 
-fn handle_list_history(history_store: &HistoryStore, query: Option<&str>) -> HttpResponse {
+fn handle_list_history(
+    runs: &RunRegistry,
+    history_store: &HistoryStore,
+    query: Option<&str>,
+) -> HttpResponse {
     let mut task_id = None;
     for (key, value) in url::form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
         if key.as_ref() == "task_id" {
@@ -580,9 +586,43 @@ fn handle_list_history(history_store: &HistoryStore, query: Option<&str>) -> Htt
         }
     }
     match history_store.list(task_id.as_deref()) {
-        Ok(history) => json_response(200, &history),
+        Ok(history) => match merge_live_history(runs, history, task_id.as_deref()) {
+            Ok(merged) => json_response(200, &merged),
+            Err(error) => internal_error(error),
+        },
         Err(error) => internal_error(error),
     }
+}
+
+fn merge_live_history(
+    runs: &RunRegistry,
+    mut history: Vec<RunHistory>,
+    task_id: Option<&str>,
+) -> Result<Vec<RunHistory>, String> {
+    let live = runs
+        .lock()
+        .map_err(|_| "run 投影锁已损坏".to_owned())?
+        .live_histories
+        .values()
+        .filter(|row| task_id.is_none_or(|wanted| row.task_id == wanted))
+        .cloned()
+        .collect::<Vec<_>>();
+    for row in live {
+        match history
+            .iter()
+            .position(|candidate| candidate.run_record_id == row.run_record_id)
+        {
+            Some(index) => history[index] = row,
+            None => history.push(row),
+        }
+    }
+    history.sort_by(|left, right| {
+        right
+            .started_at_ms()
+            .cmp(&left.started_at_ms())
+            .then_with(|| right.run_record_id.cmp(&left.run_record_id))
+    });
+    Ok(history)
 }
 
 fn history_response(history: &RunHistory) -> HttpResponse {

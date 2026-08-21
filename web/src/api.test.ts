@@ -203,6 +203,8 @@ describe("run history API", () => {
       source_sql: "SELECT a.ID AS ID\n  FROM APP.HOLDINGS a",
       staging_table: null,
       stage: null,
+      total_rows: null,
+      precount_ms: null,
       seq: 0,
       rows_pushed: 0,
       bytes: 0,

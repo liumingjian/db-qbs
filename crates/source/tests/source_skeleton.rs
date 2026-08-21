@@ -245,6 +245,8 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
             "source_sql": EXPECTED_SOURCE_SQL,
             "staging_table": "STG_7",
             "stage": "STREAMING",
+            "total_rows": null,
+            "precount_ms": null,
             "seq": 2,
             "rows_pushed": 7,
             "bytes": 220,
@@ -253,6 +255,11 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
             "live": true,
         })
     );
+    let live_list = json_body(&get(port, &format!("/api/runs?task_id={task_id}")).unwrap());
+    assert_eq!(live_list.as_array().unwrap().len(), 1);
+    assert_eq!(live_list[0]["run_record_id"], run_record_id);
+    assert_eq!(live_list[0]["rows_pushed"], 7);
+    assert_eq!(live_list[0]["finished_at"], Value::Null);
 
     let task_files = directory_entries(&directory.join("run-tasks"));
     assert_eq!(task_files.len(), 1);

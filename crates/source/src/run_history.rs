@@ -311,6 +311,10 @@ impl RunHistory {
         self.failure_kind = Some(FailureKind::Orchestrator.as_str().to_owned());
     }
 
+    pub fn started_at_ms(&self) -> i64 {
+        self.started_at_ms
+    }
+
     fn finish_from_log(&mut self, log: &Value) {
         self.outcome = owned_text(log, "terminal");
         self.stage = owned_text(log, "stage");

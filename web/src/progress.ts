@@ -33,6 +33,7 @@ export type ProgressCell =
 
 const EMPTY_LABEL = "—";
 const countFormatter = new Intl.NumberFormat("zh-CN");
+type ProgressTone = "ok" | "bad" | "live";
 
 /**
  * `run` 为 `undefined` = 这个任务尚未运行。
@@ -49,6 +50,24 @@ export function progressOf(run: RunHistory | undefined): ProgressCell {
       title: "尚未运行——这个任务还没有任何运行记录。",
     };
   }
+  const status = runStatus(run);
+  return progressFromCounts(
+    run,
+    status === "succeeded" ? "ok" : status === "failed" ? "bad" : "live",
+  );
+}
+
+export function progressOfLiveRun(run: {
+  total_rows: number | null;
+  rows_pushed: number;
+}): ProgressCell {
+  return progressFromCounts(run, "live");
+}
+
+function progressFromCounts(
+  run: { total_rows: number | null; rows_pushed: number },
+  tone: ProgressTone,
+): ProgressCell {
   const total = run.total_rows;
   if (total === null) {
     return {
@@ -60,7 +79,6 @@ export function progressOf(run: RunHistory | undefined): ProgressCell {
   const done = run.rows_pushed;
   const percent =
     total <= 0 ? 100 : Math.min(100, Math.floor((done / total) * 100));
-  const status = runStatus(run);
   return {
     kind: "value",
     percent,
@@ -70,6 +88,6 @@ export function progressOf(run: RunHistory | undefined): ProgressCell {
       total <= 0
         ? "源端总行数 0——没有要搬的行。"
         : `已推送 ${countFormatter.format(done)} / 开跑前计数 ${countFormatter.format(total)} 行（向下取整）。`,
-    tone: status === "succeeded" ? "ok" : status === "failed" ? "bad" : "live",
+    tone,
   };
 }

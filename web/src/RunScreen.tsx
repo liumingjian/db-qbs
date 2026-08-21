@@ -12,6 +12,7 @@ import {
 import { messageFrom } from "./errors";
 import { runIdPresentation } from "./history";
 import { mappingSuggestion } from "./m3";
+import { progressOfLiveRun } from "./progress";
 import { runPresentation } from "./run";
 import type { RunPresentation } from "./run";
 import { runParamsSummary } from "./spec";
@@ -200,12 +201,29 @@ function LiveRun({
   detail: RunDetail & { live: true };
   presentation: RunPresentation;
 }) {
+  const progress = progressOfLiveRun(detail);
   return (
     <>
       <section className={`live-state is-${presentation.kind}`}>
         <PhaseLine current={presentation.phase} />
         <div className="indeterminate-progress" aria-label="运行进行中">
           <span />
+        </div>
+        <div className="live-progress-row" title={progress.title}>
+          <span>迁移进度</span>
+          {progress.kind === "value" ? (
+            <span className="progress is-live-detail">
+              <span className="progress-track">
+                <span
+                  className={`progress-fill is-${progress.tone}`}
+                  style={{ width: `${progress.percent}%` }}
+                />
+              </span>
+              <span className="progress-pct">{progress.label}</span>
+            </span>
+          ) : (
+            <span className="empty-value">{progress.label}</span>
+          )}
         </div>
         <strong>{presentation.conclusion}</strong>
         {presentation.kind === "accepted" && (
@@ -214,6 +232,10 @@ function LiveRun({
       </section>
       <dl className="run-metrics">
         <Metric label="已推行数" value={formatCount(detail.rows_pushed)} />
+        <Metric
+          label="总行数"
+          value={detail.total_rows === null ? "—" : formatCount(detail.total_rows)}
+        />
         <Metric label="当前批次序号" value={formatCount(detail.seq)} />
         <Metric label="已用时" value={formatDuration(detail.ms)} />
         <Metric label="累计字节" value={formatBytes(detail.bytes)} />

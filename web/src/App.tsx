@@ -156,11 +156,10 @@ export function App() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(true);
   /**
-   * 作业中心那一行里「最近一次运行」的数据源。**读一次，不轮询**：作业中心不是运行监视屏，
-   * 后台自动刷新会让人以为这几列是实时的。要新的就点卡内工具条上的刷新。
+   * 作业中心那一行里「最近一次运行」的数据源。
    *
-   * 与任务清单**同一次读取**：两半有一半读不到就是整屏读不到（ADR-0043 §2）。
-   * 「读取失败」不再是某一列自陈的一态——那是两屏并存时代的做法，走查 X10 已随之改判。
+   * 首屏仍与任务清单同一次读取；只有存在未结束 run 时，才短轮询运行历史这一半，
+   * 用来驱动迁移进度列。任务定义不跟着轮询，避免筛选与编辑入口被后台刷新扰动。
    */
   const [runHistory, setRunHistory] = useState<RunHistory[]>([]);
   const [dialog, setDialog] = useState<DialogState>(null);
@@ -188,9 +187,39 @@ export function App() {
     }
   }, []);
 
+  const refreshRunHistory = useCallback(async () => {
+    const nextRuns = await listRunHistory({});
+    setRunHistory(nextRuns);
+    setLoadError(null);
+  }, []);
+
   useEffect(() => {
     void loadList();
   }, [loadList]);
+
+  const hasLiveRun = useMemo(
+    () => runHistory.some((run) => isLiveRunHistory(run)),
+    [runHistory],
+  );
+
+  useEffect(() => {
+    if (!hasLiveRun) {
+      return;
+    }
+    let requestInFlight = false;
+    const poll = window.setInterval(() => {
+      if (document.visibilityState !== "visible" || requestInFlight) {
+        return;
+      }
+      requestInFlight = true;
+      void refreshRunHistory()
+        .catch((error) => setLoadError(messageFrom(error)))
+        .finally(() => {
+          requestInFlight = false;
+        });
+    }, 1000);
+    return () => window.clearInterval(poll);
+  }, [hasLiveRun, refreshRunHistory]);
 
   const loadDatasources = useCallback(async () => {
     setDatasourcesLoading(true);
@@ -361,7 +390,10 @@ export function App() {
             <RunScreen
               task={activeRun.task}
               runRecordId={activeRun.runRecordId}
-              onBack={() => setActiveRun(null)}
+              onBack={() => {
+                setActiveRun(null);
+                void loadList();
+              }}
               onRelaunch={() => setDialog({ kind: "start", task: activeRun.task })}
               onEditTask={() => setDialog({ kind: "edit", task: activeRun.task })}
             />
@@ -1916,6 +1948,14 @@ function targetTreeLabel(datasource: Datasource | undefined): string {
     return datasource.database;
   }
   return datasource.name;
+}
+
+function isLiveRunHistory(run: RunHistory): boolean {
+  return (
+    run.finished_at === null &&
+    run.outcome === null &&
+    run.unknown_reason === null
+  );
 }
 
 /** 覆盖这一列的唯一性约束，`PRIMARY` 原样、其余写成 `UNIQUE <名字>`。 */

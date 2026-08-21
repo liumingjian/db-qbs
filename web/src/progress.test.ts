@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { RunHistory } from "./api";
-import { progressOf } from "./progress";
+import { progressOf, progressOfLiveRun } from "./progress";
 
 function historyRow(overrides: Partial<RunHistory> = {}): RunHistory {
   return {
@@ -98,6 +98,14 @@ describe("progressOf", () => {
       }),
     );
     expect(cell).toMatchObject({ kind: "value", label: "35%", tone: "live" });
+  });
+
+  it("运行详情页的 live 记录也按同一套分母分子算进度", () => {
+    expect(progressOfLiveRun({ total_rows: 1200, rows_pushed: 430 })).toMatchObject({
+      kind: "value",
+      label: "35%",
+      tone: "live",
+    });
   });
 
   it("空表当作跑完，不是永远停在 0%", () => {
