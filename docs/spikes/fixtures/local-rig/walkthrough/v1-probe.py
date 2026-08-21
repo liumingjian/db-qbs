@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""第一版渲染面走查 X1–X8 的机器观察。
+"""第一版渲染面走查 X1–X12 的机器观察。
 
 按 ADR-0028 §1 的先例：**只观察，不断言**；一行 DOM 断言都不进验收套件。
 输出是给人抄进走查记录的实际观察，不是 pass/fail。
@@ -47,6 +47,13 @@ NEW_DS = json.loads(os.environ["X_NEW_DS"]) if "X_NEW_DS" in os.environ else (
 # X5 的目标表列参考要一张**真存在、且当前任务没把它的列全映射掉**的表，
 # 否则 `tr.is-unmapped` 这一态没有对象。
 REFERENCE_TABLE = os.environ.get("X_REFERENCE_TABLE", "V1_C4" if RIG else "HOLDING")
+
+
+# 运行历史表的列序（P1 / ADR-0042 §4 之后）。位置索引只在这一处写，别再散到各处。
+HISTORY_COLUMNS = {
+    "task": 0, "outcome": 1, "error_code": 2, "rows": 3,
+    "elapsed": 4, "started_at": 5, "action": 6, "expand": 7,
+}
 
 
 def field_input(page, label):
@@ -369,10 +376,13 @@ def observe_rerun(page):
         # `disabled` 控件不出现，原因只能进无障碍名字）。
         button = tr.query_selector('button[aria-label^="重跑"]')
         rows.append({
-            "run_record_id": cells[0] if cells else None,
-            "run_params": cells[3] if len(cells) > 3 else None,
-            "outcome_cell": cells[4].replace("\n", " ") if len(cells) > 4 else None,
-            "action_cell": cells[9] if len(cells) > 9 else None,
+            "run_record_id": cells[HISTORY_COLUMNS["task"]] if cells else None,
+            "outcome_cell": (
+                cells[HISTORY_COLUMNS["outcome"]].replace("\n", " ")
+                if len(cells) > HISTORY_COLUMNS["outcome"] else None),
+            "action_cell": (
+                cells[HISTORY_COLUMNS["action"]]
+                if len(cells) > HISTORY_COLUMNS["action"] else None),
             "rerun_button": None if button is None else {
                 "disabled": button.is_disabled(),
                 "aria_label": button.get_attribute("aria-label"),
@@ -448,7 +458,7 @@ def observe_rerun(page):
     for tr in page.query_selector_all("#history tbody tr:not(.history-detail-row)"):
         cells = [c.inner_text().strip() for c in tr.query_selector_all("td")]
         button = tr.query_selector('button[aria-label^="重跑"]:not([disabled])')
-        if button is not None and cells and "结局不明" in cells[4]:
+        if button is not None and cells and "结局不明" in cells[HISTORY_COLUMNS["outcome"]]:
             button.click()
             page.wait_for_selector(".modal")
             for label in page.query_selector_all(".modal .run-params label.form-field"):
@@ -458,7 +468,7 @@ def observe_rerun(page):
             page.wait_for_timeout(1500)
             hint = page.query_selector(".modal .stale-run-hint")
             unknown = {
-                "run_record_id": cells[0],
+                "run_record_id": cells[HISTORY_COLUMNS["task"]],
                 "values": [f.input_value()
                            for f in page.query_selector_all(".modal .run-params input")],
                 "stale_run_hint": None if hint is None else hint.inner_text(),
@@ -475,6 +485,208 @@ def observe_rerun(page):
         "records_before": [r["run_record_id"] for r in rows],
         "records_after": after,
     }
+
+
+def observe_pagination(page, scope):
+    """分页条的实际观察。**总数不超过一页时组件自己不渲染**，那时回 `None`——
+    这本身就是一条要看的事实，不是「没观察到」。"""
+    footer = page.query_selector(f"{scope} .list-pagination")
+    if footer is None:
+        return None
+    return {
+        "total_text": footer.query_selector(".pagination-total").inner_text(),
+        "page_text": footer.query_selector(".pagination-page").inner_text(),
+        "buttons": [
+            {"label": b.inner_text(), "disabled": b.is_disabled()}
+            for b in footer.query_selector_all("button")
+        ],
+    }
+
+
+def filter_strip(page, scope):
+    """筛选条上摆了哪几项、按钮是哪几个——认标签文字，不认位置。"""
+    return {
+        "fields": [
+            label.query_selector("span").inner_text()
+            for label in page.query_selector_all(f"{scope} .history-filters label.filter-field")
+        ],
+        "buttons": [
+            b.inner_text().strip()
+            for b in page.query_selector_all(f"{scope} .history-filters button")
+            if b.inner_text().strip() != ""
+        ],
+    }
+
+
+def latest_run_cells(page):
+    """任务屏「最近运行」一列的实际内容（每行两段：状态 + 时间；没跑过的只有一段）。"""
+    return [
+        cell.inner_text().replace("\n", " · ")
+        for cell in page.query_selector_all("#tasks tbody tr td.latest-run-column")
+    ]
+
+
+def observe_task_filters(page):
+    """X10：任务屏的筛选条、「最近运行」一列与客户端分页。"""
+    page.set_viewport_size({"width": 1440, "height": 1200})
+    page.goto(BASE, wait_until="networkidle")
+    page.wait_for_selector("#tasks tbody tr")
+    before = {
+        "strip": filter_strip(page, "#tasks"),
+        "summary": page.query_selector("#tasks .card-subtitle").inner_text(),
+        "row_count": len(page.query_selector_all("#tasks tbody tr")),
+        "latest_run_header": page.query_selector("#tasks thead th.latest-run-column").inner_text(),
+        "latest_run_cells": latest_run_cells(page),
+        "pagination": observe_pagination(page, "#tasks"),
+    }
+    page.screenshot(path=f"{SHOTS}/x10-task-filters.png", full_page=True)
+
+    # 改下拉**不**重筛（查询是显式的）：先记下改完还没点查询时的行数。
+    status = page.query_selector('#tasks .history-filters label.filter-field:has(span:text-is("最近状态")) select')
+    status.select_option(label="结局不明")
+    page.wait_for_timeout(300)
+    untouched = len(page.query_selector_all("#tasks tbody tr"))
+
+    # 两次查询：一次筛得出东西，一次一条都筛不出——后者要看的是「没有匹配的任务」
+    # 这句自陈**出来了没有**，空表格加一个孤零零的分页条不算回答。
+    queried = {}
+    for label in ("结局不明", "失败"):
+        status.select_option(label=label)
+        page.click('#tasks .history-filters button.is-primary')
+        page.wait_for_timeout(300)
+        queried[label] = {
+            "summary": page.query_selector("#tasks .card-subtitle").inner_text(),
+            "row_count": len(page.query_selector_all("#tasks tbody tr")),
+            "latest_run_cells": latest_run_cells(page),
+            "no_results": (page.query_selector("#tasks .no-results").inner_text()
+                           if page.query_selector("#tasks .no-results") else None),
+            "pagination": observe_pagination(page, "#tasks"),
+        }
+        page.screenshot(path=f"{SHOTS}/x10-task-filtered-{label}.png", full_page=True)
+
+    page.click('#tasks .history-filters button.is-ghost')
+    page.wait_for_timeout(300)
+    reset = {
+        "summary": page.query_selector("#tasks .card-subtitle").inner_text(),
+        "row_count": len(page.query_selector_all("#tasks tbody tr")),
+        "status_select_value": status.input_value(),
+    }
+    return {
+        "before": before,
+        "row_count_after_select_before_query": untouched,
+        "after_query": queried,
+        "after_reset": reset,
+    }
+
+
+def observe_history_filters(page):
+    """X11：运行历史的任务 / 状态两维筛选与客户端分页。"""
+    open_history(page)
+    before = {
+        "strip": filter_strip(page, "#history"),
+        "summary": page.query_selector("#history .card-subtitle").inner_text(),
+        "row_count": len(page.query_selector_all("#history tbody tr:not(.history-detail-row)")),
+        "pagination": observe_pagination(page, "#history"),
+    }
+    page.screenshot(path=f"{SHOTS}/x11-history-filters.png", full_page=True)
+
+    # 翻页在**没筛**的那份上看：筛完只剩两条时分页条本来就该消失，那时没有翻页这回事。
+    turned = None
+    footer = page.query_selector("#history .list-pagination")
+    if footer is not None:
+        first_before = page.query_selector("#history tbody tr td").inner_text().strip()
+        next_button = footer.query_selector_all("button")[-1]
+        if not next_button.is_disabled():
+            next_button.click()
+            page.wait_for_timeout(400)
+            turned = {
+                "page_text": page.query_selector("#history .pagination-page").inner_text(),
+                "prev_disabled_on_page_2": page.query_selector_all(
+                    "#history .list-pagination button")[0].is_disabled(),
+                "next_disabled_on_last_page": page.query_selector_all(
+                    "#history .list-pagination button")[-1].is_disabled(),
+                "first_cell_before": first_before,
+                "first_cell_after": page.query_selector("#history tbody tr td").inner_text().strip(),
+                "row_count": len(page.query_selector_all(
+                    "#history tbody tr:not(.history-detail-row)")),
+            }
+            page.screenshot(path=f"{SHOTS}/x11-history-page2.png", full_page=True)
+            # 翻回第 1 页再做筛选，免得「筛完还停在第 2 页」这一态混进下面的观察。
+            page.query_selector_all("#history .list-pagination button")[0].click()
+            page.wait_for_timeout(300)
+
+    status = page.query_selector('#history .history-filters label.filter-field:has(span:text-is("状态")) select')
+    status.select_option(label="失败")
+    page.wait_for_timeout(300)
+    untouched = len(page.query_selector_all("#history tbody tr:not(.history-detail-row)"))
+
+    page.click('#history .history-filters button.is-primary')
+    page.wait_for_timeout(600)
+    outcomes = [
+        tr.query_selector_all("td")[HISTORY_COLUMNS["outcome"]].inner_text().replace("\n", " ")
+        for tr in page.query_selector_all("#history tbody tr:not(.history-detail-row)")
+    ]
+    queried = {
+        "summary": page.query_selector("#history .card-subtitle").inner_text(),
+        "row_count": len(outcomes),
+        "outcome_cells": outcomes,
+        "pagination": observe_pagination(page, "#history"),
+    }
+    page.screenshot(path=f"{SHOTS}/x11-history-filtered.png", full_page=True)
+
+    page.click('#history .history-filters button.is-ghost')
+    page.wait_for_timeout(600)
+    return {
+        "before": before,
+        "row_count_after_select_before_query": untouched,
+        "after_next_page_unfiltered": turned,
+        "after_query_status_failed": queried,
+        "after_reset": {
+            "summary": page.query_selector("#history .card-subtitle").inner_text(),
+            "row_count": len(page.query_selector_all(
+                "#history tbody tr:not(.history-detail-row)")),
+        },
+    }
+
+
+def observe_row_test(page):
+    """X12：数据源行内「测试连接」——瞬态结果、只锁自己那一行、仍然没有筛选条 / 状态列。"""
+    open_datasources(page)
+    rows = page.query_selector_all("#datasources tbody tr")
+    buttons = [r.query_selector('button:has-text("测试连接")') for r in rows]
+    before = {
+        "row_count": len(rows),
+        "buttons_present": sum(1 for b in buttons if b is not None),
+        "results_present": len(page.query_selector_all("#datasources .row-test-result")),
+        "search_fields": len(page.query_selector_all("#datasources .search-field")),
+        "filter_strips": len(page.query_selector_all("#datasources .history-filters")),
+        "selects_on_screen": len(page.query_selector_all("#datasources select")),
+    }
+
+    buttons[0].click()
+    # 只锁自己那一行：点下去的**当场**采样，一毫秒都不等。
+    # 桩答得比采样还快时会采到已经落定的态——那不是缺陷，是桩太快；
+    # `already_settled` 把这一点如实标出来，别把采空读成「没实现」。
+    while_testing = {
+        "clicked_row_button": buttons[0].inner_text().strip(),
+        "clicked_row_disabled": buttons[0].is_disabled(),
+        "other_rows_disabled": [b.is_disabled() for b in buttons[1:] if b is not None],
+        "already_settled": len(page.query_selector_all("#datasources .row-test-result")) > 0,
+    }
+    page.wait_for_selector("#datasources tbody tr .row-test-result", timeout=20000)
+    page.wait_for_timeout(200)
+    first_cell = rows[0].query_selector(".row-test-result")
+    settled = {
+        "row_name": rows[0].query_selector(".task-name").inner_text(),
+        "result_text": first_cell.inner_text(),
+        "result_classes": first_cell.get_attribute("class"),
+        "aria_role": first_cell.get_attribute("role"),
+        "error_code_tags_on_screen": len(page.query_selector_all("#datasources .error-code")),
+        "rows_with_result": len(page.query_selector_all("#datasources .row-test-result")),
+        "button_back_to_idle": buttons[0].inner_text().strip(),
+    }
+    page.screenshot(path=f"{SHOTS}/x12-datasource-row-test.png", full_page=True)
+    return {"before": before, "while_testing": while_testing, "settled": settled}
 
 
 def observe_empty_datasources(page):
@@ -499,11 +711,22 @@ def observe_empty_datasources(page):
 def main():
     os.makedirs(SHOTS, exist_ok=True)
     only_empty = os.environ.get("V1_MOCK_EMPTY_DATASOURCES") == "1"
+    # `X_ONLY=pagination`：对着**加量过的**桩（`X_BULK=1`）只跑 X10/X11，
+    # 好让分页那一格有真对象，同时不把 X1–X9 的实录塞满填充行。
+    only_pagination = os.environ.get("X_ONLY") == "pagination"
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = browser.new_page()
         if only_empty:
             report = {"empty_datasources": observe_empty_datasources(page)}
+            browser.close()
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return
+        if only_pagination:
+            report = {
+                "X10_task_filters_bulk": observe_task_filters(page),
+                "X11_history_filters_bulk": observe_history_filters(page),
+            }
             browser.close()
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return
@@ -516,6 +739,9 @@ def main():
             "X6_at_1024": observe_builder(page, 1024),
             "X8_task_screen": observe_task_screen(page),
             "X9_rerun": observe_rerun(page),
+            "X10_task_filters": observe_task_filters(page),
+            "X11_history_filters": observe_history_filters(page),
+            "X12_datasource_row_test": observe_row_test(page),
         }
         browser.close()
     print(json.dumps(report, ensure_ascii=False, indent=2))

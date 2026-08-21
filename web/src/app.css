@@ -57,11 +57,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .icon-button.is-danger:hover { border-color: var(--crit); }
 .text-button { padding: 0; border: 0; background: transparent; color: var(--brand); cursor: pointer; }
 
-.toolbar { display: flex; align-items: end; gap: 10px; padding: 14px var(--pad); border-bottom: 1px solid var(--line); }
-.search-field { display: flex; align-items: center; gap: 8px; height: var(--ctl-h); min-width: min(360px, 100%); padding-left: 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); color: var(--mute); font-size: var(--size-meta); }
-.search-field input { min-width: 0; flex: 1; height: 100%; padding: 0 10px 0 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 13px; }
-.search-field input::placeholder { color: var(--mute); }
-.search-field:focus-within { border-color: var(--brand); box-shadow: 0 0 0 2px var(--brand-dim); }
 
 .table-wrap { overflow-x: auto; background: var(--panel); }
 .data-grid { width: 100%; border-collapse: collapse; font-size: var(--size-table); }
@@ -80,12 +75,40 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .action-column { width: 126px; }
 .row-actions { display: flex; gap: 8px; }
 
+/* 筛选条。类名带 history 是历史原因（它先长在运行历史屏），P1 起任务屏也用同一条——
+   改名要连带动走查探针的选择器，不值当，先按「同一条筛选条」理解它。 */
 .history-filters { display: flex; align-items: end; gap: 12px; padding: 12px var(--pad); border-bottom: 1px solid var(--line); }
 .filter-field { min-width: 210px; display: flex; flex-direction: column; gap: 4px; color: var(--mute); font-size: var(--size-cap); }
 .filter-field select, .filter-field input { height: var(--ctl-h); padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-size: 13px; }
 .filter-field select:focus, .filter-field input:focus { border-color: var(--brand); outline: 0; box-shadow: 0 0 0 2px var(--brand-dim); }
+/* P1：筛选条上的窄项（状态 / 最近状态）不占满 210px；刷新按钮推到最右。 */
+.filter-field.is-compact { min-width: 132px; }
+.history-filters .filters-refresh { margin-left: auto; }
+
+/* P1：行内**主**动作用带文字的幽灵按钮，比一排图标按钮更容易认。 */
+.button.is-row-action { min-height: 28px; gap: 5px; padding: 0 10px; font-size: var(--size-meta); }
+
+/* P1：任务屏「最近运行」一格——两行纯文字，不着色、不出标签（三轴归运行历史屏）。 */
+.latest-run-column { min-width: 150px; }
+.data-grid th.latest-run-column { white-space: normal; }
+.data-grid th.latest-run-column small { display: block; max-width: 15em; color: var(--mute); font-size: var(--size-cap); font-weight: 400; line-height: 1.35; }
+.latest-run { display: flex; flex-direction: column; gap: 1px; }
+.latest-run-status { white-space: nowrap; }
+.latest-run-time { color: var(--mute); font-family: var(--font-num); font-size: var(--size-cap); }
+
+/* P1：数据源行内测连的瞬态结果，摆在操作按钮下面。失败原样回显驱动报错，不出错误码标签。 */
+.action-column.is-wide { width: auto; min-width: 252px; }
+.row-test-result { display: block; max-width: 420px; margin-top: 4px; white-space: normal; }
+.row-test-result.is-failed { color: var(--crit); font-size: var(--size-meta); line-height: 1.4; }
+
+/* P1：客户端分页条。总数不超过一页时组件自己不渲染，这里不靠 CSS 藏。 */
+.list-pagination { display: flex; align-items: center; justify-content: space-between; gap: var(--gap); padding: 10px var(--pad); border-top: 1px solid var(--line); color: var(--mute); font-size: var(--size-meta); }
+.list-pagination .button { min-height: 28px; padding: 0 12px; font-size: var(--size-meta); }
+.pagination-total, .pagination-page { font-family: var(--font-num); }
+.pagination-controls { display: inline-flex; align-items: center; gap: 8px; }
+
 .history-error { padding: 10px var(--pad); border-bottom: 1px solid var(--crit-bd); background: var(--crit-bg); color: var(--crit); }
-.history-grid { min-width: 1260px; }
+.history-grid { min-width: 1120px; }
 .history-grid .numeric-column { text-align: right; }
 .history-grid .expand-column { width: 40px; }
 .history-grid .run-id-cell { color: var(--dim); }
@@ -218,7 +241,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .run-parameter-list li .mono { color: var(--dim); }
 .run-params { display: flex; flex-direction: column; gap: 12px; }
 .run-params-empty { display: flex; flex-direction: column; gap: 3px; margin: 0; color: var(--mute); font-size: var(--size-meta); line-height: var(--lh-copy); }
-.run-params-cell { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .history-source-sql { display: flex; flex-direction: column; gap: 6px; }
 .history-source-sql h2 { margin: 0; font-size: var(--size-meta); font-weight: var(--weight-em); }
 .history-source-sql p { margin: 0; color: var(--mute); font-size: var(--size-cap); line-height: var(--lh-copy); }
@@ -328,7 +350,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .mobile-nav button.is-active { background: var(--brand-dim); color: var(--brand); font-weight: var(--weight-em); }
   .topbar .breadcrumb, .topbar .environment { display: none; }
   .content { padding: 12px; }
-  .card-header, .toolbar { padding-inline: 12px; }
+  .card-header { padding-inline: 12px; }
   .modal-backdrop { align-items: start; padding: 12px; }
   .modal { max-height: calc(100vh - 24px); }
   .builder-controls, .target-table-controls { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
@@ -336,6 +358,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .spec-editor > header .button, .column-fetch-section > header .button { width: 100%; }
   .condition-row, .condition-row.is-order { grid-template-columns: minmax(0, 1fr); }
   .history-filters { align-items: stretch; flex-direction: column; padding-inline: 12px; }
+  .history-filters .filters-refresh { margin-left: 0; }
+  .list-pagination { align-items: stretch; flex-direction: column; gap: 8px; padding-inline: 12px; }
+  .pagination-controls { justify-content: space-between; }
   .filter-field { min-width: 0; }
   .history-metric-groups { grid-template-columns: minmax(0, 1fr); }
   .history-detail { padding-inline: 12px; }
@@ -347,6 +372,5 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 @media (max-width: 480px) {
   .environment { display: none; }
   .card-header { align-items: flex-start; }
-  .search-field { min-width: 0; }
   .run-metrics { grid-template-columns: minmax(0, 1fr); }
 }

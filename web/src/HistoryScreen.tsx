@@ -9,11 +9,20 @@ import {
   TerminalBlock,
 } from "./components/DesignSystem";
 import { messageFrom } from "./errors";
-import { historyPresentation, runIdPresentation } from "./history";
+import { formatTimestamp, historyPresentation, runIdPresentation } from "./history";
 import type { HistoryPresentation } from "./history";
+import {
+  DEFAULT_PAGE_SIZE,
+  EMPTY_HISTORY_FILTERS,
+  historyMatchesFilters,
+  paginate,
+  RUN_STATUS_LABELS,
+  RUN_STATUS_ORDER,
+} from "./listing";
+import type { HistoryFilters, RunStatus } from "./listing";
 import { rerunAction } from "./rerun";
 import { runParamsSummary } from "./spec";
-import { ActionButton } from "./ui";
+import { ActionButton, Pagination } from "./ui";
 
 /** 点了「重跑」之后由 `App` 打开发起对话框——本屏不发请求（规格 #149 A3）。 */
 export type RerunRequest = (task: Task, row: RunHistory) => void;
@@ -30,10 +39,15 @@ export function HistoryScreen({
   onRerun: RerunRequest;
 }) {
   const [history, setHistory] = useState<RunHistory[] | null>(null);
-  const [taskId, setTaskId] = useState("");
+  // 筛选条上**正在填**的那一组，与**已生效**的那一组分开存：查询是显式的
+  // （ADR-0041 增补 1 的既有裁定），改一下下拉就重新筛一遍不是本屏的行为。
+  const [draft, setDraft] = useState<HistoryFilters>(EMPTY_HISTORY_FILTERS);
+  const [applied, setApplied] = useState<HistoryFilters>(EMPTY_HISTORY_FILTERS);
+  const [page, setPage] = useState(1);
   const [refreshing, setRefreshing] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const taskId = draft.taskId;
 
   const loadHistory = useCallback(async (filters: RunHistoryFilters) => {
     setRefreshing(true);
@@ -50,6 +64,20 @@ export function HistoryScreen({
   useEffect(() => {
     void loadHistory({});
   }, [loadHistory]);
+
+  /** 「查询」：任务那一维交给服务端，状态那一维在本地筛，两者同时生效、同时回到第 1 页。 */
+  function applyFilters(next: HistoryFilters) {
+    setDraft(next);
+    setApplied(next);
+    setPage(1);
+    void loadHistory({ taskId: next.taskId });
+  }
+
+  const filtered = useMemo(
+    () => (history ?? []).filter((row) => historyMatchesFilters(row, applied)),
+    [applied, history],
+  );
+  const slice = paginate(filtered, page, DEFAULT_PAGE_SIZE);
 
   const taskOptions = useMemo(() => {
     const names = new Map((tasks ?? []).map((task) => [task.task_id, task.name]));
@@ -86,14 +114,14 @@ export function HistoryScreen({
         <div>
           <h1 id="history-title">运行历史</h1>
           <span className="card-subtitle">
-            {history === null ? "正在读取" : `共 ${history.length} 条`}
+            {history === null ? "正在读取" : historyCountLabel(history, filtered)}
             {" · 保留最近 90 天"}
           </span>
         </div>
         <button
           className="button is-ghost"
           type="button"
-          onClick={() => void loadHistory({ taskId })}
+          onClick={() => void loadHistory({ taskId: applied.taskId })}
           disabled={refreshing}
         >
           <RefreshCw
@@ -108,8 +136,10 @@ export function HistoryScreen({
         <label className="filter-field">
           <span>任务</span>
           <select
-            value={taskId}
-            onChange={(event) => setTaskId(event.target.value)}
+            value={draft.taskId}
+            onChange={(event) =>
+              setDraft((current) => ({ ...current, taskId: event.target.value }))
+            }
           >
             <option value="">全部任务</option>
             {taskOptions.map(([id, name]) => (
@@ -119,10 +149,29 @@ export function HistoryScreen({
             ))}
           </select>
         </label>
+        <label className="filter-field is-compact">
+          <span>状态</span>
+          <select
+            value={draft.status}
+            onChange={(event) =>
+              setDraft((current) => ({
+                ...current,
+                status: event.target.value as RunStatus | "",
+              }))
+            }
+          >
+            <option value="">全部</option>
+            {RUN_STATUS_ORDER.map((status) => (
+              <option key={status} value={status}>
+                {RUN_STATUS_LABELS[status]}
+              </option>
+            ))}
+          </select>
+        </label>
         <button
           className="button is-primary"
           type="button"
-          onClick={() => void loadHistory({ taskId })}
+          onClick={() => applyFilters(draft)}
           disabled={refreshing}
         >
           查询
@@ -130,11 +179,8 @@ export function HistoryScreen({
         <button
           className="button is-ghost"
           type="button"
-          onClick={() => {
-            setTaskId("");
-            void loadHistory({});
-          }}
-          disabled={refreshing && taskId === ""}
+          onClick={() => applyFilters(EMPTY_HISTORY_FILTERS)}
+          disabled={refreshing && draft.status === "" && taskId === ""}
         >
           重置
         </button>
@@ -145,7 +191,7 @@ export function HistoryScreen({
         </div>
       )}
       <HistoryResults
-        history={history}
+        history={history === null ? null : slice.rows}
         refreshing={refreshing}
         expandedId={expandedId}
         taskNames={taskNames}
@@ -153,8 +199,30 @@ export function HistoryScreen({
         onToggle={toggleDetails}
         onRerun={onRerun}
       />
+      {history !== null && (
+        <Pagination
+          page={slice.page}
+          pageCount={slice.pageCount}
+          total={slice.total}
+          pageSize={slice.pageSize}
+          onPage={setPage}
+        />
+      )}
     </section>
   );
+}
+
+/**
+ * 卡片头那句计数。筛出来的与总共有的**不同时才写两个数**——
+ * 没筛的时候写「筛出 12 / 共 12 条」是在制造一个不存在的区别。
+ */
+function historyCountLabel(
+  history: readonly RunHistory[],
+  filtered: readonly RunHistory[],
+): string {
+  return filtered.length === history.length
+    ? `共 ${history.length} 条`
+    : `筛出 ${filtered.length} / 共 ${history.length} 条`;
 }
 
 interface HistoryResultsProps {
@@ -193,7 +261,6 @@ function HistoryResults({
         <thead>
           <tr>
             <th>任务</th>
-            <th>运行参数</th>
             <th className="outcome-column">结局</th>
             <th>错误码</th>
             <th className="numeric-column">行数</th>
@@ -258,9 +325,6 @@ function HistoryTableRow({
             运行记录 · {row.run_record_id}
           </button>
         </td>
-        <td className="mono run-params-cell" title={runParamsSummary(row.run_params)}>
-          {runParamsSummary(row.run_params)}
-        </td>
         <td className="outcome-column">
           <HistoryOutcome row={row} presentation={presentation} />
         </td>
@@ -294,7 +358,7 @@ function HistoryTableRow({
       </tr>
       {expanded && (
         <tr className="history-detail-row">
-          <td colSpan={9}>
+          <td colSpan={8}>
             <RunHistoryDetail
               row={row}
               taskName={taskName}
@@ -599,23 +663,4 @@ function formatElapsed(row: RunHistory): string {
   return [hours, minutes, seconds]
     .map((part) => String(part).padStart(2, "0"))
     .join(":");
-}
-
-function formatTimestamp(value: string | null, includeDate = false): string {
-  if (value === null) {
-    return "—";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return new Intl.DateTimeFormat("zh-CN", {
-    year: includeDate ? "numeric" : undefined,
-    month: includeDate ? "2-digit" : undefined,
-    day: includeDate ? "2-digit" : undefined,
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(date);
 }

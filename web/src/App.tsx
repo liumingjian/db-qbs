@@ -24,6 +24,7 @@ import {
   fetchTargetTables,
   listDatasources,
   generateBuilderSql,
+  listRunHistory,
   listTasks,
   taskInputFrom,
   updateTask,
@@ -34,6 +35,7 @@ import type {
   BuilderTable,
   Condition,
   OrderTerm,
+  RunHistory,
   RunParams,
   Task,
   Datasource,
@@ -43,7 +45,20 @@ import type {
   TaskSpec,
 } from "./api";
 import { messageFrom } from "./errors";
+import { formatTimestamp, historyPresentation } from "./history";
 import { HistoryScreen } from "./HistoryScreen";
+import {
+  datasourceFilterOptions,
+  DEFAULT_PAGE_SIZE,
+  EMPTY_TASK_FILTERS,
+  LATEST_RUN_LABELS,
+  LATEST_RUN_ORDER,
+  latestRunByTask,
+  latestRunStatus,
+  paginate,
+  taskMatchesFilters,
+} from "./listing";
+import type { LatestRunStatus, TaskFilters } from "./listing";
 import { RunScreen } from "./RunScreen";
 import {
   COMPARISONS,
@@ -56,7 +71,7 @@ import {
 } from "./spec";
 import { StartRunDialog } from "./StartRunDialog";
 import { DatasourceScreen } from "./DatasourceScreen";
-import { ActionButton, FormField, Modal, ModalFooter } from "./ui";
+import { ActionButton, FormField, Modal, ModalFooter, Pagination } from "./ui";
 
 type DialogState =
   | { kind: "create" }
@@ -97,7 +112,18 @@ export function App() {
   const [datasourcesLoading, setDatasourcesLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(true);
-  const [query, setQuery] = useState("");
+  /**
+   * 任务屏「最近运行」那一列的数据源（P1）。**读一次，不轮询**：任务屏不是运行监视屏，
+   * 后台自动刷新会让人以为这一列是实时的。要新的就点刷新，或去运行历史。
+   *
+   * `null` = 这一次没读到（不是「一条历史都没有」）——那时整列显示「读取失败」，
+   * 任务清单本身照常渲染。
+   */
+  const [runHistory, setRunHistory] = useState<RunHistory[] | null>(null);
+  // 筛选条上正在填的那一组 / 已生效的那一组，与运行历史屏同一套做法：查询是显式的。
+  const [taskDraft, setTaskDraft] = useState<TaskFilters>(EMPTY_TASK_FILTERS);
+  const [taskFilters, setTaskFilters] = useState<TaskFilters>(EMPTY_TASK_FILTERS);
+  const [taskPage, setTaskPage] = useState(1);
   const [dialog, setDialog] = useState<DialogState>(null);
   const [activeRun, setActiveRun] = useState<{
     task: Task;
@@ -116,9 +142,19 @@ export function App() {
     }
   }, []);
 
+  const loadRunHistory = useCallback(async () => {
+    try {
+      setRunHistory(await listRunHistory({}));
+    } catch {
+      // 读不到运行历史不该把任务屏打成错误——任务清单与它无关，那一列自陈「读取失败」。
+      setRunHistory(null);
+    }
+  }, []);
+
   useEffect(() => {
     void loadTasks();
-  }, [loadTasks]);
+    void loadRunHistory();
+  }, [loadRunHistory, loadTasks]);
 
   const loadDatasources = useCallback(async () => {
     setDatasourcesLoading(true);
@@ -144,28 +180,42 @@ export function App() {
     return () => window.removeEventListener("hashchange", handleHashChange);
   }, []);
 
-  const filteredTasks = useMemo(() => {
-    if (tasks === null) {
-      return [];
-    }
+  const latestRuns = useMemo(
+    () => latestRunByTask(runHistory ?? []),
+    [runHistory],
+  );
+  const filteredTasks = useMemo(
+    () =>
+      (tasks ?? []).filter((task) =>
+        taskMatchesFilters(
+          task,
+          taskFilters,
+          latestRunStatus(latestRuns.get(task.task_id)),
+        ),
+      ),
+    [latestRuns, taskFilters, tasks],
+  );
+  const taskSlice = paginate(filteredTasks, taskPage, DEFAULT_PAGE_SIZE);
+  const sourceOptions = useMemo(
+    () => datasourceFilterOptions(datasources, tasks ?? [], "source"),
+    [datasources, tasks],
+  );
+  const targetOptions = useMemo(
+    () => datasourceFilterOptions(datasources, tasks ?? [], "target"),
+    [datasources, tasks],
+  );
 
-    const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
-    if (normalizedQuery === "") {
-      return tasks;
-    }
+  /** 「查询」/「重置」共用一条路：生效的那一组换掉，页码回第 1 页。 */
+  function applyTaskFilters(next: TaskFilters) {
+    setTaskDraft(next);
+    setTaskFilters(next);
+    setTaskPage(1);
+  }
 
-    return tasks.filter((task) =>
-      [
-        task.name,
-        task.task_id,
-        `${task.spec.owner}.${task.spec.table}`,
-        task.spec.target_table,
-      ]
-        .join(" ")
-        .toLocaleLowerCase("zh-CN")
-        .includes(normalizedQuery),
-    );
-  }, [query, tasks]);
+  function refreshTasks() {
+    void loadTasks();
+    void loadRunHistory();
+  }
 
   function openCreateDialog() {
     setDialog({ kind: "create" });
@@ -322,7 +372,7 @@ export function App() {
                 <div>
                   <h1 id="tasks-title">任务</h1>
                   <span className="card-subtitle">
-                    {taskSummaryLabel(tasks, refreshing)}
+                    {taskSummaryLabel(tasks, filteredTasks, refreshing)}
                   </span>
                 </div>
                 <button
@@ -336,21 +386,99 @@ export function App() {
               </header>
 
               {tasks !== null && tasks.length > 0 && (
-                <div className="toolbar">
-                  <label className="search-field">
-                    <span>搜索</span>
+                <div className="history-filters">
+                  <label className="filter-field">
+                    <span>任务名</span>
                     <input
-                      value={query}
-                      onChange={(event) => setQuery(event.target.value)}
+                      value={taskDraft.keyword}
+                      onChange={(event) =>
+                        setTaskDraft((current) => ({
+                          ...current,
+                          keyword: event.target.value,
+                        }))
+                      }
                       placeholder="任务名 / 源表 / 目标表"
                     />
                   </label>
+                  <label className="filter-field">
+                    <span>源端</span>
+                    <select
+                      value={taskDraft.sourceDatasourceId}
+                      onChange={(event) =>
+                        setTaskDraft((current) => ({
+                          ...current,
+                          sourceDatasourceId: event.target.value,
+                        }))
+                      }
+                    >
+                      <option value="">全部源端</option>
+                      {sourceOptions.map(([id, name]) => (
+                        <option key={id} value={id}>
+                          {name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="filter-field">
+                    <span>目标端</span>
+                    <select
+                      value={taskDraft.targetDatasourceId}
+                      onChange={(event) =>
+                        setTaskDraft((current) => ({
+                          ...current,
+                          targetDatasourceId: event.target.value,
+                        }))
+                      }
+                    >
+                      <option value="">全部目标端</option>
+                      {targetOptions.map(([id, name]) => (
+                        <option key={id} value={id}>
+                          {name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="filter-field is-compact">
+                    <span>最近状态</span>
+                    <select
+                      value={taskDraft.latestStatus}
+                      onChange={(event) =>
+                        setTaskDraft((current) => ({
+                          ...current,
+                          latestStatus: event.target.value as
+                            | LatestRunStatus
+                            | "",
+                        }))
+                      }
+                    >
+                      <option value="">全部</option>
+                      {LATEST_RUN_ORDER.map((status) => (
+                        <option key={status} value={status}>
+                          {LATEST_RUN_LABELS[status]}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                   <button
-                    className="icon-button"
+                    className="button is-primary"
                     type="button"
-                    title="刷新任务"
-                    aria-label="刷新任务"
-                    onClick={() => void loadTasks()}
+                    onClick={() => applyTaskFilters(taskDraft)}
+                  >
+                    查询
+                  </button>
+                  <button
+                    className="button is-ghost"
+                    type="button"
+                    onClick={() => applyTaskFilters(EMPTY_TASK_FILTERS)}
+                  >
+                    重置
+                  </button>
+                  <button
+                    className="icon-button filters-refresh"
+                    type="button"
+                    title="刷新任务与最近运行"
+                    aria-label="刷新任务与最近运行"
+                    onClick={refreshTasks}
                     disabled={refreshing}
                   >
                     <RefreshCw
@@ -365,11 +493,24 @@ export function App() {
               <TaskResults
                 tasks={tasks}
                 filteredTasks={filteredTasks}
+                pageTasks={taskSlice.rows}
                 datasources={datasources}
+                latestRuns={latestRuns}
+                historyAvailable={runHistory !== null}
                 refreshing={refreshing}
                 onCreate={openCreateDialog}
                 onAction={setDialog}
               />
+              {tasks !== null && tasks.length > 0 && (
+                <Pagination
+                  page={taskSlice.page}
+                  pageCount={taskSlice.pageCount}
+                  total={taskSlice.total}
+                  pageSize={taskSlice.pageSize}
+                  unit="个"
+                  onPage={setTaskPage}
+                />
+              )}
             </section>
           )}
 
@@ -461,9 +602,19 @@ function pageLabel(page: Page): string {
   }
 }
 
-function taskSummaryLabel(tasks: Task[] | null, refreshing: boolean): string {
+/**
+ * 卡片头那句计数。**筛出来的与总共有的不同时才写两个数**——
+ * 没筛的时候写「筛出 12 / 共 12 个」是在制造一个不存在的区别。
+ */
+function taskSummaryLabel(
+  tasks: Task[] | null,
+  filteredTasks: Task[],
+  refreshing: boolean,
+): string {
   if (tasks !== null) {
-    return `共 ${tasks.length} 个`;
+    return filteredTasks.length === tasks.length
+      ? `共 ${tasks.length} 个`
+      : `筛出 ${filteredTasks.length} / 共 ${tasks.length} 个`;
   }
   if (refreshing) {
     return "正在读取";
@@ -474,14 +625,22 @@ function taskSummaryLabel(tasks: Task[] | null, refreshing: boolean): string {
 function TaskResults({
   tasks,
   filteredTasks,
+  pageTasks,
   datasources,
+  latestRuns,
+  historyAvailable,
   refreshing,
   onCreate,
   onAction,
 }: {
   tasks: Task[] | null;
   filteredTasks: Task[];
+  /** 当前这一页的行。分页是客户端的——`filteredTasks` 才是「筛出多少条」的那份。 */
+  pageTasks: Task[];
   datasources: Datasource[];
+  latestRuns: ReadonlyMap<string, RunHistory>;
+  /** 运行历史这一次读到了没有。没读到时「最近运行」整列自陈，不冒充「尚未运行」。 */
+  historyAvailable: boolean;
   refreshing: boolean;
   onCreate: () => void;
   onAction: (dialog: DialogState) => void;
@@ -501,10 +660,47 @@ function TaskResults({
   }
   return (
     <TaskTable
-      tasks={filteredTasks}
+      tasks={pageTasks}
       datasources={datasources}
+      latestRuns={latestRuns}
+      historyAvailable={historyAvailable}
       onAction={onAction}
     />
+  );
+}
+
+/**
+ * 「最近运行」一格（P1）。
+ *
+ * 三条边界，别在渲染里悄悄挪：
+ *
+ * 1. **不着色、不出标签**——三轴（运行结局 / 目标表效果 / 错误码）在运行历史屏各有形状，
+ *    任务屏这一格只是个索引，压成一个彩色圆点会让人以为它就是全部结论。
+ * 2. **「尚未运行」与「读取失败」分开**：前者是事实，后者是这一次没读到。
+ * 3. 完整结论挂在 `title` 上——列表要窄，但那句人话不该只能去另一屏才看得到。
+ */
+function LatestRunCell({
+  run,
+  available,
+}: {
+  run: RunHistory | undefined;
+  available: boolean;
+}) {
+  if (!available) {
+    return <span className="empty-value">读取失败</span>;
+  }
+  if (run === undefined) {
+    return <span className="empty-value">尚未运行</span>;
+  }
+  const presentation = historyPresentation(run);
+  const status: LatestRunStatus = presentation.kind;
+  return (
+    <span className="latest-run" title={presentation.conclusion}>
+      <span className="latest-run-status">{LATEST_RUN_LABELS[status]}</span>
+      <small className="latest-run-time">
+        {formatTimestamp(run.finished_at ?? run.started_at)}
+      </small>
+    </span>
   );
 }
 
@@ -527,10 +723,14 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
 function TaskTable({
   tasks,
   datasources,
+  latestRuns,
+  historyAvailable,
   onAction,
 }: {
   tasks: Task[];
   datasources: Datasource[];
+  latestRuns: ReadonlyMap<string, RunHistory>;
+  historyAvailable: boolean;
   onAction: (dialog: DialogState) => void;
 }) {
   // 「源 → 目标」显示的是**数据源名字**，`datasource_id` 只在数据源屏出现（ADR-0039 §8）。
@@ -550,7 +750,12 @@ function TaskTable({
             <th>目标表</th>
             <th>主键</th>
             <th>条件</th>
-            <th className="action-column">操作</th>
+            <th className="latest-run-column">
+              最近运行
+              {/* 这一列读一次就不动了（不轮询），把这一点当面说清，别让人拿它当实时看板。 */}
+              <small>状态可能有延迟，以发起结果为准。</small>
+            </th>
+            <th className="action-column is-wide">操作</th>
           </tr>
         </thead>
         <tbody>
@@ -573,13 +778,23 @@ function TaskTable({
               <td className="sql-cell" title={conditionSummary(task.spec)}>
                 {conditionSummary(task.spec)}
               </td>
+              <td className="latest-run-column">
+                <LatestRunCell
+                  run={latestRuns.get(task.task_id)}
+                  available={historyAvailable}
+                />
+              </td>
               <td>
                 <div className="row-actions">
-                  <ActionButton
-                    label="发起运行"
-                    icon={<Play size={15} />}
+                  {/* 发起运行是这一行的**主动作**：给文字，不跟改名、删除挤在一排图标里。 */}
+                  <button
+                    className="button is-ghost is-row-action"
+                    type="button"
                     onClick={() => onAction({ kind: "start", task })}
-                  />
+                  >
+                    <Play size={14} aria-hidden="true" />
+                    发起运行
+                  </button>
                   <ActionButton
                     label="编辑任务定义"
                     icon={<Pencil size={15} />}

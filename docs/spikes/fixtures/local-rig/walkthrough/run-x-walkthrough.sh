@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# X1–X8 走查的一键编排：起桩后端 → 跑机器观察 → 收摊。
+# X1–X12 走查的一键编排：起桩后端 → 跑机器观察 → 收摊。
+# 桩后端这一路跑**两趟**：常规一趟出 X1–X12，加量一趟（X_BULK=1）只出 X10/X11 的分页对象——
+# 填充行不进第一趟，否则 X1–X9 的实录会被 24 行噪声塞满。
 # 桩与探针都在本目录下（与四份 acceptance 台架同处一棵树，一起入库）。
 # 探针要 playwright，装在仓库外的虚拟环境里：默认 ~/pwvenv，用 PW_PYTHON 覆盖。
 set -u
@@ -25,11 +27,31 @@ if [[ "${X_RIG:-}" == "1" ]]; then
   exit $?
 fi
 
+wait_for_mock() {
+  for _ in $(seq 1 40); do
+    curl -sf "http://127.0.0.1:$PORT/api/datasources" >/dev/null && return 0
+    sleep 0.25
+  done
+  echo "桩后端没在 $PORT 上起来" >&2
+  return 1
+}
+
 python3 "$HERE/v1-mock.py" "$PORT" &
 MOCK=$!
 trap 'kill $MOCK 2>/dev/null' EXIT
-for _ in $(seq 1 40); do
-  curl -sf "http://127.0.0.1:$PORT/api/datasources" >/dev/null && break
-  sleep 0.25
-done
+wait_for_mock || exit 1
 "$PW_PYTHON" "$HERE/v1-probe.py" "$PORT"
+STATUS=$?
+
+kill $MOCK 2>/dev/null
+wait $MOCK 2>/dev/null
+
+echo "===== 加量一趟（X_BULK=1，只跑 X10/X11 的分页） ====="
+X_BULK=1 python3 "$HERE/v1-mock.py" "$PORT" &
+MOCK=$!
+wait_for_mock || exit 1
+X_ONLY=pagination X_SHOTS="${X_SHOTS:-/tmp/v1-visual}/bulk" "$PW_PYTHON" "$HERE/v1-probe.py" "$PORT"
+BULK_STATUS=$?
+
+[[ $STATUS -eq 0 ]] || exit $STATUS
+exit $BULK_STATUS

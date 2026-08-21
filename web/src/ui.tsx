@@ -164,3 +164,59 @@ export function ActionButton({
     </button>
   );
 }
+
+/**
+ * 列表底部的分页条（P1）。**纯客户端分页**：当前 API 没有 `limit/offset`，
+ * 这里翻的是已经取回来的那一整份清单。
+ *
+ * **总数不超过一页时整条不出**——只有一页时，「第 1 / 1 页」与两个按不动的按钮
+ * 只是噪声。`共 N 条` 里的 N 是**筛完之后**的条数，不是服务端那份的总数：
+ * 分页翻的就是这一份。
+ */
+export function Pagination({
+  page,
+  pageCount,
+  total,
+  pageSize,
+  unit = "条",
+  onPage,
+}: {
+  page: number;
+  pageCount: number;
+  total: number;
+  pageSize: number;
+  unit?: string;
+  onPage: (page: number) => void;
+}) {
+  if (total <= pageSize) {
+    return null;
+  }
+  return (
+    <nav className="list-pagination" aria-label="分页">
+      <span className="pagination-total">
+        共 {total} {unit}
+      </span>
+      <span className="pagination-controls">
+        <button
+          className="button is-ghost"
+          type="button"
+          disabled={page <= 1}
+          onClick={() => onPage(page - 1)}
+        >
+          上一页
+        </button>
+        <span className="pagination-page" aria-live="polite">
+          第 {page} / {pageCount} 页
+        </span>
+        <button
+          className="button is-ghost"
+          type="button"
+          disabled={page >= pageCount}
+          onClick={() => onPage(page + 1)}
+        >
+          下一页
+        </button>
+      </span>
+    </nav>
+  );
+}

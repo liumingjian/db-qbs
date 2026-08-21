@@ -163,3 +163,29 @@ function sinkTerminalEffect(
   }
   return null;
 }
+
+/**
+ * 列表屏共用的时间戳格式化。
+ *
+ * 它原来长在 `HistoryScreen.tsx` 里，任务屏的「最近运行」要显示同一种时间——
+ * 两处各写一份的后果是同一个时刻在两屏上长得不一样。**一个字都没改**，只换了住处。
+ * 解析不出来的值**原样回显**，不吞成「—」：那说明服务端给的不是时间戳，得看得见。
+ */
+export function formatTimestamp(value: string | null, includeDate = false): string {
+  if (value === null) {
+    return "—";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: includeDate ? "numeric" : undefined,
+    month: includeDate ? "2-digit" : undefined,
+    day: includeDate ? "2-digit" : undefined,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""第一版渲染面走查（X1–X8）的桩后端。
+"""第一版渲染面走查（X1–X12）的桩后端。
 
 **为什么不是台架**：清单写的是「复用 `run-v1-acceptance.sh` 的 C1–C5 造态」，
 而那个入口归 #135，此刻还不存在；M1/M2/M3 三份也还是退役调用面（改造归 #134）。
@@ -125,6 +125,26 @@ HISTORY = [
     run_row(run_record_id="rec-task-gone", run_id="run-x-1", task_id="task-removed",
             run_params={"load_date": "2026-08-15"}),
 ]
+
+
+# `X_BULK=1`：把任务与运行历史各加量到 26 条，好让**客户端分页**（ADR-0042 §2）有对象。
+# 默认关着——填充行会把 X1–X9 的实录塞满噪声，那几条要看的是具体那几个态。
+# 填充行**只**用来数数与翻页，态一律取「成功」，不参与任何结局判定。
+if os.environ.get("X_BULK") == "1":
+    for index in range(24):
+        task_id = f"task-bulk-{index:02d}"
+        TASKS.append({
+            "task_id": task_id, "name": f"批量任务 {index:02d}",
+            "source_datasource_id": "ds-ora-core", "target_datasource_id": "ds-my-dw",
+            "spec": copy.deepcopy(SPEC),
+        })
+        HISTORY.append(run_row(
+            run_record_id=f"rec-bulk-{index:02d}", run_id=f"run-bulk-{index:02d}",
+            task_id=task_id, run_params={"load_date": "2026-08-19"},
+            outcome="SUCCEEDED", target_table_effect="SWAPPED", stage="COMMITTING",
+            sink_code=None, sink_reported_rows=120, failure_kind=None,
+            message="run completed successfully",
+        ))
 
 
 def referencing(datasource_id):
