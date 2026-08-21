@@ -1,10 +1,13 @@
 import {
+  ChevronDown,
+  ChevronRight,
   Database,
   LoaderCircle,
   Menu,
   PanelLeftClose,
   Plus,
   RefreshCw,
+  Search,
   Server,
   Settings,
   TableProperties,
@@ -501,11 +504,19 @@ function TaskFormDialog({
   const [targetDatasourceId, setTargetDatasourceId] = useState(
     initial.target_datasource_id,
   );
-  const [spec, setSpec] = useState<TaskSpec>(() => ({ ...initial.spec }));
+  const [spec, setSpec] = useState<TaskSpec>(() => withoutDblink(initial.spec));
   const [tables, setTables] = useState<BuilderTable[]>([]);
   const [columns, setColumns] = useState<BuilderColumn[]>([]);
   const [loading, setLoading] = useState<"tables" | "columns" | null>(null);
   const [builderError, setBuilderError] = useState<string | null>(null);
+  const [sourceTableFilter, setSourceTableFilter] = useState("");
+  const [sourceExpandedOwners, setSourceExpandedOwners] = useState<Set<string>>(
+    () => new Set(initial.spec.owner === "" ? [] : [initial.spec.owner]),
+  );
+  const [targetTableFilter, setTargetTableFilter] = useState(
+    initial.spec.target_table,
+  );
+  const [targetTreeOpen, setTargetTreeOpen] = useState(true);
   const [sql, setSql] = useState<BuilderSql | null>(null);
   const [sqlError, setSqlError] = useState<string | null>(null);
   // 目标端元数据（ADR-0038 §3/§8）。**结果纯瞬态**：只活在这里，不进任务定义、
@@ -517,7 +528,6 @@ function TaskFormDialog({
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const dblink = spec.dblink ?? "";
   const oracleDatasources = datasources.filter(
     (datasource) => datasource.kind === "oracle",
   );
@@ -525,6 +535,19 @@ function TaskFormDialog({
     (datasource) => datasource.kind === "mysql",
   );
   const tableKey = spec.owner === "" ? "" : tableKeyFor({ owner: spec.owner, name: spec.table });
+  const sourceTableGroups = useMemo(
+    () => groupSourceTables(tables, sourceTableFilter),
+    [tables, sourceTableFilter],
+  );
+  const filteredTargetTables = useMemo(
+    () => filterNames(targetTables, targetTableFilter),
+    [targetTables, targetTableFilter],
+  );
+  const sourceTableLabel =
+    spec.owner === "" ? "" : `${spec.owner}.${spec.table}`;
+  const selectedTargetDatasource = mysqlDatasources.find(
+    (datasource) => datasource.datasource_id === targetDatasourceId,
+  );
   const dictionary = useMemo(
     () => new Map(columns.map((column) => [column.name, column])),
     [columns],
@@ -544,6 +567,9 @@ function TaskFormDialog({
     () => spec.columns.map((mapping) => mapping.source),
     [spec.columns],
   );
+  const allSourceColumnsSelected =
+    columnNames.length > 0 &&
+    columnNames.every((column) => selectedSourceColumns.includes(column));
   const mappedTargetsComplete = spec.columns.every(
     (mapping) => mapping.target.trim() !== "",
   );
@@ -642,14 +668,18 @@ function TaskFormDialog({
   }, [spec, specComplete]);
 
   function updateSpec(change: Partial<TaskSpec>) {
-    setSpec((current) => ({ ...current, ...change }));
+    setSpec((current) => withoutDblink({ ...current, ...change }));
   }
 
   async function loadTables() {
     setLoading("tables");
     setBuilderError(null);
     try {
-      setTables(await fetchBuilderTables(sourceDatasourceId, dblink));
+      const nextTables = await fetchBuilderTables(sourceDatasourceId, "");
+      setTables(nextTables);
+      if (spec.owner !== "") {
+        setSourceExpandedOwners((current) => new Set(current).add(spec.owner));
+      }
     } catch (loadError) {
       setBuilderError(messageFrom(loadError));
     } finally {
@@ -667,7 +697,7 @@ function TaskFormDialog({
       setColumns(
         await fetchBuilderColumns({
           datasource_id: sourceDatasourceId,
-          dblink,
+          dblink: "",
           owner: spec.owner,
           table: spec.table,
         }),
@@ -692,6 +722,9 @@ function TaskFormDialog({
       conditions: [],
       order_by: [],
     });
+    if (table !== undefined) {
+      setSourceExpandedOwners((current) => new Set(current).add(table.owner));
+    }
   }
 
   // 勾源列只表达“本次要搬这列”。目标字段要等目标表列读取后，在字段映射区明确选择。
@@ -706,6 +739,36 @@ function TaskFormDialog({
       columns: spec.columns.filter((candidate) => candidate.source !== column),
       primary_key: spec.primary_key.filter((name) => name !== mapping.target),
     });
+  }
+
+  function toggleAllColumns() {
+    if (allSourceColumnsSelected) {
+      updateSpec({ columns: [], primary_key: [], conditions: [], order_by: [] });
+      return;
+    }
+    const current = new Map(spec.columns.map((mapping) => [mapping.source, mapping]));
+    updateSpec({
+      columns: columnNames.map(
+        (source) => current.get(source) ?? { source, target: "" },
+      ),
+    });
+  }
+
+  function toggleSourceOwner(owner: string) {
+    setSourceExpandedOwners((current) => {
+      const next = new Set(current);
+      if (next.has(owner)) {
+        next.delete(owner);
+      } else {
+        next.add(owner);
+      }
+      return next;
+    });
+  }
+
+  function selectTargetTable(table: string) {
+    updateTargetTable(table);
+    setTargetTableFilter(table);
   }
 
   // 改目标名时主键跟着走（ADR-0039 增补 1）。换名字空间的单点在 `spec.ts`，
@@ -816,7 +879,7 @@ function TaskFormDialog({
         name,
         source_datasource_id: sourceDatasourceId,
         target_datasource_id: targetDatasourceId,
-        spec,
+        spec: withoutDblink(spec),
       });
       onClose();
     } catch (submitError) {
@@ -858,6 +921,16 @@ function TaskFormDialog({
                     // 换源端等于换一个库：表清单与列字典都是上一个库的，留着会选出不存在的表。
                     setTables([]);
                     setColumns([]);
+                    setSourceTableFilter("");
+                    setSourceExpandedOwners(new Set());
+                    updateSpec({
+                      owner: "",
+                      table: "",
+                      columns: [],
+                      primary_key: [],
+                      conditions: [],
+                      order_by: [],
+                    });
                   }}
                 >
                   <option value="">
@@ -888,6 +961,9 @@ function TaskFormDialog({
                       })),
                       primary_key: [],
                     });
+                    setTargetTableFilter("");
+                    setTargetTables([]);
+                    setTargetTablesError(null);
                     setTargetMeta({ kind: "idle" });
                   }}
                 >
@@ -912,22 +988,8 @@ function TaskFormDialog({
             <header>
               <div>
                 <strong id="builder-source-title">源表</strong>
-                <span>读取源表后选择本次要同步的列</span>
+                <span>按库展开表，输入关键字可筛选</span>
               </div>
-            </header>
-            <div className="builder-controls">
-              <FormField label="数据库链接（可选）">
-                <input
-                  value={dblink}
-                  placeholder="如 FA"
-                  onChange={(event) =>
-                    updateSpec({
-                      dblink:
-                        event.target.value === "" ? undefined : event.target.value,
-                    })
-                  }
-                />
-              </FormField>
               <button
                 className="button is-ghost"
                 type="button"
@@ -941,45 +1003,97 @@ function TaskFormDialog({
                 )}
                 {loading === "tables" ? "读取中" : "读取表"}
               </button>
-              <FormField label="Oracle 表">
-                {tables.length === 0 ? (
+            </header>
+            <div className="tree-picker">
+              <div className="tree-picker-toolbar">
+                <label className="tree-search">
+                  <Search size={15} aria-hidden="true" />
                   <input
-                    readOnly
-                    value={spec.owner === "" ? "" : `${spec.owner}.${spec.table}`}
-                    placeholder="先读取表"
+                    value={sourceTableFilter}
+                    placeholder="搜索库 / 表名"
+                    disabled={tables.length === 0}
+                    onChange={(event) => setSourceTableFilter(event.target.value)}
                   />
-                ) : (
-                  <select
-                    value={tableKey}
-                    onChange={(event) => selectTable(event.target.value)}
-                  >
-                    <option value="">请选择</option>
-                    {tables.map((table) => {
-                      const key = tableKeyFor(table);
-                      return (
-                        <option key={key} value={key}>
-                          {table.owner}.{table.name}
-                        </option>
-                      );
-                    })}
-                  </select>
-                )}
-              </FormField>
-              <button
-                className="button is-ghost"
-                type="button"
-                onClick={() => void loadColumns()}
-                disabled={
-                  spec.owner === "" || loading !== null || sourceDatasourceId === ""
-                }
-              >
-                {loading === "columns" ? (
-                  <LoaderCircle className="is-spinning" size={15} />
-                ) : (
-                  <TableProperties size={15} />
-                )}
-                {loading === "columns" ? "读取中" : "读取列"}
-              </button>
+                </label>
+                <span className="tree-count">
+                  {tables.length === 0 ? "未读取" : `${tables.length} 张表`}
+                </span>
+              </div>
+              {tables.length === 0 ? (
+                <p className="tree-empty">
+                  先选择源端数据源并读取表。
+                </p>
+              ) : (
+                <div className="schema-tree" role="tree" aria-label="Oracle 表">
+                  {sourceTableGroups.map((group) => {
+                    const expanded =
+                      sourceTableFilter.trim() !== "" ||
+                      sourceExpandedOwners.has(group.owner) ||
+                      group.owner === spec.owner;
+                    return (
+                      <div className="schema-node" key={group.owner}>
+                        <button
+                          className="schema-row"
+                          type="button"
+                          aria-expanded={expanded}
+                          onClick={() => toggleSourceOwner(group.owner)}
+                        >
+                          {expanded ? (
+                            <ChevronDown size={14} aria-hidden="true" />
+                          ) : (
+                            <ChevronRight size={14} aria-hidden="true" />
+                          )}
+                          <span className="schema-name">{group.owner}</span>
+                          <span className="schema-count">{group.tables.length}</span>
+                        </button>
+                        {expanded && (
+                          <div className="table-node-list">
+                            {group.tables.map((table) => {
+                              const key = tableKeyFor(table);
+                              return (
+                                <button
+                                  className={`table-node ${
+                                    key === tableKey ? "is-selected" : ""
+                                  }`}
+                                  key={key}
+                                  type="button"
+                                  onClick={() => selectTable(key)}
+                                >
+                                  <span className="mono">{table.name}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {sourceTableGroups.length === 0 && (
+                    <p className="tree-empty">没有匹配的库表。</p>
+                  )}
+                </div>
+              )}
+              <div className="builder-selected-row">
+                <span>
+                  当前源表：
+                  <strong className="mono">{sourceTableLabel || "未选择"}</strong>
+                </span>
+                <button
+                  className="button is-ghost"
+                  type="button"
+                  onClick={() => void loadColumns()}
+                  disabled={
+                    spec.owner === "" || loading !== null || sourceDatasourceId === ""
+                  }
+                >
+                  {loading === "columns" ? (
+                    <LoaderCircle className="is-spinning" size={15} />
+                  ) : (
+                    <TableProperties size={15} />
+                  )}
+                  {loading === "columns" ? "读取中" : "读取列"}
+                </button>
+              </div>
             </div>
             {builderError !== null && (
               <div className="form-error" role="alert">
@@ -991,7 +1105,17 @@ function TaskFormDialog({
                 <table className="data-grid">
                   <thead>
                     <tr>
-                      <th>选择</th>
+                      <th>
+                        <label className="select-all-cell">
+                          <input
+                            type="checkbox"
+                            checked={allSourceColumnsSelected}
+                            onChange={toggleAllColumns}
+                            aria-label="全选源表字段"
+                          />
+                          全选
+                        </label>
+                      </th>
                       <th>列名</th>
                       <th>字典类型</th>
                       {/* ADR-0039 §7：单位是字符。这一栏同时承载 NUMBER 的 (p,s)，
@@ -1053,60 +1177,106 @@ function TaskFormDialog({
             <header>
               <div>
                 <strong id="builder-target-title">目标表</strong>
-                <span>目标表需已在目标库中存在；新建后点刷新</span>
+                <span>目标表需已在目标库中存在，可搜索后选择</span>
               </div>
             </header>
-            <div className="target-table-controls">
-              <FormField label="目标表">
-                <input
-                  required
-                  list="target-table-options"
-                  value={spec.target_table}
-                  placeholder={
-                    targetDatasourceId === ""
-                      ? "先选目标端数据源"
-                      : "键入片段可筛，也可以直接打全名"
+            <div className="target-tree-shell">
+              <div className="target-table-controls">
+                <label className="tree-search">
+                  <Search size={15} aria-hidden="true" />
+                  <input
+                    required
+                    value={targetTableFilter}
+                    placeholder={
+                      targetDatasourceId === ""
+                        ? "先选目标端数据源"
+                        : "搜索或输入目标表"
+                    }
+                    onChange={(event) => {
+                      setTargetTableFilter(event.target.value);
+                      updateTargetTable(event.target.value);
+                    }}
+                    onBlur={() => loadTargetColumns()}
+                  />
+                </label>
+                <button
+                  className="button is-ghost"
+                  type="button"
+                  onClick={() => void loadTargetTables()}
+                  disabled={targetDatasourceId === "" || targetTablesLoading}
+                >
+                  {targetTablesLoading ? (
+                    <LoaderCircle className="is-spinning" size={15} />
+                  ) : (
+                    <RefreshCw size={15} />
+                  )}
+                  {targetTablesLoading ? "读取中" : "读取表"}
+                </button>
+                <button
+                  className="button is-ghost"
+                  type="button"
+                  onClick={() => loadTargetColumns(true)}
+                  disabled={
+                    targetDatasourceId === "" ||
+                    spec.target_table.trim() === "" ||
+                    targetMeta.kind === "loading"
                   }
-                  onChange={(event) => updateTargetTable(event.target.value)}
-                  onBlur={() => loadTargetColumns()}
-                />
-              </FormField>
-              <button
-                className="button is-ghost"
-                type="button"
-                onClick={() => void loadTargetTables()}
-                disabled={targetDatasourceId === "" || targetTablesLoading}
-              >
-                {targetTablesLoading ? (
-                  <LoaderCircle className="is-spinning" size={15} />
-                ) : (
-                  <RefreshCw size={15} />
+                >
+                  {targetMeta.kind === "loading" ? (
+                    <LoaderCircle className="is-spinning" size={15} />
+                  ) : (
+                    <TableProperties size={15} />
+                  )}
+                  {targetMeta.kind === "loading" ? "读取中" : "读取列"}
+                </button>
+              </div>
+              <div className="schema-tree is-target" role="tree" aria-label="目标表">
+                <button
+                  className="schema-row"
+                  type="button"
+                  aria-expanded={targetTreeOpen}
+                  onClick={() => setTargetTreeOpen((open) => !open)}
+                >
+                  {targetTreeOpen ? (
+                    <ChevronDown size={14} aria-hidden="true" />
+                  ) : (
+                    <ChevronRight size={14} aria-hidden="true" />
+                  )}
+                  <span className="schema-name">
+                    {targetTreeLabel(selectedTargetDatasource)}
+                  </span>
+                  <span className="schema-count">{filteredTargetTables.length}</span>
+                </button>
+                {targetTreeOpen && (
+                  <div className="table-node-list">
+                    {filteredTargetTables.map((table) => (
+                      <button
+                        className={`table-node ${
+                          table === spec.target_table ? "is-selected" : ""
+                        }`}
+                        key={table}
+                        type="button"
+                        onClick={() => selectTargetTable(table)}
+                      >
+                        <span className="mono">{table}</span>
+                      </button>
+                    ))}
+                    {targetTables.length === 0 && (
+                      <p className="tree-empty">先读取目标表。</p>
+                    )}
+                    {targetTables.length > 0 && filteredTargetTables.length === 0 && (
+                      <p className="tree-empty">没有匹配的目标表。</p>
+                    )}
+                  </div>
                 )}
-                {targetTablesLoading ? "读取中" : "读取表"}
-              </button>
-              <button
-                className="button is-ghost"
-                type="button"
-                onClick={() => loadTargetColumns(true)}
-                disabled={
-                  targetDatasourceId === "" ||
-                  spec.target_table.trim() === "" ||
-                  targetMeta.kind === "loading"
-                }
-              >
-                {targetMeta.kind === "loading" ? (
-                  <LoaderCircle className="is-spinning" size={15} />
-                ) : (
-                  <TableProperties size={15} />
-                )}
-                {targetMeta.kind === "loading" ? "读取中" : "读取列"}
-              </button>
+              </div>
+              <div className="builder-selected-row">
+                <span>
+                  当前目标表：
+                  <strong className="mono">{spec.target_table || "未选择"}</strong>
+                </span>
+              </div>
             </div>
-            <datalist id="target-table-options">
-              {targetTables.map((table) => (
-                <option key={table} value={table} />
-              ))}
-            </datalist>
             {targetTablesError !== null && (
               <div className="form-error" role="alert">
                 {targetTablesError}
@@ -1383,7 +1553,7 @@ function OrderEditor({
 }
 
 /**
- * 源端 SQL 的只读展示。
+ * 构建 SQL 的只读展示。
  *
  * v1 **没有编辑入口**（ADR-0036 §1）：SQL 是规格的派生面，现算现看，不存进任务定义，
  * 也没有把它传回后端的路。这里连 `textarea` 都不给——给了就是在暗示可以改。
@@ -1401,7 +1571,7 @@ function GeneratedSql({
     <section className="generated-sql" aria-labelledby="generated-sql-title">
       <header>
         <div>
-          <strong id="generated-sql-title">源端 SQL</strong>
+          <strong id="generated-sql-title">构建 SQL</strong>
           <span>只读预览</span>
         </div>
       </header>
@@ -1691,6 +1861,61 @@ function mappedSourceOf(spec: TaskSpec, targetColumn: string): string | undefine
   const wanted = targetColumn.toUpperCase();
   return spec.columns.find((mapping) => mapping.target.toUpperCase() === wanted)
     ?.source;
+}
+
+function withoutDblink(spec: TaskSpec): TaskSpec {
+  const { dblink: _dblink, ...rest } = spec;
+  return rest;
+}
+
+interface SourceTableGroup {
+  owner: string;
+  tables: BuilderTable[];
+}
+
+function groupSourceTables(
+  tables: readonly BuilderTable[],
+  query: string,
+): SourceTableGroup[] {
+  const wanted = normalizeFilter(query);
+  const grouped = new Map<string, BuilderTable[]>();
+  for (const table of tables) {
+    const ownerMatch = normalizeFilter(table.owner).includes(wanted);
+    const tableMatch = normalizeFilter(table.name).includes(wanted);
+    const fullMatch = normalizeFilter(`${table.owner}.${table.name}`).includes(wanted);
+    if (wanted !== "" && !ownerMatch && !tableMatch && !fullMatch) {
+      continue;
+    }
+    const bucket = grouped.get(table.owner) ?? [];
+    bucket.push(table);
+    grouped.set(table.owner, bucket);
+  }
+  return [...grouped.entries()].map(([owner, ownerTables]) => ({
+    owner,
+    tables: ownerTables,
+  }));
+}
+
+function filterNames(names: readonly string[], query: string): string[] {
+  const wanted = normalizeFilter(query);
+  if (wanted === "") {
+    return [...names];
+  }
+  return names.filter((name) => normalizeFilter(name).includes(wanted));
+}
+
+function normalizeFilter(value: string): string {
+  return value.trim().toLocaleUpperCase();
+}
+
+function targetTreeLabel(datasource: Datasource | undefined): string {
+  if (datasource === undefined) {
+    return "目标库";
+  }
+  if (datasource.kind === "mysql") {
+    return datasource.database;
+  }
+  return datasource.name;
 }
 
 /** 覆盖这一列的唯一性约束，`PRIMARY` 原样、其余写成 `UNIQUE <名字>`。 */
