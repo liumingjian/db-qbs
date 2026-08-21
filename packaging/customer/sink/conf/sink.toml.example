@@ -1,0 +1,5 @@
+# Copy to /opt/tools/db-qbs/conf/sink.toml and edit before starting.
+
+# Sink has no login layer. Restrict this port by firewall so only the source
+# server can access it.
+listen = "0.0.0.0:18080"

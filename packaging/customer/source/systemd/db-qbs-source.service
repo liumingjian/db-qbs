@@ -1,0 +1,15 @@
+[Unit]
+Description=db-qbs source service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=LD_LIBRARY_PATH=/opt/tools/db-qbs/oracle/instantclient:/opt/oracle/instantclient
+ExecStart=/opt/tools/db-qbs/bin/db-qbs-source --config /opt/tools/db-qbs/conf/source.toml
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=/opt/tools/db-qbs
+
+[Install]
+WantedBy=multi-user.target

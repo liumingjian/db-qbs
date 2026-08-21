@@ -1,0 +1,14 @@
+[Unit]
+Description=db-qbs sink service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/tools/db-qbs/bin/db-qbs-sink --config /opt/tools/db-qbs/conf/sink.toml
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=/opt/tools/db-qbs
+
+[Install]
+WantedBy=multi-user.target
