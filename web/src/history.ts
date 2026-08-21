@@ -68,8 +68,15 @@ const UNKNOWN_CONCLUSIONS: Readonly<
   SERVICE_RESTARTED: "服务重启，结局未知",
 };
 
-export function runIdPresentation(history: RunHistory): string {
-  return history.run_id ?? "未发起";
+/**
+ * 「目标端运行号」栏位的显示值（走查 V15）。
+ *
+ * 没有 `run_id` 时写的是**一句话，不是空白也不是横杠**：这一次根本没走到向 sink 发请求那步，
+ * 目标端对它一无所知。空白会被读成「漏渲染」，横杠会被读成「有但没给」，
+ * 两者都不如把事实说出来。`run_record_id` 与 `run_id` **谁也不替代谁**（原 V14，现由 V15 兼守）。
+ */
+export function runIdPresentation(history: { run_id: string | null }): string {
+  return history.run_id ?? "未发起，目标端不知道这次运行";
 }
 
 export function historyPresentation(history: RunHistory): HistoryPresentation {

@@ -3,6 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Instant;
 
 use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
 use db_qbs_source::{
@@ -117,6 +118,40 @@ fn run() -> bool {
             return false;
         }
     };
+
+    // 开跑前的一次源端 `COUNT(*)`：迁移进度那一列的分母（ADR-0043 §7）。
+    //
+    // **成败都发事件，失败不中断运行**（§7 边界 3）：`total_rows` 为 null 时界面把进度退回
+    // `—` 并自陈「未取到总行数」，这次搬运照样跑完。计数自己的耗时单独记 `precount_ms`，
+    // 不混进 `fetch_ms`——揉进去的话，下一个人看到的「取数慢」会是两件事的和。
+    //
+    // 摆在游标已开、sink 还没连之前：连不上 Oracle 那一类失败在上一步就已经如实报成失败了，
+    // 到这里再失败的只可能是计数本身（超时、权限、语句），那正是可以降级的那一类。
+    let precount_started = Instant::now();
+    match OracleRowSource::precount(&task) {
+        Ok(total_rows) => emit_with_run(
+            LogLevel::Info,
+            LogEvent::PrecountFinished,
+            Some(&run_id),
+            Some(&task_path),
+            [
+                ("total_rows", json!(total_rows)),
+                ("precount_ms", json!(precount_started.elapsed().as_millis() as u64)),
+                ("message", Value::Null),
+            ],
+        ),
+        Err(error) => emit_with_run(
+            LogLevel::Warn,
+            LogEvent::PrecountFinished,
+            Some(&run_id),
+            Some(&task_path),
+            [
+                ("total_rows", Value::Null),
+                ("precount_ms", json!(precount_started.elapsed().as_millis() as u64)),
+                ("message", json!(error.user_message())),
+            ],
+        ),
+    }
 
     let mut sink = match HttpSinkClient::new(&source_config.sink_base_url) {
         Ok(sink) => sink,

@@ -170,3 +170,26 @@ export function runParamsSummary(params: RunParams): string {
   }
   return entries.map(([name, value]) => `${name}=${value}`).join(" · ");
 }
+
+/**
+ * 任务条件的一行摘要（`LOAD_DATE = :load_date AND STATUS = 'OK'`）。
+ *
+ * 它原来长在 `App.tsx` 里给任务屏那一列用；P2 把条件收进详情抽屉（ADR-0043 §4），
+ * 抽屉与构建器都要同一句话，于是搬到这里——**一个字没改**，只换了住处。
+ * 一条条件都没有时写「整表」，不是空白：空白读起来像「这里应该有点什么但没渲染」。
+ */
+export function conditionSummary(spec: TaskSpec): string {
+  if (spec.conditions.length === 0) {
+    return "整表";
+  }
+  return spec.conditions
+    .map(
+      (condition) =>
+        `${condition.column} ${comparisonSymbol(condition.operator)} ${
+          condition.value_source === "constant"
+            ? condition.constant
+            : `:${condition.parameter}`
+        }`,
+    )
+    .join(" AND ");
+}

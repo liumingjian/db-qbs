@@ -54,15 +54,37 @@ def texts(page, selector):
     return [el.inner_text().replace("\n", " | ") for el in page.query_selector_all(selector)]
 
 
+JOB = "#jobs"
+
+
 def open_tasks(page):
+    """打开作业中心。屏的 id 自 ADR-0043 §2 起是 `#jobs`（任务屏与运行历史屏已合并）。"""
     page.goto(BASE, wait_until="networkidle")
-    page.wait_for_selector("#tasks tbody tr", timeout=20000)
+    page.wait_for_selector(f"{JOB} tbody tr", timeout=20000)
+
+
+def open_drawer(page, task_name):
+    """点某一行的「运行详情」图标开抽屉——轴二 / 轴三自 ADR-0043 §4 起在这里看。"""
+    open_tasks(page)
+    for row in page.query_selector_all(f"{JOB} tbody tr"):
+        cell = row.query_selector("td:nth-child(2)")
+        if cell is not None and task_name in cell.inner_text():
+            button = row.query_selector('button[aria-label="运行详情"]')
+            if button is None:
+                return False
+            button.click()
+            page.wait_for_selector(".drawer", timeout=10000)
+            # 指针必须挪开：`.data-grid tbody tr:hover td` 会换底色，V5 量的正好是底色。
+            page.mouse.move(0, 0)
+            page.wait_for_timeout(150)
+            return True
+    return False
 
 
 def start_run(page, load_date):
     """从任务列表发起一个 run，停在 RunScreen 上。日期即造态开关（见 v-mock.py）。"""
     open_tasks(page)
-    page.click('#tasks tbody tr button[aria-label="发起运行"]')
+    page.click(f'{JOB} tbody tr button[aria-label="发起运行"]')
     page.wait_for_selector(".modal.is-narrow", timeout=10000)
     page.fill(".modal.is-narrow input[type=date]", load_date)
     page.click(".modal.is-narrow button[type=submit]")
@@ -224,7 +246,7 @@ def v15_not_started(page, out):
 
 def v16_stale_hint(page, out):
     open_tasks(page)
-    page.click('#tasks tbody tr button[aria-label="发起运行"]')
+    page.click(f'{JOB} tbody tr button[aria-label="发起运行"]')
     page.wait_for_selector(".modal.is-narrow", timeout=10000)
     page.fill(".modal.is-narrow input[type=date]", "2026-01-01")
     page.wait_for_selector(".stale-run-hint", timeout=10000)
@@ -243,7 +265,7 @@ def v16_stale_hint(page, out):
     page.click('.modal.is-narrow button[type="button"]')
 
 
-# ---- 二、历史列表：V5 / V9 / V14 / V25 --------------------------------------
+# ---- 二、详情抽屉：V2 / V3 / V4 / V5 / V25（原历史列表，ADR-0043 §2 已并入作业中心） ----
 
 def median_luma(png_bytes, rect, inset_x, inset_y, w, h):
     """块内取一小片的中位亮度（PIL 'L' = ITU-R 601-2）。"""
@@ -257,45 +279,79 @@ def median_luma(png_bytes, rect, inset_x, inset_y, w, h):
             "sample": f"{w}x{h} @({x0},{y0})"}
 
 
-def history_walk(page, out):
-    page.goto(f"{BASE}/#history", wait_until="networkidle")
-    page.wait_for_selector(".history-grid tbody tr", timeout=15000)
-    # 指针必须挪开：`.data-grid tbody tr:hover td` 会把某一行的底色从纸白换成 --mute-bg，
-    # V5 量的又正好是块下面透出来的底色——不挪开量到的是悬停态，不是常态。
-    page.mouse.move(0, 0)
-    page.wait_for_timeout(100)
+def drawer_walk(page, out):
+    """V2 / V3 / V4 / V5 / V25 在**详情抽屉**里看（ADR-0043 §4）。
 
-    out["V14"] = {
-        "columns": texts(page, ".history-grid thead th"),
-        "first_col": probe_all(page, ".history-grid tbody tr td:first-child .history-link")[:1],
-        "run_id_cells": probe_all(page, ".history-grid tbody .run-id-cell")[:2],
-        "missing_run_id_cells": probe_all(page, ".history-grid tbody .missing-run-id"),
-    }
-    rows = []
-    for tr in page.query_selector_all(".history-grid tbody tr:not(.history-detail-row)"):
-        tds = tr.query_selector_all("td")
-        if len(tds) < 6:
+    2026-08-21 之前这一段叫 `history_walk`，对着运行历史列表看。那一屏已随 ADR-0043 §2
+    整屏并入作业中心，于是：
+
+    * **V9 / V14 退役**——判据的对象（历史列表的「结局」列、`run_record_id` 主列）没了；
+      V9 的方向还反转了（作业中心的「运行状态」是一维索引，五个词齐是对的，由 X17 守）。
+    * **轴二的形状判据整体移交抽屉**：SWAPPED 实心块 / DISCARDED 描边块一个没变，
+      只是要开两个任务的抽屉才凑得齐——一行只展示最近一次运行，一个抽屉里只有一种终态。
+    * **V5 的灰度取样因此分两张截图**：判据量的是两个块各自的块内中位亮度差，
+      不要求它们同屏；同屏是旧形态的副产物，不是判据本身。
+    """
+    blocks = {}
+    for name, task, selector in (
+        ("swapped", "成功那条", ".drawer .terminal-block.is-swapped"),
+        ("discarded", "校验失败那条", ".drawer .terminal-block.is-discarded"),
+    ):
+        if not open_drawer(page, task):
+            blocks[name] = {"missing": f"打不开「{task}」的抽屉"}
             continue
-        cell = tds[4]
-        kind = ("block" if cell.query_selector(".terminal-block")
-                else "neutral-text" if cell.query_selector(".neutral-outcome")
-                else "unknown-summary" if cell.query_selector(".unknown-summary")
-                else "live-summary" if cell.query_selector(".live-summary") else "?")
-        box = cell.query_selector("span").bounding_box()
-        rows.append({"run_record_id": tds[0].inner_text().strip(),
-                     "run_id_cell": tds[1].inner_text().strip(),
-                     "outcome_text": cell.inner_text().replace("\n", " | ").strip(),
-                     "outcome_kind": kind,
-                     "outcome_w": round(box["width"], 1) if box else None,
-                     "outcome_h": round(box["height"], 1) if box else None,
-                     "error_cell": tds[5].inner_text().strip()})
-    out["V9"] = {"rows": rows,
-                 "neutral_outcomes": probe_all(page, ".history-grid .neutral-outcome"),
-                 "unknown_summaries": probe_all(page, ".history-grid .unknown-summary"),
-                 "live_summaries": probe_all(page, ".history-grid .live-summary")}
-    out["V4_on_history"] = probe_all(page, ".history-grid .error-code")
-    out["V2_on_history"] = probe_all(page, ".history-grid .terminal-block.is-swapped")
-    out["V3_on_history"] = probe_all(page, ".history-grid .terminal-block.is-discarded")
+        out[f"V{'2' if name == 'swapped' else '3'}_in_drawer"] = {
+            "panels": texts(page, ".drawer .panel > h3"),
+            "terminal_blocks": probe_all(page, ".drawer .terminal-block"),
+            "terminal_text": texts(page, ".drawer .terminal-block"),
+            "error_codes": probe_all(page, ".drawer .error-code"),
+            "error_text": texts(page, ".drawer .error-code"),
+            "counts": counts(page),
+        }
+        el = page.query_selector(selector)
+        if el is None:
+            blocks[name] = {"missing": f"抽屉里没有 {selector}"}
+        else:
+            rect = el.bounding_box()
+            page.add_style_tag(content="html { filter: grayscale(1) !important; }")
+            page.wait_for_timeout(200)
+            shot = page.screenshot(full_page=True)
+            blocks[name] = median_luma(shot, rect, 2, 3, 6, 14)
+            blocks[name]["rect"] = rect
+            page.screenshot(path=f"{SHOTS}/v5-grayscale-{name}.png", full_page=True)
+        page.screenshot(path=f"{SHOTS}/v2-v3-drawer-{name}.png", full_page=True)
+        page.reload(wait_until="networkidle")
+
+    if "median" in blocks.get("swapped", {}) and "median" in blocks.get("discarded", {}):
+        diff = blocks["discarded"]["median"] - blocks["swapped"]["median"]
+        blocks["diff_median"] = diff
+        blocks["diff_pct"] = round(diff / 255 * 100, 1)
+        blocks["passes_25_over_255_bar"] = diff >= 25
+    blocks["sampling_note"] = "两块各自开一个抽屉取样（一行只展示最近一次运行）"
+    out["V5"] = blocks
+
+    # V4 的 4xx 例子：校验失败那条抽屉里的 VERIFY_FAILED。
+    open_drawer(page, "校验失败那条")
+    out["V4_in_drawer"] = {
+        "error_codes": probe_all(page, ".drawer .error-code"),
+        "error_text": texts(page, ".drawer .error-code"),
+        "conclusion": texts(page, ".drawer .error-summary, .drawer .plain-conclusion"),
+    }
+
+    # V15 兼守原 V14：两个 id 谁也不替代谁——`run_record_id` 在标题旁，
+    # `run_id`（「目标端运行号」）在「运行参数与标识」里。
+    out["V14_V15_two_ids"] = page.evaluate(
+        """() => { const d = document.querySelector('.drawer');
+             const sub = d.querySelector('.drawer-header .sub');
+             const kv = [...d.querySelectorAll('.kv > div')]
+               .map(el => [el.querySelector('.k').innerText, el.querySelector('.v').innerText]);
+             const runId = kv.find(([k]) => k === '目标端运行号');
+             return { title: d.querySelector('h2').innerText,
+                      run_record_id_beside_title: sub ? sub.innerText : null,
+                      run_record_id_style: sub ? { color: getComputedStyle(sub).color,
+                        font: getComputedStyle(sub).fontFamily.split(',')[0],
+                        size: getComputedStyle(sub).fontSize } : null,
+                      run_id_field: runId || null }; }""")
 
     out["V25"] = {
         "body": page.evaluate(
@@ -303,9 +359,15 @@ def history_walk(page, out):
             " return {fontFamily: cs.fontFamily, colorScheme: cs.colorScheme,"
             " bg: cs.backgroundColor}; }"),
         "mono": page.evaluate(
-            "() => { const el = document.querySelector('.history-grid td.mono');"
+            "() => { const el = document.querySelector('.drawer .kv .v');"
             " const cs = getComputedStyle(el);"
             " return {fontFamily: cs.fontFamily, variantNumeric: cs.fontVariantNumeric}; }"),
+        # V25 改判（ADR-0043 §走查触发）：强调字重从「600 不是 700」改成「500」，
+        # 取值来自对 x2doris 表头 / 标题块的实测。
+        "emphasis_weight": page.evaluate(
+            "() => getComputedStyle(document.querySelector('#jobs thead th')).fontWeight"),
+        "title_block_weight": page.evaluate(
+            "() => getComputedStyle(document.querySelector('#jobs .table-title')).fontWeight"),
         "weights": page.evaluate(
             "() => Array.from(new Set(Array.from(document.querySelectorAll('*'))"
             ".map(el => getComputedStyle(el).fontWeight))).sort()"),
@@ -318,32 +380,14 @@ def history_walk(page, out):
         "top_level_rules": page.evaluate(
             "() => [...document.styleSheets].flatMap(s => { try { return [...s.cssRules] }"
             " catch { return [] } }).length"),
+        # 深色侧栏**不是暗色主题**（ADR-0043 §8）：它是参照物浅色布局的一部分。
+        # 这一格摆在这里，是为了让「没有暗色主题」这句话下次仍然量得出来。
+        "sider_is_not_a_dark_theme": page.evaluate(
+            "() => ({ sider_bg: getComputedStyle(document.querySelector('aside.sidebar')).backgroundColor,"
+            " content_bg: getComputedStyle(document.querySelector('.content')).backgroundColor,"
+            " card_bg: getComputedStyle(document.querySelector('#jobs')).backgroundColor })"),
     }
-
-    swapped = page.query_selector(".history-grid .terminal-block.is-swapped")
-    discarded = page.query_selector(".history-grid .terminal-block.is-discarded")
-    neutral = page.query_selector(".history-grid .neutral-outcome")
-    page.add_style_tag(content="html { filter: grayscale(1) !important; }")
-    page.wait_for_timeout(200)
-    shot = page.screenshot(full_page=True)
-    v5 = {}
-    for name, el in (("swapped", swapped), ("discarded", discarded),
-                     ("neutral_text_cell", neutral)):
-        if el is None:
-            continue
-        rect = el.bounding_box()
-        v5[name] = median_luma(shot, rect, 2, 3, 6, 14)
-        v5[name]["rect"] = rect
-    if "swapped" in v5 and "discarded" in v5:
-        diff = v5["discarded"]["median"] - v5["swapped"]["median"]
-        v5["diff_median"] = diff
-        v5["diff_pct"] = round(diff / 255 * 100, 1)
-        v5["passes_25_over_255_bar"] = diff >= 25
-    out["V5"] = v5
-    page.screenshot(path=f"{SHOTS}/v5-grayscale.png", full_page=True)
-    page.reload(wait_until="networkidle")
-    page.wait_for_selector(".history-grid tbody tr", timeout=15000)
-    page.screenshot(path=f"{SHOTS}/v9-v14-history.png", full_page=True)
+    page.screenshot(path=f"{SHOTS}/v25-drawer-typography.png", full_page=True)
 
 
 # ---- 三、任务屏与构建器：V19 / V20 / V23 / V24 ------------------------------
@@ -351,6 +395,23 @@ def history_walk(page, out):
 def tasks_and_builder(page, out):
     open_tasks(page)
     out["V24"] = {
+        # 改判（ADR-0043 §2 §8）：导航三项、数据源第二项、侧栏深色；
+        # 「调度只是占位灰标 M3+」的对象在 P0 已被撤掉（ADR-0042 §背景），本次补记。
+        "sidebar_bg": page.evaluate(
+            "() => getComputedStyle(document.querySelector('aside.sidebar')).backgroundColor"),
+        "collapsed_icon_centering": page.evaluate(
+            """() => { const shell = document.querySelector('.app-shell');
+                 const before = document.querySelector('.nav-item.is-active').getBoundingClientRect();
+                 shell.classList.add('is-collapsed');
+                 const item = document.querySelector('.nav-item.is-active');
+                 const r = item.getBoundingClientRect();
+                 const svg = item.querySelector('svg').getBoundingClientRect();
+                 const out = { expanded_block_width: before.width, collapsed_block_width: r.width,
+                   sider_width: document.querySelector('aside.sidebar').getBoundingClientRect().width,
+                   icon_center_offset: (svg.left + svg.width / 2) - (r.left + r.width / 2),
+                   text_hidden: getComputedStyle(item.querySelector('.nav-text')).display };
+                 shell.classList.remove('is-collapsed');
+                 return out; }"""),
         "sidebar_items": page.evaluate(
             """() => Array.from(document.querySelectorAll('aside.sidebar nav[aria-label="主导航"] > *'))
                  .map(el => ({ tag: el.tagName, cls: el.className,
@@ -364,7 +425,7 @@ def tasks_and_builder(page, out):
         """() => ({ retry: (document.body.innerText.match(/重试/g) || []).length,
                     relaunch: (document.body.innerText.match(/重新发起/g) || []).length })""")
 
-    page.click('#tasks tbody tr button[aria-label="编辑任务定义"]')
+    page.click(f'{JOB} tbody tr button[aria-label="编辑任务定义"]')
     page.wait_for_selector(".modal .builder-guide", timeout=15000)
 
     # V21 的对象：目标端下拉与目标列列表——ADR-0038 §3 / ADR-0039 §5 之后**已经建成**，
@@ -386,9 +447,27 @@ def tasks_and_builder(page, out):
                       rewizard_hits: (m.innerText.match(/重走向导/g) || []).length }; }""")
 
     # V19 / V20：target_table 清空后取列，DDL 照给、占位符可见。
+    #
+    # 2026-08-21：这一卡在界面上**已经不存在**了。不是本次改动删的——
+    # `47a2fed`（"Prepare x2doris P1 frontend handoff"）把整段
+    # 「目标表建表 SQL / 拿建表 SQL / .fetch-ready」从构建器里摘掉了，而那一票没跑走查。
+    # 探针只观察不断言：对象没了就如实记一条，不抛错、更不假装跑过。
     target_input = page.query_selector(".modal input[list]")
     target_input.fill("")
-    page.click('.modal .column-fetch-section button:has-text("拿建表 SQL")')
+    fetch_button = page.query_selector('.modal .column-fetch-section button:has-text("拿建表 SQL")')
+    if fetch_button is None:
+        missing = {
+            "object_missing": "构建器里没有「拿建表 SQL」按钮与 .fetch-ready 区块——"
+                              "整段在 47a2fed 被摘掉，V19 / V20 的对象不存在",
+            "column_fetch_sections_on_screen": page.evaluate(
+                "() => [...document.querySelectorAll('.modal .column-fetch-section')]"
+                ".map(el => el.getAttribute('aria-labelledby'))"),
+        }
+        out["V19"] = missing
+        out["V20"] = missing
+        page.screenshot(path=f"{SHOTS}/v19-v20-object-missing.png", full_page=True)
+        return
+    fetch_button.click()
     page.wait_for_selector(".modal .fetch-ready, .modal .fetch-failure", timeout=30000)
     out["V19"] = {
         "panel_kind": page.evaluate(
@@ -428,13 +507,17 @@ def main():
         v13_escape(page, out)
         v15_not_started(page, out)
         v16_stale_hint(page, out)
-        history_walk(page, out)
+        drawer_walk(page, out)
         tasks_and_builder(page, out)
         browser.close()
 
     # 判据已退役的四条半：对象不存在，报 retired 并写清是谁把它判废的。
     out["RETIRED"] = {
         "V6": "形状预检失败这一态随 ADR-0036 §5 取消，屏不存在",
+        "V9": "运行历史列表随 ADR-0043 §2 整屏并入作业中心；且方向已反转——"
+              "作业中心的「运行状态」是一维索引，五个词齐是对的，形态判据改由 X17 守",
+        "V14": "同上，历史列表没了；「两个 id 谁也不替代谁」由 V15 在抽屉里兼守，"
+               "实测见 V14_V15_two_ids",
         "V10": "两张卡与灰色「未执行」占位卡随同一条取消；#132 已撤 .is-skipped",
         "V11_first_card": "形状预检那张卡（六条逐条列出）随同一条取消；第二张卡照跑，见 V11_mapping_card",
         "V12": "形状预检屏不存在，「这一屏没有错误码标签」无对象",

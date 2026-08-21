@@ -5,9 +5,7 @@ import { emptySpec } from "./api";
 import {
   datasourceFilterOptions,
   DEFAULT_PAGE_SIZE,
-  EMPTY_HISTORY_FILTERS,
   EMPTY_TASK_FILTERS,
-  historyMatchesFilters,
   latestRunByTask,
   latestRunStatus,
   paginate,
@@ -37,6 +35,8 @@ function historyRow(overrides: Partial<RunHistory> = {}): RunHistory {
     fetch_ms: 1,
     push_ms: 1,
     commit_ms: 1,
+    total_rows: null,
+    precount_ms: null,
     count_ms: 1,
     cursor_ms: 1,
     source_code: null,
@@ -236,40 +236,6 @@ describe("taskMatchesFilters", () => {
         "none",
       ),
     ).toBe(false);
-  });
-});
-
-describe("historyMatchesFilters", () => {
-  it("空筛选条放行一切", () => {
-    expect(historyMatchesFilters(historyRow(), EMPTY_HISTORY_FILTERS)).toBe(true);
-  });
-
-  it("任务与状态都判，且是「与」", () => {
-    const row = historyRow({ task_id: "task-2" });
-    expect(
-      historyMatchesFilters(row, { taskId: "task-2", status: "succeeded" }),
-    ).toBe(true);
-    expect(
-      historyMatchesFilters(row, { taskId: "task-2", status: "failed" }),
-    ).toBe(false);
-    expect(
-      historyMatchesFilters(row, { taskId: "task-1", status: "succeeded" }),
-    ).toBe(false);
-  });
-
-  it("进行中与结局不明各筛各的——结局不明的 outcome 也是 null，不能混进「进行中」", () => {
-    const live = historyRow({ outcome: null, finished_at: null });
-    const unknown = historyRow({
-      outcome: null,
-      unknown_reason: "SERVICE_RESTARTED",
-    });
-    expect(historyMatchesFilters(live, { taskId: "", status: "live" })).toBe(true);
-    expect(historyMatchesFilters(unknown, { taskId: "", status: "live" })).toBe(
-      false,
-    );
-    expect(historyMatchesFilters(unknown, { taskId: "", status: "unknown" })).toBe(
-      true,
-    );
   });
 });
 

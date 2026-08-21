@@ -246,6 +246,19 @@ export interface RunHistory {
   purged_rows: number | null;
   source_batches: number | null;
   received_batches: number | null;
+  /**
+   * 开跑前那一次 `COUNT(*)` 拿到的**总行数**，也就是迁移进度那一列的分母（ADR-0043 §7）。
+   *
+   * **可以为 `null`**：计数本身失败时它缺席，而那次运行**照常跑**——为了一个进度条把整次
+   * 搬运判死是拿主功能换装饰。前端读到 `null` 就把进度退回 `—` 并在 `title` 上自陈。
+   * 它是**开跑那一刻**的事实，不是实时的：与随后的读取之间存在时间差。
+   */
+  total_rows: number | null;
+  /**
+   * 那一次计数自己的耗时。**单独一栏，不混进读取耗时**（`fetch_ms`）——把它揉进去，
+   * 下一个人看到的「取数慢」会是两件事的和。与 sink 侧的门禁计数 `count_ms` 也是两回事。
+   */
+  precount_ms: number | null;
   fetch_ms: number | null;
   push_ms: number | null;
   commit_ms: number | null;

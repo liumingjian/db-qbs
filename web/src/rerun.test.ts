@@ -24,6 +24,8 @@ const baseHistory: RunHistory = {
   fetch_ms: 4,
   push_ms: 10,
   commit_ms: 6,
+  total_rows: null,
+  precount_ms: null,
   count_ms: 2,
   cursor_ms: 1,
   source_code: null,

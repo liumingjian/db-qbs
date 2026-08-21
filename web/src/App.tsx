@@ -1,14 +1,13 @@
 import {
-  Clock3,
   Database,
   LoaderCircle,
-  Pencil,
-  Play,
+  Menu,
+  PanelLeftClose,
   Plus,
   RefreshCw,
   Server,
+  Settings,
   TableProperties,
-  Tag,
   Trash2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -45,21 +44,10 @@ import type {
   TaskSpec,
 } from "./api";
 import { messageFrom } from "./errors";
-import { formatTimestamp, historyPresentation } from "./history";
-import { HistoryScreen } from "./HistoryScreen";
-import {
-  datasourceFilterOptions,
-  DEFAULT_PAGE_SIZE,
-  EMPTY_TASK_FILTERS,
-  LATEST_RUN_LABELS,
-  LATEST_RUN_ORDER,
-  latestRunByTask,
-  latestRunStatus,
-  paginate,
-  taskMatchesFilters,
-} from "./listing";
-import type { LatestRunStatus, TaskFilters } from "./listing";
+import { JobCenterScreen } from "./JobCenterScreen";
+import { latestRunByTask } from "./listing";
 import { RunScreen } from "./RunScreen";
+import { SettingsScreen } from "./SettingsScreen";
 import {
   COMPARISONS,
   comparisonSymbol,
@@ -71,7 +59,7 @@ import {
 } from "./spec";
 import { StartRunDialog } from "./StartRunDialog";
 import { DatasourceScreen } from "./DatasourceScreen";
-import { ActionButton, FormField, Modal, ModalFooter, Pagination } from "./ui";
+import { FormField, Modal, ModalFooter } from "./ui";
 
 type DialogState =
   | { kind: "create" }
@@ -85,13 +73,64 @@ type DialogState =
   | { kind: "start"; task: Task; rerun?: { runRecordId: string; runParams: RunParams } }
   | null;
 
-type Page = "tasks" | "history" | "datasources";
+/**
+ * 导航三项（ADR-0043 §2）：**作业中心 · 数据源 · 系统设置**。
+ * 「运行历史」独立屏随作业中心的合并整屏取消。
+ */
+type Page = "jobs" | "datasources" | "settings";
+
+/** 旧的运行历史地址。**重定向而不是 404**：它还在旧链接与旧文档里流通，接住比让人撞墙便宜。 */
+const RETIRED_HISTORY_HASHES = ["#history", "#/history"];
 
 function pageFromHash(hash: string): Page {
-  if (hash === "#history") {
-    return "history";
+  if (hash === "#datasources") {
+    return "datasources";
   }
-  return hash === "#datasources" ? "datasources" : "tasks";
+  if (hash === "#settings") {
+    return "settings";
+  }
+  return "jobs";
+}
+
+const SIDER_STORAGE_KEY = "db-qbs.sider-collapsed";
+
+/**
+ * 侧栏折叠状态**记在 `localStorage`**（ADR-0043 §8）：它是每个人对自己屏幕宽度的
+ * 一次性偏好，每次进来重置等于每次重做一遍同一个决定。
+ *
+ * 读不到就当没折叠——隐私模式下 `localStorage` 会直接抛，不能让它把整屏带崩。
+ */
+function readCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(SIDER_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeCollapsed(collapsed: boolean) {
+  try {
+    window.localStorage.setItem(SIDER_STORAGE_KEY, collapsed ? "1" : "0");
+  } catch {
+    // 存不下就算了：折叠这一次照样生效，只是下次进来记不住。
+  }
+}
+
+const NAV_ITEMS: readonly { page: Page; label: string }[] = [
+  { page: "jobs", label: "作业中心" },
+  { page: "datasources", label: "数据源" },
+  { page: "settings", label: "系统设置" },
+];
+
+function navIcon(page: Page, size: number) {
+  switch (page) {
+    case "jobs":
+      return <Database size={size} aria-hidden="true" />;
+    case "datasources":
+      return <Server size={size} aria-hidden="true" />;
+    case "settings":
+      return <Settings size={size} aria-hidden="true" />;
+  }
 }
 
 const emptyTask: TaskInput = {
@@ -105,35 +144,39 @@ export function App() {
   const [page, setPage] = useState<Page>(() =>
     pageFromHash(window.location.hash),
   );
+  const [collapsed, setCollapsed] = useState<boolean>(readCollapsed);
   const [tasks, setTasks] = useState<Task[] | null>(null);
-  // 数据源清单（ADR-0037）。管理屏在导航第三项（ADR-0039 §1）——增删改之后要重读，
+  // 数据源清单（ADR-0037）。管理屏在导航第二项——增删改之后要重读，
   // 所以这里不再是「读一次就完」。
   const [datasources, setDatasources] = useState<Datasource[]>([]);
   const [datasourcesLoading, setDatasourcesLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(true);
   /**
-   * 任务屏「最近运行」那一列的数据源（P1）。**读一次，不轮询**：任务屏不是运行监视屏，
-   * 后台自动刷新会让人以为这一列是实时的。要新的就点刷新，或去运行历史。
+   * 作业中心那一行里「最近一次运行」的数据源。**读一次，不轮询**：作业中心不是运行监视屏，
+   * 后台自动刷新会让人以为这几列是实时的。要新的就点卡内工具条上的刷新。
    *
-   * `null` = 这一次没读到（不是「一条历史都没有」）——那时整列显示「读取失败」，
-   * 任务清单本身照常渲染。
+   * 与任务清单**同一次读取**：两半有一半读不到就是整屏读不到（ADR-0043 §2）。
+   * 「读取失败」不再是某一列自陈的一态——那是两屏并存时代的做法，走查 X10 已随之改判。
    */
-  const [runHistory, setRunHistory] = useState<RunHistory[] | null>(null);
-  // 筛选条上正在填的那一组 / 已生效的那一组，与运行历史屏同一套做法：查询是显式的。
-  const [taskDraft, setTaskDraft] = useState<TaskFilters>(EMPTY_TASK_FILTERS);
-  const [taskFilters, setTaskFilters] = useState<TaskFilters>(EMPTY_TASK_FILTERS);
-  const [taskPage, setTaskPage] = useState(1);
+  const [runHistory, setRunHistory] = useState<RunHistory[]>([]);
   const [dialog, setDialog] = useState<DialogState>(null);
   const [activeRun, setActiveRun] = useState<{
     task: Task;
     runRecordId: string;
   } | null>(null);
 
-  const loadTasks = useCallback(async () => {
+  const loadList = useCallback(async () => {
     setRefreshing(true);
     try {
-      setTasks(await listTasks());
+      // 两份一起读、一起判成败：作业中心的一行是「任务 + 它最近一次运行」，
+      // 少了任何一半这张表都不成立。
+      const [nextTasks, nextRuns] = await Promise.all([
+        listTasks(),
+        listRunHistory({}),
+      ]);
+      setTasks(nextTasks);
+      setRunHistory(nextRuns);
       setLoadError(null);
     } catch (error) {
       setLoadError(messageFrom(error));
@@ -142,24 +185,14 @@ export function App() {
     }
   }, []);
 
-  const loadRunHistory = useCallback(async () => {
-    try {
-      setRunHistory(await listRunHistory({}));
-    } catch {
-      // 读不到运行历史不该把任务屏打成错误——任务清单与它无关，那一列自陈「读取失败」。
-      setRunHistory(null);
-    }
-  }, []);
-
   useEffect(() => {
-    void loadTasks();
-    void loadRunHistory();
-  }, [loadRunHistory, loadTasks]);
+    void loadList();
+  }, [loadList]);
 
   const loadDatasources = useCallback(async () => {
     setDatasourcesLoading(true);
     try {
-      // 读不到数据源不该把整个任务屏打成错误——构建器会以「没有可选的数据源」自陈。
+      // 读不到数据源不该把整个作业中心打成错误——构建器会以「没有可选的数据源」自陈。
       setDatasources(await listDatasources());
     } catch {
       setDatasources([]);
@@ -174,47 +207,25 @@ export function App() {
 
   useEffect(() => {
     function handleHashChange() {
+      // 旧的 `#history` 打进来就地换成作业中心的地址：**不留一个还能回去的空屏**。
+      if (RETIRED_HISTORY_HASHES.includes(window.location.hash)) {
+        window.location.replace("#jobs");
+        return;
+      }
       setPage(pageFromHash(window.location.hash));
     }
+    handleHashChange();
     window.addEventListener("hashchange", handleHashChange);
     return () => window.removeEventListener("hashchange", handleHashChange);
   }, []);
 
-  const latestRuns = useMemo(
-    () => latestRunByTask(runHistory ?? []),
-    [runHistory],
-  );
-  const filteredTasks = useMemo(
-    () =>
-      (tasks ?? []).filter((task) =>
-        taskMatchesFilters(
-          task,
-          taskFilters,
-          latestRunStatus(latestRuns.get(task.task_id)),
-        ),
-      ),
-    [latestRuns, taskFilters, tasks],
-  );
-  const taskSlice = paginate(filteredTasks, taskPage, DEFAULT_PAGE_SIZE);
-  const sourceOptions = useMemo(
-    () => datasourceFilterOptions(datasources, tasks ?? [], "source"),
-    [datasources, tasks],
-  );
-  const targetOptions = useMemo(
-    () => datasourceFilterOptions(datasources, tasks ?? [], "target"),
-    [datasources, tasks],
-  );
+  const latestRuns = useMemo(() => latestRunByTask(runHistory), [runHistory]);
 
-  /** 「查询」/「重置」共用一条路：生效的那一组换掉，页码回第 1 页。 */
-  function applyTaskFilters(next: TaskFilters) {
-    setTaskDraft(next);
-    setTaskFilters(next);
-    setTaskPage(1);
-  }
-
-  function refreshTasks() {
-    void loadTasks();
-    void loadRunHistory();
+  function toggleSider() {
+    setCollapsed((current) => {
+      writeCollapsed(!current);
+      return !current;
+    });
   }
 
   function openCreateDialog() {
@@ -258,98 +269,85 @@ export function App() {
 
   // 运行详情不属于任何导航项——面包屑早就这么认了，导航高亮以前还停在上一页。
   const navPage = activeRun !== null ? null : page;
+  const foldLabel = collapsed ? "展开侧边栏" : "折叠侧边栏";
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${collapsed ? "is-collapsed" : ""}`}>
       <aside className="sidebar">
         <div className="product-brand">
           <span className="brand-mark">Q</span>
-          db-qbs
+          <span className="brand-text">db-qbs</span>
         </div>
         <nav aria-label="主导航">
-          <a
-            className={`nav-item ${navPage === "tasks" ? "is-active" : ""}`}
-            href="#tasks"
-            aria-current={navPage === "tasks" ? "page" : undefined}
-            onClick={(event) => {
-              event.preventDefault();
-              navigate("tasks");
-            }}
-          >
-            <Database size={15} aria-hidden="true" />
-            任务
-          </a>
-          <a
-            className={`nav-item ${navPage === "history" ? "is-active" : ""}`}
-            href="#history"
-            aria-current={navPage === "history" ? "page" : undefined}
-            onClick={(event) => {
-              event.preventDefault();
-              navigate("history");
-            }}
-          >
-            <Clock3 size={15} aria-hidden="true" />
-            运行历史
-          </a>
-          <a
-            className={`nav-item ${navPage === "datasources" ? "is-active" : ""}`}
-            href="#datasources"
-            aria-current={navPage === "datasources" ? "page" : undefined}
-            onClick={(event) => {
-              event.preventDefault();
-              navigate("datasources");
-            }}
-          >
-            <Server size={15} aria-hidden="true" />
-            数据源
-          </a>
+          {NAV_ITEMS.map((item) => (
+            <a
+              key={item.page}
+              className={`nav-item ${navPage === item.page ? "is-active" : ""}`}
+              href={`#${item.page}`}
+              // 折叠态只剩图标，菜单名靠 `title` 报出来（ADR-0043 §8）。
+              title={item.label}
+              aria-current={navPage === item.page ? "page" : undefined}
+              onClick={(event) => {
+                event.preventDefault();
+                navigate(item.page);
+              }}
+            >
+              {navIcon(item.page, 16)}
+              <span className="nav-text">{item.label}</span>
+            </a>
+          ))}
         </nav>
       </aside>
 
       <main className="main-column">
         <header className="topbar">
+          {/* 折叠触发器在顶栏最左（参照物的 `menu-fold ⇄ menu-unfold`）。 */}
+          <button
+            className="fold-toggle"
+            type="button"
+            title={foldLabel}
+            aria-label={foldLabel}
+            aria-expanded={!collapsed}
+            onClick={toggleSider}
+          >
+            {collapsed ? (
+              <Menu size={17} aria-hidden="true" />
+            ) : (
+              <PanelLeftClose size={17} aria-hidden="true" />
+            )}
+          </button>
           <span className="mobile-brand">db-qbs</span>
           <nav className="mobile-nav" aria-label="主导航">
-            <button
-              className={navPage === "tasks" ? "is-active" : ""}
-              type="button"
-              aria-current={navPage === "tasks" ? "page" : undefined}
-              onClick={() => navigate("tasks")}
-            >
-              <Database size={14} aria-hidden="true" />任务
-            </button>
-            <button
-              className={navPage === "history" ? "is-active" : ""}
-              type="button"
-              aria-current={navPage === "history" ? "page" : undefined}
-              onClick={() => navigate("history")}
-            >
-              <Clock3 size={14} aria-hidden="true" />历史
-            </button>
-            <button
-              className={navPage === "datasources" ? "is-active" : ""}
-              type="button"
-              aria-current={navPage === "datasources" ? "page" : undefined}
-              onClick={() => navigate("datasources")}
-            >
-              <Server size={14} aria-hidden="true" />数据源
-            </button>
+            {NAV_ITEMS.map((item) => (
+              <button
+                key={item.page}
+                className={navPage === item.page ? "is-active" : ""}
+                type="button"
+                aria-current={navPage === item.page ? "page" : undefined}
+                onClick={() => navigate(item.page)}
+              >
+                {navIcon(item.page, 14)}
+                {item.label}
+              </button>
+            ))}
           </nav>
           <span className="breadcrumb">
             数据导入 <span aria-hidden="true">/</span>{" "}
             <strong>{activeRun !== null ? "运行详情" : pageLabel(page)}</strong>
           </span>
-          <span className="environment">当前工作台</span>
+          <span className="topbar-right">
+            <span className="environment">当前工作台</span>
+          </span>
         </header>
 
         <div className="content">
-          {loadError !== null && page === "tasks" && (
+          {loadError !== null && page === "jobs" && (
             <div className="notice is-error" role="alert">
               <span>{loadError}</span>
               <button
                 className="text-button"
                 type="button"
-                onClick={() => void loadTasks()}
+                onClick={() => void loadList()}
               >
                 重新加载
               </button>
@@ -366,157 +364,18 @@ export function App() {
             />
           )}
 
-          {activeRun === null && page === "tasks" && (
-            <section className="card" id="tasks" aria-labelledby="tasks-title">
-              <header className="card-header">
-                <div>
-                  <h1 id="tasks-title">任务</h1>
-                  <span className="card-subtitle">
-                    {taskSummaryLabel(tasks, filteredTasks, refreshing)}
-                  </span>
-                </div>
-                <button
-                  className="button is-primary"
-                  type="button"
-                  onClick={openCreateDialog}
-                >
-                  <Plus size={15} aria-hidden="true" />
-                  新建任务
-                </button>
-              </header>
-
-              {tasks !== null && tasks.length > 0 && (
-                <div className="history-filters">
-                  <label className="filter-field">
-                    <span>任务名</span>
-                    <input
-                      value={taskDraft.keyword}
-                      onChange={(event) =>
-                        setTaskDraft((current) => ({
-                          ...current,
-                          keyword: event.target.value,
-                        }))
-                      }
-                      placeholder="任务名 / 源表 / 目标表"
-                    />
-                  </label>
-                  <label className="filter-field">
-                    <span>源端</span>
-                    <select
-                      value={taskDraft.sourceDatasourceId}
-                      onChange={(event) =>
-                        setTaskDraft((current) => ({
-                          ...current,
-                          sourceDatasourceId: event.target.value,
-                        }))
-                      }
-                    >
-                      <option value="">全部源端</option>
-                      {sourceOptions.map(([id, name]) => (
-                        <option key={id} value={id}>
-                          {name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="filter-field">
-                    <span>目标端</span>
-                    <select
-                      value={taskDraft.targetDatasourceId}
-                      onChange={(event) =>
-                        setTaskDraft((current) => ({
-                          ...current,
-                          targetDatasourceId: event.target.value,
-                        }))
-                      }
-                    >
-                      <option value="">全部目标端</option>
-                      {targetOptions.map(([id, name]) => (
-                        <option key={id} value={id}>
-                          {name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="filter-field is-compact">
-                    <span>最近状态</span>
-                    <select
-                      value={taskDraft.latestStatus}
-                      onChange={(event) =>
-                        setTaskDraft((current) => ({
-                          ...current,
-                          latestStatus: event.target.value as
-                            | LatestRunStatus
-                            | "",
-                        }))
-                      }
-                    >
-                      <option value="">全部</option>
-                      {LATEST_RUN_ORDER.map((status) => (
-                        <option key={status} value={status}>
-                          {LATEST_RUN_LABELS[status]}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <button
-                    className="button is-primary"
-                    type="button"
-                    onClick={() => applyTaskFilters(taskDraft)}
-                  >
-                    查询
-                  </button>
-                  <button
-                    className="button is-ghost"
-                    type="button"
-                    onClick={() => applyTaskFilters(EMPTY_TASK_FILTERS)}
-                  >
-                    重置
-                  </button>
-                  <button
-                    className="icon-button filters-refresh"
-                    type="button"
-                    title="刷新任务与最近运行"
-                    aria-label="刷新任务与最近运行"
-                    onClick={refreshTasks}
-                    disabled={refreshing}
-                  >
-                    <RefreshCw
-                      className={refreshing ? "is-spinning" : ""}
-                      size={16}
-                      aria-hidden="true"
-                    />
-                  </button>
-                </div>
-              )}
-
-              <TaskResults
-                tasks={tasks}
-                filteredTasks={filteredTasks}
-                pageTasks={taskSlice.rows}
-                datasources={datasources}
-                latestRuns={latestRuns}
-                historyAvailable={runHistory !== null}
-                refreshing={refreshing}
-                onCreate={openCreateDialog}
-                onAction={setDialog}
-              />
-              {tasks !== null && tasks.length > 0 && (
-                <Pagination
-                  page={taskSlice.page}
-                  pageCount={taskSlice.pageCount}
-                  total={taskSlice.total}
-                  pageSize={taskSlice.pageSize}
-                  unit="个"
-                  onPage={setTaskPage}
-                />
-              )}
-            </section>
-          )}
-
-          {activeRun === null && page === "history" && (
-            <HistoryScreen
+          {activeRun === null && page === "jobs" && (
+            <JobCenterScreen
               tasks={tasks}
+              datasources={datasources}
+              latestRuns={latestRuns}
+              refreshing={refreshing}
+              onRefresh={() => void loadList()}
+              onCreate={openCreateDialog}
+              onEdit={(task) => setDialog({ kind: "edit", task })}
+              onRename={(task) => setDialog({ kind: "rename", task })}
+              onDelete={(task) => setDialog({ kind: "delete", task })}
+              onStart={(task) => setDialog({ kind: "start", task })}
               onRerun={(task, row) =>
                 setDialog({
                   kind: "start",
@@ -527,6 +386,7 @@ export function App() {
                   },
                 })
               }
+              onChanged={() => void loadList()}
             />
           )}
 
@@ -538,9 +398,11 @@ export function App() {
               onChanged={loadDatasources}
             />
           )}
+
+          {activeRun === null && page === "settings" && <SettingsScreen />}
         </div>
 
-        {page === "tasks" && dialog?.kind === "create" && (
+        {page === "jobs" && dialog?.kind === "create" && (
           <TaskFormDialog
             title="新建任务"
             initial={emptyTask}
@@ -550,7 +412,7 @@ export function App() {
             onSubmit={handleCreate}
           />
         )}
-        {page === "tasks" && dialog?.kind === "edit" && (
+        {page === "jobs" && dialog?.kind === "edit" && (
           <TaskFormDialog
             title={`编辑 · ${dialog.task.name}`}
             initial={taskInputFrom(dialog.task)}
@@ -561,14 +423,14 @@ export function App() {
             onSubmit={(input) => handleUpdate(dialog.task, input)}
           />
         )}
-        {page === "tasks" && dialog?.kind === "rename" && (
+        {page === "jobs" && dialog?.kind === "rename" && (
           <RenameDialog
             task={dialog.task}
             onClose={closeDialog}
             onSubmit={(input) => handleUpdate(dialog.task, input)}
           />
         )}
-        {page === "tasks" && dialog?.kind === "delete" && (
+        {page === "jobs" && dialog?.kind === "delete" && (
           <DeleteDialog
             task={dialog.task}
             onClose={closeDialog}
@@ -593,232 +455,13 @@ export function App() {
 
 function pageLabel(page: Page): string {
   switch (page) {
-    case "tasks":
-      return "任务";
-    case "history":
-      return "运行历史";
+    case "jobs":
+      return "作业中心";
     case "datasources":
       return "数据源";
+    case "settings":
+      return "系统设置";
   }
-}
-
-/**
- * 卡片头那句计数。**筛出来的与总共有的不同时才写两个数**——
- * 没筛的时候写「筛出 12 / 共 12 个」是在制造一个不存在的区别。
- */
-function taskSummaryLabel(
-  tasks: Task[] | null,
-  filteredTasks: Task[],
-  refreshing: boolean,
-): string {
-  if (tasks !== null) {
-    return filteredTasks.length === tasks.length
-      ? `共 ${tasks.length} 个`
-      : `筛出 ${filteredTasks.length} / 共 ${tasks.length} 个`;
-  }
-  if (refreshing) {
-    return "正在读取";
-  }
-  return "暂不可用";
-}
-
-function TaskResults({
-  tasks,
-  filteredTasks,
-  pageTasks,
-  datasources,
-  latestRuns,
-  historyAvailable,
-  refreshing,
-  onCreate,
-  onAction,
-}: {
-  tasks: Task[] | null;
-  filteredTasks: Task[];
-  /** 当前这一页的行。分页是客户端的——`filteredTasks` 才是「筛出多少条」的那份。 */
-  pageTasks: Task[];
-  datasources: Datasource[];
-  latestRuns: ReadonlyMap<string, RunHistory>;
-  /** 运行历史这一次读到了没有。没读到时「最近运行」整列自陈，不冒充「尚未运行」。 */
-  historyAvailable: boolean;
-  refreshing: boolean;
-  onCreate: () => void;
-  onAction: (dialog: DialogState) => void;
-}) {
-  if (tasks === null) {
-    return (
-      <div className="loading-state" aria-live="polite">
-        {refreshing ? "正在加载任务..." : "任务暂不可用"}
-      </div>
-    );
-  }
-  if (tasks.length === 0) {
-    return <EmptyState onCreate={onCreate} />;
-  }
-  if (filteredTasks.length === 0) {
-    return <div className="no-results">没有匹配的任务</div>;
-  }
-  return (
-    <TaskTable
-      tasks={pageTasks}
-      datasources={datasources}
-      latestRuns={latestRuns}
-      historyAvailable={historyAvailable}
-      onAction={onAction}
-    />
-  );
-}
-
-/**
- * 「最近运行」一格（P1）。
- *
- * 三条边界，别在渲染里悄悄挪：
- *
- * 1. **不着色、不出标签**——三轴（运行结局 / 目标表效果 / 错误码）在运行历史屏各有形状，
- *    任务屏这一格只是个索引，压成一个彩色圆点会让人以为它就是全部结论。
- * 2. **「尚未运行」与「读取失败」分开**：前者是事实，后者是这一次没读到。
- * 3. 完整结论挂在 `title` 上——列表要窄，但那句人话不该只能去另一屏才看得到。
- */
-function LatestRunCell({
-  run,
-  available,
-}: {
-  run: RunHistory | undefined;
-  available: boolean;
-}) {
-  if (!available) {
-    return <span className="empty-value">读取失败</span>;
-  }
-  if (run === undefined) {
-    return <span className="empty-value">尚未运行</span>;
-  }
-  const presentation = historyPresentation(run);
-  const status: LatestRunStatus = presentation.kind;
-  return (
-    <span className="latest-run" title={presentation.conclusion}>
-      <span className="latest-run-status">{LATEST_RUN_LABELS[status]}</span>
-      <small className="latest-run-time">
-        {formatTimestamp(run.finished_at ?? run.started_at)}
-      </small>
-    </span>
-  );
-}
-
-function EmptyState({ onCreate }: { onCreate: () => void }) {
-  return (
-    <div className="empty-state">
-      <div className="empty-icon">
-        <Database size={22} aria-hidden="true" />
-      </div>
-      <h2>还没有任务</h2>
-      <p>新建第一个 Oracle → MySQL 导入任务。</p>
-      <button className="button is-primary" type="button" onClick={onCreate}>
-        <Plus size={15} aria-hidden="true" />
-        新建任务
-      </button>
-    </div>
-  );
-}
-
-function TaskTable({
-  tasks,
-  datasources,
-  latestRuns,
-  historyAvailable,
-  onAction,
-}: {
-  tasks: Task[];
-  datasources: Datasource[];
-  latestRuns: ReadonlyMap<string, RunHistory>;
-  historyAvailable: boolean;
-  onAction: (dialog: DialogState) => void;
-}) {
-  // 「源 → 目标」显示的是**数据源名字**，`datasource_id` 只在数据源屏出现（ADR-0039 §8）。
-  const names = new Map(
-    datasources.map((datasource) => [datasource.datasource_id, datasource.name]),
-  );
-  const nameOf = (datasourceId: string) =>
-    names.get(datasourceId) ?? (datasourceId === "" ? "—" : datasourceId);
-  return (
-    <div className="table-wrap">
-      <table className="data-grid">
-        <thead>
-          <tr>
-            <th>任务</th>
-            <th>源 → 目标</th>
-            <th>源表</th>
-            <th>目标表</th>
-            <th>主键</th>
-            <th>条件</th>
-            <th className="latest-run-column">
-              最近运行
-              {/* 这一列读一次就不动了（不轮询），把这一点当面说清，别让人拿它当实时看板。 */}
-              <small>状态可能有延迟，以发起结果为准。</small>
-            </th>
-            <th className="action-column is-wide">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          {tasks.map((task) => (
-            <tr key={task.task_id}>
-              <td>
-                <span className="task-name">{task.name}</span>
-                <span className="task-id">{task.task_id}</span>
-              </td>
-              <td>
-                {nameOf(task.source_datasource_id)}
-                <span aria-hidden="true"> → </span>
-                {nameOf(task.target_datasource_id)}
-              </td>
-              <td className="mono">
-                {task.spec.owner}.{task.spec.table}
-              </td>
-              <td className="mono">{task.spec.target_table}</td>
-              <td className="mono">{task.spec.primary_key.join(", ")}</td>
-              <td className="sql-cell" title={conditionSummary(task.spec)}>
-                {conditionSummary(task.spec)}
-              </td>
-              <td className="latest-run-column">
-                <LatestRunCell
-                  run={latestRuns.get(task.task_id)}
-                  available={historyAvailable}
-                />
-              </td>
-              <td>
-                <div className="row-actions">
-                  {/* 发起运行是这一行的**主动作**：给文字，不跟改名、删除挤在一排图标里。 */}
-                  <button
-                    className="button is-ghost is-row-action"
-                    type="button"
-                    onClick={() => onAction({ kind: "start", task })}
-                  >
-                    <Play size={14} aria-hidden="true" />
-                    发起运行
-                  </button>
-                  <ActionButton
-                    label="编辑任务定义"
-                    icon={<Pencil size={15} />}
-                    onClick={() => onAction({ kind: "edit", task })}
-                  />
-                  <ActionButton
-                    label="改名"
-                    icon={<Tag size={15} />}
-                    onClick={() => onAction({ kind: "rename", task })}
-                  />
-                  <ActionButton
-                    label="删除"
-                    danger
-                    icon={<Trash2 size={15} />}
-                    onClick={() => onAction({ kind: "delete", task })}
-                  />
-                </div>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
 }
 
 type TargetMetaState =
@@ -2077,22 +1720,6 @@ function DatasourceHint() {
       去「数据源」建一个 →
     </a>
   );
-}
-
-function conditionSummary(spec: TaskSpec): string {
-  if (spec.conditions.length === 0) {
-    return "整表";
-  }
-  return spec.conditions
-    .map(
-      (condition) =>
-        `${condition.column} ${comparisonSymbol(condition.operator)} ${
-          condition.value_source === "constant"
-            ? condition.constant
-            : `:${condition.parameter}`
-        }`,
-    )
-    .join(" AND ");
 }
 
 function tableKeyFor(table: BuilderTable): string {

@@ -1,0 +1,547 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>db-qbs · 作业中心（P2 原型）</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+/* ===== docs/design-system/tokens.css 逐字内联（副本，不是第二套令牌） ===== */
+/* db-qbs 设计系统 · 令牌（唯一来源）
+ * 定调票 #55 / ADR-0025。方向 D「调度台」，V1 只发浅色（不提供暗色主题）。
+ * 后续所有 UI 原型与生产前端一律引用本文件，不得另起一套。
+ *
+ * 2026-08-21 改版（所有者裁定「照搬 x2doris」）：
+ * 数值来源不再是自拟，而是 x2doris 1.2.0 作业中心的**计算样式实测**
+ * （StreamPark 系 vue-vben-admin + Ant Design 4；实例地址与凭据不入库，向所有者索取）。
+ * 每一条后面标了实测值，改之前先回去量，别凭手感调。
+ * 唯一没照搬的是**字体栈**：x2doris 是英文界面，栈里没有中文字体；
+ * db-qbs 面向中文用户，故在同一条栈上补 CJK 回退（见 §排版）。
+ */
+:root {
+  /* ---- 层次：灰底衬白卡是唯一的分层手法 ----
+     实测：内容区 #F0F2F5、外层 #F4F7F9、卡片纯白。
+     卡片**不描边、不投影**（x2doris 实测 border: none / box-shadow: none）——
+     旧版那圈 1px --line 边框是自拟的，本次去掉；分层只靠灰底衬白卡。 */
+  --bg:          #F0F2F5;  /* 内容区底 */
+  --bg-outer:    #F4F7F9;  /* 最外层底（侧栏右侧的整幅） */
+  --panel:       #FFFFFF;  /* 卡片 / 顶栏 */
+  --line:        #F0F0F0;  /* 表格分隔线（实测 #F0F0F0） */
+  --line-strong: #D9D9D9;  /* 控件边框（实测 #D9D9D9） */
+  --line-top:    #EEEEEE;  /* 顶栏下边线（实测 #EEE） */
+
+  /* ---- 文字三级：实测正文 rgba(0,0,0,.85) ---- */
+  --text: rgba(0, 0, 0, .85);
+  --dim:  rgba(0, 0, 0, .65);
+  --mute: rgba(0, 0, 0, .45);
+
+  /* ---- 主色：只标「可点」，不承担状态语义 ----
+     实测 #3C7EFF（vben 对 antd 默认 #1890FF 的覆盖值）。 */
+  --brand:     #3C7EFF;
+  --brand-dim: #ECF2FF;  /* 选中项浅底 */
+  --btn-shadow: 0 2px 0 rgba(0, 0, 0, .043);  /* 实测按钮那层极淡投影 */
+
+  /* ---- 深色侧边栏（x2doris 浅色主题下侧栏仍是深色，这是它的布局本身） ---- */
+  --sider-bg:          #001529;  /* 实测 rgb(0,21,41) */
+  --sider-text:        rgba(255, 255, 255, .75);
+  --sider-text-active: #FFFFFF;
+  --sider-w:           256px;    /* 实测（展开） */
+  --sider-w-collapsed: 48px;     /* 实测（折叠；触发器在顶栏最左，menu-fold ⇄ menu-unfold） */
+  --sider-item-h:      57px;     /* 实测（含 14px 上下内边距） */
+  --sider-item-radius: 10px;     /* 实测；侧栏菜单项是圆角块，与卡片的 4px 不同 */
+
+  /* ---- 语义四色：Ant Design 4 的一套，状态标签用实心底 + 白字 ---- */
+  --ok:   #52C41A;  --ok-bg:   #F6FFED;  --ok-bd:   #B7EB8F;  /* 成功 / 已切换 */
+  /* 轴二实心块专用（2026-08-16，#89）。不复用 --ok-bg：那个 token 的角色是
+     「大面积柔和底」（结论条、告警框），要淡到不抢；轴二实心块的角色是
+     「灰度下必须与白底可分的填充」，要深到能分。两个要求方向相反，
+     同一个 token 承载不了。--ok-ink 是配套墨色：填充加深必须让文字跟着加深。
+     轴二只出现在**运行详情**里（列表已按所有者裁定收敛为一维状态标签）。 */
+  --ok-fill: #CDEBD9;  /* 灰度实测中位亮度 227，与白底 255 差 28（11.0%） */
+  --ok-ink:  #0B6637;  /* 对 --ok-fill 5.55:1，过 WCAG AA 正文档 */
+  --crit: #F5222D;  --crit-bg: #FFF1F0;  --crit-bd: #FFA39E;  /* 拒绝 4xx / 失败 */
+  --warn: #FAAD14;  --warn-bg: #FFFBE6;  --warn-bd: #FFE58F;  /* 内部错 5xx / 业务值容器 */
+  --info: #3C7EFF;  --info-bg: #ECF2FF;  --info-bd: #ADC6FF;  /* 进行中 */
+  --mute-bg: #FAFAFA;  /* 表头底（实测 #FAFAFA）、中性终态底 */
+  --title-bg: #F5F5F5;  /* 卡内标题块底（实测；x2doris 的「Job Center」那一块） */
+
+  /* ---- 形状与密度：全部实测 ---- */
+  --radius:       4px;   /* 卡片、控件、按钮、页码 */
+  --badge-radius: 0px;   /* 状态标签是**方角**（实测 border-radius: 0），不是胶囊也不是圆角 */
+  --row-h:        41px;  /* 数据行（实测） */
+  --head-h:       39px;  /* 表头行（实测） */
+  --ctl-h:        32px;  /* 按钮、下拉、输入（实测） */
+  --cell-pad:     8px;   /* 单元格内边距（实测） */
+  --ctl-pad:      11px;  /* 控件左右内边距（实测） */
+  --card-pad:     10px;  /* 卡片内边距（实测；表格卡 10、筛选卡 12/10/6） */
+  --pad:          16px;  /* 内容区四周（实测） */
+  --gap:          16px;  /* 卡片之间（实测 margin-bottom: 16px） */
+  --topbar-h:     50px;  /* 顶栏（实测） */
+
+  /* ---- 排版 ----
+     栈照搬 x2doris 实测值，**尾部补 CJK 回退**：它是英文界面，栈里没有中文字体；
+     macOS 上 -apple-system 已经落到 PingFang SC，Windows 上 Segoe UI 会回退到微软雅黑，
+     但 Linux 机器上没有兜底，所以在 sans-serif 之前补三个思源/Noto。
+     数字与标识符仍走独立等宽栈并开 tabular-nums——列对齐才成立。 */
+  --font-cn:  -apple-system, system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+              "PingFang SC", "HarmonyOS Sans SC", "Source Han Sans SC",
+              "Noto Sans CJK SC", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-num: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono",
+              Menlo, Consolas, "Liberation Mono", monospace;
+  --size-body:  14px;    /* 正文 */
+  --size-table: 14px;    /* 表格单元格（实测 14，不再降到 13.5） */
+  --size-num:   14px;    /* 键值区数字 */
+  --size-meta:  12px;    /* 状态标签、次要说明 */
+  --size-cap:   12px;    /* 字段名 */
+  --lh-ui:      22px;    /* 界面正文（实测 22.001px） */
+  --lh-prose:   1.7;     /* 成段中文（错误解释、说明文字） */
+  --weight-em:  500;     /* 强调字重（实测表头 / 标题块 w500） */
+}
+
+/* 数字一律定宽，列对齐才成立 */
+.num, td.n { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+
+/* ===== 原型自有样式：形态与数值一律照 x2doris 实测 ===== */
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg-outer); color: var(--text); font-family: var(--font-cn); font-size: var(--size-body); line-height: var(--lh-ui); }
+
+/* ---- 外壳：深色侧栏 + 白顶栏 + 灰内容区 ---- */
+.app-shell { display: grid; grid-template-columns: var(--sider-w) minmax(0, 1fr); min-height: 100vh; background: var(--bg); }
+.sidebar { background: var(--sider-bg); }
+.product-brand { height: var(--topbar-h); margin-top: 10px; display: flex; align-items: center; gap: 10px; padding: 10px 4px 10px 20px; color: var(--sider-text-active); font-size: 16px; font-weight: var(--weight-em); }
+.brand-mark { width: 24px; height: 24px; display: grid; place-items: center; border-radius: var(--radius); background: var(--brand); color: #fff; font-family: var(--font-num); font-size: var(--size-cap); }
+.sidebar nav { display: flex; flex-direction: column; padding: 8px 0; }
+.nav-item { height: var(--sider-item-h); margin: 0 10px; display: flex; align-items: center; gap: 10px; padding: 14px 24px 14px 20px; border-radius: var(--sider-item-radius); color: var(--sider-text); text-decoration: none; }
+.nav-item.is-active { background: var(--brand); color: var(--sider-text-active); }
+.main-column { min-width: 0; display: flex; flex-direction: column; }
+.topbar { height: var(--topbar-h); display: flex; align-items: center; gap: 12px; padding: 0 var(--pad); border-bottom: 1px solid var(--line-top); background: var(--panel); color: var(--dim); }
+.breadcrumb strong { color: var(--text); font-weight: var(--weight-em); }
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.environment { padding: 1px 7px; border: 1px solid var(--line-strong); border-radius: var(--radius); color: var(--mute); font-family: var(--font-num); font-size: var(--size-meta); }
+.content { flex: 1; padding: var(--pad); }
+
+/* ---- 侧栏折叠：展开 256 / 折叠 48（实测），触发器在顶栏最左 ---- */
+.app-shell.is-collapsed { grid-template-columns: var(--sider-w-collapsed) minmax(0, 1fr); }
+.app-shell.is-collapsed .product-brand { padding-inline: 0; justify-content: center; }
+.app-shell.is-collapsed .product-brand .brand-text { display: none; }
+/* 折叠后图标居中、圆角块跟着收窄。x2doris 这里没改 padding-left，
+   选中的蓝块被 48px 切掉大半、只剩一条竖边——那是渲染瑕疵，不照抄。 */
+.app-shell.is-collapsed .nav-item { margin: 0 4px; padding: 0; justify-content: center; gap: 0; }
+.app-shell.is-collapsed .nav-item .nav-text { display: none; }
+.fold-toggle { width: 32px; height: 32px; display: inline-grid; place-items: center; margin-left: -6px; border: 0; border-radius: var(--radius); background: transparent; color: var(--dim); cursor: pointer; }
+.fold-toggle:hover { background: var(--mute-bg); color: var(--brand); }
+
+/* ---- 卡片：白底、圆角 4、无边框无阴影 ---- */
+.card { border-radius: var(--radius); background: var(--panel); }
+.filter-card { display: flex; align-items: center; gap: 12px; margin-bottom: var(--gap); padding: 12px var(--card-pad) 6px; border-radius: var(--radius); background: var(--panel); }
+.table-card { padding: var(--card-pad); }
+.filter-field { display: flex; align-items: center; gap: 8px; color: var(--text); }
+.filter-field > span { white-space: nowrap; }
+.filter-field select, .filter-field input { width: 160px; height: var(--ctl-h); padding: 0 var(--ctl-pad); border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-size: var(--size-body); font-family: inherit; }
+.filter-actions { margin-left: auto; display: flex; gap: 8px; }
+
+/* ---- 按钮 ---- */
+.button { height: var(--ctl-h); display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 4px 15px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); box-shadow: var(--btn-shadow); cursor: pointer; font-size: var(--size-body); font-family: inherit; white-space: nowrap; }
+.button.is-primary { border-color: var(--brand); background: var(--brand); color: #fff; }
+.button.is-danger { border-color: var(--crit-bd); color: var(--crit); }
+.button:disabled { cursor: not-allowed; opacity: .55; }
+.icon-button { height: 24px; display: inline-grid; place-items: center; padding: 0 7px; border: 1px solid transparent; border-radius: var(--radius); background: transparent; color: var(--brand); cursor: pointer; }
+.icon-button.is-danger { color: var(--crit); }
+.icon-button:disabled { color: var(--mute); cursor: not-allowed; }
+.icon-button.is-tool { color: var(--dim); }
+
+/* ---- 卡内标题块 + 工具条 ---- */
+.table-title-row { height: 48px; display: flex; align-items: center; padding-bottom: 8px; }
+.table-title { margin-right: 32px; padding: 8px 12px; background: var(--title-bg); color: var(--text); font-size: var(--size-body); font-weight: var(--weight-em); line-height: 24px; }
+.table-count { color: var(--mute); font-size: var(--size-meta); }
+.table-toolbar { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.toolbar-icons { display: flex; gap: 2px; padding-right: 12px; margin-right: 4px; }
+.toolbar-icons .icon-button { height: var(--ctl-h); }
+
+/* ---- 表格 ---- */
+.table-wrap { overflow-x: auto; }
+.data-grid { width: 100%; min-width: 1080px; border-collapse: separate; border-spacing: 0; font-size: var(--size-table); }
+.data-grid th { height: var(--head-h); padding: var(--cell-pad); border-bottom: 1px solid var(--line); background: var(--mute-bg); color: var(--text); font-weight: var(--weight-em); text-align: left; white-space: nowrap; }
+.data-grid td { height: var(--row-h); padding: var(--cell-pad); border-bottom: 1px solid var(--line); background: var(--panel); vertical-align: middle; white-space: nowrap; }
+.data-grid tbody tr:hover td { background: #FAFAFA; }
+.check-column { width: 32px; }
+.task-name { display: block; }
+.task-id { display: block; color: var(--mute); font-family: var(--font-num); font-size: var(--size-cap); }
+.table-cell { display: block; font-family: var(--font-num); font-size: var(--size-meta); }
+.table-side { display: block; color: var(--mute); font-size: var(--size-cap); }
+.time-cell { font-family: var(--font-num); font-size: var(--size-meta); font-variant-numeric: tabular-nums; }
+.empty-value { color: var(--mute); }
+
+/* 操作列吸附右侧（x2doris 的 ant-table-cell-fix-right） */
+.action-column { position: sticky; right: 0; width: 1%; box-shadow: -6px 0 6px -6px rgba(0,0,0,.12); }
+.data-grid th.action-column { z-index: 2; }
+.row-actions { display: flex; align-items: center; }
+.row-actions .divider { width: 1px; height: 14px; margin: 0 4px; background: #E8E8E8; }
+
+/* ---- 迁移进度：只给百分比 ---- */
+.progress { min-width: 120px; display: flex; align-items: center; gap: 8px; }
+.progress-track { flex: 1; height: 6px; border-radius: 3px; background: #F5F5F5; overflow: hidden; }
+.progress-fill { display: block; height: 100%; border-radius: 3px; background: var(--brand); }
+.progress-fill.is-ok { background: var(--ok); }
+.progress-fill.is-bad { background: var(--crit); }
+.progress-pct { min-width: 34px; text-align: right; font-family: var(--font-num); font-size: var(--size-meta); font-variant-numeric: tabular-nums; color: var(--dim); }
+
+/* ---- 运行状态：实心方角标签，照 x2doris 的 .ant-tag ---- */
+.state { display: inline-block; height: 22px; padding: 0 7px; border: 1px solid transparent; border-radius: var(--badge-radius); color: #fff; font-size: var(--size-meta); line-height: 20px; }
+.state.is-ok { background: var(--ok); }
+.state.is-failed { background: var(--crit); }
+.state.is-live { background: var(--brand); }
+.state.is-unknown { background: rgba(0,0,0,.45); }
+.state.is-none { border-color: var(--line-strong); background: var(--panel); color: var(--mute); }
+
+/* ---- 分页：卡内右下 ---- */
+.list-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 10px; height: 24px; color: var(--text); }
+.pagination-total { margin-right: auto; color: var(--mute); font-family: var(--font-num); font-size: var(--size-meta); }
+.page-btn { min-width: 24px; height: 24px; margin: 0 4px; padding: 0 4px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-family: var(--font-num); font-weight: var(--weight-em); line-height: 22px; cursor: pointer; }
+.page-btn.is-active { border-color: var(--brand); background: var(--brand); color: #fff; }
+.page-btn:disabled { color: var(--mute); cursor: not-allowed; }
+.page-size { height: 24px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-size: var(--size-meta); font-family: inherit; }
+
+/* ---- 运行详情抽屉（替代整个「运行历史」屏） ---- */
+.drawer-scrim { position: fixed; inset: 0; background: rgba(0,0,0,.45); }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 760px; max-width: 92vw; display: flex; flex-direction: column; background: var(--bg); }
+.drawer-header { height: 56px; display: flex; align-items: center; gap: 12px; padding: 0 var(--pad); border-bottom: 1px solid var(--line); background: var(--panel); }
+.drawer-header h2 { margin: 0; font-size: var(--size-body); font-weight: var(--weight-em); }
+.drawer-header .sub { color: var(--mute); font-family: var(--font-num); font-size: var(--size-meta); }
+.drawer-body { flex: 1; overflow: auto; padding: var(--pad); display: flex; flex-direction: column; gap: var(--gap); }
+.drawer-footer { display: flex; align-items: center; gap: 10px; padding: 12px var(--pad); border-top: 1px solid var(--line); background: var(--panel); }
+.drawer-footer .spacer { margin-left: auto; }
+.panel { border-radius: var(--radius); background: var(--panel); }
+.panel > h3 { margin: 0; padding: 11px var(--pad); border-bottom: 1px solid var(--line); font-size: var(--size-body); font-weight: var(--weight-em); }
+.panel > .panel-body { padding: 14px var(--pad); }
+.conclusion { display: flex; flex-direction: column; gap: 8px; padding: 12px var(--pad); background: var(--crit-bg); line-height: var(--lh-prose); }
+.axes { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.state-discarded { display: inline-block; height: 22px; padding: 0 7px; border: 1px solid var(--line-strong); border-radius: var(--badge-radius); background: var(--panel); font-size: var(--size-meta); line-height: 20px; }
+.error-code { display: inline-block; height: 22px; padding: 0 7px; border-radius: var(--badge-radius); font-family: var(--font-num); font-size: var(--size-meta); line-height: 20px; white-space: nowrap; }
+.error-code.is-4xx { border: 1px dashed var(--crit-bd); background: var(--crit-bg); color: var(--crit); }
+.error-code.is-5xx { border: 1px solid var(--warn-bd); background: var(--warn-bg); color: var(--warn); }
+.kv { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 14px 18px; }
+.kv > div { display: flex; flex-direction: column; gap: 2px; }
+.kv .k { color: var(--mute); font-size: var(--size-cap); }
+.kv .v { font-family: var(--font-num); font-size: var(--size-meta); font-variant-numeric: tabular-nums; }
+.kv .v.bad { color: var(--crit); }
+pre.sql { margin: 0; padding: 12px var(--pad); overflow: auto; border-top: 1px solid var(--line); background: var(--mute-bg); color: var(--dim); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.6; }
+.note { color: var(--mute); font-size: var(--size-meta); }
+
+/* ---- 原型自己的讲解条，生产前端没有 ---- */
+.proto-note { margin: 0; padding: 10px 14px; border-left: 3px solid var(--brand); background: var(--brand-dim); color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-prose); }
+.proto-section { margin: 28px 0 10px; padding: 0 var(--pad); font-size: var(--size-meta); font-weight: var(--weight-em); color: var(--mute); }
+.proto-frame { border-radius: var(--radius); overflow: hidden; }
+.proto-frame .app-shell { min-height: 0; }
+.proto-frame .content { min-height: 380px; }
+.drawer-demo { position: relative; height: 980px; background: var(--bg); }
+.drawer-demo .drawer-scrim, .drawer-demo .drawer { position: absolute; }
+.drawer-demo .drawer { width: 640px; max-width: 100%; }
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="i-db" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></symbol>
+<symbol id="i-server" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></symbol>
+<symbol id="i-gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/></symbol>
+<symbol id="i-rows" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 6h18M3 12h18M3 18h18"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M10 8.5l6 3.5-6 3.5z" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></symbol>
+<symbol id="i-pencil" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20h4L20 8l-4-4L4 16z"/></symbol>
+<symbol id="i-tag" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12V4h8l10 10-8 8z"/><circle cx="7.5" cy="7.5" r="1.3"/></symbol>
+<symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M9 6V4h6v2M6 6l1 14h10l1-14"/></symbol>
+<symbol id="i-fold" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 5h18M3 12h11M3 19h18"/><path d="M21 8.5L17.5 12 21 15.5"/></symbol>
+<symbol id="i-unfold" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 5h18M10 12h11M3 19h18"/><path d="M3.5 8.5L7 12l-3.5 3.5"/></symbol>
+<symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+</defs></svg>
+
+<p class="proto-section">P2 原型 · 作业中心（把「运行历史」屏并进来）</p>
+<p class="proto-note" style="margin: 0 16px 12px;">
+  <b>照搬 x2doris 1.2.0 作业中心。</b>骨架、列的内容、行内图标操作、以及
+  <code>tokens.css</code> 里的字号 / 行高 / 行高密度 / 圆角 / 主色 / 侧栏，
+  全部来自 2026-08-21 对它的<b>计算样式实测</b>，不是照着截图凑的。
+  两处按 db-qbs 的事实调整：① 状态词是 db-qbs 的四态（成功 / 失败 / 进行中 / 结局不明）加一个「尚未运行」；
+  ② 主键、条件、错误码、目标表效果收进详情抽屉。
+  <b>顶栏最左那个按钮可以真的点</b>——侧栏在 256px 与 48px 之间切，折叠后只剩图标、靠 <code>title</code> 认。
+</p>
+
+<div class="proto-frame" style="margin: 0 16px;">
+<div class="app-shell" id="shell">
+  <aside class="sidebar">
+    <div class="product-brand"><span class="brand-mark">Q</span><span class="brand-text">db-qbs</span></div>
+    <nav>
+      <a class="nav-item is-active" href="#" title="作业中心"><svg width="16" height="16"><use href="#i-db"/></svg><span class="nav-text">作业中心</span></a>
+      <a class="nav-item" href="#" title="数据源"><svg width="16" height="16"><use href="#i-server"/></svg><span class="nav-text">数据源</span></a>
+      <a class="nav-item" href="#" title="系统设置"><svg width="16" height="16"><use href="#i-gear"/></svg><span class="nav-text">系统设置</span></a>
+    </nav>
+  </aside>
+
+  <main class="main-column">
+    <header class="topbar">
+      <button class="fold-toggle" id="foldBtn" type="button" title="折叠侧边栏" aria-label="折叠侧边栏" aria-expanded="true"
+              onclick="(function(b){var sh=document.getElementById('shell');var c=sh.classList.toggle('is-collapsed');b.setAttribute('aria-expanded',String(!c));b.title=c?'展开侧边栏':'折叠侧边栏';b.setAttribute('aria-label',b.title);b.querySelector('use').setAttribute('href',c?'#i-unfold':'#i-fold');})(this)">
+        <svg width="17" height="17"><use href="#i-fold"/></svg>
+      </button>
+      <span class="breadcrumb">数据导入 <span aria-hidden="true">/</span> <strong>作业中心</strong></span>
+      <span class="topbar-right"><span class="environment">当前工作台</span></span>
+    </header>
+
+    <div class="content">
+
+      <div class="filter-card">
+        <label class="filter-field"><span>任务名</span><input placeholder="请输入"></label>
+        <label class="filter-field"><span>源端</span><select><option>请选择</option><option>生产核心库</option></select></label>
+        <label class="filter-field"><span>目标端</span><select><option>请选择</option><option>数仓贴源层</option></select></label>
+        <label class="filter-field"><span>运行状态</span><select><option>请选择</option><option>成功</option><option>失败</option></select></label>
+        <span class="filter-actions">
+          <button class="button">重置</button>
+          <button class="button is-primary">查询</button>
+        </span>
+      </div>
+
+      <section class="card table-card">
+        <div class="table-title-row">
+          <span class="table-title">作业中心</span>
+          <span class="table-count">共 26 个</span>
+          <div class="table-toolbar">
+            <span class="toolbar-icons">
+              <button class="icon-button is-tool" title="刷新"><svg width="17" height="17"><use href="#i-refresh"/></svg></button>
+              <button class="icon-button is-tool" title="行高密度"><svg width="17" height="17"><use href="#i-rows"/></svg></button>
+              <button class="icon-button is-tool" title="列设置"><svg width="17" height="17"><use href="#i-gear"/></svg></button>
+            </span>
+            <button class="button is-primary">新建任务</button>
+            <button class="button" disabled>批量发起</button>
+            <button class="button is-danger" disabled>批量删除</button>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table class="data-grid">
+            <thead>
+              <tr>
+                <th class="check-column"><input type="checkbox"></th>
+                <th>任务名</th>
+                <th>源表</th>
+                <th>目标表</th>
+                <th>迁移进度</th>
+                <th>运行状态</th>
+                <th>启动时间</th>
+                <th>运行时长</th>
+                <th class="action-column">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="check-column"><input type="checkbox"></td>
+                <td><span class="task-name">持仓日明细</span><span class="task-id">task-hold-daily</span></td>
+                <td><span class="table-cell">APP.HOLDINGS</span><span class="table-side">生产核心库</span></td>
+                <td><span class="table-cell">dw_holdings</span><span class="table-side">数仓贴源层</span></td>
+                <td><span class="progress"><span class="progress-track"><span class="progress-fill is-ok" style="width:100%"></span></span><span class="progress-pct">100%</span></span></td>
+                <td><span class="state is-ok">成功</span></td>
+                <td class="time-cell">2026-08-21 09:12:33</td>
+                <td class="time-cell">2 分 14 秒</td>
+                <td class="action-column"><span class="row-actions">
+                    <button class="icon-button" title="发起运行"><svg width="16" height="16"><use href="#i-play"/></svg></button>
+                    <span class="divider"></span>
+                    <button class="icon-button" title="运行详情"><svg width="16" height="16"><use href="#i-clock"/></svg></button>
+                    <button class="icon-button" title="编辑任务定义"><svg width="16" height="16"><use href="#i-pencil"/></svg></button>
+                    <button class="icon-button" title="改名"><svg width="16" height="16"><use href="#i-tag"/></svg></button>
+                    <span class="divider"></span>
+                    <button class="icon-button is-danger" title="删除"><svg width="16" height="16"><use href="#i-trash"/></svg></button>
+                  </span></td>
+              </tr>
+              <tr>
+                <td class="check-column"><input type="checkbox" checked></td>
+                <td><span class="task-name">交易流水</span><span class="task-id">task-trade-flow</span></td>
+                <td><span class="table-cell">APP.TRADES</span><span class="table-side">生产核心库</span></td>
+                <td><span class="table-cell">dw_trades</span><span class="table-side">数仓贴源层</span></td>
+                <td><span class="progress"><span class="progress-track"><span class="progress-fill is-bad" style="width:99%"></span></span><span class="progress-pct">99%</span></span></td>
+                <td><span class="state is-failed">失败</span></td>
+                <td class="time-cell">2026-08-21 08:40:02</td>
+                <td class="time-cell">15 秒</td>
+                <td class="action-column"><span class="row-actions">
+                    <button class="icon-button" title="发起运行"><svg width="16" height="16"><use href="#i-play"/></svg></button>
+                    <span class="divider"></span>
+                    <button class="icon-button" title="运行详情"><svg width="16" height="16"><use href="#i-clock"/></svg></button>
+                    <button class="icon-button" title="编辑任务定义"><svg width="16" height="16"><use href="#i-pencil"/></svg></button>
+                    <button class="icon-button" title="改名"><svg width="16" height="16"><use href="#i-tag"/></svg></button>
+                    <span class="divider"></span>
+                    <button class="icon-button is-danger" title="删除"><svg width="16" height="16"><use href="#i-trash"/></svg></button>
+                  </span></td>
+              </tr>
+              <tr>
+                <td class="check-column"><input type="checkbox"></td>
+                <td><span class="task-name">客户主数据</span><span class="task-id">task-customer</span></td>
+                <td><span class="table-cell">APP.CUSTOMERS</span><span class="table-side">生产核心库</span></td>
+                <td><span class="table-cell">dw_customers</span><span class="table-side">数仓贴源层</span></td>
+                <td><span class="progress"><span class="progress-track"><span class="progress-fill " style="width:36%"></span></span><span class="progress-pct">36%</span></span></td>
+                <td><span class="state is-live">进行中</span></td>
+                <td class="time-cell">2026-08-21 09:30:11</td>
+                <td class="time-cell">4 分 21 秒</td>
+                <td class="action-column"><span class="row-actions">
+                    <button class="icon-button" title="发起运行" disabled><svg width="16" height="16"><use href="#i-play"/></svg></button>
+                    <span class="divider"></span>
+                    <button class="icon-button" title="运行详情"><svg width="16" height="16"><use href="#i-clock"/></svg></button>
+                    <button class="icon-button" title="编辑任务定义"><svg width="16" height="16"><use href="#i-pencil"/></svg></button>
+                    <button class="icon-button" title="改名"><svg width="16" height="16"><use href="#i-tag"/></svg></button>
+                    <span class="divider"></span>
+                    <button class="icon-button is-danger" title="删除"><svg width="16" height="16"><use href="#i-trash"/></svg></button>
+                  </span></td>
+              </tr>
+              <tr>
+                <td class="check-column"><input type="checkbox"></td>
+                <td><span class="task-name">估值结果</span><span class="task-id">task-valuation</span></td>
+                <td><span class="table-cell">APP.VALUATION</span><span class="table-side">备份库</span></td>
+                <td><span class="table-cell">dw_valuation</span><span class="table-side">数仓贴源层</span></td>
+                <td><span class="progress"><span class="progress-track"><span class="progress-fill " style="width:72%"></span></span><span class="progress-pct">72%</span></span></td>
+                <td><span class="state is-unknown">结局不明</span></td>
+                <td class="time-cell">2026-08-20 22:05:47</td>
+                <td class="time-cell"><span class="empty-value">—</span></td>
+                <td class="action-column"><span class="row-actions">
+                    <button class="icon-button" title="发起运行"><svg width="16" height="16"><use href="#i-play"/></svg></button>
+                    <span class="divider"></span>
+                    <button class="icon-button" title="运行详情"><svg width="16" height="16"><use href="#i-clock"/></svg></button>
+                    <button class="icon-button" title="编辑任务定义"><svg width="16" height="16"><use href="#i-pencil"/></svg></button>
+                    <button class="icon-button" title="改名"><svg width="16" height="16"><use href="#i-tag"/></svg></button>
+                    <span class="divider"></span>
+                    <button class="icon-button is-danger" title="删除"><svg width="16" height="16"><use href="#i-trash"/></svg></button>
+                  </span></td>
+              </tr>
+              <tr>
+                <td class="check-column"><input type="checkbox"></td>
+                <td><span class="task-name">产品维表</span><span class="task-id">task-product-dim</span></td>
+                <td><span class="table-cell">APP.PRODUCTS</span><span class="table-side">生产核心库</span></td>
+                <td><span class="table-cell">dw_products</span><span class="table-side">数仓贴源层</span></td>
+                <td><span class="empty-value">—</span></td>
+                <td><span class="state is-none">尚未运行</span></td>
+                <td class="time-cell"><span class="empty-value">—</span></td>
+                <td class="time-cell"><span class="empty-value">—</span></td>
+                <td class="action-column"><span class="row-actions">
+                    <button class="icon-button" title="发起运行"><svg width="16" height="16"><use href="#i-play"/></svg></button>
+                    <span class="divider"></span>
+                    <button class="icon-button" title="运行详情" disabled><svg width="16" height="16"><use href="#i-clock"/></svg></button>
+                    <button class="icon-button" title="编辑任务定义"><svg width="16" height="16"><use href="#i-pencil"/></svg></button>
+                    <button class="icon-button" title="改名"><svg width="16" height="16"><use href="#i-tag"/></svg></button>
+                    <span class="divider"></span>
+                    <button class="icon-button is-danger" title="删除"><svg width="16" height="16"><use href="#i-trash"/></svg></button>
+                  </span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="list-pagination">
+          <span class="pagination-total">共 26 条</span>
+          <button class="page-btn" disabled>‹</button>
+          <button class="page-btn is-active">1</button>
+          <button class="page-btn">2</button>
+          <button class="page-btn">›</button>
+          <select class="page-size"><option>20 / 页</option><option>50 / 页</option><option>100 / 页</option></select>
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+</div>
+
+<p class="proto-note" style="margin: 14px 16px 0;">
+  <b>迁移进度只有一个整数百分比。</b>所有者 2026-08-21 裁定：第一版就在开跑前跑一次 <code>COUNT(*)</code>，
+  分母当场拿到，所以<b>进行中的行也有真百分比</b>，不需要不确定进度条、也不用把行数糊在旁边。
+  <b>不带小数</b>——小数点撑歪这一列的对齐，而且第二位小数对「跑到哪了」这个问题毫无信息量。
+  取整方向是<b>向下取整</b>，<code>100%</code> 只在真跑完时出现：上面那条失败行实际是 99.98%，显示 <code>99%</code>，
+  四舍五入成 100% 等于拿显示撒谎。
+  代价写在明处：每次发起会多一次源端全表计数，大表上这一次 <code>COUNT(*)</code> 本身要花时间。
+</p>
+
+<p class="proto-section">运行详情抽屉 · 顶替整个「运行历史」屏</p>
+<p class="proto-note" style="margin: 0 16px 12px;">
+  行里点时钟图标开右侧抽屉，装的是<b>这个任务最近一次运行</b>的全部信息——
+  从列表挪下来的<b>主键、条件、错误码、目标表效果</b>都在这里，原来运行历史屏展开行里有什么也一样不少。
+  失败与结局不明时底部给「重跑」，<b>ADR-0041 的重跑入口不会随历史屏一起消失</b>。
+  一个任务的<b>多次</b>历史按 2026-08-21 的裁定「另说」，本版不做。
+</p>
+
+<div class="proto-frame drawer-demo" style="margin: 0 16px;">
+  <div class="drawer-scrim"></div>
+  <aside class="drawer">
+    <header class="drawer-header">
+      <button class="icon-button"><svg width="18" height="18"><use href="#i-close"/></svg></button>
+      <h2>运行详情 · 交易流水</h2>
+      <span class="sub">rec-20260821-0840</span>
+    </header>
+    <div class="drawer-body">
+
+      <section class="panel">
+        <h3>结论</h3>
+        <div class="conclusion">
+          <span class="axes">
+            <span class="state-discarded">DISCARDED　目标表未被触碰</span>
+            <span class="error-code is-4xx">VERIFY_FAILED 409</span>
+          </span>
+          <span>目标端：门禁计数不一致——暂存表 128,400 行，目标端回报 128,377 行，差 23 行，暂存表已丢弃、目标表保持原样。</span>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h3>行数核对</h3>
+        <div class="panel-body kv">
+          <div><span class="k">源端读取</span><span class="v">128,400</span></div>
+          <div><span class="k">暂存表</span><span class="v">128,400</span></div>
+          <div><span class="k">目标端回报</span><span class="v bad">128,377</span></div>
+          <div><span class="k">清理行数</span><span class="v">0</span></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h3>耗时</h3>
+        <div class="panel-body kv">
+          <div><span class="k">开跑前计数</span><span class="v">1,806 ms</span></div>
+          <div><span class="k">源端读取</span><span class="v">4,120 ms</span></div>
+          <div><span class="k">推送</span><span class="v">9,845 ms</span></div>
+          <div><span class="k">提交 / 核对</span><span class="v">612 / 238 ms</span></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h3>任务定义</h3>
+        <div class="panel-body kv" style="grid-template-columns: repeat(2, minmax(0,1fr));">
+          <div><span class="k">源端 · 源表</span><span class="v">生产核心库 · APP.TRADES</span></div>
+          <div><span class="k">目标端 · 目标表</span><span class="v">数仓贴源层 · dw_trades</span></div>
+          <div><span class="k">主键</span><span class="v">TRADE_ID</span></div>
+          <div><span class="k">条件</span><span class="v">D_BIZ = :d_biz AND STATUS = 'OK'</span></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h3>运行参数与标识</h3>
+        <div class="panel-body kv" style="grid-template-columns: repeat(2, minmax(0,1fr));">
+          <div><span class="k">运行记录</span><span class="v">rec-20260821-0840</span></div>
+          <div><span class="k">目标端运行号</span><span class="v">run-8f31c2</span></div>
+          <div><span class="k">发起于</span><span class="v">2026-08-21 08:40:02</span></div>
+          <div><span class="k">结束于</span><span class="v">2026-08-21 08:40:17</span></div>
+          <div><span class="k">d_biz</span><span class="v">2026-08-20</span></div>
+          <div><span class="k">暂存表</span><span class="v">STG_TRADES_8F31C2</span></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h3>源端 SQL</h3>
+        <pre class="sql">SELECT a.TRADE_ID AS TRADE_ID,
+       a.D_BIZ     AS D_BIZ,
+       a.AMOUNT    AS AMOUNT
+  FROM APP.TRADES a
+ WHERE a.D_BIZ = :d_biz
+   AND a.STATUS = 'OK'</pre>
+      </section>
+
+    </div>
+    <footer class="drawer-footer">
+      <span class="note">这一条已是最近一次运行。</span>
+      <span class="spacer"></span>
+      <button class="button">关闭</button>
+      <button class="button is-primary"><svg width="14" height="14"><use href="#i-play"/></svg>重跑</button>
+    </footer>
+  </aside>
+</div>
+
+<p style="margin: 24px 16px 40px; color: var(--mute); font-size: var(--size-meta);">
+  原型不接后端、不带交互；它只定形态。参照物：x2doris 1.2.0 作业中心（内网，地址与凭据不入库）。
+</p>

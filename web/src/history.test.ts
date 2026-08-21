@@ -24,6 +24,8 @@ const baseHistory: RunHistory = {
   fetch_ms: 4,
   push_ms: 10,
   commit_ms: 6,
+  total_rows: null,
+  precount_ms: null,
   count_ms: 2,
   cursor_ms: 1,
   source_code: null,
@@ -185,6 +187,8 @@ describe("run history presentation", () => {
   });
 
   it("explains a missing run id", () => {
-    expect(runIdPresentation(history({ run_id: null }))).toBe("未发起");
+    expect(runIdPresentation(history({ run_id: null }))).toBe(
+      "未发起，目标端不知道这次运行",
+    );
   });
 });

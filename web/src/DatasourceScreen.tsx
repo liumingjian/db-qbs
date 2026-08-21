@@ -229,7 +229,7 @@ function DatasourceTable({
             <th>用户</th>
             <th>口令</th>
             <th>被引用</th>
-            <th className="action-column is-wide">操作</th>
+            <th className="action-column">操作</th>
           </tr>
         </thead>
         <tbody>
@@ -247,27 +247,35 @@ function DatasourceTable({
                 <td className="mono">{datasource.username}</td>
                 <td>{datasource.has_password ? "已设置" : "未设置"}</td>
                 <td>{count === 0 ? "未被引用" : `${count} 个任务`}</td>
-                <td>
+                <td className="action-column">
+                  {/* 行内动作**全用图标**、靠 `title` 认（ADR-0043 §5；ADR-0042 §6 已作废）。
+                      「正在连接」这一态不再靠按钮文字自陈——它挂在 `title` / `aria-label` 上，
+                      图标同时转起来，禁用的只有这一行自己。 */}
                   <div className="row-actions">
-                    {/* 这一行的主动作：给文字，不跟编辑、删除挤在一排图标里。 */}
-                    <button
-                      className="button is-ghost is-row-action"
-                      type="button"
+                    <ActionButton
+                      label={
+                        test?.kind === "testing" ? "正在连接" : "测试连接"
+                      }
+                      icon={
+                        <PlugZap
+                          className={test?.kind === "testing" ? "is-spinning" : ""}
+                          size={16}
+                        />
+                      }
                       disabled={test?.kind === "testing"}
                       onClick={() => onTest(datasource)}
-                    >
-                      <PlugZap size={14} aria-hidden="true" />
-                      {test?.kind === "testing" ? "正在连接" : "测试连接"}
-                    </button>
+                    />
+                    <span className="divider" />
                     <ActionButton
                       label="编辑数据源"
-                      icon={<Pencil size={15} />}
+                      icon={<Pencil size={16} />}
                       onClick={() => onAction({ kind: "edit", datasource })}
                     />
+                    <span className="divider" />
                     <ActionButton
                       label="删除数据源"
                       danger
-                      icon={<Trash2 size={15} />}
+                      icon={<Trash2 size={16} />}
                       onClick={() => onAction({ kind: "delete", datasource })}
                     />
                   </div>

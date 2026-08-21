@@ -69,6 +69,32 @@ impl OracleRowSource {
         Ok(columns)
     }
 
+    /// 开跑前的一次 `COUNT(*)`：迁移进度那一列的分母（ADR-0043 §7、裁定 6）。
+    ///
+    /// **把当次真正要执行的语句整个套进子查询**（`SELECT COUNT(*) FROM (<source_sql>)`），
+    /// 而不是照 `spec` 另拼一条 `SELECT COUNT(*) FROM 表 WHERE 条件`：
+    /// 另拼的那条迟早与生成器漂开，分母就会算的是另一批行。绑定变量用**同一组**，
+    /// 常量条件也走绑定（ADR-0011 §2「不发明第二套转义」）。
+    ///
+    /// 单独开一条连接、用完即关：主游标那条连接上挂着的是取数结果集，
+    /// 在它上面再跑一条语句要么排队要么打断取数。代价明码标价——每次发起多一次源端全表计数。
+    ///
+    /// 失败**不抛给运行**：调用方把它记成「未取到总行数」就继续跑。
+    pub fn precount(task: &TaskConfig) -> Result<u64, SourceReadError> {
+        let bindings = task
+            .bindings()
+            .map_err(|message| SourceReadError::with_kind(&message, None, FailureKind::Config))?;
+        let query = format!("SELECT COUNT(*) FROM (\n{}\n)", task.source_sql());
+        let connection = open_connection(&task.oracle)?;
+        let row = connection
+            .query_row_named(&query, &named_params(&bindings))
+            .map_err(oracle_error)?;
+        // Oracle 的 COUNT(*) 回的是 NUMBER，取成 i64 再夹到 0：负数不可能出现，
+        // 但夹一下比在 `as u64` 上把 -1 变成天文数字安全。
+        let total: i64 = row.get(0).map_err(oracle_error)?;
+        Ok(total.max(0) as u64)
+    }
+
     /// 「测试连接」（ADR-0037 §9）：开一条连接、跑一条最便宜的查询，用完即关。
     ///
     /// `SELECT 1 FROM DUAL` 而不是只 `Connection::connect`：登录成功之后仍可能因为

@@ -18,7 +18,7 @@ def observe_run_screen(page, width, label):
     """W1 / W2 / W6：映射预检失败态的运行详情屏。"""
     page.set_viewport_size({"width": width, "height": 1000})
     page.goto(BASE, wait_until="networkidle")
-    page.wait_for_selector("#tasks tbody tr")
+    page.wait_for_selector("#jobs tbody tr")
     page.click('button[aria-label="发起运行"]')
     page.wait_for_selector(".run-params input")
     page.fill(".run-params input", "2026-08-18")
@@ -68,20 +68,36 @@ def open_builder(page, target_table):
     """
     page.set_viewport_size({"width": 1440, "height": 1200})
     page.goto(BASE, wait_until="networkidle")
-    page.wait_for_selector("#tasks tbody tr")
+    page.wait_for_selector("#jobs tbody tr")
     page.click('button[aria-label="编辑任务定义"]')
     page.wait_for_selector(".builder-guide")
     page.fill('input[list="target-table-options"]', target_table)
     page.wait_for_timeout(500)
     button = page.query_selector('section[aria-labelledby="column-fetch-title"] header button')
+    if button is None:
+        # 2026-08-21：这一卡在界面上**已经不存在**了。它不是被本次改动删的——
+        # `47a2fed`（"Prepare x2doris P1 frontend handoff"）把整段
+        # 「目标表建表 SQL / 拿建表 SQL / .fetch-ready」从构建器里摘掉了，
+        # 而那一票没有跑 W1–W6（`CLAUDE.md` 规则 1 挡的正是这个），于是没人发现。
+        # 探针**只观察不断言**：这里不抛错，如实回一条「对象不存在」，让走查记录看得见。
+        return False
     button.scroll_into_view_if_needed()
     button.evaluate("(el) => el.click()")
     page.wait_for_selector(".fetch-ready")
+    return True
 
 
 def observe_column_fetch(page):
     """W3 / W4：取列态 —— 三档标记与建表 SQL 占位符。"""
-    open_builder(page, "M3_B1")
+    if not open_builder(page, "M3_B1"):
+        return {
+            "object_missing": "构建器里没有「目标表建表 SQL」卡（`column-fetch-title`）——"
+                              "整段在 47a2fed 被摘掉，W3 / W4 的对象不存在",
+            "column_fetch_sections_on_screen": page.evaluate(
+                "() => [...document.querySelectorAll('.column-fetch-section')]"
+                ".map(el => el.getAttribute('aria-labelledby'))"),
+            "fetch_ready_present": page.query_selector(".fetch-ready") is not None,
+        }
     type_cells = page.query_selector_all(".fetch-ready tbody tr td:nth-child(2)")
     marks = []
     for cell in type_cells:
@@ -115,7 +131,10 @@ def observe_column_fetch(page):
 
 def observe_rejected_fetch(page):
     """W5：白名单外的列 —— 列表照给，只有 DDL 区块换成「整份不给」。"""
-    open_builder(page, "REJECTED")
+    if not open_builder(page, "REJECTED"):
+        return {
+            "object_missing": "同 W3 / W4：取列卡不存在，W5 的第四态无从制造",
+        }
     listed = [c.inner_text() for c in page.query_selector_all(".fetch-ready tbody tr td:nth-child(1)")]
     crit = page.query_selector(".row-size-warning.is-crit")
     if crit is not None:
@@ -133,7 +152,7 @@ def observe_builder_surface(page):
     """本票新增的构建器面（条件 / 排序 / 只读 SQL），走查清单之外的旁证。"""
     page.set_viewport_size({"width": 1440, "height": 1400})
     page.goto(BASE, wait_until="networkidle")
-    page.wait_for_selector("#tasks tbody tr")
+    page.wait_for_selector("#jobs tbody tr")
     page.click('button[aria-label="编辑任务定义"]')
     page.wait_for_selector(".generated-sql pre")
     page.screenshot(path=f"{SHOTS}/builder.png", full_page=True)

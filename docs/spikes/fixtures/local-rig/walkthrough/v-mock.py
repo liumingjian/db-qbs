@@ -55,10 +55,27 @@ SPEC = {
     "order_by": [],
 }
 
+# 2026-08-21（ADR-0043 §2）：运行历史独立屏并进作业中心，**一行 = 一个任务 + 它最近一次运行**。
+# 于是「同一屏上同时看到 SWAPPED 与 DISCARDED」这件事不能再靠一个任务的多条历史，
+# 得靠**多个任务各一条**。每条运行记录因此各挂一个任务，见 `RUNS` 里的 `task_id`。
+# `task-holding` 留在第一位：`start_run()` 点的是第一行的「发起运行」，
+# 而 V16 的并跑提示要它名下那条进行中的 run。
 TASKS = [
     {"task_id": "task-holding", "name": "持仓日明细",
      "source_datasource_id": "ds-ora-core", "target_datasource_id": "ds-my-dw",
      "spec": SPEC},
+    {"task_id": "task-success", "name": "成功那条", "source_datasource_id": "ds-ora-core",
+     "target_datasource_id": "ds-my-dw", "spec": SPEC},
+    {"task_id": "task-verify", "name": "校验失败那条", "source_datasource_id": "ds-ora-core",
+     "target_datasource_id": "ds-my-dw", "spec": SPEC},
+    {"task_id": "task-mapping", "name": "映射预检失败那条", "source_datasource_id": "ds-ora-core",
+     "target_datasource_id": "ds-my-dw", "spec": SPEC},
+    {"task_id": "task-unknown", "name": "结局不明那条", "source_datasource_id": "ds-ora-core",
+     "target_datasource_id": "ds-my-dw", "spec": SPEC},
+    {"task_id": "task-escape", "name": "哨兵逃逸那条", "source_datasource_id": "ds-ora-core",
+     "target_datasource_id": "ds-my-dw", "spec": SPEC},
+    {"task_id": "task-not-started", "name": "未发起那条", "source_datasource_id": "ds-ora-core",
+     "target_datasource_id": "ds-my-dw", "spec": SPEC},
 ]
 
 SOURCE_SQL = (
@@ -117,6 +134,8 @@ def base_run(**over):
         "bytes": 4589312,
         "last_ts": "2026-08-19T12:03:20.000Z",
         "ms": 9540,
+        "total_rows": 100000,
+        "precount_ms": 640,
         "mapping_issues": [],
         "live": False,
     }
@@ -142,11 +161,11 @@ RUNS = {
     "rec-live": LIVE_STREAMING,
     "rec-accepted": LIVE_ACCEPTED,
     # V2：成功，终态 SWAPPED。
-    "rec-success": base_run(run_record_id="rec-success",
+    "rec-success": base_run(run_record_id="rec-success", task_id="task-success",
                             run_params={"load_date": "2026-01-03"}),
     # V3：校验失败，终态 DISCARDED，错误码 4xx。
     "rec-verify": base_run(
-        run_record_id="rec-verify", run_id="20260819121000_cccccc",
+        run_record_id="rec-verify", task_id="task-verify", run_id="20260819121000_cccccc",
         run_params={"load_date": "2026-01-04"},
         outcome="FAILED", target_table_effect="DISCARDED",
         sink_code="VERIFY_FAILED", failure_kind="VERIFY_FAILED",
@@ -154,7 +173,7 @@ RUNS = {
         message="目标端：行数校验未通过：暂存 100,000 行、目标端点到 99,998 行，暂存表已丢弃。"),
     # V4 / V7 / V11 / V22 / V23：映射预检失败。
     "rec-mapping": base_run(
-        run_record_id="rec-mapping", run_id="20260819121500_dddddd",
+        run_record_id="rec-mapping", task_id="task-mapping", run_id="20260819121500_dddddd",
         run_params={"load_date": "2026-01-05"},
         outcome="FAILED", target_table_effect=None, staging_table=None,
         sink_code="PRECHECK_FAILED", failure_kind="MAPPING_PRECHECK",
@@ -164,14 +183,14 @@ RUNS = {
         mapping_issues=MAPPING_ISSUES),
     # V8：结局不明（进程消失）。
     "rec-unknown": base_run(
-        run_record_id="rec-unknown", run_id="20260819122000_eeeeee",
+        run_record_id="rec-unknown", task_id="task-unknown", run_id="20260819122000_eeeeee",
         run_params={"load_date": "2026-01-06"},
         outcome="FAILED", target_table_effect="UNKNOWN",
         unknown_reason="PROCESS_DISAPPEARED", failure_kind="UNKNOWN",
         sink_code=None, message=None, finished_at=None),
     # V13 / V4 的 5xx 一例：哨兵逃逸，报文里带业务列与业务值。
     "rec-escape": base_run(
-        run_record_id="rec-escape", run_id="20260819122500_ffffff",
+        run_record_id="rec-escape", task_id="task-escape", run_id="20260819122500_ffffff",
         run_params={"load_date": "2026-01-07"},
         outcome="FAILED", target_table_effect="DISCARDED",
         sink_code="INTERNAL_PRECHECK_ESCAPE", failure_kind="DEFECT",
@@ -179,7 +198,7 @@ RUNS = {
         message="目标端：内部断言失败：预检放行的值在写入时被拒，暂存表已丢弃。"),
     # V15：run 未发起 —— 目标端不知道这次运行（源端就失败了）。
     "rec-not-started": base_run(
-        run_record_id="rec-not-started", run_id=None,
+        run_record_id="rec-not-started", task_id="task-not-started", run_id=None,
         run_params={"load_date": "2026-01-08"},
         outcome="FAILED", target_table_effect=None, staging_table=None,
         sink_code=None, failure_kind="SOURCE_CONNECT",

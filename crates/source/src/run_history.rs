@@ -32,6 +32,8 @@ macro_rules! history_params {
             ":purged_rows": $history.purged_rows,
             ":source_batches": $history.source_batches,
             ":received_batches": $history.received_batches,
+            ":total_rows": $history.total_rows,
+            ":precount_ms": $history.precount_ms,
             ":fetch_ms": $history.fetch_ms,
             ":push_ms": $history.push_ms,
             ":commit_ms": $history.commit_ms,
@@ -58,6 +60,10 @@ macro_rules! history_params {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryChange {
     MemoryOnly,
+    /// 要落盘，但**阶段没变**。开跑前计数就是这一类：它给的是分母，不是一个新阶段，
+    /// 拿 `StageChanged` 顶替会顺手去改 `active_runs` 里的 stage（而且那条路上的
+    /// `?` 会在 `active_runs` 缺条目时把整行日志丢掉）。
+    FieldsChanged,
     StageChanged,
     Terminal,
 }
@@ -111,6 +117,15 @@ pub struct RunHistory {
     pub purged_rows: Option<u64>,
     pub source_batches: Option<u64>,
     pub received_batches: Option<u64>,
+    /// 开跑前那一次 `COUNT(*)` 拿到的**总行数**：迁移进度那一列的分母（ADR-0043 §7）。
+    ///
+    /// **`None` 不是错误**：计数本身失败时它缺席，而那次运行照常跑完。
+    /// 它是**开跑那一刻**的事实，与随后的读取之间存在时间差——分母不是实时的。
+    /// M2 之前落盘的老历史行也都是 `None`（那时还没有这一次计数）。
+    pub total_rows: Option<u64>,
+    /// 那一次计数**自己**的耗时。与 `count_ms`（sink 侧门禁计数）是两回事，别混；
+    /// 也不并进 `fetch_ms`——揉进去之后「取数慢」会是两件事的和。
+    pub precount_ms: Option<u64>,
     pub fetch_ms: Option<u64>,
     pub push_ms: Option<u64>,
     pub commit_ms: Option<u64>,
@@ -161,6 +176,8 @@ impl RunHistory {
             purged_rows: None,
             source_batches: None,
             received_batches: None,
+            total_rows: None,
+            precount_ms: None,
             fetch_ms: None,
             push_ms: None,
             commit_ms: None,
@@ -211,6 +228,13 @@ impl RunHistory {
             Some("stage_changed") => {
                 self.stage = owned_text(log, "stage");
                 HistoryChange::StageChanged
+            }
+            // 开跑前计数：**落盘**而不是只留内存。进行中的那一行要靠它才有分母，
+            // 而进行中的行恰恰是重启后最需要还原的那一类。
+            Some("precount_finished") => {
+                self.total_rows = number(log, "total_rows");
+                self.precount_ms = number(log, "precount_ms");
+                HistoryChange::FieldsChanged
             }
             Some("run_opened") => {
                 self.staging_table = owned_text(log, "staging_table");
@@ -369,6 +393,8 @@ impl HistoryStore {
                     purged_rows          INTEGER,
                     source_batches      INTEGER,
                     received_batches    INTEGER,
+                    total_rows          INTEGER,
+                    precount_ms         INTEGER,
                     fetch_ms            INTEGER,
                     push_ms             INTEGER,
                     commit_ms           INTEGER,
@@ -394,6 +420,8 @@ impl HistoryStore {
             .map_err(|error| format!("初始化 SQLite 运行历史表失败：{error}"))?;
         ensure_json_column(&connection, "mapping_issues")?;
         ensure_nullable_text_column(&connection, "failure_kind")?;
+        ensure_nullable_integer_column(&connection, "total_rows")?;
+        ensure_nullable_integer_column(&connection, "precount_ms")?;
         Ok(store)
     }
 
@@ -415,14 +443,16 @@ impl HistoryStore {
                     run_record_id, run_id, task_id, run_params, source_sql, staging_table,
                     started_at, started_at_ms, finished_at, outcome, target_table_effect, stage,
                     source_rows, staged_rows, sink_reported_rows, purged_rows, source_batches,
-                    received_batches, fetch_ms, push_ms, commit_ms, count_ms, cursor_ms,
+                    received_batches, total_rows, precount_ms,
+                    fetch_ms, push_ms, commit_ms, count_ms, cursor_ms,
                     source_code, sink_code, [column], [value], message, unknown_reason,
                     failure_kind, seq, rows_pushed, bytes, ms, last_ts, mapping_issues
                  ) VALUES (
                     :run_record_id, :run_id, :task_id, :run_params, :source_sql, :staging_table,
                     :started_at, :started_at_ms, :finished_at, :outcome, :target_table_effect,
                     :stage, :source_rows, :staged_rows, :sink_reported_rows, :purged_rows,
-                    :source_batches, :received_batches, :fetch_ms, :push_ms, :commit_ms,
+                    :source_batches, :received_batches, :total_rows, :precount_ms,
+                    :fetch_ms, :push_ms, :commit_ms,
                     :count_ms, :cursor_ms, :source_code, :sink_code, :column, :value,
                     :message, :unknown_reason, :failure_kind, :seq, :rows_pushed, :bytes, :ms,
                     :last_ts, :mapping_issues
@@ -459,6 +489,7 @@ impl HistoryStore {
                     source_rows=:source_rows, staged_rows=:staged_rows,
                     sink_reported_rows=:sink_reported_rows, purged_rows=:purged_rows,
                     source_batches=:source_batches, received_batches=:received_batches,
+                    total_rows=:total_rows, precount_ms=:precount_ms,
                     fetch_ms=:fetch_ms, push_ms=:push_ms, commit_ms=:commit_ms,
                     count_ms=:count_ms, cursor_ms=:cursor_ms, source_code=:source_code,
                     sink_code=:sink_code, [column]=:column, [value]=:value, message=:message,
@@ -663,6 +694,28 @@ fn ensure_json_column(connection: &Connection, name: &str) -> Result<(), String>
     Ok(())
 }
 
+/// 补一列可空 INTEGER。老库里没有这一列，老历史行补出来就是 `NULL`——
+/// 那正是实话：那些运行跑的时候还没有「开跑前计数」这回事。
+fn ensure_nullable_integer_column(connection: &Connection, name: &str) -> Result<(), String> {
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('run_history') WHERE name = ?1)",
+            [name],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("检查 SQLite 运行历史列 {name} 失败：{error}"))?;
+    if exists {
+        return Ok(());
+    }
+    connection
+        .execute(
+            &format!("ALTER TABLE run_history ADD COLUMN {name} INTEGER"),
+            [],
+        )
+        .map_err(|error| format!("迁移 SQLite 运行历史列 {name} 失败：{error}"))?;
+    Ok(())
+}
+
 /// 补一列可空 TEXT。M2 之前建的库没有这一列，老历史行补出来就是 `NULL`——
 /// 与 `ensure_json_column` 同一条路子，区别只在没有默认值可给：分类是**当时没记**，不是空集。
 fn ensure_nullable_text_column(connection: &Connection, name: &str) -> Result<(), String> {
@@ -705,6 +758,7 @@ const HISTORY_SELECT: &str = "SELECT
     run_record_id, run_id, task_id, run_params, source_sql, staging_table, started_at,
     started_at_ms, finished_at, outcome, target_table_effect, stage, source_rows, staged_rows,
     sink_reported_rows, purged_rows, source_batches, received_batches, fetch_ms, push_ms,
+    total_rows, precount_ms,
     commit_ms, count_ms, cursor_ms, source_code, sink_code, [column], [value],
     message, unknown_reason, failure_kind, seq, rows_pushed, bytes, ms, last_ts,
     mapping_issues
@@ -733,6 +787,8 @@ fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunHistory> {
         fetch_ms: row.get("fetch_ms")?,
         push_ms: row.get("push_ms")?,
         commit_ms: row.get("commit_ms")?,
+        total_rows: row.get("total_rows")?,
+        precount_ms: row.get("precount_ms")?,
         count_ms: row.get("count_ms")?,
         cursor_ms: row.get("cursor_ms")?,
         source_code: row.get("source_code")?,

@@ -2,20 +2,26 @@ import type { Datasource, RunHistory, Task } from "./api";
 import { historyPresentation } from "./history";
 
 /**
- * 任务屏与运行历史屏共用的**列表判定**（P1，x2doris 式列表工作流）。
+ * 作业中心的**列表判定**（P1 留下的那一套，P2 原样复用）。
  *
  * 摆在组件外面的理由与 `datasource.ts` 同源：这几条是**规则**不是渲染。
- * 筛选筛掉了不该筛的行、分页把最后一页算少一页、「最近运行」认错了那条记录，
+ * 筛选筛掉了不该筛的行、分页把最后一页算少一页、「最近一次运行」认错了那条记录，
  * 三样都是用户看不出来的错——只能靠用例守着。渲染仍归走查。
  *
  * 三条边界，别在实现里悄悄挪：
  *
  * 1. **一律客户端过滤 / 客户端分页**。当前 API 没有 `limit/offset`（ADR-0039 的口径未变），
  *    做出服务端分页的假象比不分页更坏：翻到第 3 页却发现总数是刚才那一屏的。
- * 2. **「最近状态」不是一个新语义**，它就是 `historyPresentation(row).kind`。
- *    三轴（运行结局 / 目标表效果 / 错误码）不因为列表上要一个筛选项就被压成一个彩色标签。
- * 3. **「尚未运行」与「读取失败」是两回事**：前者是事实（这个任务没有历史记录），
- *    后者是这一次没读到。列表把它们混成同一格，等于替服务端下结论。
+ * 2. **「运行状态」不是一个新语义**，它就是 `historyPresentation(row).kind` 加一个
+ *    「尚未运行」。它是一格**一维索引**，不是轴二——轴二（目标表效果）与轴三（错误码）
+ *    整体在详情抽屉里，形状一个没变（ADR-0043 §4）。
+ * 3. **「尚未运行」是事实，不是缺数据**：这个任务一条运行记录都没有。
+ *    2026-08-21 起「读取失败」不再是这一列的一态——运行记录与任务清单是同一次读取的两半，
+ *    读不到就是整屏读不到（ADR-0043 §2，走查 X10）。
+ *
+ * 运行历史独立屏随 ADR-0043 §2 取消，`HistoryFilters` / `historyMatchesFilters`
+ * 一并删除：它们唯一的调用方是那个屏。按任务筛的服务端参数 `RunHistoryFilters` 还在，
+ * 那是 API 的东西，不归本文件。
  */
 
 /** 一条运行记录的结局归类。取值与 `HistoryPresentation["kind"]` 逐字相同，不另立词表。 */
@@ -36,7 +42,7 @@ export const LATEST_RUN_LABELS: Readonly<Record<LatestRunStatus, string>> = {
   none: "尚未运行",
 };
 
-/** 运行历史筛选条上「状态」下拉的选项顺序（`""` = 全部，由界面另行摆在最前）。 */
+/** 运行记录四态的排序（`""` = 全部，由界面另行摆在最前）。 */
 export const RUN_STATUS_ORDER: readonly RunStatus[] = [
   "succeeded",
   "failed",
@@ -44,7 +50,7 @@ export const RUN_STATUS_ORDER: readonly RunStatus[] = [
   "unknown",
 ];
 
-/** 任务屏「最近状态」下拉的选项顺序。 */
+/** 作业中心「运行状态」下拉的选项顺序——四态加上「尚未运行」。 */
 export const LATEST_RUN_ORDER: readonly LatestRunStatus[] = [
   ...RUN_STATUS_ORDER,
   "none",
@@ -151,31 +157,16 @@ export function taskMatchesFilters(
   return filters.latestStatus === "" || filters.latestStatus === status;
 }
 
-export interface HistoryFilters {
-  taskId: string;
-  /** `""` = 全部。 */
-  status: RunStatus | "";
-}
-
-export const EMPTY_HISTORY_FILTERS: HistoryFilters = { taskId: "", status: "" };
+export const DEFAULT_PAGE_SIZE = 20;
 
 /**
- * 运行历史是否命中筛选条。
+ * 「每页条数」下拉的取值（ADR-0043 §走查触发 X11，形态照参照物）。
  *
- * 任务那一维服务端也筛（`listRunHistory({ taskId })`），这里仍然再判一遍：
- * 「查询」按的是同一份筛选条，两边口径必须一致，而只有客户端这一份能被用例守住。
+ * 三档而不是连续输入：现场规模是几十个任务，20 / 50 / 100 已经覆盖「一屏」「翻两页」
+ * 「一次看完」三种意图；让人手填一个数只会换来 37 这种没人再想第二次的值。
+ * 第一档必须等于 `DEFAULT_PAGE_SIZE`，否则下拉一进来就显示一个跟实际不符的值。
  */
-export function historyMatchesFilters(
-  row: RunHistory,
-  filters: HistoryFilters,
-): boolean {
-  if (filters.taskId !== "" && row.task_id !== filters.taskId) {
-    return false;
-  }
-  return filters.status === "" || filters.status === runStatus(row);
-}
-
-export const DEFAULT_PAGE_SIZE = 20;
+export const PAGE_SIZE_OPTIONS: readonly number[] = [DEFAULT_PAGE_SIZE, 50, 100];
 
 export interface PageSlice<T> {
   rows: T[];

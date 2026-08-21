@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# X1–X12 走查的一键编排：起桩后端 → 跑机器观察 → 收摊。
-# 桩后端这一路跑**两趟**：常规一趟出 X1–X12，加量一趟（X_BULK=1）只出 X10/X11 的分页对象——
-# 填充行不进第一趟，否则 X1–X9 的实录会被 24 行噪声塞满。
+# X1–X18 走查的一键编排：起桩后端 → 跑机器观察 → 收摊。
+# 桩后端这一路跑**两趟**：常规一趟出 X1–X10 与 X12–X18，加量一趟（X_BULK=1）出 X11 的分页
+# 与 X15 的跨页全选对象——填充行不进第一趟，否则前面那些态的实录会被 24 行噪声塞满。
+# X15 的「未勾选禁用 / 确认框列全名字 / 汇总一行」在加量那一趟里一并观察。
 # 桩与探针都在本目录下（与四份 acceptance 台架同处一棵树，一起入库）。
 # 探针要 playwright，装在仓库外的虚拟环境里：默认 ~/pwvenv，用 PW_PYTHON 覆盖。
 set -u
@@ -27,6 +28,17 @@ if [[ "${X_RIG:-}" == "1" ]]; then
   exit $?
 fi
 
+# 端口上已经有人应答 = 上一趟的桩没收干净。**当场停下**，别接着跑：
+# 那种情况下探针会对着一个陈旧的桩取观察，实录看上去正常、内容却是上一版的
+# （2026-08-21 真踩过一次：X_BULK=1 的旧桩留在 18098 上，两趟都在读它）。
+require_free_port() {
+  if curl -sf "http://127.0.0.1:$PORT/api/datasources" >/dev/null 2>&1; then
+    echo "端口 $PORT 上已经有服务在应答——多半是上一趟的桩没退干净。" >&2
+    echo "先收掉它（pkill -f v1-mock.py），或用 PORT=... 换一个端口。" >&2
+    exit 1
+  fi
+}
+
 wait_for_mock() {
   for _ in $(seq 1 40); do
     curl -sf "http://127.0.0.1:$PORT/api/datasources" >/dev/null && return 0
@@ -36,6 +48,7 @@ wait_for_mock() {
   return 1
 }
 
+require_free_port
 python3 "$HERE/v1-mock.py" "$PORT" &
 MOCK=$!
 trap 'kill $MOCK 2>/dev/null' EXIT
@@ -45,12 +58,18 @@ STATUS=$?
 
 kill $MOCK 2>/dev/null
 wait $MOCK 2>/dev/null
+# 端口交还要等一下：`kill` 只是发信号，socket 未必已经松开。
+for _ in $(seq 1 20); do
+  curl -sf "http://127.0.0.1:$PORT/api/datasources" >/dev/null 2>&1 || break
+  sleep 0.25
+done
+require_free_port
 
-echo "===== 加量一趟（X_BULK=1，只跑 X10/X11 的分页） ====="
+echo "===== 加量一趟（X_BULK=1，跑 X11 的分页与 X15 的跨页全选） ====="
 X_BULK=1 python3 "$HERE/v1-mock.py" "$PORT" &
 MOCK=$!
 wait_for_mock || exit 1
-X_ONLY=pagination X_SHOTS="${X_SHOTS:-/tmp/v1-visual}/bulk" "$PW_PYTHON" "$HERE/v1-probe.py" "$PORT"
+X_ONLY=bulk X_SHOTS="${X_SHOTS:-/tmp/v1-visual}/bulk" "$PW_PYTHON" "$HERE/v1-probe.py" "$PORT"
 BULK_STATUS=$?
 
 [[ $STATUS -eq 0 ]] || exit $STATUS

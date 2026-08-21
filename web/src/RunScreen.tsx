@@ -10,6 +10,7 @@ import {
   TerminalBlock,
 } from "./components/DesignSystem";
 import { messageFrom } from "./errors";
+import { runIdPresentation } from "./history";
 import { mappingSuggestion } from "./m3";
 import { runPresentation } from "./run";
 import type { RunPresentation } from "./run";
@@ -183,7 +184,7 @@ function RunIdentity({ task, detail }: { task: Task; detail: RunDetail }) {
       <DetailValue label="运行记录" value={detail.run_record_id} />
       <DetailValue
         label="目标端运行号"
-        value={detail.run_id ?? "未发起"}
+        value={runIdPresentation(detail)}
       />
       <DetailValue label="所属任务" value={task.task_id} />
       <DetailValue label="运行参数" value={runParamsSummary(detail.run_params)} />

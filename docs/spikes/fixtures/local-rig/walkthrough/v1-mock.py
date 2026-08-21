@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""第一版渲染面走查（X1–X12）的桩后端。
+"""第一版渲染面走查（X1–X18）的桩后端。
 
 **为什么不是台架**：清单写的是「复用 `run-v1-acceptance.sh` 的 C1–C5 造态」，
 而那个入口归 #135，此刻还不存在；M1/M2/M3 三份也还是退役调用面（改造归 #134）。
@@ -70,6 +70,8 @@ FA_SPEC["conditions"] = FA_SPEC["conditions"] + [
      "parameter": "region", "value_source": "runtime", "constant": ""},
 ]
 
+# 作业中心一行 = 一个任务 + 它最近一次运行（ADR-0043 §2），所以**五种运行状态要靠五个任务摆出来**，
+# 而不是像原来那样靠运行历史屏的五行。X17 看的是这五个词同屏、X16 看的是进度的三种空态。
 TASKS = [
     {"task_id": "task-holding", "name": "持仓日明细",
      "source_datasource_id": "ds-ora-core", "target_datasource_id": "ds-my-dw",
@@ -77,6 +79,20 @@ TASKS = [
     {"task_id": "task-fa", "name": "财务凭证",
      "source_datasource_id": "ds-ora-fa", "target_datasource_id": "ds-my-dw",
      "spec": FA_SPEC},
+    {"task_id": "task-verify", "name": "结算对账",
+     "source_datasource_id": "ds-ora-core", "target_datasource_id": "ds-my-mart",
+     "spec": copy.deepcopy(SPEC)},
+    {"task_id": "task-unknown", "name": "客户主数据",
+     "source_datasource_id": "ds-ora-core", "target_datasource_id": "ds-my-dw",
+     "spec": copy.deepcopy(SPEC)},
+    {"task_id": "task-nocount", "name": "交易流水（计数失败）",
+     "source_datasource_id": "ds-ora-fa", "target_datasource_id": "ds-my-dw",
+     "spec": copy.deepcopy(SPEC)},
+    # 从没跑过的那一个：进度列该是 `—`（不是 0%）、状态该是「尚未运行」、
+    # 行内「运行详情」该是禁用态（X9 前半 / X16 / X17 都要它）。
+    {"task_id": "task-never", "name": "产品维表",
+     "source_datasource_id": "ds-ora-core", "target_datasource_id": "ds-my-spare",
+     "spec": copy.deepcopy(SPEC)},
 ]
 
 
@@ -90,6 +106,10 @@ def run_row(**overrides):
         "target_table_effect": "DISCARDED", "stage": "FAILED",
         "source_rows": 120, "staged_rows": 120, "sink_reported_rows": 118, "purged_rows": 0,
         "source_batches": 2, "received_batches": 2,
+        # `total_rows` 是**开跑前** `COUNT(*)` 拿到的分母，`precount_ms` 是那一次计数自己的耗时
+        # （ADR-0043 §7）。两者与 sink 侧的门禁计数 `count_ms` 是两回事，别混。
+        # `total_rows` 为 None = 那次计数没成功——运行照跑，进度列退回 `—`，X16 要这一态。
+        "total_rows": 120, "precount_ms": 180,
         "fetch_ms": 900, "push_ms": 1400, "commit_ms": 120, "count_ms": 60, "cursor_ms": 20,
         "source_code": None, "sink_code": "VERIFY_FAILED", "column": None, "value": None,
         "message": "目标端：门禁计数不一致：源端 120 行，目标端报 118 行",
@@ -102,34 +122,69 @@ def run_row(**overrides):
     return row
 
 
-# X9 的五态各一行：可重跑两种（FAILED / 结局不明）、不给入口两种（进行中 / SUCCEEDED）、
-# 禁用一种（任务已删除）。`rec-live-fa` 与 `rec-failed-fa` 同任务，且参数只差一个 `region`——
-# 重跑时把 `region` 补成 `HZ`，就撞上「同一组参数可能已有 run 进行中」那条既有提示。
+# 五个任务各一条最近运行，凑齐作业中心的五个状态词；外加进度那三种空态。
+# `rec-live-fa` 与 `rec-failed-fa` 同任务、参数只差一个 `region`——重跑时把 `region` 补成 `HZ`，
+# 就撞上「同一组参数可能已有 run 进行中」那条既有提示（X9 后半，判据一字未改）。
+#
+# 进度分母（`total_rows`）故意摆成四种：
+#   task-verify  11998 / 12000 = 99.983% → **必须显示 99%**，向下取整这条就靠它（X16）
+#   task-fa        430 / 1200          → 进行中也有真百分比，不是不确定进度条
+#   task-unknown   900 / 1200          → 结局不明那行的进度停在最后一次上报
+#   task-nocount  total_rows=None      → 进度 `—` + title 自陈「未取到总行数」，但运行照常跑完
+#
+# 注意 `task-fa` 的**最近一次**是那条进行中的 run，`rec-failed-fa` 只是它的上一次——
+# 上一次不上列表（ADR-0043 §2 只展示最近一次），它留在库里是给 X9 的重跑用的。
+# 因此 99% 那一格必须挂在**另一个任务**（`task-verify`）上，否则这一态在屏上根本不出现。
 HISTORY = [
     run_row(run_record_id="rec-failed-fa", run_id="run-fa-7", task_id="task-fa",
             run_params={"load_date": "2026-08-18", "legacy_region": "SH"}),
+    # 99.983% —— 这一格必须显示 99%，四舍五入成 100% 等于拿显示撒谎（ADR-0043 §7 边界 1）。
+    run_row(run_record_id="rec-verify", run_id="run-vf-1", task_id="task-verify",
+            run_params={"load_date": "2026-08-19"},
+            started_at="2026-08-19T02:20:00Z", finished_at="2026-08-19T02:20:15Z", ms=15000,
+            total_rows=12000, rows_pushed=11998, source_rows=11998, staged_rows=11998,
+            sink_reported_rows=11975, precount_ms=1806),
+    # X9 后半的「同一组参数可能已有 run 进行中」那条提示要有对象。
+    # ADR-0043 §2 之后列表只展示最近一次运行，`task-fa` 的最近一次是**进行中**那条，
+    # 它的上一次（失败）从此点不开抽屉——原来靠那一对造出来的提示没了对象。
+    # 改由 `task-verify` 承担：一条**更早**发起、至今仍挂在进行中的陈旧 run，
+    # 参数与 `rec-verify` 完全相同。这正是那条提示要警告的情形本身。
+    run_row(run_record_id="rec-live-verify", run_id="run-vf-0", task_id="task-verify",
+            run_params={"load_date": "2026-08-19"},
+            outcome=None, stage="STREAMING", finished_at=None, sink_code=None,
+            target_table_effect=None, sink_reported_rows=None, staged_rows=None,
+            started_at="2026-08-19T01:00:00Z", ms=3600000,
+            total_rows=12000, rows_pushed=120, source_rows=120),
     run_row(run_record_id="rec-live-fa", run_id="run-fa-8", task_id="task-fa",
             run_params={"load_date": "2026-08-18", "region": "HZ"},
             outcome=None, stage="STREAMING", finished_at=None, sink_code=None,
             target_table_effect=None, sink_reported_rows=None, staged_rows=None,
-            started_at="2026-08-19T02:10:00Z", ms=42000),
-    run_row(run_record_id="rec-unknown", run_id="run-h-5",
+            started_at="2026-08-19T02:10:00Z", ms=42000,
+            total_rows=1200, rows_pushed=430, source_rows=430),
+    run_row(run_record_id="rec-unknown", run_id="run-h-5", task_id="task-unknown",
             run_params={"load_date": "2026-08-17"},
             outcome=None, stage=None, sink_code=None, target_table_effect=None,
-            unknown_reason="PROCESS_DISAPPEARED", message=None, failure_kind="UNKNOWN"),
-    run_row(run_record_id="rec-succeeded", run_id="run-h-4",
+            unknown_reason="PROCESS_DISAPPEARED", message=None, failure_kind="UNKNOWN",
+            finished_at=None, total_rows=1200, rows_pushed=900, source_rows=900),
+    run_row(run_record_id="rec-succeeded", run_id="run-h-4", task_id="task-holding",
             run_params={"load_date": "2026-08-16"},
             outcome="SUCCEEDED", target_table_effect="SWAPPED", stage="COMMITTING",
             sink_code=None, sink_reported_rows=120, message="run completed successfully",
-            failure_kind=None),
-    run_row(run_record_id="rec-task-gone", run_id="run-x-1", task_id="task-removed",
-            run_params={"load_date": "2026-08-15"}),
+            failure_kind=None, total_rows=120, rows_pushed=120),
+    # 开跑前那次 COUNT(*) 没成功：分母缺席，但这次运行**照样跑完并成功**——
+    # 「为了一个进度条把整次搬运判死」正是 ADR-0043 §7 边界 3 要挡的事。
+    run_row(run_record_id="rec-nocount", run_id="run-nc-1", task_id="task-nocount",
+            run_params={"load_date": "2026-08-19"},
+            outcome="SUCCEEDED", target_table_effect="SWAPPED", stage="COMMITTING",
+            sink_code=None, sink_reported_rows=120, message="run completed successfully",
+            failure_kind=None, total_rows=None, precount_ms=None),
 ]
 
 
-# `X_BULK=1`：把任务与运行历史各加量到 26 条，好让**客户端分页**（ADR-0042 §2）有对象。
+# `X_BULK=1`：把任务与运行历史各加量到 26 条以上，好让**客户端分页**（ADR-0042 §2、X11）
+# 与**跨页全选**（ADR-0043 §6、X15：表头全选只选当前页，翻页不跟着跑）有对象。
 # 默认关着——填充行会把 X1–X9 的实录塞满噪声，那几条要看的是具体那几个态。
-# 填充行**只**用来数数与翻页，态一律取「成功」，不参与任何结局判定。
+# 填充行**只**用来数数、翻页、勾选，态一律取「成功」、进度一律 100%，不参与任何结局判定。
 if os.environ.get("X_BULK") == "1":
     for index in range(24):
         task_id = f"task-bulk-{index:02d}"
@@ -143,7 +198,7 @@ if os.environ.get("X_BULK") == "1":
             task_id=task_id, run_params={"load_date": "2026-08-19"},
             outcome="SUCCEEDED", target_table_effect="SWAPPED", stage="COMMITTING",
             sink_code=None, sink_reported_rows=120, failure_kind=None,
-            message="run completed successfully",
+            message="run completed successfully", total_rows=120, rows_pushed=120,
         ))
 
 
