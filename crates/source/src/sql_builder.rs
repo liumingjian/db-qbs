@@ -21,6 +21,10 @@ pub struct BuilderColumn {
     pub nullable: bool,
 }
 
+pub fn builder_dblink_query() -> &'static str {
+    "SELECT DB_LINK FROM USER_DB_LINKS ORDER BY DB_LINK"
+}
+
 pub fn builder_table_query(dblink: Option<&str>) -> Result<String, String> {
     Ok(format!(
         "SELECT OWNER, TABLE_NAME FROM ALL_TABLES{} ORDER BY OWNER, TABLE_NAME",

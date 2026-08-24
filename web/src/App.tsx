@@ -22,6 +22,7 @@ import {
   deleteTask,
   emptySpec,
   fetchBuilderColumns,
+  fetchBuilderDblinks,
   fetchBuilderTables,
   fetchTargetColumns,
   fetchTargetTables,
@@ -575,6 +576,8 @@ function TaskFormDialog({
   );
   const [spec, setSpec] = useState<TaskSpec>(() => initial.spec);
   const [tables, setTables] = useState<BuilderTable[]>([]);
+  const [dblinks, setDblinks] = useState<string[]>([]);
+  const [dblinksLoading, setDblinksLoading] = useState(false);
   const [columns, setColumns] = useState<BuilderColumn[]>([]);
   const [loading, setLoading] = useState<"tables" | "columns" | null>(null);
   const [builderError, setBuilderError] = useState<string | null>(null);
@@ -647,6 +650,36 @@ function TaskFormDialog({
     spec.columns.length > 0 &&
     mappedTargetsComplete &&
     spec.primary_key.length > 0;
+
+  useEffect(() => {
+    if (sourceDatasourceId === "") {
+      setDblinks([]);
+      setDblinksLoading(false);
+      return;
+    }
+    let active = true;
+    setDblinksLoading(true);
+    void fetchBuilderDblinks(sourceDatasourceId)
+      .then((nextDblinks) => {
+        if (active) {
+          setDblinks(nextDblinks);
+        }
+      })
+      .catch(() => {
+        // DBLINK suggestions are optional; manual input remains available when discovery fails.
+        if (active) {
+          setDblinks([]);
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setDblinksLoading(false);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [sourceDatasourceId]);
 
   // 目标表清单跟着目标数据源走。取不到不打断建任务——`datalist` 空掉即可，
   // 目标表名**仍然能手打**（ADR-0039 §5：记得全名的人不必翻列表）。
@@ -993,6 +1026,7 @@ function TaskFormDialog({
                     // 换源端等于换一个库：表清单与列字典都是上一个库的，留着会选出不存在的表。
                     setTables([]);
                     setColumns([]);
+                    setDblinks([]);
                     setSourceTableFilter("");
                     setSourceExpandedOwners(new Set());
                     updateSpec({
@@ -1020,11 +1054,16 @@ function TaskFormDialog({
                 </select>
                 {oracleDatasources.length === 0 && <DatasourceHint />}
               </FormField>
-              <FormField label="源端 DBLINK（可选）">
+              <FormField
+                label="源端 DBLINK（可选）"
+                badge={dblinksLoading ? "读取中" : dblinks.length > 0 ? `${dblinks.length} 个可选` : undefined}
+                neutralBadge
+              >
                 <input
+                  list="source-dblinks"
                   value={spec.dblink ?? ""}
                   disabled={sourceDatasourceId === ""}
-                  placeholder="如 FA"
+                  placeholder={dblinksLoading ? "正在读取" : "输入或选择，如 FA"}
                   onChange={(event) => {
                     const dblink = event.target.value.trim();
                     setTables([]);
@@ -1042,6 +1081,11 @@ function TaskFormDialog({
                     });
                   }}
                 />
+                <datalist id="source-dblinks">
+                  {dblinks.map((dblink) => (
+                    <option key={dblink} value={dblink} />
+                  ))}
+                </datalist>
               </FormField>
               <FormField label="目标端（MySQL）">
                 <select

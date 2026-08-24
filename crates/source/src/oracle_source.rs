@@ -4,9 +4,10 @@ use oracle::sql_type::{OracleType, Timestamp};
 use oracle::{Connection, InitParams, ResultSet, Row};
 
 use crate::{
-    builder_column_query, builder_table_query, classify_column, column_support, BuilderColumn,
-    BuilderTable, FailureKind, OracleAccess, RangeCheckColumn, RangeCheckResult, RowSource,
-    SourceColumn, SourceReadError, TaskConfig, TaskSpec, FETCH_ARRAY_SIZE,
+    builder_column_query, builder_dblink_query, builder_table_query, classify_column,
+    column_support, validate_builder_dblink, BuilderColumn, BuilderTable, FailureKind,
+    OracleAccess, RangeCheckColumn, RangeCheckResult, RowSource, SourceColumn, SourceReadError,
+    TaskConfig, TaskSpec, FETCH_ARRAY_SIZE,
 };
 
 /// 一次查询的绑定变量取值：参数名 → 值。全部值都走绑定（ADR-0011 §2「不发明第二套转义」），
@@ -124,6 +125,22 @@ impl OracleRowSource {
             });
         }
         Ok(tables)
+    }
+
+    pub fn list_builder_dblinks(access: &OracleAccess) -> Result<Vec<String>, SourceReadError> {
+        let connection = open_connection(access)?;
+        let rows = connection
+            .query(builder_dblink_query(), &[])
+            .map_err(oracle_error)?;
+        let mut dblinks = Vec::new();
+        for row in rows {
+            let row = row.map_err(oracle_error)?;
+            let dblink: String = row.get(0).map_err(oracle_error)?;
+            if validate_builder_dblink(Some(&dblink)).is_ok() {
+                dblinks.push(dblink);
+            }
+        }
+        Ok(dblinks)
     }
 
     pub fn list_builder_columns(

@@ -6,6 +6,7 @@ import {
   deleteTask,
   emptySpec,
   fetchBuilderColumns,
+  fetchBuilderDblinks,
   fetchBuilderTables,
   fetchColumns,
   fetchTargetColumns,
@@ -313,6 +314,19 @@ describe("SQL builder API", () => {
       }),
     }));
     expect(columns[0]).not.toHaveProperty("supported");
+  });
+
+  it("loads DBLINK suggestions by Oracle datasource id", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(["FA", "REPORTING"]), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchBuilderDblinks("ds-oracle")).resolves.toEqual(["FA", "REPORTING"]);
+    expect(fetchMock).toHaveBeenCalledWith("/api/builder/dblinks", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ datasource_id: "ds-oracle" }),
+    }));
   });
 
   it("asks the target end for tables and columns by datasource id alone", async () => {

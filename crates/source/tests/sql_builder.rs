@@ -5,8 +5,9 @@
 //! 标识符恒过白名单——这些由生成器结构性保证，下面逐条钉住。
 
 use db_qbs_source::{
-    builder_column_query, builder_table_query, validate_builder_dblink, ColumnMapping, Comparison,
-    Condition, Direction, OrderTerm, RunParams, TaskSpec, ValueSource, ValueType,
+    builder_column_query, builder_dblink_query, builder_table_query, validate_builder_dblink,
+    ColumnMapping, Comparison, Condition, Direction, OrderTerm, RunParams, TaskSpec, ValueSource,
+    ValueType,
 };
 
 /// 恒等映射：目标字段预填成源列名（ADR-0038 §2）。改形状之前的规格就是这一份。
@@ -285,6 +286,10 @@ fn identifiers_are_the_only_thing_not_bound_so_they_are_whitelisted() {
 
 #[test]
 fn metadata_queries_use_only_a_validated_dblink_suffix() {
+    assert_eq!(
+        builder_dblink_query(),
+        "SELECT DB_LINK FROM USER_DB_LINKS ORDER BY DB_LINK"
+    );
     assert_eq!(validate_builder_dblink(Some("fa")), Ok(()));
     assert_eq!(
         builder_table_query(Some("fa")),

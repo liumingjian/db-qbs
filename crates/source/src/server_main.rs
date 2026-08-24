@@ -82,6 +82,12 @@ struct BuilderLinkInput {
     dblink: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuilderDatasourceInput {
+    datasource_id: String,
+}
+
 /// 草稿测连的请求体（ADR-0039 §3）：吃的是**表单里当前填的那组值**，不是库里存的那条。
 ///
 /// `datasource_id` 只有编辑态才有，用途单一——口令留空时去库里取那一份
@@ -394,6 +400,10 @@ fn route_api_request(
 
     if method == Method::Post && path == "/api/builder/tables" {
         return handle_builder_tables(request, state);
+    }
+
+    if method == Method::Post && path == "/api/builder/dblinks" {
+        return handle_builder_dblinks(request, state);
     }
 
     if method == Method::Post && path == "/api/builder/columns" {
@@ -1660,6 +1670,21 @@ fn handle_builder_tables(request: &mut Request, state: &ServerState<'_>) -> Http
     };
     match OracleRowSource::list_builder_tables(&access, input.dblink.as_deref()) {
         Ok(tables) => json_response(200, &tables),
+        Err(error) => oracle_failure(error),
+    }
+}
+
+fn handle_builder_dblinks(request: &mut Request, state: &ServerState<'_>) -> HttpResponse {
+    let input: BuilderDatasourceInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    let access = match oracle_access(state, &input.datasource_id) {
+        Ok(access) => access,
+        Err(error) => return bad_request(error),
+    };
+    match OracleRowSource::list_builder_dblinks(&access) {
+        Ok(dblinks) => json_response(200, &dblinks),
         Err(error) => oracle_failure(error),
     }
 }

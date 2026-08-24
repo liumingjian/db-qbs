@@ -45,7 +45,8 @@ pub use run_history::{
     UnknownReason,
 };
 pub use sql_builder::{
-    builder_column_query, builder_table_query, validate_builder_dblink, BuilderColumn, BuilderTable,
+    builder_column_query, builder_dblink_query, builder_table_query, validate_builder_dblink,
+    BuilderColumn, BuilderTable,
 };
 pub use target_ddl::{generate_target_ddl, TargetDdlColumnError, TargetDdlError};
 pub use task_spec::{

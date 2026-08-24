@@ -621,6 +621,14 @@ export async function fetchBuilderTables(
   );
 }
 
+export async function fetchBuilderDblinks(datasourceId: string): Promise<string[]> {
+  return postJson<string[]>(
+    "/api/builder/dblinks",
+    { datasource_id: datasourceId },
+    "读取 Oracle DBLINK 失败",
+  );
+}
+
 export async function fetchBuilderColumns(input: {
   datasource_id: string;
   dblink: string;
