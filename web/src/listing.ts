@@ -1,5 +1,6 @@
 import type { Datasource, RunHistory, Task } from "./api";
 import { historyPresentation } from "./history";
+import { sourceSummary } from "./spec";
 
 /**
  * 作业中心的**列表判定**（P1 留下的那一套，P2 原样复用）。
@@ -133,7 +134,9 @@ export function taskMatchesFilters(
     const haystack = [
       task.name,
       task.task_id,
-      `${task.spec.owner}.${task.spec.table}`,
+      // 自定义 SQL 的任务 owner / table 都是空串，直接拼这两个字段等于把它排除在
+      // 关键词搜索之外。`full` 在 SQL 模式下是整条语句，用户记得的表名因此能搜到。
+      sourceSummary(task.spec).full,
       task.spec.target_table,
     ]
       .join(" ")

@@ -206,16 +206,23 @@ impl TaskSpec {
     }
 
     /// 源端 SQL。一条条件都没有时就是整表取数——量级风险归 #122 去证，不在这里挡。
+    ///
+    /// 自定义 SQL **不原样执行**：外层再套一次投影。搬运链路只认结果列名——`transfer.rs`
+    /// 把 `source.columns()`（执行语句的结果列）原样交给 sink，所以「结果列名就是目标列名」。
+    /// 不套这一层，勾选落不了地（没勾的列照样过线），目标字段改名也会被静默忽略。
     pub fn source_sql(&self) -> String {
         if let Some(source_sql) = self.source_sql.as_deref() {
-            return normalize_source_sql(source_sql);
+            let inner = normalize_source_sql(source_sql)
+                .lines()
+                .map(|line| format!("         {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return format!(
+                "SELECT {}\n  FROM (\n{inner}\n       ) q",
+                self.projection("q")
+            );
         }
-        let projection = self
-            .columns
-            .iter()
-            .map(|mapping| format!("a.{} AS {}", mapping.source, mapping.target))
-            .collect::<Vec<_>>()
-            .join(",\n       ");
+        let projection = self.projection("a");
         let dblink_suffix = self
             .dblink
             .as_deref()
@@ -244,6 +251,16 @@ impl TaskSpec {
             sql.push_str(&format!("\n ORDER BY {terms}"));
         }
         sql
+    }
+
+    /// 投影就是映射：`别名.源列 AS 目标字段`。按表选择与自定义 SQL 共用这一份，
+    /// 两条路径生成的形状因此不会漂。
+    fn projection(&self, alias: &str) -> String {
+        self.columns
+            .iter()
+            .map(|mapping| format!("{alias}.{} AS {}", mapping.source, mapping.target))
+            .collect::<Vec<_>>()
+            .join(",\n       ")
     }
 
     pub fn validate(&self) -> Result<(), String> {

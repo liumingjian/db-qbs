@@ -14,7 +14,7 @@ import {
   TableProperties,
   Trash2,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 
 import {
@@ -38,6 +38,7 @@ import {
 import type {
   Agent,
   BuilderColumn,
+  ColumnMapping,
   BuilderSql,
   BuilderTable,
   Condition,
@@ -680,9 +681,14 @@ function TaskFormDialog({
     }
     return names;
   }, [columns, spec.columns]);
+  // 跟源列表同一个顺序。按 `spec.columns` 排会变成「勾选先后」——取消再勾一列，
+  // 它就跳到映射表末尾，两张表对不上行。
   const selectedSourceColumns = useMemo(
-    () => spec.columns.map((mapping) => mapping.source),
-    [spec.columns],
+    () =>
+      columnNames.filter((name) =>
+        spec.columns.some((mapping) => mapping.source === name),
+      ),
+    [columnNames, spec.columns],
   );
   const allSourceColumnsSelected =
     columnNames.length > 0 &&
@@ -773,7 +779,10 @@ function TaskFormDialog({
     }
     setTargetMeta({ kind: "loading" });
     void fetchTargetColumns(targetDatasourceId, table)
-      .then((data) => setTargetMeta({ kind: "ready", table, data }))
+      .then((data) => {
+        setTargetMeta({ kind: "ready", table, data });
+        autoFillSameNameTargets(data);
+      })
       .catch((loadError) =>
         setTargetMeta({ kind: "failed", message: messageFrom(loadError) }),
       );
@@ -822,8 +831,27 @@ function TaskFormDialog({
     setSpec((current) => ({ ...current, ...change }));
   }
 
+  // 当前表单里有没有会被切模式抹掉的东西。空表单上弹确认框是纯噪声，
+  // 所以这个判断存在的全部意义就是「只在真有东西可丢时才拦一下」。
+  const sourceWorkInProgress =
+    spec.owner !== "" ||
+    (spec.source_sql?.trim() ?? "") !== "" ||
+    spec.columns.length > 0 ||
+    spec.conditions.length > 0;
+
   function switchSourceQueryMode(nextMode: SourceQueryMode) {
     if (nextMode === sourceQueryMode) {
+      return;
+    }
+    // 切模式会把源表 / 结果列、字段映射、主键、过滤条件整套清掉——它们全是上一条
+    // 取数路径的产物，留着只会生成一段引用不存在列的 SQL。原来这一步是**静默**的：
+    // 填了半小时的映射一点就没，且没有撤销。
+    if (
+      sourceWorkInProgress &&
+      !window.confirm(
+        "切换取数方式会清空当前的源表 / 结果列、字段映射、主键和过滤条件。确定切换？",
+      )
+    ) {
       return;
     }
     setSourceQueryMode(nextMode);
@@ -890,12 +918,26 @@ function TaskFormDialog({
             nullable: true,
           })),
         );
+        // 首次读取默认全勾（多数场景就是整段搬）；已经勾过就只做交集——
+        // 「读取列」是刷新结果列，不是重置这张表单。改 SQL 文本本身已经在
+        // textarea 的 onChange 里清空过勾选，所以这里留下来的一定是同一条 SQL 的选择。
+        const previous = new Map(
+          spec.columns.map((mapping) => [mapping.source, mapping]),
+        );
+        const nextMappings: ColumnMapping[] =
+          spec.columns.length === 0
+            ? nextColumns.map((column) => ({ source: column.name, target: "" }))
+            : nextColumns
+                .map((column) => previous.get(column.name))
+                .filter((mapping): mapping is ColumnMapping => mapping !== undefined);
+        const survivingTargets = new Set(
+          nextMappings.map((mapping) => mapping.target),
+        );
         updateSpec({
-          columns: nextColumns.map((column) => ({
-            source: column.name,
-            target: column.name,
-          })),
-          primary_key: [],
+          columns: nextMappings,
+          primary_key: spec.primary_key.filter((name) =>
+            survivingTargets.has(name),
+          ),
           conditions: [],
           order_by: [],
         });
@@ -946,13 +988,13 @@ function TaskFormDialog({
   }
 
   // 勾源列只表达“本次要搬这列”。目标字段要等目标表列读取后，在字段映射区明确选择。
+  // 自定义 SQL 模式同样可勾：没勾的列不进投影，也就不会过线（见 TaskSpec::source_sql）。
   function toggleColumn(column: string) {
-    if (sourceQueryMode === "sql") {
-      return;
-    }
     const mapping = spec.columns.find((candidate) => candidate.source === column);
     if (mapping === undefined) {
-      updateSpec({ columns: [...spec.columns, { source: column, target: "" }] });
+      updateSpec({
+        columns: [...spec.columns, { source: column, target: "" }],
+      });
       return;
     }
     // 主键存的是目标字段，取消源列时按当前目标名摘掉。
@@ -963,9 +1005,6 @@ function TaskFormDialog({
   }
 
   function toggleAllColumns() {
-    if (sourceQueryMode === "sql") {
-      return;
-    }
     if (allSourceColumnsSelected) {
       updateSpec({ columns: [], primary_key: [], conditions: [], order_by: [] });
       return;
@@ -999,6 +1038,38 @@ function TaskFormDialog({
   // 这里不再各处 `find()`。
   function renameTarget(column: string, nextTarget: string) {
     updateSpec(renameTargetField(spec, column, nextTarget));
+  }
+
+  /**
+   * 目标列一读回来就把**同名的**源列自动接上——只填还空着的，已经选好的不动。
+   *
+   * 原来这一步要用户自己去点「同名填充」：`ID` / `C_NAME` / `LOAD_DATE` 名字一模一样，
+   * 四个下拉却都停在「请选择目标字段」，等于让人手工确认一件机器已经知道的事。
+   * 只填空位是关键——重新读取目标列不该把用户手改过的映射冲掉。
+   */
+  function autoFillSameNameTargets(data: TargetTableMetadata) {
+    const targetByUpper = new Map(
+      data.columns.map((column) => [column.name.toUpperCase(), column.name]),
+    );
+    setSpec((current) =>
+      current.columns.reduce((draft, mapping) => {
+        if (mapping.target.trim() !== "") {
+          return draft;
+        }
+        const target = targetByUpper.get(mapping.source.toUpperCase());
+        return target === undefined
+          ? draft
+          : { ...draft, ...renameTargetField(draft, mapping.source, target) };
+      }, current),
+    );
+  }
+
+  /** 全部退回未映射。主键存的是目标字段，一并清掉，否则会剩下一批指向空名字的键。 */
+  function clearMapping() {
+    updateSpec({
+      columns: spec.columns.map((mapping) => ({ ...mapping, target: "" })),
+      primary_key: [],
+    });
   }
 
   function fillSameNameTargets() {
@@ -1154,6 +1225,9 @@ function TaskFormDialog({
                 </select>
                 {oracleDatasources.length === 0 && <DatasourceHint />}
               </FormField>
+              {/* 徽标原来写「4 个可选」并右对齐——两处都误导：它飘到「目标端（MySQL）」
+                  标签旁边，而「（可选）」说的是这个字段可以不填、「可选」说的是有几个
+                  可以挑，同一行里两个「可选」不是一个意思。改成「发现 4 个」并贴回标签。 */}
               {sourceQueryMode === "table" && (
                 <FormField
                   label="源端 DBLINK（可选）"
@@ -1161,33 +1235,41 @@ function TaskFormDialog({
                     dblinksLoading
                       ? "读取中"
                       : dblinks.length > 0
-                        ? String(dblinks.length) + " 个可选"
+                        ? `发现 ${dblinks.length} 个`
                         : undefined
                   }
                   neutralBadge
+                  inlineBadge
                 >
-                  <input
-                    list="source-dblinks"
-                    value={spec.dblink ?? ""}
-                    disabled={sourceDatasourceId === ""}
-                    placeholder={dblinksLoading ? "正在读取" : "输入或选择，如 FA"}
-                    onChange={(event) => {
-                      const dblink = event.target.value.trim();
-                      setTables([]);
-                      setColumns([]);
-                      setSourceTableFilter("");
-                      setSourceExpandedOwners(new Set());
-                      updateSpec({
-                        dblink: dblink === "" ? undefined : dblink,
-                        owner: "",
-                        table: "",
-                        columns: [],
-                        primary_key: [],
-                        conditions: [],
-                        order_by: [],
-                      });
-                    }}
-                  />
+                  {/* 自动发现是这一版新加的能力，可它长得和普通文本框一模一样，
+                      没人知道点下去有东西。补一个可见的 ▾——仍然可以直接手打。 */}
+                  <span className="combo-input">
+                    <input
+                      list="source-dblinks"
+                      value={spec.dblink ?? ""}
+                      disabled={sourceDatasourceId === ""}
+                      placeholder={
+                        dblinksLoading ? "正在读取" : "不走 dblink 就留空"
+                      }
+                      onChange={(event) => {
+                        const dblink = event.target.value.trim();
+                        setTables([]);
+                        setColumns([]);
+                        setSourceTableFilter("");
+                        setSourceExpandedOwners(new Set());
+                        updateSpec({
+                          dblink: dblink === "" ? undefined : dblink,
+                          owner: "",
+                          table: "",
+                          columns: [],
+                          primary_key: [],
+                          conditions: [],
+                          order_by: [],
+                        });
+                      }}
+                    />
+                    <ChevronDown size={15} aria-hidden="true" />
+                  </span>
                   <datalist id="source-dblinks">
                     {dblinks.map((dblink) => (
                       <option key={dblink} value={dblink} />
@@ -1230,36 +1312,15 @@ function TaskFormDialog({
                 {mysqlDatasources.length === 0 && <DatasourceHint />}
               </FormField>
             </div>
-            <div className="builder-query-mode">
-              <span>源端查询方式</span>
-              <div className="builder-mode-buttons" role="tablist" aria-label="源端查询方式">
-                <button
-                  className={sourceQueryMode === "table" ? "button is-primary" : "button"}
-                  type="button"
-                  role="tab"
-                  aria-selected={sourceQueryMode === "table"}
-                  onClick={() => switchSourceQueryMode("table")}
-                >
-                  按表选择
-                </button>
-                <button
-                  className={sourceQueryMode === "sql" ? "button is-primary" : "button"}
-                  type="button"
-                  role="tab"
-                  aria-selected={sourceQueryMode === "sql"}
-                  onClick={() => switchSourceQueryMode("sql")}
-                >
-                  自定义 SQL
-                </button>
-              </div>
-            </div>
           </section>
 
           <section className="builder-guide" aria-labelledby="builder-source-title">
             <header>
               <div>
+                {/* 一个概念一个名字：tab、卡片标题、字段标签原来是「自定义 SQL」/
+                    「源 SQL」/「自定义 SQL」三种说法。统一到 tab 上那个。 */}
                 <strong id="builder-source-title">
-                  {sourceQueryMode === "table" ? "源表" : "源 SQL"}
+                  {sourceQueryMode === "table" ? "源表" : "自定义 SQL"}
                 </strong>
                 <span>
                   {sourceQueryMode === "table"
@@ -1267,50 +1328,89 @@ function TaskFormDialog({
                     : "输入一条只读 SELECT，读取结果列后继续做目标映射"}
                 </span>
               </div>
-              <button
-                className="button is-ghost"
-                type="button"
-                onClick={() => void (sourceQueryMode === "table" ? loadTables() : loadColumns())}
-                disabled={
-                  loading !== null ||
-                  sourceDatasourceId === "" ||
-                  (sourceQueryMode === "sql" && !Boolean(spec.source_sql?.trim()))
-                }
-              >
-                {loading !== null ? (
-                  <LoaderCircle className="is-spinning" size={15} />
-                ) : sourceQueryMode === "table" ? (
-                  <RefreshCw size={15} />
-                ) : (
-                  <TableProperties size={15} />
-                )}
-                {loading !== null
-                  ? "读取中"
-                  : sourceQueryMode === "table"
-                    ? "读取表"
-                    : "读取列"}
-              </button>
+              {/* 取数方式这个岔路口决定下面出现的是一棵库表树还是一个 textarea，
+                  原来却摆在上一张卡的页脚、和辅助说明同一个字重。搬到它真正控制的
+                  这张卡的头上。 */}
+              <div className="builder-mode-switch">
+                <div
+                  className="builder-mode-buttons"
+                  role="tablist"
+                  aria-label="源端查询方式"
+                >
+                  <button
+                    className={
+                      sourceQueryMode === "table" ? "button is-primary" : "button"
+                    }
+                    type="button"
+                    role="tab"
+                    aria-selected={sourceQueryMode === "table"}
+                    onClick={() => switchSourceQueryMode("table")}
+                  >
+                    按表选择
+                  </button>
+                  <button
+                    className={
+                      sourceQueryMode === "sql" ? "button is-primary" : "button"
+                    }
+                    type="button"
+                    role="tab"
+                    aria-selected={sourceQueryMode === "sql"}
+                    onClick={() => switchSourceQueryMode("sql")}
+                  >
+                    自定义 SQL
+                  </button>
+                </div>
+                <button
+                  className="button is-ghost"
+                  type="button"
+                  onClick={() =>
+                    void (sourceQueryMode === "table" ? loadTables() : loadColumns())
+                  }
+                  disabled={
+                    loading !== null ||
+                    sourceDatasourceId === "" ||
+                    (sourceQueryMode === "sql" && !Boolean(spec.source_sql?.trim()))
+                  }
+                >
+                  {loading !== null ? (
+                    <LoaderCircle className="is-spinning" size={15} />
+                  ) : sourceQueryMode === "table" ? (
+                    <RefreshCw size={15} />
+                  ) : (
+                    <TableProperties size={15} />
+                  )}
+                  {loading !== null
+                    ? "读取中"
+                    : sourceQueryMode === "table"
+                      ? "读取表"
+                      : "读取列"}
+                </button>
+              </div>
             </header>
             {sourceQueryMode === "sql" ? (
               <div className="source-sql-editor">
-                <FormField label="自定义 SQL">
-                  <textarea
-                    required
-                    rows={8}
-                    value={spec.source_sql ?? ""}
-                    placeholder={"SELECT *\nFROM APP.T_CUSTOMER@POC_LINK_A\nWHERE STATUS = 1"}
-                    onChange={(event) => {
-                      setColumns([]);
-                      updateSpec({
-                        source_sql: event.target.value,
-                        columns: [],
-                        primary_key: [],
-                        conditions: [],
-                        order_by: [],
-                      });
-                    }}
-                  />
-                </FormField>
+                {/* 卡片标题已经写着「自定义 SQL」，内层再挂一个同名标签是纯重复。 */}
+                <textarea
+                  required
+                  rows={8}
+                  aria-label="自定义 SQL"
+                  value={spec.source_sql ?? ""}
+                  placeholder={"SELECT *\nFROM APP.T_CUSTOMER@POC_LINK_A\nWHERE STATUS = 1"}
+                  onChange={(event) => {
+                    setColumns([]);
+                    updateSpec({
+                      source_sql: event.target.value,
+                      columns: [],
+                      primary_key: [],
+                      conditions: [],
+                      order_by: [],
+                    });
+                  }}
+                />
+                <small className="spec-note">
+                  读取列后可以只勾要搬的列。实际执行时会在这条 SQL 外层套一层投影，
+                  只取勾选的列并改名成目标字段——没勾的列不会过线。
+                </small>
               </div>
             ) : (
             <div className="tree-picker">
@@ -1446,7 +1546,6 @@ function TaskFormDialog({
                             <input
                               type="checkbox"
                               checked={selected}
-                              disabled={sourceQueryMode === "sql"}
                               onChange={() => toggleColumn(columnName)}
                               aria-label={`选择 ${columnName}`}
                             />
@@ -1607,10 +1706,11 @@ function TaskFormDialog({
               onTargetChange={renameTarget}
               onToggleKey={toggleKey}
               onFillSameName={fillSameNameTargets}
+              onClearMapping={clearMapping}
             />
           </section>
 
-          {sourceQueryMode === "table" && (
+          {sourceQueryMode === "table" ? (
             <ConditionEditor
               conditions={spec.conditions}
               columnNames={columnNames}
@@ -1619,9 +1719,30 @@ function TaskFormDialog({
               onChange={updateCondition}
               onRemove={removeCondition}
             />
+          ) : (
+            /* 这张卡原来在 SQL 模式下整个消失，不留一句话——上一屏还有的东西
+               下一屏没了，读起来像丢了功能。留住卡，明说它去哪了。 */
+            <section className="spec-editor" aria-labelledby="conditions-title">
+              <header>
+                <div>
+                  <strong id="conditions-title">过滤条件</strong>
+                  <span>由你写的 SQL 决定</span>
+                </div>
+              </header>
+              <p className="spec-empty">
+                自定义 SQL 模式：过滤与排序请直接写进上面的 SQL。
+              </p>
+            </section>
           )}
 
-          <GeneratedSql sql={sql} error={sqlError} ready={specComplete} />
+          {/* 两种模式都要看到构建 SQL。SQL 模式下**尤其**要看：你写的那段不是原样
+              执行的，外面套了一层只取勾选列的投影，这里是唯一能核对最终语句的地方。 */}
+          <GeneratedSql
+            sql={sql}
+            error={sqlError}
+            ready={specComplete}
+            mode={sourceQueryMode}
+          />
 
           {error !== null && (
             <div className="form-error" role="alert">
@@ -1633,7 +1754,7 @@ function TaskFormDialog({
           onClose={onClose}
           busy={submitting}
           submitLabel={submitLabel}
-          submitDisabled={!specComplete}
+          submitDisabled={!specComplete || sqlError !== null}
         />
       </form>
     </Modal>
@@ -1666,7 +1787,7 @@ function ConditionEditor({
       <header>
         <div>
           <strong id="conditions-title">过滤条件</strong>
-          <span>一条都没有就是整表取数</span>
+          <span>一条都没有就是整表取数；多条按 AND 连接</span>
         </div>
         <button
           className="button is-ghost"
@@ -1683,7 +1804,14 @@ function ConditionEditor({
       ) : (
         <ul className="condition-list">
           {conditions.map((condition, index) => (
-            <li key={index} className="condition-row">
+            <Fragment key={index}>
+            {/* 多条条件怎么拼原来没人说过。写在两行之间，而不是藏进底部说明。 */}
+            {index > 0 && (
+              <li className="condition-join" aria-hidden="true">
+                且
+              </li>
+            )}
+            <li className="condition-row">
               <label>
                 <span>字段</span>
                 <select
@@ -1717,6 +1845,17 @@ function ConditionEditor({
                 </select>
               </label>
               <label>
+                <span>值</span>
+                <input
+                  value={condition.constant}
+                  required
+                  onChange={(event) => onChange(index, { constant: event.target.value })}
+                />
+              </label>
+              {/* 值类型排在值后面、格子也更窄：它按字典预填、多数时候不用动。
+                  但字段**必须留着**——ADR-0036 §6 不许 describe 的类型进任务定义，
+                  所以这是用户的声明，不是元数据的回显。 */}
+              <label>
                 <span>值类型</span>
                 <select
                   value={condition.value_type}
@@ -1733,14 +1872,6 @@ function ConditionEditor({
                   ))}
                 </select>
               </label>
-              <label>
-                <span>值</span>
-                <input
-                  value={condition.constant}
-                  required
-                  onChange={(event) => onChange(index, { constant: event.target.value })}
-                />
-              </label>
               <button
                 className="icon-button is-danger"
                 type="button"
@@ -1751,11 +1882,20 @@ function ConditionEditor({
                 <Trash2 size={15} aria-hidden="true" />
               </button>
             </li>
+            </Fragment>
           ))}
         </ul>
       )}
       <small className="spec-note">
-        过滤值为固定配置，保存后随任务执行。
+        过滤值为固定配置，保存后随任务执行。比较符只有
+        <span className="mono"> &gt; </span>
+        <span className="mono"> &lt; </span>
+        <span className="mono"> = </span>
+        三种（ADR-0035 §3）；需要
+        <span className="mono"> &gt;= </span>、
+        <span className="mono">IN</span>、
+        <span className="mono">BETWEEN</span>{" "}
+        这类条件，请改用「自定义 SQL」。
       </small>
     </section>
   );
@@ -1771,17 +1911,23 @@ function GeneratedSql({
   sql,
   error,
   ready,
+  mode,
 }: {
   sql: BuilderSql | null;
   error: string | null;
   ready: boolean;
+  mode: SourceQueryMode;
 }) {
   return (
     <section className="generated-sql" aria-labelledby="generated-sql-title">
       <header>
         <div>
           <strong id="generated-sql-title">构建 SQL</strong>
-          <span>只读预览</span>
+          <span>
+            {mode === "sql"
+              ? "只读预览——实际执行的是这一段：你写的 SQL 外面套了一层只取勾选列的投影"
+              : "只读预览"}
+          </span>
         </div>
       </header>
       {error !== null ? (
@@ -1792,16 +1938,18 @@ function GeneratedSql({
         <p className="spec-empty">
           {ready
             ? "正在生成..."
-            : "先选源表和源列，再读取目标列完成映射与主键。"}
+            : mode === "sql"
+              ? "先读取结果列，再选目标表完成映射与主键。"
+              : "先选源表和源列，再读取目标列完成映射与主键。"}
         </p>
       ) : (
         <>
           <pre className="ddl-output">{sql.source_sql}</pre>
-          <div className="run-parameter-list">
-            <strong>运行参数</strong>
-            {sql.run_parameters.length === 0 ? (
-              <span>无——发起运行时不需要填任何值。</span>
-            ) : (
+          {/* 值来源一律是常量，所以「无——发起运行时不需要填任何值」对每一个新任务
+              都恒为真。恒真的提示不承载信息，只占高度：没有参数就不渲染这一块。 */}
+          {sql.run_parameters.length > 0 && (
+            <div className="run-parameter-list">
+              <strong>运行参数</strong>
               <ul>
                 {sql.run_parameters.map((parameter) => (
                   <li key={parameter.parameter}>
@@ -1812,8 +1960,8 @@ function GeneratedSql({
                   </li>
                 ))}
               </ul>
-            )}
-          </div>
+            </div>
+          )}
         </>
       )}
     </section>
@@ -1845,6 +1993,7 @@ function TargetColumnReference({
   onTargetChange,
   onToggleKey,
   onFillSameName,
+  onClearMapping,
 }: {
   state: TargetMetaState;
   spec: TaskSpec;
@@ -1853,99 +2002,137 @@ function TargetColumnReference({
   onTargetChange: (source: string, target: string) => void;
   onToggleKey: (source: string) => void;
   onFillSameName: () => void;
+  onClearMapping: () => void;
 }) {
+  // 结构表默认收起。展开态是**用户的会话选择**，不进任务定义——它和目标表结构本身
+  // 一样是瞬态的（ADR-0038 §8）。
+  const [structureOpen, setStructureOpen] = useState(false);
   if (state.kind === "idle") {
     return null;
   }
-  return (
-    <section className="column-fetch-section" aria-labelledby="target-columns-title">
-      <header>
-        <div>
-          <strong id="target-columns-title">目标表列参考</strong>
-          <span>目标表结构供参考，主键由你选择</span>
-        </div>
-        <button
-          className="button is-ghost"
-          type="button"
-          onClick={onReload}
-          disabled={state.kind === "loading"}
-        >
-          {state.kind === "loading" ? "读取中" : "重新读取"}
-        </button>
-      </header>
-      {state.kind === "loading" && (
-        <div className="loading-state" aria-live="polite">
-          正在读取目标表列...
-        </div>
-      )}
-      {state.kind === "failed" && (
+  const retry = (
+    <button
+      className="button is-ghost"
+      type="button"
+      onClick={onReload}
+      disabled={state.kind === "loading"}
+    >
+      {state.kind === "loading" ? "读取中" : "重新读取"}
+    </button>
+  );
+  if (state.kind === "loading") {
+    return (
+      <div className="loading-state" aria-live="polite">
+        正在读取目标表列...
+      </div>
+    );
+  }
+  if (state.kind === "failed") {
+    return (
+      <div className="target-meta-retry">
         <div className="form-error" role="alert">
           {state.message}
         </div>
-      )}
-      {state.kind === "ready" && state.data.columns.length === 0 && (
+        {retry}
+      </div>
+    );
+  }
+  if (state.data.columns.length === 0) {
+    return (
+      <div className="target-meta-retry">
         <p className="column-fetch-hint">
           目标库中没有 <code>{state.table}</code> 这张表。请在目标库中建好这张表，
           然后点「重新读取」。
         </p>
-      )}
-      {state.kind === "ready" && state.data.columns.length > 0 && (
-        <>
-          <FieldMappingEditor
-            spec={spec}
-            selectedSources={selectedSources}
-            targetMeta={state.data}
-            onTargetChange={onTargetChange}
-            onToggleKey={onToggleKey}
-            onFillSameName={onFillSameName}
-          />
-          <div className="table-wrap">
-            <table className="data-grid">
-              <thead>
-                <tr>
-                  <th>目标表列</th>
-                  <th>类型</th>
-                  <th>长度（字符）</th>
-                  <th>可空</th>
-                  <th>默认值</th>
-                  <th>约束</th>
-                  <th>映射自</th>
-                </tr>
-              </thead>
-              <tbody>
-                {state.data.columns.map((column) => {
-                  const source = mappedSourceOf(spec, column.name);
-                  return (
-                    <tr
-                      key={column.name}
-                      className={source === undefined ? "is-unmapped" : ""}
-                    >
-                      <td className="mono">{column.name}</td>
-                      <td className="mono">{column.column_type}</td>
-                      <td className="mono">{column.length ?? "—"}</td>
-                      <td>{column.nullable ? "是" : "否"}</td>
-                      <td className="mono">{column.default_value ?? "—"}</td>
-                      <td className="mono">
-                        {constraintsOf(state.data, column) || "—"}
-                      </td>
-                      <td className="mono">{source ?? "（未映射）"}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </>
-      )}
-      <footer>
-        <span>
-          目标表结构仅用于本次配置参考，不会写入任务定义。
-        </span>
-        <span className="builder-key-note">
-          长度栏同为字符；映射预检按字节判。
-        </span>
-      </footer>
-    </section>
+        {retry}
+      </div>
+    );
+  }
+  const targetMeta = state.data;
+  return (
+    <>
+      <FieldMappingEditor
+        spec={spec}
+        selectedSources={selectedSources}
+        targetMeta={targetMeta}
+        onTargetChange={onTargetChange}
+        onToggleKey={onToggleKey}
+        onFillSameName={onFillSameName}
+        onClearMapping={onClearMapping}
+      />
+      {/* 原来这张只读表和「字段映射」是父子关系（目标表 > 目标表列参考 > 字段映射），
+          三层卡片描述的是同一批列，占掉近半个弹窗的高度。改成与映射表**平级**、
+          默认收起：它是查证用的参考，不是每次建任务都要读完的东西。 */}
+      <section
+        className={`target-structure ${structureOpen ? "is-open" : ""}`}
+        aria-labelledby="target-structure-title"
+      >
+        <header>
+          <button
+            className="structure-toggle"
+            type="button"
+            aria-expanded={structureOpen}
+            onClick={() => setStructureOpen((open) => !open)}
+          >
+            {structureOpen ? (
+              <ChevronDown size={14} aria-hidden="true" />
+            ) : (
+              <ChevronRight size={14} aria-hidden="true" />
+            )}
+            <strong id="target-structure-title">目标表结构</strong>
+            <span>
+              {targetMeta.columns.length} 列 · 只读参考，不写入任务定义
+            </span>
+          </button>
+          {retry}
+        </header>
+        {structureOpen && (
+          <>
+            <div className="table-wrap">
+              <table className="data-grid">
+                <thead>
+                  <tr>
+                    <th>目标表列</th>
+                    <th>类型</th>
+                    <th>长度（字符）</th>
+                    <th>可空</th>
+                    <th>默认值</th>
+                    <th>约束</th>
+                    <th>映射自</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {targetMeta.columns.map((column) => {
+                    const source = mappedSourceOf(spec, column.name);
+                    return (
+                      <tr
+                        key={column.name}
+                        className={source === undefined ? "is-unmapped" : ""}
+                      >
+                        <td className="mono">{column.name}</td>
+                        <td className="mono">{column.column_type}</td>
+                        <td className="mono">{column.length ?? "—"}</td>
+                        <td>{column.nullable ? "是" : "否"}</td>
+                        <td className="mono">{column.default_value ?? "—"}</td>
+                        <td className="mono">
+                          {constraintsOf(targetMeta, column) || "—"}
+                        </td>
+                        <td className="mono">{source ?? "（未映射）"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <footer>
+              <span className="builder-key-note">
+                长度栏同为字符；映射预检按字节判。
+              </span>
+            </footer>
+          </>
+        )}
+      </section>
+    </>
   );
 }
 
@@ -1956,6 +2143,7 @@ function FieldMappingEditor({
   onTargetChange,
   onToggleKey,
   onFillSameName,
+  onClearMapping,
 }: {
   spec: TaskSpec;
   selectedSources: string[];
@@ -1963,27 +2151,50 @@ function FieldMappingEditor({
   onTargetChange: (source: string, target: string) => void;
   onToggleKey: (source: string) => void;
   onFillSameName: () => void;
+  onClearMapping: () => void;
 }) {
   const targetColumns = targetMeta.columns;
   const targetByUpper = new Map(
     targetColumns.map((column) => [column.name.toUpperCase(), column]),
   );
+  const mappedCount = spec.columns.filter(
+    (mapping) => mapping.target.trim() !== "",
+  ).length;
+  const pendingCount = spec.columns.length - mappedCount;
 
   return (
     <section className="field-mapping-section" aria-labelledby="field-mapping-title">
       <header>
         <div>
           <strong id="field-mapping-title">字段映射</strong>
-          <span>读取目标列后再把源列绑定到目标列</span>
+          {/* 同名列在读取目标列时就已经自动接上了。这一行说的是「机器做到了多少、
+              还剩几个要你决定」，而不是笼统的操作说明。 */}
+          <span>
+            {selectedSources.length === 0
+              ? "读取目标列后再把源列绑定到目标列"
+              : pendingCount === 0
+                ? `${mappedCount} 列已映射，无需确认`
+                : `已自动匹配 ${mappedCount}/${spec.columns.length}，${pendingCount} 个待确认`}
+          </span>
         </div>
-        <button
-          className="button is-ghost"
-          type="button"
-          onClick={onFillSameName}
-          disabled={selectedSources.length === 0 || targetColumns.length === 0}
-        >
-          同名填充
-        </button>
+        <div className="field-mapping-actions">
+          <button
+            className="button is-ghost"
+            type="button"
+            onClick={onFillSameName}
+            disabled={selectedSources.length === 0 || targetColumns.length === 0}
+          >
+            同名填充
+          </button>
+          <button
+            className="button is-ghost"
+            type="button"
+            onClick={onClearMapping}
+            disabled={mappedCount === 0}
+          >
+            清空映射
+          </button>
+        </div>
       </header>
       {selectedSources.length === 0 ? (
         <p className="column-fetch-hint">

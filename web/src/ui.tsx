@@ -108,6 +108,7 @@ export function FormField({
   label,
   badge,
   neutralBadge = false,
+  inlineBadge = false,
   children,
 }: {
   label: string;
@@ -117,6 +118,14 @@ export function FormField({
    * 口令的「已设置 / 未设置」是**事实陈述，不是成功或失败**，所以它不着成功色也不着告警色。
    */
   neutralBadge?: boolean;
+  /**
+   * 徽标紧贴标签，而不是被推到行尾（`.field-badge` 默认 `margin-left: auto`）。
+   *
+   * 右对齐在「口令 · 已设置」那种「字段 ←→ 状态」的读法里是对的，但当徽标说的是
+   * **这个字段自己**的事（DBLINK 发现了几个）时，它会飘到下一栏的标签旁边，读起来
+   * 像在描述那一栏。默认不变，只有需要的字段打开这一档。
+   */
+  inlineBadge?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -124,7 +133,11 @@ export function FormField({
       <span className="field-label">
         {label}
         {badge !== undefined && (
-          <span className={`field-badge ${neutralBadge ? "is-neutral" : ""}`}>
+          <span
+            className={`field-badge ${neutralBadge ? "is-neutral" : ""} ${
+              inlineBadge ? "is-inline" : ""
+            }`}
+          >
             {badge}
           </span>
         )}

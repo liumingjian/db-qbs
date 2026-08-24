@@ -193,3 +193,50 @@ export function conditionSummary(spec: TaskSpec): string {
     )
     .join(" AND ");
 }
+
+/**
+ * 源端在列表里的一行读法（作业中心的「源表」列 + 搜索索引）。
+ *
+ * 自定义 SQL 的规格里 `owner` / `table` 都是空串。两处原来各自直接拼
+ * `owner.table`：单元格因此渲染成一个孤零零的 `.`，搜索索引里也只剩这个点，
+ * 于是这类任务**按源表关键字永远搜不到**。两处都改从这里取，口径只有一份。
+ *
+ * `label` 进单元格（折叠空白、截断），`full` 进搜索索引与 `title` 提示——
+ * 索引吃全文是有意的：用户记得的是 SQL 里那张表的名字，不是任务名。
+ */
+export interface SourceSummary {
+  kind: "table" | "sql";
+  /** 单元格里显示的一行：空白已折叠，过长时尾部截断成省略号。 */
+  label: string;
+  /** 完整原文：`owner.table`，或整条 SQL 的原样文本。 */
+  full: string;
+}
+
+/** 单元格里一行放得下的字数。超出只截 `label`，`full` 永远是全文。 */
+const SOURCE_LABEL_MAX = 48;
+
+export function sourceSummary(
+  spec: Pick<TaskSpec, "owner" | "table" | "source_sql">,
+): SourceSummary {
+  const sourceSql = spec.source_sql?.trim() ?? "";
+  if (sourceSql === "") {
+    const label = `${spec.owner}.${spec.table}`;
+    return { kind: "table", label, full: label };
+  }
+  const collapsed = sourceSql.replace(/\s+/g, " ").trim();
+  return {
+    kind: "sql",
+    label:
+      collapsed.length > SOURCE_LABEL_MAX
+        ? `${collapsed.slice(0, SOURCE_LABEL_MAX)}\u2026`
+        : collapsed,
+    full: sourceSql,
+  };
+}
+
+/** 这份规格走的是不是自定义 SQL 取数——判据只有一条：`source_sql` 有没有非空内容。 */
+export function isCustomSqlSpec(
+  spec: Pick<TaskSpec, "source_sql">,
+): boolean {
+  return (spec.source_sql?.trim() ?? "") !== "";
+}

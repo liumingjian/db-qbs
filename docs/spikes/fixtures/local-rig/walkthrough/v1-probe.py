@@ -288,14 +288,48 @@ def observe_builder(page, width):
     page.click('.modal .builder-guide button:has-text("读取列")')
     page.wait_for_selector('.modal .builder-columns tbody tr:nth-child(4)')
 
-    # X5：原生 input list + datalist，打字仍然能打。
-    target_input = page.query_selector('.modal input[list]')
-    datalist = page.query_selector(f'.modal datalist#{target_input.get_attribute("list")}')
+    # X5：**这条的对象换过两次，`.modal input[list]` 已经不再指着目标表。**
+    #
+    # 原判说「目标表是原生 `<input list>` + `<datalist>`」。P2 把目标表改成了
+    # 「树 + 可直接键入的搜索框」（`.target-tree-shell`），它身上根本没有 `list`；
+    # 而本分支新加的**源端 DBLINK** 恰好是唯一一个 `input[list]`——旧写法于是
+    # 静悄悄地把 DBLINK 当成目标表量了一遍，实录看上去正常、量的却是另一个控件。
+    # 两个都摆出来，各按各的形态记。
+    target_input = page.query_selector('.modal .target-tree-shell .tree-search input')
+    dblink_input = page.query_selector('.modal input[list]')
+    dblink_list = (
+        page.query_selector(f'.modal datalist#{dblink_input.get_attribute("list")}')
+        if dblink_input else None
+    )
     x5 = {
-        "input_list_attr": target_input.get_attribute("list"),
-        "input_readonly": target_input.get_attribute("readonly") is not None,
-        "datalist_options": [o.get_attribute("value") for o in datalist.query_selector_all("option")],
-        "current_value": target_input.input_value(),
+        "target_control": {
+            "tag": target_input.evaluate("(el) => el.tagName") if target_input else None,
+            "has_list_attr": target_input.get_attribute("list") is not None
+            if target_input else None,
+            "readonly": target_input.get_attribute("readonly") is not None
+            if target_input else None,
+            "value": target_input.input_value() if target_input else None,
+            "placeholder": target_input.get_attribute("placeholder") if target_input else None,
+            "tree_nodes": len(page.query_selector_all(".modal .target-tree-shell .table-node")),
+        },
+        "dblink_combo": {
+            "list_attr": dblink_input.get_attribute("list") if dblink_input else None,
+            "readonly": dblink_input.get_attribute("readonly") is not None
+            if dblink_input else None,
+            "placeholder": dblink_input.get_attribute("placeholder") if dblink_input else None,
+            "value": dblink_input.input_value() if dblink_input else None,
+            "options": [o.get_attribute("value")
+                        for o in dblink_list.query_selector_all("option")]
+            if dblink_list else None,
+            # 自动发现是新能力，可它长得和普通文本框一样。这枚 ▾ 是它唯一的可见线索。
+            "chevron": page.query_selector(".modal .combo-input > svg") is not None,
+            "badge": page.eval_on_selector(
+                ".modal .field-badge.is-inline",
+                "(el) => ({text: el.innerText, cls: el.className,"
+                " margin_left: getComputedStyle(el).marginLeft,"
+                " left: el.getBoundingClientRect().left})",
+            ) if page.query_selector(".modal .field-badge.is-inline") else None,
+        },
     }
 
     # 映射面要等**目标列读回来**才渲染（它得知道目标表有哪些列可选）。
@@ -387,9 +421,39 @@ def observe_builder(page, width):
         break
     x6["rename_follows_key"] = rename
 
+    # 映射卡的头：同名列在读取目标列时**自动接上**，这一行说的是「机器做到了多少、
+    # 还剩几个要你决定」；两颗操作键（同名填充 / 清空映射）也一并记下。
+    x6["mapping_header"] = page.eval_on_selector(
+        f"{mapping_scope} > header",
+        "(el) => ({sub: el.querySelector('span')?.innerText,"
+        " buttons: [...el.querySelectorAll('button')].map(b => ({text: b.innerText,"
+        " disabled: b.disabled}))})",
+    )
+    # 三张表描述同一批列、且嵌了三层（目标表 > 目标表列参考 > 字段映射）的结构已经拆平：
+    # 「字段映射」与「目标表结构」现在是**兄弟**，后者默认收起。
+    x6["target_structure"] = page.eval_on_selector(
+        ".modal .target-structure",
+        "(el) => ({open: el.classList.contains('is-open'),"
+        " expanded: el.querySelector('.structure-toggle')?.getAttribute('aria-expanded'),"
+        " title: el.querySelector('.structure-toggle strong')?.innerText,"
+        " sub: el.querySelector('.structure-toggle span')?.innerText,"
+        " rows_rendered: el.querySelectorAll('tbody tr').length})",
+    ) if page.query_selector(".modal .target-structure") else None
+    x6["mapping_nested_in_structure"] = page.evaluate(
+        "() => !!document.querySelector('.modal .target-structure .field-mapping-section')"
+    )
+
     # X7：单位标注与静态说明。
+    #
+    # 「长度」这一栏**不在映射表上**——它在取列表（`.builder-columns`）和目标表结构表上。
+    # 原来这里拿的是 `headers`（映射表的五个表头），于是 `length_headers` 恒为空，
+    # 这条判据一直落在空集上、看不出真假。改成从真正有这一栏的两张表上取。
     x7 = {
-        "length_headers": [h for h in headers if "长度" in h],
+        "length_headers": [h for h in source_headers if "长度" in h] + [
+            h.inner_text()
+            for h in page.query_selector_all(".modal .target-structure th")
+            if "长度" in h.inner_text()
+        ],
         "static_note": page.query_selector(".modal .target-side-note").inner_text()
         if page.query_selector(".modal .target-side-note") else None,
         "note_style": page.eval_on_selector(
@@ -402,10 +466,15 @@ def observe_builder(page, width):
     # 目标列参考表：填一张真表再失焦。
     target_input.fill(REFERENCE_TABLE)
     target_input.evaluate("(el) => el.blur()")
+    # 这张只读表现在**默认收起**（它是查证用的参考，不是每次建任务都要读完的东西），
+    # 所以得先展开才有对象。「未映射整行压暗」这条判据本身没变，只是多一次点击。
+    page.wait_for_selector(".modal .structure-toggle", timeout=15000)
+    if page.query_selector(".modal .target-structure.is-open") is None:
+        page.click(".modal .structure-toggle")
     page.wait_for_selector(".modal table.data-grid tr.is-unmapped", timeout=5000)
     reference_rows = []
     for row in page.query_selector_all(
-        ".modal section[aria-labelledby='target-columns-title'] tbody tr"
+        ".modal section[aria-labelledby='target-structure-title'] tbody tr"
     ):
         cells = [c.inner_text() for c in row.query_selector_all("td")]
         reference_rows.append({
@@ -416,13 +485,19 @@ def observe_builder(page, width):
     x5["reference_headers"] = [
         h.inner_text()
         for h in page.query_selector_all(
-            ".modal section[aria-labelledby='target-columns-title'] th"
+            ".modal section[aria-labelledby='target-structure-title'] th"
         )
     ]
     x5["reference_rows"] = reference_rows
-    x5["footnote"] = page.query_selector(
-        ".modal section[aria-labelledby='target-columns-title'] footer"
-    ).inner_text()
+    footnote = page.query_selector(
+        ".modal section[aria-labelledby='target-structure-title'] footer"
+    )
+    x5["footnote"] = footnote.inner_text() if footnote else None
+    # 「不写入任务定义」这半句从页脚搬到了折叠头的副标题上——收起时也读得到，
+    # 而原来它只在整张表都渲染出来时才在最底下露一行。
+    x5["structure_subtitle"] = page.eval_on_selector(
+        ".modal .structure-toggle span", "(el) => el.innerText",
+    ) if page.query_selector(".modal .structure-toggle span") else None
     page.screenshot(path=f"{SHOTS}/x5-x7-builder-{width}.png", full_page=True)
     return {"X5": x5, "X6": x6, "X7": x7}
 
@@ -459,11 +534,22 @@ def observe_task_screen(page):
         " color: getComputedStyle(c).color, font: getComputedStyle(c).fontFamily.split(',')[0]}))})",
     )
     page.screenshot(path=f"{SHOTS}/x8-job-list.png", full_page=True)
+    # 每一行的源表格都量一遍，不只是第一行：自定义 SQL 的任务在这一列里是另一种形态
+    # （类别徽标 + 截断的 SQL + `title` 里的全文），只看第一行永远看不见它。
+    all_source_cells = page.eval_on_selector_all(
+        f"{JOB} tbody tr td:nth-child({source_index})",
+        "(els) => els.map(el => ({children: el.children.length,"
+        " lines: [...el.children].map(c => ({cls: c.className, text: c.innerText})),"
+        " title: el.querySelector('.table-cell')?.getAttribute('title'),"
+        " ligatures: getComputedStyle(el.querySelector('.table-cell'))"
+        ".fontVariantLigatures}))",
+    )
     return {
         "columns": headers,
         "source_cells": cells_of(page, "source_table"),
         "target_cells": cells_of(page, "target_table"),
         "source_cell_shape": style,
+        "source_cell_shapes": all_source_cells,
         "target_cell_children": page.eval_on_selector(
             f"{JOB} tbody tr td:nth-child({target_index})",
             "(el) => el.children.length",

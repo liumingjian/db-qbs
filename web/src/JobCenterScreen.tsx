@@ -27,7 +27,7 @@ import {
 import type { LatestRunStatus, TaskFilters } from "./listing";
 import { progressOf } from "./progress";
 import { RunDrawer } from "./RunDrawer";
-import { runtimeConditions } from "./spec";
+import { runtimeConditions, sourceSummary } from "./spec";
 import { ActionButton, Modal, Pagination } from "./ui";
 
 /**
@@ -585,6 +585,7 @@ function JobResults({
             const run = latestRuns.get(task.task_id);
             const status = latestRunStatus(run);
             const progress = progressOf(run);
+            const source = sourceSummary(task.spec);
             return (
               <tr key={task.task_id}>
                 <td className="check-column">
@@ -603,8 +604,13 @@ function JobResults({
                   <span className="task-id">{task.task_id}</span>
                 </td>
                 <td>
-                  <span className="table-cell">
-                    {task.spec.owner}.{task.spec.table}
+                  {/* 自定义 SQL 的任务没有 owner / table——直接拼这两个字段会渲染成
+                      一个孤零零的 `.`。这一列改成「徽标 + 截断的一行」，全文进 title。 */}
+                  <span className="table-cell" title={source.full}>
+                    {source.kind === "sql" && (
+                      <span className="source-kind">自定义 SQL</span>
+                    )}
+                    {source.label}
                   </span>
                   <span className="table-side">
                     {nameOf(task.source_datasource_id)}

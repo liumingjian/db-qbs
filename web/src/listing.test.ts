@@ -156,6 +156,30 @@ describe("taskMatchesFilters", () => {
     ).toBe(false);
   });
 
+  it("自定义 SQL 的任务按 SQL 正文里的源表名也能搜到", () => {
+    // 索引原来只拼 `owner.table`，而自定义 SQL 的规格里这两个字段都是空串——
+    // 于是这类任务按源表关键字**永远搜不到**（实测搜 T_HOLDING 漏掉了它）。
+    const subject = task({
+      task_id: "task-sqlmode",
+      name: "客户订单增量",
+      spec: {
+        ...emptySpec(),
+        owner: "",
+        table: "",
+        target_table: "dw_holding",
+        source_sql: "SELECT * FROM APP.T_HOLDING@POC_LINK_A WHERE STATUS = 1",
+      },
+    });
+    for (const keyword of ["t_holding", "POC_LINK_A", "客户订单"]) {
+      expect(
+        taskMatchesFilters(subject, { ...EMPTY_TASK_FILTERS, keyword }, "none"),
+      ).toBe(true);
+    }
+    expect(
+      taskMatchesFilters(subject, { ...EMPTY_TASK_FILTERS, keyword: "库存" }, "none"),
+    ).toBe(false);
+  });
+
   it("只有空白的关键词等于没填", () => {
     expect(
       taskMatchesFilters(task(), { ...EMPTY_TASK_FILTERS, keyword: "   " }, "none"),

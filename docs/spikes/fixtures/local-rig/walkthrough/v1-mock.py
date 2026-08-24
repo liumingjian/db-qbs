@@ -16,6 +16,7 @@
 import copy
 import json
 import os
+import re
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -87,6 +88,20 @@ FA_SPEC["conditions"] = FA_SPEC["conditions"] + [
      "parameter": "region", "value_source": "runtime", "constant": ""},
 ]
 
+# 自定义 SQL 取数的规格：`owner` / `table` **都是空串**，取数靠 `source_sql`。
+# 作业中心「源表」那一格原来直接拼 `owner.table`，于是这类任务渲染成一个孤零零的
+# `.`，搜索索引里也只剩这个点（按源表关键字永远搜不到）。X8 / X14 要这一态才看得见。
+SQL_SPEC = {
+    "owner": "",
+    "table": "",
+    "source_sql": "SELECT *\n  FROM APP.T_HOLDING@POC_LINK_A\n WHERE STATUS = 1",
+    "target_table": "HOLDING",
+    "primary_key": ["ID"],
+    "columns": [{"source": c, "target": c} for c in ("ID", "C_NAME", "LOAD_DATE")],
+    "conditions": [],
+    "order_by": [],
+}
+
 # 作业中心一行 = 一个任务 + 它最近一次运行（ADR-0043 §2），所以**五种运行状态要靠五个任务摆出来**，
 # 而不是像原来那样靠运行历史屏的五行。X17 看的是这五个词同屏、X16 看的是进度的三种空态。
 TASKS = [
@@ -110,6 +125,10 @@ TASKS = [
     {"task_id": "task-never", "name": "产品维表",
      "source_datasource_id": "ds-ora-core", "target_datasource_id": "ds-my-spare",
      "spec": copy.deepcopy(SPEC)},
+    # 自定义 SQL 那一个。摆在最后，前面五种运行状态的取样对象一个都不动。
+    {"task_id": "task-sqlmode", "name": "客户订单增量",
+     "source_datasource_id": "ds-ora-core", "target_datasource_id": "ds-my-dw",
+     "spec": copy.deepcopy(SQL_SPEC)},
 ]
 
 
@@ -263,6 +282,17 @@ TARGET_COLUMNS = {
     ],
 }
 
+BUILDER_DBLINKS = ["POC_LINK_A", "FA", "ERP_PROD", "HR_LINK"]
+
+# `/api/builder/sql-columns` 回的是 `FetchedColumn`（`type` 而不是 `data_type`），
+# 且**不带可空**——describe 一条 SELECT 拿不到 nullability，界面上那一栏因此是「—」。
+SQL_COLUMNS = [
+    {"name": "ID", "type": "NUMBER", "precision": 10, "scale": 0, "length": None},
+    {"name": "C_NAME", "type": "VARCHAR2", "precision": None, "scale": None, "length": 200},
+    {"name": "LOAD_DATE", "type": "DATE", "precision": None, "scale": None, "length": None},
+    {"name": "N_AMT", "type": "NUMBER", "precision": 18, "scale": 2, "length": None},
+]
+
 BUILDER_TABLES = [{"owner": "APP", "name": "T_HOLDING"}, {"owner": "APP", "name": "T_CUSTOMER"}]
 
 BUILDER_COLUMNS = [
@@ -343,17 +373,54 @@ class Handler(BaseHTTPRequestHandler):
             if body.get("target_table") not in TARGET_TABLES:
                 return self._send(200, {"columns": [], "keys": []})
             return self._send(200, TARGET_COLUMNS)
+        if path == "/api/builder/dblinks":
+            # 源端 DBLINK 的自动发现（builder 屏新增）。桩不查库，给一组固定名字即可——
+            # 走查只回答「下拉里有没有东西、badge 数对不对」。
+            return self._send(200, BUILDER_DBLINKS)
+        if path == "/api/builder/sql-columns":
+            # 自定义 SQL 的结果列 describe。桩只判「像不像一条 SELECT」，
+            # 不像就回 400，把 X 走查里那个报错态也造出来。
+            source_sql = (self._read().get("source_sql") or "").strip()
+            if not source_sql.lower().startswith("select"):
+                return self._send(
+                    400, {"error": {"message": "自定义 SQL 必须是一条只读 SELECT"}}
+                )
+            return self._send(200, SQL_COLUMNS)
         if path == "/api/builder/tables":
             return self._send(200, BUILDER_TABLES)
         if path == "/api/builder/columns":
             return self._send(200, BUILDER_COLUMNS)
         if path == "/api/builder/sql":
             spec = self._read()
-            projection = ",\n       ".join(
-                f"a.{c['source']} AS {c['target']}" for c in spec.get("columns", [])
-            )
+            # 桩要能造出**报错态**：自定义 SQL 模式下「构建 SQL」卡不再渲染，
+            # 这条 400 是该模式下唯一的报错通道，走查得看得见它。
+            # 只镜像 `TaskSpec::validate()` 里前端能违反的那两条，不复刻整个校验。
+            columns = spec.get("columns", [])
+            seen = set()
+            for mapping in columns:
+                for what, name in (("column", mapping["source"]), ("target column", mapping["target"])):
+                    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_$#]*", name or ""):
+                        return self._send(400, {"error": {"message":
+                            f"{what} {name!r} 必须是未加引号的 Oracle 标识符"}})
+                if mapping["target"].upper() in seen:
+                    return self._send(400, {"error": {"message":
+                        f"目标字段 {mapping['target']} 重复"}})
+                seen.add(mapping["target"].upper())
+            source_sql = (spec.get("source_sql") or "").strip()
+            if source_sql:
+                # 自定义 SQL 不原样执行：外层套一层投影，内层原文一字不动。
+                projection = ",\n       ".join(
+                    f"q.{c['source']} AS {c['target']}" for c in columns
+                )
+                inner = "\n".join("         " + line for line in source_sql.splitlines())
+                built = f"SELECT {projection}\n  FROM (\n{inner}\n       ) q"
+            else:
+                projection = ",\n       ".join(
+                    f"a.{c['source']} AS {c['target']}" for c in columns
+                )
+                built = f"SELECT {projection}\n  FROM {spec.get('owner')}.{spec.get('table')} a"
             return self._send(200, {
-                "source_sql": f"SELECT {projection}\n  FROM {spec.get('owner')}.{spec.get('table')} a",
+                "source_sql": built,
                 "run_parameters": [
                     {"parameter": c["parameter"], "column": c["column"], "value_type": c["value_type"]}
                     for c in spec.get("conditions", []) if c["value_source"] == "runtime"
@@ -372,6 +439,19 @@ class Handler(BaseHTTPRequestHandler):
                 purged_rows=None, seq=0, rows_pushed=0, bytes=0, message=None,
                 failure_kind=None))
             return self._send(202, {"run_record_id": new_id})
+        if path == "/api/tasks":
+            # 建任务：桩原样收下 spec 并落进清单。走查要的是「建完能不能再打开编辑」
+            # 这条回路（自定义 SQL 的规格得原样转一圈回来），不是服务端校验。
+            draft = self._read()
+            task = {
+                "task_id": f"task-new-{len(TASKS) + 1}",
+                "name": draft.get("name", ""),
+                "source_datasource_id": draft.get("source_datasource_id"),
+                "target_datasource_id": draft.get("target_datasource_id"),
+                "spec": draft.get("spec", {}),
+            }
+            TASKS.append(task)
+            return self._send(201, task)
         if path == "/api/datasources":
             draft = self._read()
             entry = dict(draft)
@@ -423,6 +503,15 @@ class Handler(BaseHTTPRequestHandler):
                     AGENTS[index] = updated
                     return self._send(200, updated)
             return self._send(404, {"error": {"message": "agent not found"}})
+        if path.startswith("/api/tasks/"):
+            task_id = path.rsplit("/", 1)[-1]
+            draft = self._read()
+            for index, entry in enumerate(TASKS):
+                if entry["task_id"] == task_id:
+                    TASKS[index] = dict(entry, name=draft.get("name", entry["name"]),
+                                        spec=draft.get("spec", entry["spec"]))
+                    return self._send(200, TASKS[index])
+            return self._send(404, {"error": {"message": "task not found"}})
         if path.startswith("/api/datasources/"):
             datasource_id = path.rsplit("/", 1)[-1]
             draft = self._read()

@@ -121,10 +121,15 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .task-name { white-space: nowrap; }
 .task-id { color: var(--mute); font-family: var(--font-num); font-size: var(--size-cap); }
 /* 源表 / 目标表一格两行：上行表名（等宽），下行数据源**名字**，不是 id（ADR-0039 §8）。 */
-.table-cell { display: block; font-family: var(--font-num); font-size: var(--size-meta); }
+.table-cell { display: block; font-family: var(--font-num); font-size: var(--size-meta); font-variant-ligatures: none; }
+/* 作业中心「源表」列里自定义 SQL 任务的类别徽标。 */
+.source-kind { display: inline-block; margin-right: 6px; padding: 0 6px; border: 1px solid var(--line-strong); border-radius: var(--badge-radius); background: var(--mute-bg); color: var(--mute); font-family: var(--font-cn); font-size: var(--size-cap); }
 .table-side { display: block; color: var(--mute); font-size: var(--size-cap); }
 .time-cell { font-family: var(--font-num); font-size: var(--size-meta); font-variant-numeric: tabular-nums; }
-.mono, .sql-cell { font-family: var(--font-num); font-size: var(--size-meta); }
+/* 连字一律关掉。--font-num 排在最前的是 JetBrains Mono / Cascadia Mono，它们默认把
+   `>=` 画成 `≥`、`!=` 画成 `≠`、`->` 画成 `→`。这些地方摆的是**将要执行的语句**，
+   显示出来的字符串必须就是执行的那一个，不能是它的排版近似。 */
+.mono, .sql-cell { font-family: var(--font-num); font-size: var(--size-meta); font-variant-ligatures: none; }
 /* tokens.css 把 tabular-nums 挂在 .num / td.n 上，应用里用的却是 .mono / .numeric-column，
    于是列表屏的行数、耗时、时间戳全是比例数字。在应用侧对齐 token 的意图。 */
 .mono, .numeric-column { font-variant-numeric: tabular-nums; }
@@ -190,7 +195,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .kv .k { color: var(--mute); font-size: var(--size-cap); }
 .kv .v { overflow-wrap: anywhere; font-family: var(--font-num); font-size: var(--size-meta); font-variant-numeric: tabular-nums; }
 .kv .v.is-bad { color: var(--crit); }
-pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height: 240px; border-top: 1px solid var(--line); background: var(--mute-bg); color: var(--dim); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height: 240px; border-top: 1px solid var(--line); background: var(--mute-bg); color: var(--dim); font-family: var(--font-num); font-size: var(--size-meta); font-variant-ligatures: none; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ---------------------------------------------------------------- 空态与提示 */
 .loading-state, .no-results { padding: 44px var(--pad); color: var(--mute); text-align: center; }
@@ -220,9 +225,12 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .field-label { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .field-badge { margin-left: auto; padding: 1px 7px; border: 1px solid var(--warn-bd); border-radius: var(--badge-radius); background: var(--warn-bg); color: var(--warn); font-family: var(--font-cn); font-size: var(--size-cap); }
 .field-badge.is-neutral { border-color: var(--line-strong); background: var(--mute-bg); color: var(--mute); }
+/* 说的是这个字段自己的事时，徽标贴着标签走；默认的 margin-left:auto 会把它推到
+   行尾，读起来像在描述隔壁那一栏。 */
+.field-badge.is-inline { margin-left: 6px; }
 .form-field input, .form-field textarea { width: 100%; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); }
 .form-field input { height: var(--ctl-h); padding: 0 10px; }
-.form-field textarea { resize: vertical; min-height: 132px; padding: 9px 10px; font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.65; }
+.form-field textarea { resize: vertical; min-height: 132px; padding: 9px 10px; font-family: var(--font-num); font-size: var(--size-meta); font-variant-ligatures: none; line-height: 1.65; }
 .form-field input:focus, .form-field textarea:focus { border-color: var(--brand); outline: 0; box-shadow: 0 0 0 2px var(--brand-dim); }
 .form-error { padding: 9px 12px; border-left: 3px solid var(--crit); background: var(--crit-bg); color: var(--crit); font-size: var(--size-body); }
 .delete-copy p { margin: 0 0 6px; }
@@ -251,21 +259,32 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .target-side-note strong { color: var(--dim); font-weight: var(--weight-em); }
 
 /* ---------------------------------------------------------------- 构建器 */
-.builder-guide > header, .builder-guide > footer, .column-fetch-section > header, .field-mapping-section > header, .field-mapping-section > footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.builder-guide header > div, .column-fetch-section header > div, .field-mapping-section header > div { display: flex; flex-direction: column; gap: 2px; }
-.builder-guide strong, .column-fetch-section strong, .field-mapping-section strong { font-size: var(--size-body); font-weight: var(--weight-em); }
-.builder-guide header span, .column-fetch-section header span, .field-mapping-section header span { color: var(--mute); font-size: var(--size-meta); }
+.builder-guide > header, .builder-guide > footer, .field-mapping-section > header, .field-mapping-section > footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.builder-guide header > div, .field-mapping-section header > div { display: flex; flex-direction: column; gap: 2px; }
+.builder-guide strong, .field-mapping-section strong { font-size: var(--size-body); font-weight: var(--weight-em); }
+.builder-guide header span, .field-mapping-section header span { color: var(--mute); font-size: var(--size-meta); }
 .builder-guide { overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); }
 .builder-guide > header { min-height: 48px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
-.builder-controls { display: grid; grid-template-columns: repeat(3, minmax(180px, 1fr)); align-items: end; gap: 10px; padding: 12px; }
+/* auto-fit 而不是写死 3 列：自定义 SQL 模式下 DBLINK 整栏不渲染，写死会留一个
+   空格子，切换模式时整行还会跳一下。 */
+.builder-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); align-items: end; gap: 10px; padding: 12px; }
 .builder-controls select { width: 100%; height: var(--ctl-h); padding: 0 30px 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); }
-.builder-query-mode { display: flex; align-items: center; gap: 10px; padding: 0 12px 12px; color: var(--dim); font-size: var(--size-meta); }
+/* 取数方式的岔路口现在长在它真正控制的那张卡的头上，和「读取表 / 读取列」同排。 */
+/* 选择器要压过 `.builder-guide header > div { flex-direction: column }`——那条是给
+   「标题 + 副标题」那一摞写的，会把这里的按钮组也竖过来。 */
+.builder-guide > header > .builder-mode-switch { flex-direction: row; align-items: center; gap: 10px; flex: none; }
+.combo-input { position: relative; display: flex; align-items: center; }
+.combo-input input { width: 100%; padding-right: 30px; }
+.combo-input > svg { position: absolute; right: 9px; pointer-events: none; color: var(--mute); }
+.combo-input input:disabled ~ svg { opacity: .4; }
 .builder-mode-buttons { display: inline-flex; }
 .builder-mode-buttons .button { border-radius: 0; }
 .builder-mode-buttons .button:first-child { border-radius: var(--radius) 0 0 var(--radius); }
 .builder-mode-buttons .button:last-child { margin-left: -1px; border-radius: 0 var(--radius) var(--radius) 0; }
 .source-sql-editor { padding: 12px; }
-.source-sql-editor textarea { min-height: 170px; font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.55; }
+/* 连字必须关掉：--font-num 里的 JetBrains Mono / Cascadia Mono 会把 `>=` 画成 `≥`、
+   `!=` 画成 `≠`。这一格是该模式下唯一能看到查询的地方，显示的字符串必须**就是**执行的那个。 */
+.source-sql-editor textarea { display: block; width: 100%; min-height: 170px; resize: vertical; padding: 9px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.55; font-variant-ligatures: none; }
 .tree-picker, .target-tree-shell { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
 .tree-picker-toolbar, .target-table-controls, .builder-selected-row { display: flex; align-items: center; gap: 10px; }
 .tree-search { min-width: 0; flex: 1; height: var(--ctl-h); display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--mute); }
@@ -297,6 +316,18 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .field-mapping-section { margin: 0 12px 12px; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); }
 .field-mapping-section > header { min-height: 48px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
 .field-mapping-section > footer { min-height: 40px; padding: 8px 12px; color: var(--mute); font-family: var(--font-num); font-size: var(--size-meta); }
+.field-mapping-section > header > .field-mapping-actions { flex-direction: row; align-items: center; gap: 8px; flex: none; }
+/* 目标表结构：与「字段映射」平级、默认收起的只读参考。原来它是父级卡片
+   （目标表 > 目标表列参考 > 字段映射），三层卡片描述的是同一批列。 */
+.target-structure { margin: 0 12px 12px; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); }
+.target-structure > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; padding: 6px 12px; }
+.target-structure.is-open > header { border-bottom: 1px solid var(--line); }
+.structure-toggle { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0; border: 0; background: transparent; color: var(--text); cursor: pointer; text-align: left; }
+.structure-toggle strong { font-size: var(--size-body); font-weight: var(--weight-em); }
+.structure-toggle span { color: var(--mute); font-size: var(--size-meta); }
+.target-structure > footer { min-height: 40px; display: flex; align-items: center; padding: 8px 12px; border-top: 1px solid var(--line); color: var(--mute); font-size: var(--size-meta); }
+.target-meta-retry { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 12px 12px; }
+.target-meta-retry > .form-error, .target-meta-retry > .column-fetch-hint { flex: 1; margin: 0; }
 .spec-editor { overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); }
 .spec-editor > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
 .spec-editor > header > div { display: flex; flex-direction: column; gap: 2px; }
@@ -305,7 +336,11 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .spec-empty { margin: 0; padding: 14px 12px; color: var(--mute); font-size: var(--size-meta); }
 .spec-note { display: block; padding: 0 12px 11px; color: var(--mute); font-size: var(--size-cap); line-height: var(--lh-prose); }
 .condition-list { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 12px; list-style: none; }
-.condition-row { display: grid; grid-template-columns: minmax(120px, 1.2fr) 64px 88px minmax(140px, 1fr) auto; align-items: end; gap: 8px; }
+/* 列序与列宽都按「手要落在哪」排：字段（选）· 比较（三选一，64px 够）·
+   值（唯一要手打的，给最宽）· 值类型（按字典预填，多数时候不动）。 */
+.condition-row { display: grid; grid-template-columns: minmax(110px, 0.9fr) 64px minmax(180px, 1.7fr) 88px auto; align-items: end; gap: 8px; }
+/* 多条条件按 AND 连接——这件事原来一个字都没说。 */
+.condition-join { padding-left: 4px; color: var(--mute); font-size: var(--size-cap); }
 .condition-row label { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .condition-row label > span { color: var(--mute); font-size: var(--size-cap); }
 .condition-row input, .condition-row select { width: 100%; height: var(--ctl-h); padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-size: var(--size-meta); }
@@ -326,10 +361,8 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .run-parameter-list li .mono { color: var(--dim); }
 .run-params { display: flex; flex-direction: column; gap: 12px; }
 .run-params-empty { display: flex; flex-direction: column; gap: 3px; margin: 0; color: var(--mute); font-size: var(--size-meta); line-height: var(--lh-prose); }
-.column-fetch-section { overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); }
-.column-fetch-section > header { min-height: 54px; padding: 9px 12px; border-bottom: 1px solid var(--line); }
 .column-fetch-hint { margin: 0; padding: 14px 12px; color: var(--mute); font-size: var(--size-meta); }
-.ddl-output { max-height: 280px; overflow: auto; margin: 0; padding: 12px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--mute-bg); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ddl-output { max-height: 280px; overflow: auto; margin: 0; padding: 12px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--mute-bg); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); font-variant-ligatures: none; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ---------------------------------------------------------------- 运行详情页（发起后的实时屏） */
 .run-card { overflow: hidden; }
@@ -455,13 +488,16 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
   .modal-backdrop { align-items: start; padding: 12px; }
   .modal { max-height: calc(100vh - 24px); }
   .builder-controls { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
-  .builder-query-mode { align-items: stretch; flex-direction: column; }
+  .builder-guide > header > .builder-mode-switch { align-items: stretch; flex-direction: column; width: 100%; }
   .builder-mode-buttons { width: 100%; }
   .builder-mode-buttons .button { width: 50%; }
+  .field-mapping-section > header > .field-mapping-actions { width: 100%; }
+  .field-mapping-actions .button { flex: 1; }
+  .target-meta-retry { align-items: stretch; flex-direction: column; }
   .tree-picker-toolbar, .target-table-controls, .builder-selected-row { align-items: stretch; flex-direction: column; }
   .tree-picker-toolbar .tree-search, .target-table-controls .tree-search, .builder-selected-row .button { width: 100%; }
-  .spec-editor > header, .column-fetch-section > header { align-items: flex-start; flex-direction: column; }
-  .spec-editor > header .button, .column-fetch-section > header .button { width: 100%; }
+  .spec-editor > header, .builder-guide > header, .target-structure > header { align-items: flex-start; flex-direction: column; }
+  .spec-editor > header .button, .target-structure > header .button { width: 100%; }
   .condition-row { grid-template-columns: minmax(0, 1fr); }
   .filter-card { align-items: stretch; flex-direction: column; }
   .filter-field { justify-content: space-between; }

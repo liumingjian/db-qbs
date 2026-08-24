@@ -10,6 +10,7 @@ import {
   runParamsSummary,
   runtimeConditions,
   sameRunParams,
+  sourceSummary,
   targetFieldOf,
 } from "./spec";
 
@@ -162,5 +163,49 @@ describe("renameTargetField（改目标名时主键跟着走）", () => {
     expect(next.columns[0]).toEqual({ source: "ID", target: "" });
     // 没有目标字段就不能再作主键；留下空字符串只会把错误拖到提交时才爆。
     expect(next.primary_key).toEqual(["C_NAME"]);
+  });
+});
+
+describe("source summary", () => {
+  it("reads a table-mode spec as owner.table", () => {
+    const summary = sourceSummary({ ...emptySpec(), owner: "APP", table: "T_HOLDING" });
+    expect(summary).toEqual({
+      kind: "table",
+      label: "APP.T_HOLDING",
+      full: "APP.T_HOLDING",
+    });
+  });
+
+  it("never renders a bare dot for a custom-SQL spec", () => {
+    // 自定义 SQL 的规格里 owner / table 都是空串。作业中心那一列原来直接拼
+    // `owner.table`，于是渲染成一个孤零零的 `.`——这条用例守住它不再回来。
+    const summary = sourceSummary({
+      ...emptySpec(),
+      owner: "",
+      table: "",
+      source_sql: "SELECT *\n  FROM APP.T_HOLDING@POC_LINK_A",
+    });
+    expect(summary.kind).toBe("sql");
+    expect(summary.label).not.toBe(".");
+    expect(summary.label).toBe("SELECT * FROM APP.T_HOLDING@POC_LINK_A");
+  });
+
+  it("keeps the whole statement in `full` and truncates only the label", () => {
+    const source_sql =
+      "SELECT ID, C_NAME, LOAD_DATE, N_AMT, STATUS FROM APP.T_HOLDING@POC_LINK_A WHERE STATUS = 1";
+    const summary = sourceSummary({ ...emptySpec(), source_sql });
+    expect(summary.full).toBe(source_sql);
+    expect(summary.label.endsWith("\u2026")).toBe(true);
+    expect(summary.label.length).toBeLessThan(source_sql.length);
+  });
+
+  it("treats a blank source_sql as table mode", () => {
+    const summary = sourceSummary({
+      ...emptySpec(),
+      owner: "APP",
+      table: "T_HOLDING",
+      source_sql: "   ",
+    });
+    expect(summary.kind).toBe("table");
   });
 });

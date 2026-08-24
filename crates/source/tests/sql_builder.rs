@@ -61,11 +61,17 @@ fn a_spec_without_conditions_reads_the_whole_table() {
     assert!(spec.bindings(&RunParams::new()).unwrap().is_empty());
 }
 
+/// 自定义 SQL 外面要再套一层投影，**不是**原样执行。
+///
+/// 理由在搬运链路那头：`transfer.rs` 把 `source.columns()`——执行语句的结果列——原样交给
+/// sink，所以结果列名就是目标列名。少了这一层，勾选与目标字段改名两件事都落不了地。
+/// 内层照旧不许被追加条件或排序（那两样只能由用户写进 SQL）。
 #[test]
-fn custom_select_is_the_source_sql_and_does_not_add_table_conditions() {
+fn custom_select_is_wrapped_in_a_projection_and_gets_no_table_conditions() {
     let mut spec = spec();
     spec.source_sql = Some(
-        "SELECT a.ID, a.C_NAME FROM APP.T_CUSTOMER@FA a WHERE a.ACTIVE = 1;".to_owned(),
+        "SELECT a.N_VA_PRICE, a.D_BIZ\n  FROM APP.T_CUSTOMER@FA a\n WHERE a.ACTIVE = 1;"
+            .to_owned(),
     );
     spec.dblink = None;
     spec.conditions.clear();
@@ -74,8 +80,58 @@ fn custom_select_is_the_source_sql_and_does_not_add_table_conditions() {
     spec.validate().unwrap();
     assert_eq!(
         spec.source_sql(),
-        "SELECT a.ID, a.C_NAME FROM APP.T_CUSTOMER@FA a WHERE a.ACTIVE = 1"
+        concat!(
+            "SELECT q.N_VA_PRICE AS N_VA_PRICE,\n",
+            "       q.D_BIZ AS D_BIZ\n",
+            "  FROM (\n",
+            "         SELECT a.N_VA_PRICE, a.D_BIZ\n",
+            "           FROM APP.T_CUSTOMER@FA a\n",
+            "          WHERE a.ACTIVE = 1\n",
+            "       ) q"
+        )
     );
+}
+
+/// 没勾的列不进投影——这正是「自定义 SQL 也能筛列」在 SQL 上的全部痕迹。
+/// 内层原文一个字节不动，用户写的 `SELECT *` 仍然是 `SELECT *`。
+#[test]
+fn unselected_columns_are_dropped_from_the_custom_sql_projection() {
+    let mut spec = spec();
+    spec.source_sql = Some("SELECT * FROM APP.T_CUSTOMER@FA".to_owned());
+    spec.dblink = None;
+    spec.conditions.clear();
+    spec.order_by.clear();
+    spec.columns = vec![identity("D_BIZ")];
+    spec.primary_key = vec!["D_BIZ".to_owned()];
+
+    spec.validate().unwrap();
+    assert_eq!(
+        spec.source_sql(),
+        concat!(
+            "SELECT q.D_BIZ AS D_BIZ\n",
+            "  FROM (\n",
+            "         SELECT * FROM APP.T_CUSTOMER@FA\n",
+            "       ) q"
+        )
+    );
+}
+
+/// 目标字段改名在自定义 SQL 模式下同样要生效——改之前它被静默忽略。
+#[test]
+fn a_renamed_target_field_reaches_the_custom_sql_projection() {
+    let mut spec = spec();
+    spec.source_sql = Some("SELECT * FROM APP.T_CUSTOMER@FA".to_owned());
+    spec.dblink = None;
+    spec.conditions.clear();
+    spec.order_by.clear();
+    spec.columns = vec![ColumnMapping {
+        source: "D_BIZ".to_owned(),
+        target: "BIZ_DATE".to_owned(),
+    }];
+    spec.primary_key = vec!["BIZ_DATE".to_owned()];
+
+    spec.validate().unwrap();
+    assert!(spec.source_sql().contains("q.D_BIZ AS BIZ_DATE"));
 }
 
 #[test]

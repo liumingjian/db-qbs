@@ -134,8 +134,10 @@ export function StartRunDialog({
         <form onSubmit={(event) => void handleSubmit(event)}>
           <div className="modal-body form-stack">
             {parameters.length === 0 ? (
+              // 「这个任务没有『运行时填』的条件」这半句对每一个任务都恒为真——
+              // 值来源一律是常量，构建器里已经没有「运行时填」这个选项了。
+              // 留下的是真正的约束那一句。
               <p className="run-params-empty">
-                这个任务没有「运行时填」的条件，发起时无需取值。
                 <span>同一任务不允许同时运行两次。</span>
               </p>
             ) : (
