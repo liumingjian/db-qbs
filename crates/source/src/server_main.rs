@@ -15,10 +15,10 @@ use chrono::Utc;
 use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
 use db_qbs_source::{
     embedded_web_asset, fetch_agent_info, generate_target_ddl, load_source_config,
-    validate_builder_dblink, Agent, AgentEndpoint, AgentInput, AgentStore, ColumnPrecision,
-    DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess, OracleRowSource,
-    RunHistory, RunParams, SourceConfig, TargetConnection, Task, TaskConfig, TaskInput, TaskSpec,
-    TaskStore, UnknownReason,
+    validate_builder_dblink, validate_source_sql, Agent, AgentEndpoint, AgentInput, AgentStore,
+    ColumnPrecision, DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess,
+    OracleRowSource, RunHistory, RunParams, SourceConfig, TargetConnection, Task, TaskConfig,
+    TaskInput, TaskSpec, TaskStore, UnknownReason,
 };
 use rand::RngCore;
 use serde::de::DeserializeOwned;
@@ -86,6 +86,13 @@ struct BuilderLinkInput {
 #[serde(deny_unknown_fields)]
 struct BuilderDatasourceInput {
     datasource_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuilderSqlInput {
+    datasource_id: String,
+    source_sql: String,
 }
 
 /// 草稿测连的请求体（ADR-0039 §3）：吃的是**表单里当前填的那组值**，不是库里存的那条。
@@ -404,6 +411,10 @@ fn route_api_request(
 
     if method == Method::Post && path == "/api/builder/dblinks" {
         return handle_builder_dblinks(request, state);
+    }
+
+    if method == Method::Post && path == "/api/builder/sql-columns" {
+        return handle_builder_sql_columns(request, state);
     }
 
     if method == Method::Post && path == "/api/builder/columns" {
@@ -1685,6 +1696,24 @@ fn handle_builder_dblinks(request: &mut Request, state: &ServerState<'_>) -> Htt
     };
     match OracleRowSource::list_builder_dblinks(&access) {
         Ok(dblinks) => json_response(200, &dblinks),
+        Err(error) => oracle_failure(error),
+    }
+}
+
+fn handle_builder_sql_columns(request: &mut Request, state: &ServerState<'_>) -> HttpResponse {
+    let input: BuilderSqlInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    if let Err(error) = validate_source_sql(&input.source_sql) {
+        return bad_request(error);
+    }
+    let access = match oracle_access(state, &input.datasource_id) {
+        Ok(access) => access,
+        Err(error) => return bad_request(error),
+    };
+    match OracleRowSource::describe_source_sql(&access, &input.source_sql) {
+        Ok(columns) => json_response(200, &columns),
         Err(error) => oracle_failure(error),
     }
 }

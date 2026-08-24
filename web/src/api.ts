@@ -42,6 +42,7 @@ export interface ColumnMapping {
 }
 
 export interface TaskSpec {
+  source_sql?: string;
   dblink?: string;
   owner: string;
   table: string;
@@ -626,6 +627,17 @@ export async function fetchBuilderDblinks(datasourceId: string): Promise<string[
     "/api/builder/dblinks",
     { datasource_id: datasourceId },
     "读取 Oracle DBLINK 失败",
+  );
+}
+
+export async function fetchBuilderSqlColumns(input: {
+  datasource_id: string;
+  source_sql: string;
+}): Promise<FetchedColumn[]> {
+  return postJson<FetchedColumn[]>(
+    "/api/builder/sql-columns",
+    input,
+    "读取自定义 SQL 列失败",
   );
 }
 

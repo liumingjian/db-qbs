@@ -6,8 +6,8 @@
 
 use db_qbs_source::{
     builder_column_query, builder_dblink_query, builder_table_query, validate_builder_dblink,
-    ColumnMapping, Comparison, Condition, Direction, OrderTerm, RunParams, TaskSpec, ValueSource,
-    ValueType,
+    validate_source_sql, ColumnMapping, Comparison, Condition, Direction, OrderTerm, RunParams,
+    TaskSpec, ValueSource, ValueType,
 };
 
 /// 恒等映射：目标字段预填成源列名（ADR-0038 §2）。改形状之前的规格就是这一份。
@@ -20,6 +20,7 @@ fn identity(column: &str) -> ColumnMapping {
 
 fn spec() -> TaskSpec {
     TaskSpec {
+        source_sql: None,
         dblink: Some("FA".to_owned()),
         owner: "HTBR45".to_owned(),
         table: "T_R_FR_ASTSTAT".to_owned(),
@@ -58,6 +59,31 @@ fn a_spec_without_conditions_reads_the_whole_table() {
     );
     assert!(spec.runtime_parameters().is_empty());
     assert!(spec.bindings(&RunParams::new()).unwrap().is_empty());
+}
+
+#[test]
+fn custom_select_is_the_source_sql_and_does_not_add_table_conditions() {
+    let mut spec = spec();
+    spec.source_sql = Some(
+        "SELECT a.ID, a.C_NAME FROM APP.T_CUSTOMER@FA a WHERE a.ACTIVE = 1;".to_owned(),
+    );
+    spec.dblink = None;
+    spec.conditions.clear();
+    spec.order_by.clear();
+
+    spec.validate().unwrap();
+    assert_eq!(
+        spec.source_sql(),
+        "SELECT a.ID, a.C_NAME FROM APP.T_CUSTOMER@FA a WHERE a.ACTIVE = 1"
+    );
+}
+
+#[test]
+fn custom_source_sql_only_accepts_one_select_statement() {
+    assert_eq!(validate_source_sql("SELECT 1"), Ok(()));
+    assert_eq!(validate_source_sql("SELECT 1;"), Ok(()));
+    assert!(validate_source_sql("UPDATE T SET C = 1").is_err());
+    assert!(validate_source_sql("SELECT 1; SELECT 2").is_err());
 }
 
 #[test]

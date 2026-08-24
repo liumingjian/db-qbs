@@ -858,6 +858,30 @@ fn builder_rejects_an_invalid_dblink_before_connecting_to_oracle() {
 }
 
 #[test]
+fn builder_rejects_non_select_custom_sql_before_connecting_to_oracle() {
+    let directory = temp_directory();
+    let (port, _config, child, _ready) =
+        start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
+
+    let response = post(
+        port,
+        "/api/builder/sql-columns",
+        r#"{"datasource_id":"unused","source_sql":"UPDATE T SET C = 1"}"#,
+    )
+    .unwrap();
+
+    assert_eq!(response.status, 400);
+    let body: Value = serde_json::from_str(&response.body).unwrap();
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("SELECT"));
+
+    assert_success(&terminate(child));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn column_fetch_oracle_failure_does_not_create_a_run_touch_sink_or_write_storage() {
     let directory = temp_directory();
     let sink = TcpListener::bind("127.0.0.1:0").unwrap();

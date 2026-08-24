@@ -259,6 +259,13 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .builder-guide > header { min-height: 48px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
 .builder-controls { display: grid; grid-template-columns: repeat(3, minmax(180px, 1fr)); align-items: end; gap: 10px; padding: 12px; }
 .builder-controls select { width: 100%; height: var(--ctl-h); padding: 0 30px 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); }
+.builder-query-mode { display: flex; align-items: center; gap: 10px; padding: 0 12px 12px; color: var(--dim); font-size: var(--size-meta); }
+.builder-mode-buttons { display: inline-flex; }
+.builder-mode-buttons .button { border-radius: 0; }
+.builder-mode-buttons .button:first-child { border-radius: var(--radius) 0 0 var(--radius); }
+.builder-mode-buttons .button:last-child { margin-left: -1px; border-radius: 0 var(--radius) var(--radius) 0; }
+.source-sql-editor { padding: 12px; }
+.source-sql-editor textarea { min-height: 170px; font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.55; }
 .tree-picker, .target-tree-shell { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
 .tree-picker-toolbar, .target-table-controls, .builder-selected-row { display: flex; align-items: center; gap: 10px; }
 .tree-search { min-width: 0; flex: 1; height: var(--ctl-h); display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--mute); }
@@ -298,8 +305,7 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .spec-empty { margin: 0; padding: 14px 12px; color: var(--mute); font-size: var(--size-meta); }
 .spec-note { display: block; padding: 0 12px 11px; color: var(--mute); font-size: var(--size-cap); line-height: var(--lh-prose); }
 .condition-list { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 12px; list-style: none; }
-.condition-row { display: grid; grid-template-columns: minmax(120px, 1.2fr) 64px 88px minmax(110px, 1fr) 104px minmax(110px, 1fr) auto; align-items: end; gap: 8px; }
-.condition-row.is-order { grid-template-columns: minmax(120px, 1.2fr) 104px auto; }
+.condition-row { display: grid; grid-template-columns: minmax(120px, 1.2fr) 64px 88px minmax(140px, 1fr) auto; align-items: end; gap: 8px; }
 .condition-row label { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .condition-row label > span { color: var(--mute); font-size: var(--size-cap); }
 .condition-row input, .condition-row select { width: 100%; height: var(--ctl-h); padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-size: var(--size-meta); }
@@ -449,11 +455,14 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
   .modal-backdrop { align-items: start; padding: 12px; }
   .modal { max-height: calc(100vh - 24px); }
   .builder-controls { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
+  .builder-query-mode { align-items: stretch; flex-direction: column; }
+  .builder-mode-buttons { width: 100%; }
+  .builder-mode-buttons .button { width: 50%; }
   .tree-picker-toolbar, .target-table-controls, .builder-selected-row { align-items: stretch; flex-direction: column; }
   .tree-picker-toolbar .tree-search, .target-table-controls .tree-search, .builder-selected-row .button { width: 100%; }
   .spec-editor > header, .column-fetch-section > header { align-items: flex-start; flex-direction: column; }
   .spec-editor > header .button, .column-fetch-section > header .button { width: 100%; }
-  .condition-row, .condition-row.is-order { grid-template-columns: minmax(0, 1fr); }
+  .condition-row { grid-template-columns: minmax(0, 1fr); }
   .filter-card { align-items: stretch; flex-direction: column; }
   .filter-field { justify-content: space-between; }
   .filter-actions { margin-left: 0; }

@@ -313,6 +313,7 @@ mod tests {
 
     fn sample_spec() -> TaskSpec {
         TaskSpec {
+            source_sql: None,
             dblink: Some("FA".to_owned()),
             owner: "HTBR45".to_owned(),
             table: "T_R_FR_ASTSTAT".to_owned(),

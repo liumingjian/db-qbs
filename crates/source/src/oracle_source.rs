@@ -70,6 +70,16 @@ impl OracleRowSource {
         Ok(columns)
     }
 
+    pub fn describe_source_sql(
+        access: &OracleAccess,
+        source_sql: &str,
+    ) -> Result<Vec<SourceColumn>, SourceReadError> {
+        let bindings: Bindings = Vec::new();
+        let rows = open_result_set(access, source_sql, &bindings)?;
+        let (columns, _) = describe_columns(rows.column_info());
+        Ok(columns)
+    }
+
     /// 开跑前的一次 `COUNT(*)`：迁移进度那一列的分母（ADR-0043 §7、裁定 6）。
     ///
     /// **把当次真正要执行的语句整个套进子查询**（`SELECT COUNT(*) FROM (<source_sql>)`），

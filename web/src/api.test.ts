@@ -7,6 +7,7 @@ import {
   emptySpec,
   fetchBuilderColumns,
   fetchBuilderDblinks,
+  fetchBuilderSqlColumns,
   fetchBuilderTables,
   fetchColumns,
   fetchTargetColumns,
@@ -327,6 +328,41 @@ describe("SQL builder API", () => {
       method: "POST",
       body: JSON.stringify({ datasource_id: "ds-oracle" }),
     }));
+  });
+
+  it("describes columns from a custom source SELECT", async () => {
+    const columns = [
+      {
+        name: "CUSTOMER_ID",
+        type: "NUMBER",
+        precision: 10,
+        scale: 0,
+        length: null,
+        fsp: null,
+        support: "ok",
+      },
+    ];
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(columns), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchBuilderSqlColumns({
+        datasource_id: "ds-oracle",
+        source_sql: "SELECT CUSTOMER_ID FROM APP.CUSTOMER",
+      }),
+    ).resolves.toEqual(columns);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/builder/sql-columns",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          datasource_id: "ds-oracle",
+          source_sql: "SELECT CUSTOMER_ID FROM APP.CUSTOMER",
+        }),
+      }),
+    );
   });
 
   it("asks the target end for tables and columns by datasource id alone", async () => {

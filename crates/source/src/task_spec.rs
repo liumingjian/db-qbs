@@ -142,6 +142,8 @@ pub struct ColumnMapping {
 #[serde(deny_unknown_fields)]
 pub struct TaskSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_sql: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dblink: Option<String>,
     pub owner: String,
     pub table: String,
@@ -205,6 +207,9 @@ impl TaskSpec {
 
     /// 源端 SQL。一条条件都没有时就是整表取数——量级风险归 #122 去证，不在这里挡。
     pub fn source_sql(&self) -> String {
+        if let Some(source_sql) = self.source_sql.as_deref() {
+            return normalize_source_sql(source_sql);
+        }
         let projection = self
             .columns
             .iter()
@@ -242,10 +247,25 @@ impl TaskSpec {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        validate_identifier(&self.owner, "owner")?;
-        validate_identifier(&self.table, "table")?;
-        if let Some(dblink) = &self.dblink {
-            validate_identifier(dblink, "dblink")?;
+        let custom_sql = match self.source_sql.as_deref().map(str::trim) {
+            Some(sql) if !sql.is_empty() => Some(sql),
+            Some(_) => return Err("source_sql 不能为空".to_owned()),
+            None => None,
+        };
+        if let Some(source_sql) = custom_sql {
+            validate_source_sql(source_sql)?;
+            if self.dblink.is_some() {
+                return Err("自定义 SQL 已包含源端查询路径，不能同时设置 dblink".to_owned());
+            }
+            if !self.conditions.is_empty() || !self.order_by.is_empty() {
+                return Err("自定义 SQL 模式不能再配置过滤条件或排序，请直接写入 SQL".to_owned());
+            }
+        } else {
+            validate_identifier(&self.owner, "owner")?;
+            validate_identifier(&self.table, "table")?;
+            if let Some(dblink) = &self.dblink {
+                validate_identifier(dblink, "dblink")?;
+            }
         }
         if self.target_table.trim().is_empty() {
             return Err("target_table 不能为空".to_owned());
@@ -310,6 +330,30 @@ impl TaskSpec {
         }
         Ok(())
     }
+}
+
+pub fn validate_source_sql(source_sql: &str) -> Result<(), String> {
+    let normalized = normalize_source_sql(source_sql);
+    if normalized.is_empty() {
+        return Err("自定义 SQL 不能为空".to_owned());
+    }
+    if normalized.contains(';') {
+        return Err("自定义 SQL 只能包含一条 SELECT 语句".to_owned());
+    }
+    let first_keyword = normalized.split_whitespace().next().unwrap_or_default();
+    if !first_keyword.eq_ignore_ascii_case("SELECT") {
+        return Err("自定义 SQL 目前只允许 SELECT 语句".to_owned());
+    }
+    Ok(())
+}
+
+fn normalize_source_sql(source_sql: &str) -> String {
+    source_sql
+        .trim()
+        .strip_suffix(';')
+        .map(str::trim_end)
+        .unwrap_or_else(|| source_sql.trim())
+        .to_owned()
 }
 
 /// 只收未加引号的 Oracle 标识符。这是**唯一**挡住把标识符拼进 SQL 的东西——

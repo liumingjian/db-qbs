@@ -23,6 +23,7 @@ import {
   emptySpec,
   fetchBuilderColumns,
   fetchBuilderDblinks,
+  fetchBuilderSqlColumns,
   fetchBuilderTables,
   fetchTargetColumns,
   fetchTargetTables,
@@ -40,7 +41,6 @@ import type {
   BuilderSql,
   BuilderTable,
   Condition,
-  OrderTerm,
   RunHistory,
   RunParams,
   Task,
@@ -262,6 +262,28 @@ export function App() {
   useEffect(() => {
     void loadDatasources();
   }, [loadDatasources]);
+
+  const refreshAgents = useCallback(async () => {
+    try {
+      setAgents(await listAgents());
+    } catch {
+      // Agent 状态刷新是辅助信息，失败时保留最近一次成功读取的状态。
+    }
+  }, []);
+
+  useEffect(() => {
+    let requestInFlight = false;
+    const poll = window.setInterval(() => {
+      if (document.visibilityState !== "visible" || requestInFlight) {
+        return;
+      }
+      requestInFlight = true;
+      void refreshAgents().finally(() => {
+        requestInFlight = false;
+      });
+    }, 15000);
+    return () => window.clearInterval(poll);
+  }, [refreshAgents]);
 
   useEffect(() => {
     function handleHashChange() {
@@ -543,11 +565,27 @@ type TargetMetaState =
   | { kind: "failed"; message: string }
   | { kind: "ready"; table: string; data: TargetTableMetadata };
 
+type SourceQueryMode = "table" | "sql";
+
+function normalizeTaskSpecForEditor(spec: TaskSpec): TaskSpec {
+  const isSql = Boolean(spec.source_sql?.trim());
+  return {
+    ...spec,
+    conditions: isSql
+      ? []
+      : spec.conditions.map((condition) => ({
+          ...condition,
+          value_source: "constant",
+        })),
+    order_by: [],
+  };
+}
+
 /**
  * 任务定义编辑器 —— 构建器本身就是任务定义（ADR-0036 §1）。
  *
  * 它不再是「一次性生成四个字段、选择态丢弃」的向导：结构化规格是唯一真相源，
- * 选表、勾列、勾主键、条件、排序**全部原样存进任务定义**，再次打开还在（所有者裁定 6）。
+ * 选表、勾列、勾主键、条件**全部原样存进任务定义**，再次打开还在（所有者裁定 6）。
  * SQL 是规格的派生面，只读展示，v1 没有编辑入口。
  */
 function TaskFormDialog({
@@ -574,7 +612,14 @@ function TaskFormDialog({
   const [targetDatasourceId, setTargetDatasourceId] = useState(
     initial.target_datasource_id,
   );
-  const [spec, setSpec] = useState<TaskSpec>(() => initial.spec);
+  const [sourceQueryMode, setSourceQueryMode] = useState<SourceQueryMode>(
+    initial.spec.source_sql?.trim() === "" || initial.spec.source_sql === undefined
+      ? "table"
+      : "sql",
+  );
+  const [spec, setSpec] = useState<TaskSpec>(() =>
+    normalizeTaskSpecForEditor(initial.spec),
+  );
   const [tables, setTables] = useState<BuilderTable[]>([]);
   const [dblinks, setDblinks] = useState<string[]>([]);
   const [dblinksLoading, setDblinksLoading] = useState(false);
@@ -645,14 +690,18 @@ function TaskFormDialog({
   const mappedTargetsComplete = spec.columns.every(
     (mapping) => mapping.target.trim() !== "",
   );
+  const sourceQueryComplete =
+    sourceQueryMode === "sql"
+      ? Boolean(spec.source_sql?.trim())
+      : spec.owner !== "";
   const specComplete =
-    spec.owner !== "" &&
+    sourceQueryComplete &&
     spec.columns.length > 0 &&
     mappedTargetsComplete &&
     spec.primary_key.length > 0;
 
   useEffect(() => {
-    if (sourceDatasourceId === "") {
+    if (sourceDatasourceId === "" || sourceQueryMode === "sql") {
       setDblinks([]);
       setDblinksLoading(false);
       return;
@@ -679,7 +728,7 @@ function TaskFormDialog({
     return () => {
       active = false;
     };
-  }, [sourceDatasourceId]);
+  }, [sourceDatasourceId, sourceQueryMode]);
 
   // 目标表清单跟着目标数据源走。取不到不打断建任务——`datalist` 空掉即可，
   // 目标表名**仍然能手打**（ADR-0039 §5：记得全名的人不必翻列表）。
@@ -773,7 +822,32 @@ function TaskFormDialog({
     setSpec((current) => ({ ...current, ...change }));
   }
 
+  function switchSourceQueryMode(nextMode: SourceQueryMode) {
+    if (nextMode === sourceQueryMode) {
+      return;
+    }
+    setSourceQueryMode(nextMode);
+    setTables([]);
+    setDblinks([]);
+    setColumns([]);
+    setSourceTableFilter("");
+    setSourceExpandedOwners(new Set());
+    updateSpec({
+      source_sql: nextMode === "sql" ? "" : undefined,
+      dblink: undefined,
+      owner: "",
+      table: "",
+      columns: [],
+      primary_key: [],
+      conditions: [],
+      order_by: [],
+    });
+  }
+
   async function loadTables() {
+    if (sourceQueryMode !== "table") {
+      return;
+    }
     setLoading("tables");
     setBuilderError(null);
     try {
@@ -793,6 +867,45 @@ function TaskFormDialog({
   }
 
   async function loadColumns() {
+    if (sourceQueryMode === "sql") {
+      const sourceSql = spec.source_sql?.trim() ?? "";
+      if (sourceDatasourceId === "" || sourceSql === "") {
+        return;
+      }
+      setLoading("columns");
+      setBuilderError(null);
+      try {
+        const nextColumns = await fetchBuilderSqlColumns({
+          datasource_id: sourceDatasourceId,
+          source_sql: sourceSql,
+        });
+        setColumns(
+          nextColumns.map((column) => ({
+            name: column.name,
+            data_type: column.type,
+            precision: column.precision,
+            scale: column.scale,
+            length: column.length,
+            // SQL describe does not expose column nullability; keep the field neutral in the UI.
+            nullable: true,
+          })),
+        );
+        updateSpec({
+          columns: nextColumns.map((column) => ({
+            source: column.name,
+            target: column.name,
+          })),
+          primary_key: [],
+          conditions: [],
+          order_by: [],
+        });
+      } catch (loadError) {
+        setBuilderError(messageFrom(loadError));
+      } finally {
+        setLoading(null);
+      }
+      return;
+    }
     if (spec.owner === "" || spec.table === "") {
       return;
     }
@@ -817,8 +930,8 @@ function TaskFormDialog({
   function selectTable(key: string) {
     const table = tables.find((candidate) => tableKeyFor(candidate) === key);
     setColumns([]);
-    // 换表就等于换一份规格：列、主键、条件、排序全是上一张表的列名，留着只会生成一段
-    // 引用不存在列的 SQL。目标表名是用户自己写的，不跟着清。
+    // 换表就等于换一份规格：列、主键、条件全是上一张表的列名，留着只会生成一段引用
+    // 不存在列的 SQL。目标表名是用户自己写的，不跟着清。
     updateSpec({
       owner: table?.owner ?? "",
       table: table?.name ?? "",
@@ -834,6 +947,9 @@ function TaskFormDialog({
 
   // 勾源列只表达“本次要搬这列”。目标字段要等目标表列读取后，在字段映射区明确选择。
   function toggleColumn(column: string) {
+    if (sourceQueryMode === "sql") {
+      return;
+    }
     const mapping = spec.columns.find((candidate) => candidate.source === column);
     if (mapping === undefined) {
       updateSpec({ columns: [...spec.columns, { source: column, target: "" }] });
@@ -847,6 +963,9 @@ function TaskFormDialog({
   }
 
   function toggleAllColumns() {
+    if (sourceQueryMode === "sql") {
+      return;
+    }
     if (allSourceColumnsSelected) {
       updateSpec({ columns: [], primary_key: [], conditions: [], order_by: [] });
       return;
@@ -932,7 +1051,7 @@ function TaskFormDialog({
             column,
             spec.conditions.map((condition) => condition.parameter),
           ),
-          value_source: "runtime",
+          value_source: "constant",
           constant: "",
         },
       ],
@@ -942,7 +1061,9 @@ function TaskFormDialog({
   function updateCondition(index: number, change: Partial<Condition>) {
     updateSpec({
       conditions: spec.conditions.map((condition, position) =>
-        position === index ? { ...condition, ...change } : condition,
+        position === index
+          ? { ...condition, ...change, value_source: "constant" }
+          : condition,
       ),
     });
   }
@@ -950,28 +1071,6 @@ function TaskFormDialog({
   function removeCondition(index: number) {
     updateSpec({
       conditions: spec.conditions.filter((_, position) => position !== index),
-    });
-  }
-
-  function addOrderTerm() {
-    const column = columnNames[0];
-    if (column === undefined) {
-      return;
-    }
-    updateSpec({ order_by: [...spec.order_by, { column, direction: "asc" }] });
-  }
-
-  function updateOrderTerm(index: number, change: Partial<OrderTerm>) {
-    updateSpec({
-      order_by: spec.order_by.map((term, position) =>
-        position === index ? { ...term, ...change } : term,
-      ),
-    });
-  }
-
-  function removeOrderTerm(index: number) {
-    updateSpec({
-      order_by: spec.order_by.filter((_, position) => position !== index),
     });
   }
 
@@ -984,7 +1083,7 @@ function TaskFormDialog({
         name,
         source_datasource_id: sourceDatasourceId,
         target_datasource_id: targetDatasourceId,
-        spec,
+        spec: normalizeTaskSpecForEditor(spec),
       });
       onClose();
     } catch (submitError) {
@@ -1030,6 +1129,7 @@ function TaskFormDialog({
                     setSourceTableFilter("");
                     setSourceExpandedOwners(new Set());
                     updateSpec({
+                      source_sql: sourceQueryMode === "sql" ? "" : undefined,
                       dblink: undefined,
                       owner: "",
                       table: "",
@@ -1054,39 +1154,47 @@ function TaskFormDialog({
                 </select>
                 {oracleDatasources.length === 0 && <DatasourceHint />}
               </FormField>
-              <FormField
-                label="源端 DBLINK（可选）"
-                badge={dblinksLoading ? "读取中" : dblinks.length > 0 ? `${dblinks.length} 个可选` : undefined}
-                neutralBadge
-              >
-                <input
-                  list="source-dblinks"
-                  value={spec.dblink ?? ""}
-                  disabled={sourceDatasourceId === ""}
-                  placeholder={dblinksLoading ? "正在读取" : "输入或选择，如 FA"}
-                  onChange={(event) => {
-                    const dblink = event.target.value.trim();
-                    setTables([]);
-                    setColumns([]);
-                    setSourceTableFilter("");
-                    setSourceExpandedOwners(new Set());
-                    updateSpec({
-                      dblink: dblink === "" ? undefined : dblink,
-                      owner: "",
-                      table: "",
-                      columns: [],
-                      primary_key: [],
-                      conditions: [],
-                      order_by: [],
-                    });
-                  }}
-                />
-                <datalist id="source-dblinks">
-                  {dblinks.map((dblink) => (
-                    <option key={dblink} value={dblink} />
-                  ))}
-                </datalist>
-              </FormField>
+              {sourceQueryMode === "table" && (
+                <FormField
+                  label="源端 DBLINK（可选）"
+                  badge={
+                    dblinksLoading
+                      ? "读取中"
+                      : dblinks.length > 0
+                        ? String(dblinks.length) + " 个可选"
+                        : undefined
+                  }
+                  neutralBadge
+                >
+                  <input
+                    list="source-dblinks"
+                    value={spec.dblink ?? ""}
+                    disabled={sourceDatasourceId === ""}
+                    placeholder={dblinksLoading ? "正在读取" : "输入或选择，如 FA"}
+                    onChange={(event) => {
+                      const dblink = event.target.value.trim();
+                      setTables([]);
+                      setColumns([]);
+                      setSourceTableFilter("");
+                      setSourceExpandedOwners(new Set());
+                      updateSpec({
+                        dblink: dblink === "" ? undefined : dblink,
+                        owner: "",
+                        table: "",
+                        columns: [],
+                        primary_key: [],
+                        conditions: [],
+                        order_by: [],
+                      });
+                    }}
+                  />
+                  <datalist id="source-dblinks">
+                    {dblinks.map((dblink) => (
+                      <option key={dblink} value={dblink} />
+                    ))}
+                  </datalist>
+                </FormField>
+              )}
               <FormField label="目标端（MySQL）">
                 <select
                   required
@@ -1122,28 +1230,89 @@ function TaskFormDialog({
                 {mysqlDatasources.length === 0 && <DatasourceHint />}
               </FormField>
             </div>
+            <div className="builder-query-mode">
+              <span>源端查询方式</span>
+              <div className="builder-mode-buttons" role="tablist" aria-label="源端查询方式">
+                <button
+                  className={sourceQueryMode === "table" ? "button is-primary" : "button"}
+                  type="button"
+                  role="tab"
+                  aria-selected={sourceQueryMode === "table"}
+                  onClick={() => switchSourceQueryMode("table")}
+                >
+                  按表选择
+                </button>
+                <button
+                  className={sourceQueryMode === "sql" ? "button is-primary" : "button"}
+                  type="button"
+                  role="tab"
+                  aria-selected={sourceQueryMode === "sql"}
+                  onClick={() => switchSourceQueryMode("sql")}
+                >
+                  自定义 SQL
+                </button>
+              </div>
+            </div>
           </section>
 
           <section className="builder-guide" aria-labelledby="builder-source-title">
             <header>
               <div>
-                <strong id="builder-source-title">源表</strong>
-                <span>按库展开表，输入关键字可筛选</span>
+                <strong id="builder-source-title">
+                  {sourceQueryMode === "table" ? "源表" : "源 SQL"}
+                </strong>
+                <span>
+                  {sourceQueryMode === "table"
+                    ? "按库展开表，输入关键字可筛选"
+                    : "输入一条只读 SELECT，读取结果列后继续做目标映射"}
+                </span>
               </div>
               <button
                 className="button is-ghost"
                 type="button"
-                onClick={() => void loadTables()}
-                disabled={loading !== null || sourceDatasourceId === ""}
+                onClick={() => void (sourceQueryMode === "table" ? loadTables() : loadColumns())}
+                disabled={
+                  loading !== null ||
+                  sourceDatasourceId === "" ||
+                  (sourceQueryMode === "sql" && !Boolean(spec.source_sql?.trim()))
+                }
               >
-                {loading === "tables" ? (
+                {loading !== null ? (
                   <LoaderCircle className="is-spinning" size={15} />
-                ) : (
+                ) : sourceQueryMode === "table" ? (
                   <RefreshCw size={15} />
+                ) : (
+                  <TableProperties size={15} />
                 )}
-                {loading === "tables" ? "读取中" : "读取表"}
+                {loading !== null
+                  ? "读取中"
+                  : sourceQueryMode === "table"
+                    ? "读取表"
+                    : "读取列"}
               </button>
             </header>
+            {sourceQueryMode === "sql" ? (
+              <div className="source-sql-editor">
+                <FormField label="自定义 SQL">
+                  <textarea
+                    required
+                    rows={8}
+                    value={spec.source_sql ?? ""}
+                    placeholder={"SELECT *\nFROM APP.T_CUSTOMER@POC_LINK_A\nWHERE STATUS = 1"}
+                    onChange={(event) => {
+                      setColumns([]);
+                      updateSpec({
+                        source_sql: event.target.value,
+                        columns: [],
+                        primary_key: [],
+                        conditions: [],
+                        order_by: [],
+                      });
+                    }}
+                  />
+                </FormField>
+              </div>
+            ) : (
             <div className="tree-picker">
               <div className="tree-picker-toolbar">
                 <label className="tree-search">
@@ -1235,6 +1404,7 @@ function TaskFormDialog({
                 </button>
               </div>
             </div>
+            )}
             {builderError !== null && (
               <div className="form-error" role="alert">
                 {builderError}
@@ -1276,6 +1446,7 @@ function TaskFormDialog({
                             <input
                               type="checkbox"
                               checked={selected}
+                              disabled={sourceQueryMode === "sql"}
                               onChange={() => toggleColumn(columnName)}
                               aria-label={`选择 ${columnName}`}
                             />
@@ -1286,7 +1457,13 @@ function TaskFormDialog({
                             {column === undefined ? "—" : columnShape(column)}
                           </td>
                           <td>
-                            {column === undefined ? "—" : column.nullable ? "是" : "否"}
+                            {sourceQueryMode === "sql"
+                              ? "—"
+                              : column === undefined
+                                ? "—"
+                                : column.nullable
+                                  ? "是"
+                                  : "否"}
                           </td>
                         </tr>
                       );
@@ -1433,22 +1610,16 @@ function TaskFormDialog({
             />
           </section>
 
-          <ConditionEditor
-            conditions={spec.conditions}
-            columnNames={columnNames}
-            dictionary={dictionary}
-            onAdd={addCondition}
-            onChange={updateCondition}
-            onRemove={removeCondition}
-          />
-
-          <OrderEditor
-            terms={spec.order_by}
-            columnNames={columnNames}
-            onAdd={addOrderTerm}
-            onChange={updateOrderTerm}
-            onRemove={removeOrderTerm}
-          />
+          {sourceQueryMode === "table" && (
+            <ConditionEditor
+              conditions={spec.conditions}
+              columnNames={columnNames}
+              dictionary={dictionary}
+              onAdd={addCondition}
+              onChange={updateCondition}
+              onRemove={removeCondition}
+            />
+          )}
 
           <GeneratedSql sql={sql} error={sqlError} ready={specComplete} />
 
@@ -1563,36 +1734,10 @@ function ConditionEditor({
                 </select>
               </label>
               <label>
-                <span>参数名</span>
-                <input
-                  required
-                  value={condition.parameter}
-                  onChange={(event) => onChange(index, { parameter: event.target.value })}
-                />
-              </label>
-              <label>
-                <span>值来源</span>
-                <select
-                  value={condition.value_source}
-                  onChange={(event) => {
-                    const valueSource = event.target.value as Condition["value_source"];
-                    onChange(index, {
-                      value_source: valueSource,
-                      // 运行时填的条件不许同时写死常量值——两个值来源只能有一个说了算。
-                      constant: valueSource === "runtime" ? "" : condition.constant,
-                    });
-                  }}
-                >
-                  <option value="runtime">运行时填</option>
-                  <option value="constant">常量</option>
-                </select>
-              </label>
-              <label>
-                <span>常量值</span>
+                <span>值</span>
                 <input
                   value={condition.constant}
-                  disabled={condition.value_source === "runtime"}
-                  required={condition.value_source === "constant"}
+                  required
                   onChange={(event) => onChange(index, { constant: event.target.value })}
                 />
               </label>
@@ -1610,84 +1755,8 @@ function ConditionEditor({
         </ul>
       )}
       <small className="spec-note">
-        只有「运行时填」的参数需要在发起运行时填写。
+        过滤值为固定配置，保存后随任务执行。
       </small>
-    </section>
-  );
-}
-
-function OrderEditor({
-  terms,
-  columnNames,
-  onAdd,
-  onChange,
-  onRemove,
-}: {
-  terms: OrderTerm[];
-  columnNames: string[];
-  onAdd: () => void;
-  onChange: (index: number, change: Partial<OrderTerm>) => void;
-  onRemove: (index: number) => void;
-}) {
-  return (
-    <section className="spec-editor" aria-labelledby="order-title">
-      <header>
-        <div>
-          <strong id="order-title">排序</strong>
-          <span>字段 + 正序 / 倒序，可留空</span>
-        </div>
-        <button
-          className="button is-ghost"
-          type="button"
-          onClick={onAdd}
-          disabled={columnNames.length === 0}
-        >
-          <Plus size={15} aria-hidden="true" />
-          添加排序
-        </button>
-      </header>
-      {terms.length === 0 ? (
-        <p className="spec-empty">没有排序：由 Oracle 决定返回顺序。</p>
-      ) : (
-        <ul className="condition-list">
-          {terms.map((term, index) => (
-            <li key={index} className="condition-row is-order">
-              <label>
-                <span>字段</span>
-                <select
-                  value={term.column}
-                  onChange={(event) => onChange(index, { column: event.target.value })}
-                >
-                  {columnOptions(columnNames, term.column)}
-                </select>
-              </label>
-              <label>
-                <span>方向</span>
-                <select
-                  value={term.direction}
-                  onChange={(event) =>
-                    onChange(index, {
-                      direction: event.target.value as OrderTerm["direction"],
-                    })
-                  }
-                >
-                  <option value="asc">正序</option>
-                  <option value="desc">倒序</option>
-                </select>
-              </label>
-              <button
-                className="icon-button is-danger"
-                type="button"
-                title="删除这条排序"
-                aria-label={`删除排序 ${term.column}`}
-                onClick={() => onRemove(index)}
-              >
-                <Trash2 size={15} aria-hidden="true" />
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
     </section>
   );
 }
@@ -2071,7 +2140,7 @@ function constraintsOf(data: TargetTableMetadata, column: TargetColumn): string 
 }
 
 /**
- * 任务列表里那一列条件的单行读法：`列 符 参数名` 或 `列 符 常量`。
+ * 任务列表里那一列条件的单行读法：`列 符 固定值`；历史任务里的运行参数条件仍按参数名展示。
  *
  * 一条条件都没有时明写「整表」——留空会被读成「没配好」，而整表取数是允许的形态。
  */
