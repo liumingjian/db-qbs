@@ -121,15 +121,50 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .task-name { white-space: nowrap; }
 .task-id { color: var(--mute); font-family: var(--font-num); font-size: var(--size-cap); }
 /* 源表 / 目标表一格两行：上行表名（等宽），下行数据源**名字**，不是 id（ADR-0039 §8）。 */
-.table-cell { display: block; font-family: var(--font-num); font-size: var(--size-meta); font-variant-ligatures: none; }
-/* 作业中心「源表」列里自定义 SQL 任务的类别徽标。 */
-.source-kind { display: inline-block; margin-right: 6px; padding: 0 6px; border: 1px solid var(--line-strong); border-radius: var(--badge-radius); background: var(--mute-bg); color: var(--mute); font-family: var(--font-cn); font-size: var(--size-cap); }
+.table-cell { display: block; font-family: var(--font-num); font-size: var(--size-meta); }
+/* ── 连字一律关掉 ──────────────────────────────────────────────────────────
+   --font-num 排在最前的是 JetBrains Mono / Cascadia Mono（tokens.css），两者默认把
+   `>=` 画成 `≥`、`!=` 画成 `≠`、`->` 画成 `→`。这些地方摆的是**将要执行的语句**
+   与**错误码**，显示出来的字符串必须就是那一个，不能是它的排版近似。
+
+   逐条挂在各自的规则里试过一次，漏了六处——判据是「凡是用 --font-num 的地方」，
+   那就让选择器清单与那个判据一一对应，放在一处看得见。加新的等宽面时一并加到这里。 */
+.brand-mark,
+.environment,
+.task-id,
+.table-cell,
+.time-cell,
+.mono, .sql-cell,
+.progress-pct,
+.pagination-total,
+.page-btn,
+.drawer-header .sub,
+.kv .v,
+pre.drawer-sql,
+.form-field > span,
+.form-field textarea,
+.inline-result,
+.source-sql-editor textarea,
+.tree-count,
+.schema-count,
+.builder-guide > footer > span,
+.field-mapping-section > footer,
+.ddl-output,
+.run-identity dd, .run-metrics dd,
+.outcome-label,
+.unknown-effect,
+.effect-text, .source-code,
+.precheck-reports code,
+.precheck-exit code,
+.diagnostic-table td,
+.phase-item,
+.terminal-block,
+.error-code,
+.sensitive-value dl,
+.settings-copy dd { font-variant-ligatures: none; }
 .table-side { display: block; color: var(--mute); font-size: var(--size-cap); }
 .time-cell { font-family: var(--font-num); font-size: var(--size-meta); font-variant-numeric: tabular-nums; }
-/* 连字一律关掉。--font-num 排在最前的是 JetBrains Mono / Cascadia Mono，它们默认把
-   `>=` 画成 `≥`、`!=` 画成 `≠`、`->` 画成 `→`。这些地方摆的是**将要执行的语句**，
-   显示出来的字符串必须就是执行的那一个，不能是它的排版近似。 */
-.mono, .sql-cell { font-family: var(--font-num); font-size: var(--size-meta); font-variant-ligatures: none; }
+.mono, .sql-cell { font-family: var(--font-num); font-size: var(--size-meta); }
 /* tokens.css 把 tabular-nums 挂在 .num / td.n 上，应用里用的却是 .mono / .numeric-column，
    于是列表屏的行数、耗时、时间戳全是比例数字。在应用侧对齐 token 的意图。 */
 .mono, .numeric-column { font-variant-numeric: tabular-nums; }
@@ -195,7 +230,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .kv .k { color: var(--mute); font-size: var(--size-cap); }
 .kv .v { overflow-wrap: anywhere; font-family: var(--font-num); font-size: var(--size-meta); font-variant-numeric: tabular-nums; }
 .kv .v.is-bad { color: var(--crit); }
-pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height: 240px; border-top: 1px solid var(--line); background: var(--mute-bg); color: var(--dim); font-family: var(--font-num); font-size: var(--size-meta); font-variant-ligatures: none; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height: 240px; border-top: 1px solid var(--line); background: var(--mute-bg); color: var(--dim); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ---------------------------------------------------------------- 空态与提示 */
 .loading-state, .no-results { padding: 44px var(--pad); color: var(--mute); text-align: center; }
@@ -223,14 +258,19 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .form-field { display: flex; flex-direction: column; gap: 5px; color: var(--dim); font-size: var(--size-body); }
 .form-field > span { font-family: var(--font-num); font-size: var(--size-meta); }
 .field-label { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.field-badge { margin-left: auto; padding: 1px 7px; border: 1px solid var(--warn-bd); border-radius: var(--badge-radius); background: var(--warn-bg); color: var(--warn); font-family: var(--font-cn); font-size: var(--size-cap); }
-.field-badge.is-neutral { border-color: var(--line-strong); background: var(--mute-bg); color: var(--mute); }
+/* 徽标共用一份底子。`.source-kind`（作业中心「源表」列里自定义 SQL 任务的类别标）
+   与表单里的中性徽标长得一模一样，各写一遍会各自漂。 */
+.field-badge, .source-kind { padding: 1px 7px; border: 1px solid var(--warn-bd); border-radius: var(--badge-radius); background: var(--warn-bg); color: var(--warn); font-family: var(--font-cn); font-size: var(--size-cap); }
+.field-badge { margin-left: auto; }
+.field-badge.is-neutral, .source-kind { border-color: var(--line-strong); background: var(--mute-bg); color: var(--mute); }
+/* 表格单元格里跟在徽标后面的是 SQL 正文，靠 margin-right 隔开。 */
+.source-kind { display: inline-block; margin-right: 6px; }
 /* 说的是这个字段自己的事时，徽标贴着标签走；默认的 margin-left:auto 会把它推到
    行尾，读起来像在描述隔壁那一栏。 */
 .field-badge.is-inline { margin-left: 6px; }
 .form-field input, .form-field textarea { width: 100%; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); }
 .form-field input { height: var(--ctl-h); padding: 0 10px; }
-.form-field textarea { resize: vertical; min-height: 132px; padding: 9px 10px; font-family: var(--font-num); font-size: var(--size-meta); font-variant-ligatures: none; line-height: 1.65; }
+.form-field textarea { resize: vertical; min-height: 132px; padding: 9px 10px; font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.65; }
 .form-field input:focus, .form-field textarea:focus { border-color: var(--brand); outline: 0; box-shadow: 0 0 0 2px var(--brand-dim); }
 .form-error { padding: 9px 12px; border-left: 3px solid var(--crit); background: var(--crit-bg); color: var(--crit); font-size: var(--size-body); }
 .delete-copy p { margin: 0 0 6px; }
@@ -284,7 +324,7 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .source-sql-editor { padding: 12px; }
 /* 连字必须关掉：--font-num 里的 JetBrains Mono / Cascadia Mono 会把 `>=` 画成 `≥`、
    `!=` 画成 `≠`。这一格是该模式下唯一能看到查询的地方，显示的字符串必须**就是**执行的那个。 */
-.source-sql-editor textarea { display: block; width: 100%; min-height: 170px; resize: vertical; padding: 9px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.55; font-variant-ligatures: none; }
+.source-sql-editor textarea { display: block; width: 100%; min-height: 170px; resize: vertical; padding: 9px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.55; }
 .tree-picker, .target-tree-shell { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
 .tree-picker-toolbar, .target-table-controls, .builder-selected-row { display: flex; align-items: center; gap: 10px; }
 .tree-search { min-width: 0; flex: 1; height: var(--ctl-h); display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--mute); }
@@ -362,7 +402,7 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .run-params { display: flex; flex-direction: column; gap: 12px; }
 .run-params-empty { display: flex; flex-direction: column; gap: 3px; margin: 0; color: var(--mute); font-size: var(--size-meta); line-height: var(--lh-prose); }
 .column-fetch-hint { margin: 0; padding: 14px 12px; color: var(--mute); font-size: var(--size-meta); }
-.ddl-output { max-height: 280px; overflow: auto; margin: 0; padding: 12px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--mute-bg); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); font-variant-ligatures: none; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ddl-output { max-height: 280px; overflow: auto; margin: 0; padding: 12px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--mute-bg); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ---------------------------------------------------------------- 运行详情页（发起后的实时屏） */
 .run-card { overflow: hidden; }

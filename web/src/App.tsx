@@ -57,11 +57,13 @@ import { JobCenterScreen } from "./JobCenterScreen";
 import { latestRunByTask } from "./listing";
 import { RunScreen } from "./RunScreen";
 import { SettingsScreen } from "./SettingsScreen";
+import type { TargetColumnName } from "./spec";
 import {
   COMPARISONS,
   comparisonSymbol,
   defaultParameterName,
   defaultValueType,
+  matchSameNameTargets,
   renameTargetField,
   targetFieldOf,
   VALUE_TYPE_LABELS,
@@ -781,7 +783,7 @@ function TaskFormDialog({
     void fetchTargetColumns(targetDatasourceId, table)
       .then((data) => {
         setTargetMeta({ kind: "ready", table, data });
-        autoFillSameNameTargets(data);
+        autoFillSameNameTargets(data.columns);
       })
       .catch((loadError) =>
         setTargetMeta({ kind: "failed", message: messageFrom(loadError) }),
@@ -930,13 +932,24 @@ function TaskFormDialog({
             : nextColumns
                 .map((column) => previous.get(column.name))
                 .filter((mapping): mapping is ColumnMapping => mapping !== undefined);
-        const survivingTargets = new Set(
-          nextMappings.map((mapping) => mapping.target),
+        // 两个方向都要接线。读目标列那一路在 `loadTargetColumns` 里接；
+        // 反过来——目标列已经读过、这会儿才读源列——新种下的映射全是空的，
+        // 那一路的 `.then` 早跑完了，不在这里补就永远没人补。
+        const seeded =
+          targetMeta.kind === "ready"
+            ? matchSameNameTargets(
+                { columns: nextMappings, primary_key: spec.primary_key },
+                targetMeta.data.columns,
+                { onlyUnmapped: true },
+              )
+            : { columns: nextMappings, primary_key: spec.primary_key };
+        const survivingAfterMatch = new Set(
+          seeded.columns.map((mapping) => mapping.target),
         );
         updateSpec({
-          columns: nextMappings,
-          primary_key: spec.primary_key.filter((name) =>
-            survivingTargets.has(name),
+          columns: seeded.columns,
+          primary_key: seeded.primary_key.filter((name) =>
+            survivingAfterMatch.has(name),
           ),
           conditions: [],
           order_by: [],
@@ -1047,21 +1060,11 @@ function TaskFormDialog({
    * 四个下拉却都停在「请选择目标字段」，等于让人手工确认一件机器已经知道的事。
    * 只填空位是关键——重新读取目标列不该把用户手改过的映射冲掉。
    */
-  function autoFillSameNameTargets(data: TargetTableMetadata) {
-    const targetByUpper = new Map(
-      data.columns.map((column) => [column.name.toUpperCase(), column.name]),
-    );
-    setSpec((current) =>
-      current.columns.reduce((draft, mapping) => {
-        if (mapping.target.trim() !== "") {
-          return draft;
-        }
-        const target = targetByUpper.get(mapping.source.toUpperCase());
-        return target === undefined
-          ? draft
-          : { ...draft, ...renameTargetField(draft, mapping.source, target) };
-      }, current),
-    );
+  function autoFillSameNameTargets(targetColumns: readonly TargetColumnName[]) {
+    setSpec((current) => ({
+      ...current,
+      ...matchSameNameTargets(current, targetColumns, { onlyUnmapped: true }),
+    }));
   }
 
   /** 全部退回未映射。主键存的是目标字段，一并清掉，否则会剩下一批指向空名字的键。 */
@@ -1072,26 +1075,16 @@ function TaskFormDialog({
     });
   }
 
+  /** 「同名填充」那颗键：用户显式要求，所以覆盖已有映射。 */
   function fillSameNameTargets() {
     if (targetMeta.kind !== "ready") {
       return;
     }
-    const targetByUpper = new Map(
-      targetMeta.data.columns.map((column) => [
-        column.name.toUpperCase(),
-        column.name,
-      ]),
+    updateSpec(
+      matchSameNameTargets(spec, targetMeta.data.columns, {
+        onlyUnmapped: false,
+      }),
     );
-    const next = spec.columns.reduce<Pick<TaskSpec, "columns" | "primary_key">>(
-      (current, mapping) => {
-        const target = targetByUpper.get(mapping.source.toUpperCase());
-        return target === undefined
-          ? current
-          : renameTargetField(current, mapping.source, target);
-      },
-      { columns: spec.columns, primary_key: spec.primary_key },
-    );
-    updateSpec(next);
   }
 
   function toggleKey(column: string) {
@@ -1335,7 +1328,7 @@ function TaskFormDialog({
                 <div
                   className="builder-mode-buttons"
                   role="tablist"
-                  aria-label="源端查询方式"
+                  aria-label="取数方式"
                 >
                   <button
                     className={
@@ -1750,11 +1743,14 @@ function TaskFormDialog({
             </div>
           )}
         </div>
+        {/* 保存只看规格自己完不完整。`sqlError` 是**预览**这一路的偶发失败
+            （一次 500、一次断网），拿它挡保存等于让人对着一个没有重试入口的
+            禁用按钮干瞪眼；规格真有毛病由服务端 `validate()` 在保存时硬拒。 */}
         <ModalFooter
           onClose={onClose}
           busy={submitting}
           submitLabel={submitLabel}
-          submitDisabled={!specComplete || sqlError !== null}
+          submitDisabled={!specComplete}
         />
       </form>
     </Modal>
@@ -1765,7 +1761,9 @@ function TaskFormDialog({
  * 过滤条件控件：字段 + 比较符 + 值，可有若干条（ADR-0035 §3）。
  *
  * 一条都没有时整表取数——**这是允许的**，量级风险归台架（#122）去证，不在这里挡。
- * 比较符严格只有 `>` `<` `=`：`>=` / `<=` 与 `IN` / `BETWEEN` / `LIKE` 第一版都不做。
+ * 控件目前只给 `>` `<` `=` 三种比较符。**这不是 ADR-0035 §3 的原话**——它排除的是形态
+ * （`IN` / `BETWEEN` / `LIKE` / 表达式），`>=` 保持同一个「字段 + 比较符 + 值」三段式，
+ * 并不在排除清单里。加不加是独立的产品决定（ADR-0045 后果），不是被决议挡住的。
  */
 function ConditionEditor({
   conditions,
@@ -1887,11 +1885,11 @@ function ConditionEditor({
         </ul>
       )}
       <small className="spec-note">
-        过滤值为固定配置，保存后随任务执行。比较符只有
+        过滤值为固定配置，保存后随任务执行。这里目前只有
         <span className="mono"> &gt; </span>
         <span className="mono"> &lt; </span>
         <span className="mono"> = </span>
-        三种（ADR-0035 §3）；需要
+        三种比较符；需要
         <span className="mono"> &gt;= </span>、
         <span className="mono">IN</span>、
         <span className="mono">BETWEEN</span>{" "}

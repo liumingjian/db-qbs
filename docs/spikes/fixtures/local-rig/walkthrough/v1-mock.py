@@ -213,7 +213,31 @@ HISTORY = [
             run_params={"load_date": "2026-08-19"},
             outcome="SUCCEEDED", target_table_effect="SWAPPED", stage="COMMITTING",
             sink_code=None, sink_reported_rows=120, message="run completed successfully",
-            failure_kind=None, total_rows=None, precount_ms=None),
+            failure_kind=None, total_rows=120, rows_pushed=120, precount_ms=None),
+    # 自定义 SQL 那个任务也得有一次运行，否则「运行详情」是禁用态、抽屉打不开——
+    # X18 改判后要看的正是抽屉里「任务定义 · 源表」那一格（ADR-0045 §走查触发），
+    # 没有这条运行，那条判据就没有对象。
+    #
+    # 五种运行状态的取样对象一个不动：这一条是**第二个**成功态，
+    # `task-never` 仍然是唯一的「尚未运行」。
+    #
+    # `source_sql` 存的是**包裹之后的完整语句**——运行历史钉的是当时真执行的那一份
+    # （ADR-0036 §2），而自定义 SQL 从不原样执行（ADR-0045 §1）。
+    run_row(run_record_id="rec-sqlmode", run_id="run-sq-1", task_id="task-sqlmode",
+            run_params={},
+            source_sql=(
+                "SELECT q.ID AS ID,\n"
+                "       q.C_NAME AS C_NAME,\n"
+                "       q.LOAD_DATE AS LOAD_DATE\n"
+                "  FROM (\n"
+                "         SELECT *\n"
+                "           FROM APP.T_HOLDING@POC_LINK_A\n"
+                "          WHERE STATUS = 1\n"
+                "       ) q"
+            ),
+            outcome="SUCCEEDED", target_table_effect="SWAPPED", stage="COMMITTING",
+            sink_code=None, sink_reported_rows=64, message="run completed successfully",
+            failure_kind=None, total_rows=64, rows_pushed=64),
 ]
 
 
@@ -392,8 +416,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, BUILDER_COLUMNS)
         if path == "/api/builder/sql":
             spec = self._read()
-            # 桩要能造出**报错态**：自定义 SQL 模式下「构建 SQL」卡不再渲染，
-            # 这条 400 是该模式下唯一的报错通道，走查得看得见它。
+            # 桩要能造出**报错态**：这条 400 是构建器里的报错通道，走查得看得见它。
+            # （原注释写「自定义 SQL 模式下『构建 SQL』卡不再渲染」——那已经反了，
+            #  ADR-0045 §6 判两种模式都渲染预览，因为用户的 SQL 不是原样执行的。）
             # 只镜像 `TaskSpec::validate()` 里前端能违反的那两条，不复刻整个校验。
             columns = spec.get("columns", [])
             seen = set()

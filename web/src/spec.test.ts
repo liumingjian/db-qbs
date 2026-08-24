@@ -6,6 +6,7 @@ import {
   comparisonSymbol,
   defaultParameterName,
   defaultValueType,
+  matchSameNameTargets,
   renameTargetField,
   runParamsSummary,
   runtimeConditions,
@@ -207,5 +208,65 @@ describe("source summary", () => {
       source_sql: "   ",
     });
     expect(summary.kind).toBe("table");
+  });
+});
+
+describe("matchSameNameTargets（同名接线，两个调用点共用）", () => {
+  const targets = [{ name: "ID" }, { name: "c_name" }, { name: "OTHER" }];
+
+  function draft(columns: TaskSpec["columns"], primary_key: string[] = []) {
+    return { columns, primary_key };
+  }
+
+  it("只补空位时不碰用户已经改过的映射", () => {
+    const next = matchSameNameTargets(
+      draft([
+        { source: "ID", target: "" },
+        { source: "C_NAME", target: "CUSTOMER_NAME" },
+      ]),
+      targets,
+      { onlyUnmapped: true },
+    );
+    expect(next.columns).toEqual([
+      { source: "ID", target: "ID" },
+      // 用户手改成 CUSTOMER_NAME，同名的 c_name 不许把它冲掉。
+      { source: "C_NAME", target: "CUSTOMER_NAME" },
+    ]);
+  });
+
+  it("显式填充时覆盖已有映射", () => {
+    const next = matchSameNameTargets(
+      draft([{ source: "C_NAME", target: "CUSTOMER_NAME" }]),
+      targets,
+      { onlyUnmapped: false },
+    );
+    expect(next.columns).toEqual([{ source: "C_NAME", target: "c_name" }]);
+  });
+
+  it("大小写不敏感地匹配，但落的是目标端原样的大小写（ADR-0038 §8）", () => {
+    const next = matchSameNameTargets(
+      draft([{ source: "C_NAME", target: "" }]),
+      targets,
+      { onlyUnmapped: true },
+    );
+    expect(next.columns).toEqual([{ source: "C_NAME", target: "c_name" }]);
+  });
+
+  it("目标端没有同名列就留着不动", () => {
+    const next = matchSameNameTargets(
+      draft([{ source: "NOT_THERE", target: "" }]),
+      targets,
+      { onlyUnmapped: true },
+    );
+    expect(next.columns).toEqual([{ source: "NOT_THERE", target: "" }]);
+  });
+
+  it("改了目标名的列，主键跟着走", () => {
+    const next = matchSameNameTargets(
+      draft([{ source: "C_NAME", target: "TMP" }], ["TMP"]),
+      targets,
+      { onlyUnmapped: false },
+    );
+    expect(next.primary_key).toEqual(["c_name"]);
   });
 });

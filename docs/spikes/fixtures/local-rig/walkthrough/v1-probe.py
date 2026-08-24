@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""第一版渲染面走查 X1–X19 的机器观察。
+"""第一版渲染面走查 X1–X20 的机器观察。
 
 ## 已跟进 ADR-0043（2026-08-21）
 
@@ -19,6 +19,9 @@
   `observe_progress`（X16）、`observe_state_tags`（X17）、`observe_drawer`（X18）。
 * 2026-08-24（ADR-0044）：`observe_nav`（X1）改判成**四项、目标端 Agent 第一项**，
   `observe_list`（X2）多量一列「目标端 Agent」，新增 `observe_agents`（X19）。
+* 2026-08-24（ADR-0045）：新增 `observe_custom_sql_mode`（X20）——**自定义 SQL 模式
+  此前从未被探针走到过**，那半边的所有实录都是无观察支撑的。`observe_drawer`（X18）
+  多量一格「任务定义 · 源表」，自定义 SQL 的任务在那里曾经是个裸点。
 
 屏的 id 从 `#tasks` 变成 `#jobs`，筛选条从 `.history-filters` 变成 `.filter-card`
 （而且它是表格卡的**兄弟**、不在卡内），卡内计数从 `.card-subtitle` 变成 `.table-count`。
@@ -1242,7 +1245,264 @@ def observe_drawer(page):
     }
     page.screenshot(path=f"{SHOTS}/x18-drawer.png", full_page=True)
     page.click(".drawer-footer button.is-ghost")
+
+    # X18 改判（ADR-0045）：「任务定义」面板的**源表**一格。自定义 SQL 的任务
+    # `owner` / `table` 都是空串，这里曾经直接拼出一个裸点——而上面那一趟取的是
+    # 失败任务（按表选择的那一种），永远照不到这一态。所以再开一次，专挑它。
+    report["source_cell_by_task"] = {}
+    for name in (failed, "客户订单增量"):
+        try:
+            open_drawer(page, name)
+        except Exception as error:  # noqa: BLE001 —— 只观察，探不到就如实记
+            report["source_cell_by_task"][name] = {"opened": False, "reason": str(error)[:120]}
+            continue
+        report["source_cell_by_task"][name] = page.eval_on_selector_all(
+            ".drawer .kv > div",
+            """(els) => els
+                 .filter((el) => el.querySelector('.k').innerText.trim() === '源表')
+                 .map((el) => {
+                     const v = el.querySelector('.v');
+                     return {text: v.innerText, title: v.getAttribute('title')};
+                 })[0] || null""")
+        report["source_cell_by_task"][name]["drawer_sql"] = page.eval_on_selector(
+            ".drawer .drawer-sql", "el => el.innerText")
+        page.click(".drawer-footer button.is-ghost")
     return report
+
+
+def observe_custom_sql_mode(page):
+    """X20：自定义 SQL 模式整半边——**此前从未被探针走到过**。
+
+    上一份实录（`20260824T113748Z`）里「SQL 模式下过滤条件卡不再整个消失」一句
+    没有观察支撑，因为探针从头到尾没点过那个 tab。ADR-0045 §走查触发 认了这笔账，
+    这个函数是它的接手人。
+
+    `window.confirm` 要特别对付：**Playwright 默认自动 dismiss 对话框**，
+    什么都不做的话切模式会静悄悄地变成空操作，而实录会显示「切过去了」——
+    正是那种「跑了等于没跑」的门禁。这里挂 handler，既接受它、又把原话记下来。
+    """
+    dialogs = []
+
+    def on_dialog(dialog):
+        dialogs.append({"type": dialog.type, "message": dialog.message})
+        dialog.accept()
+
+    page.on("dialog", on_dialog)
+    try:
+        open_builder(page, 1440)
+
+        # 岔路口长在哪张卡上——判据说的是「它真正控制的那张卡的头上」，
+        # 所以量的是祖先链，不是它自己长什么样。
+        switch = page.query_selector(".modal .builder-mode-switch")
+        switch_host = page.evaluate(
+            """() => {
+                const el = document.querySelector('.modal .builder-mode-switch');
+                if (!el) { return null; }
+                const header = el.closest('header');
+                const card = header && header.parentElement;
+                return {
+                    in_header: Boolean(header),
+                    card_class: card ? card.className : null,
+                    card_title: card ? (card.querySelector('strong') || {}).textContent : null,
+                    siblings: header
+                        ? [...header.querySelectorAll('button')].map((b) => b.textContent.trim())
+                        : [],
+                };
+            }"""
+        )
+        tabs = [
+            {
+                "text": button.inner_text().strip(),
+                "selected": button.get_attribute("aria-selected"),
+            }
+            for button in page.query_selector_all('.modal [role="tab"]')
+        ]
+
+        # 先读一次源列，制造「真有东西可丢」——桩的任务规格本来就带列，
+        # 但读一次让结果列表也在场，切换要清掉的东西才齐。
+        page.click('.modal .builder-guide button:has-text("读取列")')
+        page.wait_for_selector(".modal .builder-columns tbody tr")
+        before_switch = {
+            "source_rows": len(page.query_selector_all(".modal .builder-columns tbody tr")),
+            "mapping_rows": len(
+                page.query_selector_all(".modal .field-mapping-section tbody tr")
+            ),
+        }
+
+        # ── 切过去。有东西可丢 → 必须弹一次确认 ────────────────────────────
+        page.click('.modal [role="tab"]:has-text("自定义 SQL")')
+        page.wait_for_selector(".modal .source-sql-editor textarea")
+        confirm_on_switch = list(dialogs)
+
+        card_title = page.eval_on_selector(
+            ".modal .builder-guide header strong", "el => el.textContent"
+        )
+        textarea = page.query_selector(".modal .source-sql-editor textarea")
+        # 「一个概念一个名字」：卡片标题 / tab / 字段标签三处该是同一个词。
+        naming = {
+            "card_title": card_title,
+            "tab_text": [t["text"] for t in tabs],
+            "textarea_aria_label": textarea.get_attribute("aria-label"),
+            "legacy_wording_present": page.evaluate(
+                """() => document.querySelector('.modal')
+                     .innerHTML.includes('源 SQL')
+                   || document.querySelector('.modal')
+                     .innerHTML.includes('源端查询方式')"""
+            ),
+        }
+
+        # 切过去之后该被清空的七样
+        after_switch = {
+            "source_rows": len(page.query_selector_all(".modal .builder-columns tbody tr")),
+            "mapping_rows": len(
+                page.query_selector_all(".modal .field-mapping-section tbody tr")
+            ),
+            "textarea_value": textarea.input_value(),
+            # DBLINK 在 SQL 模式下不该出现——路径已经写在 SQL 里了。
+            "dblink_present": page.query_selector(".modal input[list]") is not None,
+        }
+
+        # 过滤条件卡：**不消失**，留一句说明去向
+        conditions = page.query_selector(
+            '.modal section.spec-editor[aria-labelledby="conditions-title"]'
+        )
+        conditions_card = None
+        if conditions is not None:
+            empty = conditions.query_selector(".spec-empty")
+            conditions_card = {
+                "present": True,
+                "subtitle": conditions.eval_on_selector(
+                    "header span", "el => el.textContent"
+                ),
+                "message": empty.inner_text().strip() if empty else None,
+                "add_button": conditions.query_selector("button") is not None,
+            }
+
+        # ── 写一段 SQL、读结果列 ───────────────────────────────────────────
+        sql_text = "SELECT *\n  FROM APP.T_CUSTOMER@POC_LINK_A\n WHERE N_AMT >= 100 AND STATUS != 9"
+        textarea.fill(sql_text)
+        # SQL 模式下读结果列的那颗键在**卡头里**（与两个 tab 同排），文案是「读取列」——
+        # 与表模式下表格上方那颗同名，所以必须限定在 `.builder-mode-switch` 里，
+        # 否则会点到另一个控件上（或在 SQL 模式下压根找不到）。
+        page.click('.modal .builder-mode-switch button:has-text("读取列")')
+        page.wait_for_selector(".modal .builder-columns tbody tr")
+        result_columns = [
+            row.query_selector("td:nth-child(2)").inner_text().strip()
+            for row in page.query_selector_all(".modal .builder-columns tbody tr")
+        ]
+
+        # ── 把映射做完，预览才有内容 ────────────────────────────────────────
+        # `specComplete` 要求**每一个勾选的源列都映射到了目标字段**，外加至少一个主键。
+        # 桩的目标表只有 ID / C_NAME / LOAD_DATE，`N_AMT` 没有同名列可接——
+        # 所以先把它勾掉。这一步同时就是判据本身：勾掉的列不该出现在最终语句里。
+        dropped = None
+        rows = page.query_selector_all(".modal .builder-columns tbody tr")
+        for row in rows:
+            if row.query_selector("td:nth-child(2)").inner_text().strip() == "N_AMT":
+                row.query_selector('input[type="checkbox"]').uncheck()
+                dropped = "N_AMT"
+                break
+
+        # 目标列要**失焦**才读（见 X6 那段注释：不先 focus，React 的 onBlur 不触发）。
+        # 目标表没被切模式清掉——它是目标端的事，与源端怎么取数无关。
+        target_input = page.query_selector(".modal .target-tree-shell .tree-search input")
+        target_table_value = target_input.input_value() if target_input else None
+        target_input.focus()
+        target_input.evaluate("(el) => el.blur()")
+        page.wait_for_selector(".modal .field-mapping-section tbody tr", timeout=15000)
+        # 同名列自动接上（ADR-0045 之外的既有行为），这里把它量下来：
+        # 上一轮走查里这条一直没有对象，因为桩的规格本来就填满了。
+        mapping_after_autofill = page.eval_on_selector_all(
+            ".modal .field-mapping-section tbody tr",
+            """(rows) => rows.map((r) => ({
+                 source: r.querySelector('td').innerText.trim(),
+                 target: (r.querySelector('.cell-input') || {}).value ?? null,
+               }))""")
+        mapping_subtitle = page.eval_on_selector(
+            ".modal .field-mapping-section header span", "el => el.textContent")
+
+        # 主键：勾第一行
+        first_key = page.query_selector(
+            '.modal .field-mapping-section tbody tr input[type="checkbox"]')
+        if first_key is not None and not first_key.is_disabled():
+            first_key.check()
+
+        def preview():
+            node = page.query_selector(".modal .generated-sql .ddl-output")
+            if node is not None:
+                return {"rendered": True, "sql": node.inner_text()}
+            empty = page.query_selector(".modal .generated-sql .spec-empty")
+            error = page.query_selector(".modal .generated-sql .form-error")
+            return {
+                "rendered": False,
+                "empty_text": empty.inner_text().strip() if empty else None,
+                "error_text": error.inner_text().strip() if error else None,
+            }
+
+        page.wait_for_timeout(700)
+        preview_subtitle = page.eval_on_selector(
+            ".modal .generated-sql header span", "el => el.textContent"
+        )
+        preview_without_dropped = preview()
+
+        # 连字要**在预览真渲染出来之后**量——`.ddl-output` 不在场时取到的是 None，
+        # 那不是「没关连字」，是「压根没量到」。上一版就是在空态下取的。
+        ligatures = page.evaluate(
+            """() => {
+                const pick = (sel) => {
+                    const el = document.querySelector(sel);
+                    return el ? getComputedStyle(el).fontVariantLigatures : null;
+                };
+                return {
+                    textarea: pick('.modal .source-sql-editor textarea'),
+                    preview: pick('.modal .generated-sql .ddl-output'),
+                    preview_text: (document.querySelector('.modal .generated-sql .ddl-output')
+                        || {}).innerText ?? null,
+                };
+            }"""
+        )
+
+        # ── 反过来把那一列勾回去 ───────────────────────────────────────────
+        # 勾回来它就又变成「没映射的选中列」，`specComplete` 掉回 false、预览退回空态。
+        # 两个方向都动了，才说明这颗勾选框真的连着最终语句（P0 第 3 条）。
+        for row in page.query_selector_all(".modal .builder-columns tbody tr"):
+            if row.query_selector("td:nth-child(2)").inner_text().strip() == "N_AMT":
+                row.query_selector('input[type="checkbox"]').check()
+                break
+        page.wait_for_timeout(700)
+        preview_with_dropped_back = preview()
+
+        # ── 反向：清空之后再切回去，**不该**弹确认 ─────────────────────────
+        dialogs.clear()
+        textarea.fill("")
+        page.wait_for_timeout(300)
+        page.click('.modal [role="tab"]:has-text("按表选择")')
+        page.wait_for_timeout(300)
+        confirm_when_blank = list(dialogs)
+
+        page.screenshot(path=f"{SHOTS}/x20-custom-sql.png", full_page=True)
+        return {
+            "switch_host": switch_host,
+            "switch_present": switch is not None,
+            "tabs": tabs,
+            "naming": naming,
+            "before_switch": before_switch,
+            "after_switch": after_switch,
+            "confirm_on_switch": confirm_on_switch,
+            "confirm_when_blank": confirm_when_blank,
+            "conditions_card": conditions_card,
+            "result_columns": result_columns,
+            "target_table_value": target_table_value,
+            "mapping_after_autofill": mapping_after_autofill,
+            "mapping_subtitle": mapping_subtitle,
+            "preview_subtitle": preview_subtitle,
+            "unchecked_column": dropped,
+            "preview_without_dropped": preview_without_dropped,
+            "preview_with_dropped_back": preview_with_dropped_back,
+            "ligatures": ligatures,
+        }
+    finally:
+        page.remove_listener("dialog", on_dialog)
 
 
 def observe_history_redirect(page):
@@ -1449,6 +1709,9 @@ def main():
             "X16_progress": observe_progress(page),
             "X17_state_tags": observe_state_tags(page),
             "X18_drawer": observe_drawer(page),
+            # X20 会**改构建器里的规格草稿**（切模式清空、写 SQL、改勾选），
+            # 但它开的是编辑对话框、关掉就没了，不落库，所以摆在只读的那些之后即可。
+            "X20_custom_sql": observe_custom_sql_mode(page),
             # X19 也会**改状态**（注册一台新 agent），所以同样排在只读的那些之后。
             "X19_agents": observe_agents(page),
             # X9 摆在最后：它会**真的发起一次运行**，把桩里的最近一次运行换掉。

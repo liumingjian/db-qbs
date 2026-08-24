@@ -234,9 +234,40 @@ export function sourceSummary(
   };
 }
 
-/** 这份规格走的是不是自定义 SQL 取数——判据只有一条：`source_sql` 有没有非空内容。 */
-export function isCustomSqlSpec(
-  spec: Pick<TaskSpec, "source_sql">,
-): boolean {
-  return (spec.source_sql?.trim() ?? "") !== "";
+/** 同名匹配只认名字，不认大小写——目标端是 MySQL，比对口径见 ADR-0038 §8。 */
+export interface TargetColumnName {
+  name: string;
+}
+
+/**
+ * 把源列按**同名**接到目标字段上，返回改动后的 `columns` + `primary_key`。
+ *
+ * 两个调用点共用这一份：读取目标列之后的自动接线（`onlyUnmapped: true`，
+ * 只补空位，绝不冲掉用户手改过的映射），以及「同名填充」那颗键
+ * （`onlyUnmapped: false`，用户显式要求，覆盖）。
+ * 差别只有这一个开关——两份各写一遍的时候，差别藏在函数名里看不见。
+ *
+ * 走 `renameTargetField` 而不是直接改 `columns`，是因为目标名一变主键就要跟着走
+ * （主键存的是目标字段名，ADR-0038 §6）。
+ */
+export function matchSameNameTargets(
+  spec: Pick<TaskSpec, "columns" | "primary_key">,
+  targetColumns: readonly TargetColumnName[],
+  { onlyUnmapped }: { onlyUnmapped: boolean },
+): Pick<TaskSpec, "columns" | "primary_key"> {
+  const targetByUpper = new Map(
+    targetColumns.map((column) => [column.name.toUpperCase(), column.name]),
+  );
+  return spec.columns.reduce<Pick<TaskSpec, "columns" | "primary_key">>(
+    (current, mapping) => {
+      if (onlyUnmapped && mapping.target.trim() !== "") {
+        return current;
+      }
+      const target = targetByUpper.get(mapping.source.toUpperCase());
+      return target === undefined
+        ? current
+        : renameTargetField(current, mapping.source, target);
+    },
+    { columns: spec.columns, primary_key: spec.primary_key },
+  );
 }

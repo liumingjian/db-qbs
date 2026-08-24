@@ -258,7 +258,13 @@ impl TaskSpec {
     fn projection(&self, alias: &str) -> String {
         self.columns
             .iter()
-            .map(|mapping| format!("{alias}.{} AS {}", mapping.source, mapping.target))
+            .map(|mapping| {
+                format!(
+                    "{alias}.{} AS {}",
+                    quote_if_folded(&mapping.source),
+                    mapping.target
+                )
+            })
             .collect::<Vec<_>>()
             .join(",\n       ")
     }
@@ -371,6 +377,23 @@ fn normalize_source_sql(source_sql: &str) -> String {
         .map(str::trim_end)
         .unwrap_or_else(|| source_sql.trim())
         .to_owned()
+}
+
+/// 列引用的写法。Oracle 把**未加引号**的标识符一律折成大写，于是内层查询若把结果列
+/// 别名成了带引号的小写（`SELECT ID AS "id"`），`q.id` 会折成 `Q.ID`——打不中，
+/// ORA-00904，且只在真跑的时候才炸。
+///
+/// 判定见 ADR-0045 §3：**不是全大写才加引号**。全大写是绝大多数情况（Oracle 的默认折叠结果），
+/// 保持不加引号意味着既有任务生成的 SQL 文本一字不变；「一律加引号」的正确性与本式完全相同，
+/// 却会改动每一条既有任务的生成文本，连带动到运行历史里那份快照的可比性。
+///
+/// 安全性不靠这里：名字已经过 [`validate_identifier`]，里面不可能有引号或空白。
+fn quote_if_folded(identifier: &str) -> String {
+    if identifier == identifier.to_ascii_uppercase() {
+        identifier.to_owned()
+    } else {
+        format!("\"{identifier}\"")
+    }
 }
 
 /// 只收未加引号的 Oracle 标识符。这是**唯一**挡住把标识符拼进 SQL 的东西——

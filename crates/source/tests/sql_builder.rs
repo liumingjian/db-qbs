@@ -116,6 +116,55 @@ fn unselected_columns_are_dropped_from_the_custom_sql_projection() {
     );
 }
 
+/// 内层把结果列别名成了**带引号的小写**（`AS "id"`）时，外层的引用必须也带引号。
+/// 不带引号的引用被 Oracle 折成大写，`q.id` → `Q.ID`，打不中那一列——
+/// ORA-00904，而且只在真跑的时候才炸（ADR-0045 §3）。
+#[test]
+fn a_lowercase_result_column_is_referenced_with_quotes() {
+    let mut spec = spec();
+    spec.source_sql = Some("SELECT ID AS \"id\" FROM APP.T_CUSTOMER@FA".to_owned());
+    spec.dblink = None;
+    spec.conditions.clear();
+    spec.order_by.clear();
+    spec.columns = vec![ColumnMapping {
+        source: "id".to_owned(),
+        target: "BIZ_ID".to_owned(),
+    }];
+    spec.primary_key = vec!["BIZ_ID".to_owned()];
+
+    spec.validate().unwrap();
+    assert!(
+        spec.source_sql().contains("q.\"id\" AS BIZ_ID"),
+        "小写结果列必须带引号引用，实际生成：\n{}",
+        spec.source_sql()
+    );
+}
+
+/// 反过来：全大写的列名**不加引号**——绝大多数任务走这一支，
+/// 加引号会把每一条既有任务的生成文本都改掉，收益为零（ADR-0045 §3 否掉「一律加引号」）。
+#[test]
+fn an_uppercase_result_column_is_referenced_without_quotes() {
+    let mut spec = spec();
+    spec.source_sql = Some("SELECT * FROM APP.T_CUSTOMER@FA".to_owned());
+    spec.dblink = None;
+    spec.conditions.clear();
+    spec.order_by.clear();
+
+    spec.validate().unwrap();
+    let sql = spec.source_sql();
+    assert!(sql.contains("q.N_VA_PRICE AS N_VA_PRICE"), "{sql}");
+    assert!(!sql.contains('"'), "全大写列名不该出现引号：\n{sql}");
+}
+
+/// 按表选择那一路同样遵守这条规则，两条路径共用一份投影，形状不会漂。
+#[test]
+fn the_table_path_keeps_unquoted_uppercase_references() {
+    let spec = spec();
+    spec.validate().unwrap();
+    assert!(spec.source_sql().contains("a.N_VA_PRICE AS N_VA_PRICE"));
+    assert!(!spec.source_sql().contains('"'));
+}
+
 /// 目标字段改名在自定义 SQL 模式下同样要生效——改之前它被静默忽略。
 #[test]
 fn a_renamed_target_field_reaches_the_custom_sql_projection() {

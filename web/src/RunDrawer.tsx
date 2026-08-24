@@ -9,7 +9,7 @@ import {
 } from "./components/DesignSystem";
 import { formatTimestamp, historyPresentation, runIdPresentation } from "./history";
 import { rerunAction } from "./rerun";
-import { conditionSummary, runParamsSummary } from "./spec";
+import { conditionSummary, runParamsSummary, sourceSummary } from "./spec";
 
 /**
  * 运行详情抽屉——**顶替整个「运行历史」屏**（ADR-0043 §2 §4）。
@@ -166,9 +166,13 @@ export function RunDrawer({
             {/* 主键与条件从列表挪进来（ADR-0043 §4）：它们是**任务**的属性，
                 每次运行都一样，占着列表一整列换不来任何区分度。 */}
             <div className="panel-body kv is-pairs">
+              {/* 自定义 SQL 的任务 owner / table 都是空串，直接拼会打出一个裸点。
+                  与作业中心同一口径（sourceSummary）：这里给截断的一行，
+                  全文进 title——完整语句在下面「当次执行的源端 SQL」那一面板里。 */}
               <Value
                 label="源表"
-                value={`${task.spec.owner}.${task.spec.table}`}
+                value={sourceSummary(task.spec).label}
+                title={sourceSummary(task.spec).full}
               />
               <Value label="目标表" value={task.spec.target_table} />
               <Value
@@ -250,15 +254,23 @@ function Value({
   label,
   value,
   bad = false,
+  title,
 }: {
   label: string;
   value: string;
   bad?: boolean;
+  /** 值被截断时挂全文；不传就不加属性，避免给短值也挂一份重复的 tooltip。 */
+  title?: string;
 }) {
   return (
     <div>
       <span className="k">{label}</span>
-      <span className={`v ${bad ? "is-bad" : ""}`}>{value}</span>
+      <span
+        className={`v ${bad ? "is-bad" : ""}`}
+        title={title === value ? undefined : title}
+      >
+        {value}
+      </span>
     </div>
   );
 }
