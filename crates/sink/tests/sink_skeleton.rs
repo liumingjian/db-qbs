@@ -726,6 +726,53 @@ fn open_creates_staging_then_abort_is_idempotent() {
 }
 
 #[test]
+fn poc_relaxed_precheck_allows_mixed_types_not_null_and_split_keys() {
+    let sources = vec![
+        source_column("C_VALUE", "VARCHAR2", None, None, Some(20)),
+        source_column("ID", "NUMBER", Some(10), Some(0), None),
+        source_column("SUB_ID", "NUMBER", Some(10), Some(0), None),
+    ];
+    let targets = vec![
+        target_column("C_VALUE", "int", "int", Some(10), Some(0), None, None, false, None, 1),
+        target_column("ID", "int", "int", Some(10), Some(0), None, None, false, None, 2),
+        target_column(
+            "SUB_ID",
+            "int",
+            "int",
+            Some(10),
+            Some(0),
+            None,
+            None,
+            false,
+            None,
+            3,
+        ),
+    ];
+    let destination = Arc::new(FakeDestination {
+        columns: targets,
+        keys: vec![
+            TargetKey {
+                name: "PRIMARY".to_owned(),
+                columns: vec!["ID".to_owned()],
+            },
+            TargetKey {
+                name: "SUB_ID_UNIQUE".to_owned(),
+                columns: vec!["SUB_ID".to_owned()],
+            },
+        ],
+        ..FakeDestination::default()
+    });
+    let service = SinkService::new_relaxed_precheck("qbs", destination.clone());
+    let mut request = open_request(sources);
+    request.primary_key = vec!["ID".to_owned(), "SUB_ID".to_owned()];
+
+    let opened = service.open(request).unwrap();
+
+    assert_eq!(opened.columns_checked, 3);
+    assert_eq!(destination.created.lock().unwrap().len(), 1);
+}
+
+#[test]
 fn bare_number_range_check_delays_staging_and_rejects_invalid_rows() {
     let sources = vec![
         source_column("N_RAW", "NUMBER", None, None, None),

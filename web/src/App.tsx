@@ -573,7 +573,7 @@ function TaskFormDialog({
   const [targetDatasourceId, setTargetDatasourceId] = useState(
     initial.target_datasource_id,
   );
-  const [spec, setSpec] = useState<TaskSpec>(() => withoutDblink(initial.spec));
+  const [spec, setSpec] = useState<TaskSpec>(() => initial.spec);
   const [tables, setTables] = useState<BuilderTable[]>([]);
   const [columns, setColumns] = useState<BuilderColumn[]>([]);
   const [loading, setLoading] = useState<"tables" | "columns" | null>(null);
@@ -737,14 +737,17 @@ function TaskFormDialog({
   }, [spec, specComplete]);
 
   function updateSpec(change: Partial<TaskSpec>) {
-    setSpec((current) => withoutDblink({ ...current, ...change }));
+    setSpec((current) => ({ ...current, ...change }));
   }
 
   async function loadTables() {
     setLoading("tables");
     setBuilderError(null);
     try {
-      const nextTables = await fetchBuilderTables(sourceDatasourceId, "");
+      const nextTables = await fetchBuilderTables(
+        sourceDatasourceId,
+        spec.dblink?.trim() ?? "",
+      );
       setTables(nextTables);
       if (spec.owner !== "") {
         setSourceExpandedOwners((current) => new Set(current).add(spec.owner));
@@ -766,7 +769,7 @@ function TaskFormDialog({
       setColumns(
         await fetchBuilderColumns({
           datasource_id: sourceDatasourceId,
-          dblink: "",
+          dblink: spec.dblink?.trim() ?? "",
           owner: spec.owner,
           table: spec.table,
         }),
@@ -948,7 +951,7 @@ function TaskFormDialog({
         name,
         source_datasource_id: sourceDatasourceId,
         target_datasource_id: targetDatasourceId,
-        spec: withoutDblink(spec),
+        spec,
       });
       onClose();
     } catch (submitError) {
@@ -993,6 +996,7 @@ function TaskFormDialog({
                     setSourceTableFilter("");
                     setSourceExpandedOwners(new Set());
                     updateSpec({
+                      dblink: undefined,
                       owner: "",
                       table: "",
                       columns: [],
@@ -1015,6 +1019,29 @@ function TaskFormDialog({
                   ))}
                 </select>
                 {oracleDatasources.length === 0 && <DatasourceHint />}
+              </FormField>
+              <FormField label="源端 DBLINK（可选）">
+                <input
+                  value={spec.dblink ?? ""}
+                  disabled={sourceDatasourceId === ""}
+                  placeholder="如 FA"
+                  onChange={(event) => {
+                    const dblink = event.target.value.trim();
+                    setTables([]);
+                    setColumns([]);
+                    setSourceTableFilter("");
+                    setSourceExpandedOwners(new Set());
+                    updateSpec({
+                      dblink: dblink === "" ? undefined : dblink,
+                      owner: "",
+                      table: "",
+                      columns: [],
+                      primary_key: [],
+                      conditions: [],
+                      order_by: [],
+                    });
+                  }}
+                />
               </FormField>
               <FormField label="目标端（MySQL）">
                 <select
@@ -1930,11 +1957,6 @@ function mappedSourceOf(spec: TaskSpec, targetColumn: string): string | undefine
   const wanted = targetColumn.toUpperCase();
   return spec.columns.find((mapping) => mapping.target.toUpperCase() === wanted)
     ?.source;
-}
-
-function withoutDblink(spec: TaskSpec): TaskSpec {
-  const { dblink: _dblink, ...rest } = spec;
-  return rest;
 }
 
 interface SourceTableGroup {

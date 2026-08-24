@@ -87,6 +87,20 @@ describe("task API", () => {
     });
   });
 
+  it("keeps an Oracle dblink in the structured task spec", async () => {
+    const input = taskInput({ spec: spec({ dblink: "FA" }) });
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ task_id: "task-01", ...input }), { status: 201 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createTask(input);
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/tasks", expect.objectContaining({
+      body: JSON.stringify(input),
+    }));
+  });
+
   it("never sends a SQL string with the task definition", async () => {
     const input = taskInput({
       name: "持仓明细",

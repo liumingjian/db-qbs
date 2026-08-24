@@ -257,7 +257,7 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .builder-guide header span, .column-fetch-section header span, .field-mapping-section header span { color: var(--mute); font-size: var(--size-meta); }
 .builder-guide { overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); }
 .builder-guide > header { min-height: 48px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
-.builder-controls { display: grid; grid-template-columns: repeat(2, minmax(220px, 1fr)); align-items: end; gap: 10px; padding: 12px; }
+.builder-controls { display: grid; grid-template-columns: repeat(3, minmax(180px, 1fr)); align-items: end; gap: 10px; padding: 12px; }
 .builder-controls select { width: 100%; height: var(--ctl-h); padding: 0 30px 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); }
 .tree-picker, .target-tree-shell { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
 .tree-picker-toolbar, .target-table-controls, .builder-selected-row { display: flex; align-items: center; gap: 10px; }

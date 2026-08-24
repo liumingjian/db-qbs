@@ -10,6 +10,7 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use crate::{
     load_agent_identity, ApiError, BatchPayload, CommitRequest, Destination, DestinationFactory,
     MysqlDestination, MysqlFactory, OpenRunRequest, SinkConfig, SinkService, TargetConnection,
+    relaxed_precheck_enabled,
 };
 
 const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
@@ -20,6 +21,7 @@ pub fn serve(config: SinkConfig) -> Result<(), String> {
     if config.listen.is_empty() {
         return Err("sink 配置 listen 不能为空".to_owned());
     }
+    let relaxed_precheck = relaxed_precheck_enabled();
     {
         let stdout = io::stdout();
         let mut writer = stdout.lock();
@@ -31,9 +33,15 @@ pub fn serve(config: SinkConfig) -> Result<(), String> {
             None,
             json!({
                 "listen": &config.listen,
+                "relaxed_precheck": relaxed_precheck,
                 "message": format!(
-                    "本服务无鉴权，能连上者可用调用方给的凭据清空并重写任意暂存表与目标表；当前监听地址：{}",
-                    config.listen
+                    "{}；当前监听地址：{}",
+                    if relaxed_precheck {
+                        "POC 宽松预检查已开启，映射类型、可空性、唯一键和值域检查不会拦截运行"
+                    } else {
+                        "本服务无鉴权，能连上者可用调用方给的凭据清空并重写任意暂存表与目标表"
+                    },
+                    config.listen,
                 ),
             }),
         );
