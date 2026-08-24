@@ -241,7 +241,10 @@ function DatasourceTable({
                 它回答的是现场那句「我把 agent 停了，为什么还在同步」——现在停了就看得见。 */}
             <th>目标端 Agent</th>
             <th>用户</th>
-            <th>口令</th>
+            {/* 「口令」列退役（ADR-0046 §3）：数据源要测通才存得下（ADR-0039 §3），
+                存下来的每一条口令都是设过的，这一列因此恒为「已设置」——一列常量，
+                占着一格宽度却答不了任何问题。表单里那个「已设置 · 留空 = 不改」的徽标
+                照旧留着，它答的是「这次留空会怎样」，是另一回事。 */}
             <th>被引用</th>
             <th className="action-column">操作</th>
           </tr>
@@ -262,7 +265,6 @@ function DatasourceTable({
                   <AgentCell datasource={datasource} agents={agents} />
                 </td>
                 <td className="mono">{datasource.username}</td>
-                <td>{datasource.has_password ? "已设置" : "未设置"}</td>
                 <td>{count === 0 ? "未被引用" : `${count} 个任务`}</td>
                 <td className="action-column">
                   {/* 行内动作**全用图标**、靠 `title` 认（ADR-0043 §5；ADR-0042 §6 已作废）。

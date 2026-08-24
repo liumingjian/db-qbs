@@ -71,7 +71,16 @@ def open_builder(page, target_table):
     page.wait_for_selector("#jobs tbody tr")
     page.click('button[aria-label="编辑任务定义"]')
     page.wait_for_selector(".builder-guide")
-    page.fill('input[list="target-table-options"]', target_table)
+    # 2026-08-24：目标表输入框**又换了一次形态**。`f371935`（"Refine task builder
+    # table selection"，2026-08-21）把 `<input list="target-table-options">` 换成了
+    # 目标端那棵树上的搜索框，于是这一行从那天起就选不中任何东西——W1–W6 整份
+    # 一跑就 30s 超时。那一票没有触发 W 系列，中间几票也没有，所以没人发现。
+    # 这与 `47a2fed` 摘掉建表 SQL 区块是同一种事故：**判据还在，跑它的手断了**。
+    # 认 `.target-tree-shell .tree-search input`——它是目标端那半边唯一的输入框；
+    # 填完要 blur，`loadTargetColumns` 挂在 onBlur 上（与 X 走查的 X6 同一处坑）。
+    target_input = page.wait_for_selector(".target-tree-shell .tree-search input")
+    target_input.fill(target_table)
+    target_input.evaluate("(el) => el.blur()")
     page.wait_for_timeout(500)
     button = page.query_selector('section[aria-labelledby="column-fetch-title"] header button')
     if button is None:
@@ -150,6 +159,16 @@ def observe_rejected_fetch(page):
     }
 
 
+def text_or_absent(page, selector):
+    """取一格的文字；这一格不在场就如实回一条缺席，**不抛**。
+
+    走查记录要看得见「它没了」，而不是看见一个堆栈——一个 `AttributeError`
+    会把后面所有判据一起带走，那才是最贵的失败方式。
+    """
+    node = page.query_selector(selector)
+    return node.inner_text() if node is not None else {"object_missing": selector}
+
+
 def observe_builder_surface(page):
     """本票新增的构建器面（条件 / 排序 / 只读 SQL），走查清单之外的旁证。"""
     page.set_viewport_size({"width": 1440, "height": 1400})
@@ -173,9 +192,13 @@ def observe_builder_surface(page):
         "condition_rows": len(page.query_selector_all(".condition-row")),
         "sql_is_readonly": page.query_selector(".generated-sql textarea") is None,
         "sql_text": page.query_selector(".generated-sql pre").inner_text(),
-        "run_parameters": page.query_selector(".run-parameter-list").inner_text(),
+        # 这两格都可能**合法地缺席**，缺席时不许抛：探针只观察不断言（ADR-0028 §1）。
+        # `.run-parameter-list` 只在真有运行参数时渲染——值来源全是常量时那句
+        # 「无——发起运行时不需要填任何值」恒为真，恒真的提示不承载信息，已被撤掉。
+        # 抛出去的话，整份 W1–W6 会以一个 AttributeError 收场，而判据一条都没跑。
+        "run_parameters": text_or_absent(page, ".run-parameter-list"),
         "primary_key_boxes": len(page.query_selector_all('.builder-columns input[aria-label*="主键"]')),
-        "key_note": page.query_selector(".builder-key-note").inner_text(),
+        "key_note": text_or_absent(page, ".builder-key-note"),
     }
 
 

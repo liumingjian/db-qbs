@@ -22,6 +22,11 @@
 * 2026-08-24（ADR-0045）：新增 `observe_custom_sql_mode`（X20）——**自定义 SQL 模式
   此前从未被探针走到过**，那半边的所有实录都是无观察支撑的。`observe_drawer`（X18）
   多量一格「任务定义 · 源表」，自定义 SQL 的任务在那里曾经是个裸点。
+* 2026-08-24（ADR-0046，一轮 QA 修复）：`observe_nav`（X1）三改判成**作业中心第一、
+  目标端 Agent 第三**（按回访频次排），并多量一个 `active_item`——高亮项必须就是第一项；
+  `observe_list`（X2）显式量「口令」列**不在**（那一列恒为「已设置」，已撤）；
+  `observe_custom_sql_mode`（X20）多量高亮层的记号配色与**两层同框**、
+  以及「格式化」按钮的**只动空白**不变式。
 
 屏的 id 从 `#tasks` 变成 `#jobs`，筛选条从 `.history-filters` 变成 `.filter-card`
 （而且它是表格卡的**兄弟**、不在卡内），卡内计数从 `.card-subtitle` 变成 `.table-count`。
@@ -107,11 +112,14 @@ def open_datasources(page, width=1440, height=1200):
 
 
 def observe_nav(page):
-    """X1（ADR-0044 再改判）：导航**四项**、目标端 Agent 第一项、数据源第三项、侧栏深色。
+    """X1（ADR-0046 三改判）：导航**四项**、次序按回访频次——
+    作业中心第一、数据源第二、目标端 Agent 第三、系统设置第四；侧栏深色。
 
-    2026-08-24 之前判的是「三项、数据源第二项」（ADR-0043），更早判的是「四项、数据源第三项」
-    ——现在这四项与更早那次不是同一组。这里连侧栏底色一起量出来，
-    「不再是白底左导航」那句话得有个数字兜着。
+    ADR-0044 曾判「目标端 Agent 第一」，理由是先有 agent 才建得出 MySQL 数据源；
+    ADR-0046 §2 推翻的正是这条——那只在第一次装机那天成立。
+    落地页一直是作业中心，所以这里连 `active_item` 一起量：**高亮项必须就是第一项**，
+    「打开时高亮的和展开的不是同一屏」正是这次改判要消掉的错位。
+    侧栏底色一并量出来，「不再是白底左导航」那句话得有个数字兜着。
     """
     page.set_viewport_size({"width": 1440, "height": 1200})
     page.goto(BASE, wait_until="networkidle")
@@ -123,6 +131,10 @@ def observe_nav(page):
         "classes": [item.get_attribute("class") for item in items],
         "first_item": items[0].inner_text().strip() if items else None,
         "third_item": items[2].inner_text().strip() if len(items) > 2 else None,
+        # 高亮项与第一项是不是同一个——ADR-0046 §2 要消掉的那处错位。
+        "active_item": page.eval_on_selector(
+            "aside.sidebar .nav-item.is-active", "(el) => el.innerText.trim()"
+        ),
         "sidebar_style": page.eval_on_selector(
             "aside.sidebar",
             "(el) => { const cs = getComputedStyle(el);"
@@ -138,10 +150,12 @@ def observe_nav(page):
 
 
 def observe_list(page):
-    """X2（ADR-0044 改判）：列表八列——多一列「目标端 Agent」；
-    仍然没有搜索框 / 类型筛选 / **业务库的**连接状态列。
+    """X2（ADR-0046 再改判）：列表**七列**——ADR-0044 加的「目标端 Agent」还在，
+    ADR-0046 §3 撤掉的是「口令」；仍然没有搜索框 / 类型筛选 / **业务库的**连接状态列。
 
-    那一列 MySQL 行显示 agent 名字、绑的那台不在线时跟一个状态标签，Oracle 行是空的。
+    「目标端 Agent」那一列 MySQL 行显示 agent 名字、绑的那台不在线时跟一个状态标签，
+    Oracle 行是空的。「口令」列恒为「已设置」（测通才让存），所以这里**显式量它不在**——
+    一列常量消失了，只看列数看不出来是哪一列没了。
     """
     open_datasources(page)
     headers = [h.inner_text() for h in page.query_selector_all("#datasources thead th")]
@@ -150,6 +164,9 @@ def observe_list(page):
     page.screenshot(path=f"{SHOTS}/x2-datasource-list.png", full_page=True)
     return {
         "columns": headers,
+        "column_count": len(headers),
+        # 撤掉的是**列表这一列**；表单里那个「已设置 · 留空 = 不改」的徽标是另一回事（见 X4）。
+        "password_column_present": "口令" in headers,
         "row_count": len(rows),
         "rows": rows,
         "search_fields": len(page.query_selector_all("#datasources .search-field")),
@@ -1379,7 +1396,13 @@ def observe_custom_sql_mode(page):
             }
 
         # ── 写一段 SQL、读结果列 ───────────────────────────────────────────
-        sql_text = "SELECT *\n  FROM APP.T_CUSTOMER@POC_LINK_A\n WHERE N_AMT >= 100 AND STATUS != 9"
+        # 记号六类都要在场，高亮才有得量：关键字 / 标识符 / **单引号字面量** /
+        # **双引号标识符** / 数字 / 行注释。结果列由桩固定返回，改这段不影响后面的判据。
+        sql_text = (
+            "SELECT ID, C_NAME, 'vip' AS \"grade\", N_AMT -- 结果列由桩固定返回\n"
+            "  FROM APP.T_CUSTOMER@POC_LINK_A\n"
+            " WHERE N_AMT >= 100 AND STATUS != 9"
+        )
         textarea.fill(sql_text)
         # SQL 模式下读结果列的那颗键在**卡头里**（与两个 tab 同排），文案是「读取列」——
         # 与表模式下表格上方那颗同名，所以必须限定在 `.builder-mode-switch` 里，
@@ -1390,6 +1413,90 @@ def observe_custom_sql_mode(page):
             row.query_selector("td:nth-child(2)").inner_text().strip()
             for row in page.query_selector_all(".modal .builder-columns tbody tr")
         ]
+
+        # ── 高亮与格式化（ADR-0046 §1 增补）─────────────────────────────────
+        # 高亮的判据有两半，两半都得量：
+        #   1. **分类对不对**——双引号标识符与单引号字面量必须不同色（Oracle 上天差地别）；
+        #   2. **两层同不同框**——字体、字号、行高、内边距、边框、white-space 六项但凡差一项，
+        #      光标就会飘。这才是这个实现最容易坏的地方，光看颜色是看不出来的。
+        highlight = page.evaluate(
+            """() => {
+                const pre = document.querySelector('.modal .sql-highlight');
+                const ta = document.querySelector('.modal .source-sql-editor textarea');
+                if (!pre || !ta) { return {present: false}; }
+                const nl = String.fromCharCode(10);
+                const trimEnd = (text) => {
+                    let out = text;
+                    while (out.endsWith(nl)) { out = out.slice(0, -1); }
+                    return out;
+                };
+                const colorOf = (cls) => {
+                    const el = pre.querySelector('.' + cls);
+                    return el ? {text: el.textContent, color: getComputedStyle(el).color} : null;
+                };
+                const box = (el) => {
+                    const cs = getComputedStyle(el);
+                    const r = el.getBoundingClientRect();
+                    return {
+                        font: cs.fontFamily, size: cs.fontSize, lineHeight: cs.lineHeight,
+                        padding: cs.padding, borderWidth: cs.borderTopWidth,
+                        whiteSpace: cs.whiteSpace, ligatures: cs.fontVariantLigatures,
+                        left: Math.round(r.left), top: Math.round(r.top),
+                        width: Math.round(r.width), height: Math.round(r.height),
+                    };
+                };
+                return {
+                    present: true,
+                    token_classes: [...new Set([...pre.querySelectorAll('span')]
+                        .map((el) => el.className))].sort(),
+                    keyword: colorOf('sql-t-keyword'),
+                    string: colorOf('sql-t-string'),
+                    quoted: colorOf('sql-t-quoted'),
+                    number: colorOf('sql-t-number'),
+                    comment: colorOf('sql-t-comment'),
+                    pre_box: box(pre), textarea_box: box(ta),
+                    // 文本没被高亮层吞掉或改写：着色层拼回来的字必须逐字等于输入框里的。
+                    // 换行取自 fromCharCode、不写成正则字面量：这段 JS 住在一个
+                    // 非 raw 的 Python 字符串里，反斜杠 n 会在送到浏览器之前就被
+                    // Python 换成真换行，正则当场断掉。同理这里不用反引号。
+                    text_matches: trimEnd(pre.innerText) === trimEnd(ta.value),
+                    textarea_color: getComputedStyle(ta).color,
+                    caret_color: getComputedStyle(ta).caretColor,
+                };
+            }"""
+        )
+
+        # 格式化：**只动空白**。这里不信任何自陈，直接把非空白字符前后比一遍——
+        # 那正是 `formatSql` 那条不变式的可观察形式。
+        format_button = page.query_selector(
+            '.modal .sql-editor-toolbar button:has-text("格式化")'
+        )
+        before_format = textarea.input_value()
+        format_enabled_before = (
+            not format_button.is_disabled() if format_button else None
+        )
+        if format_button is not None and not format_button.is_disabled():
+            format_button.click()
+            page.wait_for_timeout(300)
+        after_format = textarea.input_value()
+        formatting = {
+            "button_present": format_button is not None,
+            "button_title": format_button.get_attribute("title") if format_button else None,
+            "enabled_before": format_enabled_before,
+            # 排完版就该禁用：再点一次什么都不动，让按钮自陈「没得排了」。
+            "disabled_after": format_button.is_disabled() if format_button else None,
+            "before": before_format,
+            "after": after_format,
+            "changed": before_format != after_format,
+            "non_whitespace_identical": (
+                "".join(before_format.split()) == "".join(after_format.split())
+            ),
+            # 语义没变，已读的结果列就不该被清掉——这是 onFormat 与 onChange 分开的全部理由。
+            "result_columns_after": [
+                row.query_selector("td:nth-child(2)").inner_text().strip()
+                for row in page.query_selector_all(".modal .builder-columns tbody tr")
+            ],
+        }
 
         # ── 把映射做完，预览才有内容 ────────────────────────────────────────
         # `specComplete` 要求**每一个勾选的源列都映射到了目标字段**，外加至少一个主键。
@@ -1492,6 +1599,8 @@ def observe_custom_sql_mode(page):
             "confirm_when_blank": confirm_when_blank,
             "conditions_card": conditions_card,
             "result_columns": result_columns,
+            "highlight": highlight,
+            "formatting": formatting,
             "target_table_value": target_table_value,
             "mapping_after_autofill": mapping_after_autofill,
             "mapping_subtitle": mapping_subtitle,

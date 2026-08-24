@@ -145,6 +145,7 @@ pre.drawer-sql,
 .form-field textarea,
 .inline-result,
 .source-sql-editor textarea,
+.sql-highlight,
 .tree-count,
 .schema-count,
 .builder-guide > footer > span,
@@ -321,10 +322,31 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .builder-mode-buttons .button { border-radius: 0; }
 .builder-mode-buttons .button:first-child { border-radius: var(--radius) 0 0 var(--radius); }
 .builder-mode-buttons .button:last-child { margin-left: -1px; border-radius: 0 var(--radius) var(--radius) 0; }
-.source-sql-editor { padding: 12px; }
+/* ---------------------------------------------------------------- 自定义 SQL 输入框（ADR-0046 §1）
+   高亮是**透明字 textarea 压在着色 `<pre>` 上**：两层必须逐像素同框，否则光标会飘。
+   下面那条 `.sql-highlight, .source-sql-editor textarea` 的合并选择器就是这个约束本身——
+   字体、字号、行高、内边距、边框宽度、`white-space` 六项只要有一项分开写，迟早分开改。 */
+.source-sql-editor { display: flex; flex-direction: column; gap: 8px; padding: 12px; }
+.sql-editor-toolbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.sql-editor-toolbar .spec-note { margin: 0; }
+.sql-editor-toolbar .button { flex: none; }
+.sql-input-shell { position: relative; }
+.sql-highlight, .source-sql-editor textarea { padding: 9px 10px; border: 1px solid transparent; border-radius: var(--radius); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.55; white-space: pre; tab-size: 2; }
+/* 着色层在下、只读、不吃事件；滚动由 textarea 的 onScroll 同步过来（见 SqlEditor.tsx）。 */
+.sql-highlight { position: absolute; inset: 0; overflow: hidden; margin: 0; background: var(--panel); color: var(--text); pointer-events: none; }
+.sql-t-keyword { color: var(--sql-keyword); font-weight: var(--weight-em); }
+.sql-t-string { color: var(--sql-string); }
+.sql-t-number { color: var(--sql-number); }
+.sql-t-quoted { color: var(--sql-quoted); }
+.sql-t-comment { color: var(--mute); }
+.sql-t-punct { color: var(--dim); }
 /* 连字必须关掉：--font-num 里的 JetBrains Mono / Cascadia Mono 会把 `>=` 画成 `≥`、
-   `!=` 画成 `≠`。这一格是该模式下唯一能看到查询的地方，显示的字符串必须**就是**执行的那个。 */
-.source-sql-editor textarea { display: block; width: 100%; min-height: 170px; resize: vertical; padding: 9px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.55; }
+   `!=` 画成 `≠`。这一格是该模式下唯一能看到查询的地方，显示的字符串必须**就是**执行的那个。
+   两层都要关——只关一层，飘的就不只是字形，还有光标位置。 */
+.source-sql-editor textarea { position: relative; display: block; width: 100%; min-height: 170px; resize: vertical; overflow: auto; border-color: var(--line-strong); background: transparent; color: transparent; caret-color: var(--text); }
+/* 字透明了，占位符和选区得单独交代，否则前者跟着一起消失、后者选中即看不见。 */
+.source-sql-editor textarea::placeholder { color: var(--mute); }
+.source-sql-editor textarea::selection { background: var(--brand-dim); }
 .tree-picker, .target-tree-shell { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
 .tree-picker-toolbar, .target-table-controls, .builder-selected-row { display: flex; align-items: center; gap: 10px; }
 .tree-search { min-width: 0; flex: 1; height: var(--ctl-h); display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--mute); }

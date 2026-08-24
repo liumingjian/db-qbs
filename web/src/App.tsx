@@ -57,6 +57,7 @@ import { JobCenterScreen } from "./JobCenterScreen";
 import { latestRunByTask } from "./listing";
 import { RunScreen } from "./RunScreen";
 import { SettingsScreen } from "./SettingsScreen";
+import { SqlEditor } from "./SqlEditor";
 import type { TargetColumnName } from "./spec";
 import {
   COMPARISONS,
@@ -85,14 +86,15 @@ type DialogState =
   | null;
 
 /**
- * 导航四项（ADR-0044 §6 在 ADR-0043 §2 的三项上加了第一项）：
- * **目标端 Agent · 作业中心 · 数据源 · 系统设置**。
+ * 导航四项：**作业中心 · 数据源 · 目标端 Agent · 系统设置**（ADR-0046 §2 改写 ADR-0044 §6 的次序）。
  * 「运行历史」独立屏随作业中心的合并整屏取消。
  *
- * agent 排在最前不是排版偏好：一条 MySQL 数据源必须先有一台已注册的 agent 才建得出来，
- * 所以新装一台机器时，这一屏是第一站。
+ * 次序按**回访频次**排，不按依赖链：agent 屏是装机时去一次、出事时回去一次的运维屏，
+ * 「先有 agent 才建得出 MySQL 数据源」只在第一次装机那一天成立，不该让它占住天天要点的第一格。
+ * 落地页本来也一直是作业中心（见 `pageFromHash` 的兜底），导航第一项是 agent 时，
+ * 高亮的那一项和展开的那一屏对不上。
  */
-type Page = "agents" | "jobs" | "datasources" | "settings";
+type Page = "jobs" | "datasources" | "agents" | "settings";
 
 /** 旧的运行历史地址。**重定向而不是 404**：它还在旧链接与旧文档里流通，接住比让人撞墙便宜。 */
 const RETIRED_HISTORY_HASHES = ["#history", "#/history"];
@@ -135,9 +137,9 @@ function writeCollapsed(collapsed: boolean) {
 }
 
 const NAV_ITEMS: readonly { page: Page; label: string }[] = [
-  { page: "agents", label: "目标端 Agent" },
   { page: "jobs", label: "作业中心" },
   { page: "datasources", label: "数据源" },
+  { page: "agents", label: "目标端 Agent" },
   { page: "settings", label: "系统设置" },
 ];
 
@@ -1381,30 +1383,23 @@ function TaskFormDialog({
               </div>
             </header>
             {sourceQueryMode === "sql" ? (
-              <div className="source-sql-editor">
-                {/* 卡片标题已经写着「自定义 SQL」，内层再挂一个同名标签是纯重复。 */}
-                <textarea
-                  required
-                  rows={8}
-                  aria-label="自定义 SQL"
-                  value={spec.source_sql ?? ""}
-                  placeholder={"SELECT *\nFROM APP.T_CUSTOMER@POC_LINK_A\nWHERE STATUS = 1"}
-                  onChange={(event) => {
-                    setColumns([]);
-                    updateSpec({
-                      source_sql: event.target.value,
-                      columns: [],
-                      primary_key: [],
-                      conditions: [],
-                      order_by: [],
-                    });
-                  }}
-                />
-                <small className="spec-note">
-                  读取列后可以只勾要搬的列。实际执行时会在这条 SQL 外层套一层投影，
-                  只取勾选的列并改名成目标字段——没勾的列不会过线。
-                </small>
-              </div>
+              <SqlEditor
+                value={spec.source_sql ?? ""}
+                placeholder={"SELECT *\nFROM APP.T_CUSTOMER@POC_LINK_A\nWHERE STATUS = 1"}
+                onChange={(next) => {
+                  setColumns([]);
+                  updateSpec({
+                    source_sql: next,
+                    columns: [],
+                    primary_key: [],
+                    conditions: [],
+                    order_by: [],
+                  });
+                }}
+                /* 格式化只动空白（`formatSql` 的不变式），结果列还是同一批——
+                   把已读的列和已勾的主键清掉，等于罚人排一次版。 */
+                onFormat={(next) => updateSpec({ source_sql: next })}
+              />
             ) : (
             <div className="tree-picker">
               <div className="tree-picker-toolbar">
