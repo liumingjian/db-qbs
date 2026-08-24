@@ -387,6 +387,7 @@ dependencies = [
  "db-qbs-shared",
  "db-qbs-source",
  "mysql",
+ "rand",
  "regex",
  "serde",
  "serde_json",
