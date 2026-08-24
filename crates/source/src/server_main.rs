@@ -14,10 +14,11 @@ use std::time::Duration;
 use chrono::Utc;
 use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
 use db_qbs_source::{
-    embedded_web_asset, generate_target_ddl, load_source_config, validate_builder_dblink,
-    ColumnPrecision, DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess,
-    OracleRowSource, RunHistory, RunParams, SourceConfig, TargetConnection, Task, TaskConfig,
-    TaskInput, TaskSpec, TaskStore, UnknownReason,
+    embedded_web_asset, fetch_agent_info, generate_target_ddl, load_source_config,
+    validate_builder_dblink, Agent, AgentEndpoint, AgentInput, AgentStore, ColumnPrecision,
+    DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess, OracleRowSource,
+    RunHistory, RunParams, SourceConfig, TargetConnection, Task, TaskConfig, TaskInput, TaskSpec,
+    TaskStore, UnknownReason,
 };
 use rand::RngCore;
 use serde::de::DeserializeOwned;
@@ -56,9 +57,14 @@ struct ServerState<'a> {
     config_path: &'a Path,
     tasks: &'a TaskStore,
     datasources: &'a DatasourceStore,
+    agents: &'a AgentRegistry,
     history: &'a HistoryStore,
     runs: &'a RunRegistry,
 }
+
+/// agent 注册表被后台探测线程与请求线程共用，所以它是 `Arc<Mutex<...>>`——
+/// 底下是一条 SQLite 连接，`rusqlite::Connection` 不是 `Sync`。
+type AgentRegistry = Arc<Mutex<AgentStore>>;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -157,6 +163,8 @@ fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
     let task_store = TaskStore::open(&config.data_dir)?;
     let datasource_store = DatasourceStore::open(&config.data_dir)?;
     migrate_legacy_oracle_datasource(&config, &datasource_store)?;
+    let agent_store: AgentRegistry = Arc::new(Mutex::new(AgentStore::open(&config.data_dir)?));
+    migrate_legacy_sink_base_url(&config, &agent_store, &datasource_store)?;
     let history_store = HistoryStore::open(&config.data_dir)?;
     history_store.seal_incomplete(
         UnknownReason::ProcessDisappeared,
@@ -192,11 +200,13 @@ fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
     let terminated = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(SIGTERM, Arc::clone(&terminated))
         .map_err(|error| format!("注册 SIGTERM 处理失败：{error}"))?;
+    spawn_agent_probe_loop(Arc::clone(&agent_store), Arc::clone(&terminated));
     let state = ServerState {
         config: &config,
         config_path: &config_path,
         tasks: &task_store,
         datasources: &datasource_store,
+        agents: &agent_store,
         history: &history_store,
         runs: &runs,
     };
@@ -239,6 +249,76 @@ fn migrate_legacy_oracle_datasource(
         );
     }
     Ok(())
+}
+
+/// `source.toml` 里 `sink_base_url` 的一次性迁移（ADR-0044 §5）。
+///
+/// 迁出来的那台 agent 状态是「未探测」，并把**当时还没绑定 agent 的 MySQL 数据源**
+/// 全部指到它——现存部署因此在升级后第一次启动就能照常跑，不需要人先去注册一遍。
+/// 之后这条路径永远不再触发（判据是 agent 表为空）。
+fn migrate_legacy_sink_base_url(
+    config: &SourceConfig,
+    agents: &AgentRegistry,
+    datasources: &DatasourceStore,
+) -> Result<(), String> {
+    let migrated = agents
+        .lock()
+        .map_err(|_| "agent 注册表锁已损坏".to_owned())?
+        .migrate_legacy_sink_base_url(config.sink_base_url.as_deref())?;
+    let Some(agent_id) = migrated else {
+        return Ok(());
+    };
+    let patched = datasources.backfill_missing_agent_id(&agent_id)?;
+    emit(
+        LogLevel::Warn,
+        LogEvent::SourceStarted,
+        json!({
+            "agent_id": agent_id,
+            "datasources_patched": patched,
+            "message": "source.toml 的 sink_base_url 已退役（ADR-0044 §5），本次已迁成一条名为「默认」的目标端 agent，并把还没绑定 agent 的 MySQL 数据源指向它；请从配置文件里删掉这个字段，并在「目标端 Agent」屏确认它在线",
+        }),
+    );
+    Ok(())
+}
+
+/// 后台探测：每 15 秒把注册表里每台 agent 打一遍 `/v1/agent/info`（ADR-0044 §3）。
+///
+/// **它是「停了 agent，界面上就看得见」的那一半**。另一半是每次真要用到 agent 时的当场核对
+/// （测连、元数据、发起运行）——只靠后台探测会有最长 15 秒的窗口期，只靠当场核对则
+/// 列表上永远显示着上一次的旧状态。两个都要。
+fn spawn_agent_probe_loop(agents: AgentRegistry, terminated: Arc<AtomicBool>) {
+    const PROBE_INTERVAL: Duration = Duration::from_secs(15);
+    thread::spawn(move || {
+        while !terminated.load(Ordering::Relaxed) {
+            let registered = match agents.lock() {
+                Ok(store) => store.list().unwrap_or_default(),
+                Err(_) => return,
+            };
+            for agent in registered {
+                if terminated.load(Ordering::Relaxed) {
+                    return;
+                }
+                // 探测本身在锁外做：一台掉线的 agent 要等满连接超时，
+                // 攥着锁等于让整个界面陪它一起卡住。
+                let probed = fetch_agent_info(&agent.base_url);
+                let Ok(store) = agents.lock() else {
+                    return;
+                };
+                let _ = store.record_probe(
+                    &agent.agent_id,
+                    &probed,
+                    &Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                );
+            }
+            // 睡成小段，好让 SIGTERM 之后进程能及时退出。
+            for _ in 0..PROBE_INTERVAL.as_secs() {
+                if terminated.load(Ordering::Relaxed) {
+                    return;
+                }
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+    });
 }
 
 fn clean_run_tasks(data_dir: &Path) -> Result<(), String> {
@@ -320,10 +400,37 @@ fn route_api_request(
         return handle_builder_columns(request, state);
     }
 
+    if path == "/api/agents" {
+        return match method {
+            Method::Get => handle_list_agents(state),
+            Method::Post => handle_register_agent(request, state),
+            _ => not_found(),
+        };
+    }
+
+    // 与数据源那条同理：`/api/agents/{id}/probe` 里的 `probe` 会被按 id 的分支吃掉，
+    // 所以带动作的路由必须排在前面。
+    if method == Method::Post {
+        if let Some(agent_id) = agent_action_id_from_path(path, "/probe") {
+            return handle_probe_agent(state, agent_id);
+        }
+    }
+
+    if path.starts_with("/api/agents/") {
+        let Some(agent_id) = resource_id_from_path(path, "/api/agents/") else {
+            return not_found();
+        };
+        return match method {
+            Method::Put => handle_update_agent(request, state, agent_id),
+            Method::Delete => handle_delete_agent(state, agent_id),
+            _ => not_found(),
+        };
+    }
+
     if path == "/api/datasources" {
         return match method {
             Method::Get => handle_list_datasources(state.datasources),
-            Method::Post => handle_create_datasource(request, state.datasources),
+            Method::Post => handle_create_datasource(request, state),
             _ => not_found(),
         };
     }
@@ -346,7 +453,7 @@ fn route_api_request(
         };
         return match method {
             Method::Get => handle_get_datasource(state.datasources, datasource_id),
-            Method::Put => handle_update_datasource(request, state.datasources, datasource_id),
+            Method::Put => handle_update_datasource(request, state, datasource_id),
             Method::Delete => handle_delete_datasource(state, datasource_id),
             _ => not_found(),
         };
@@ -411,6 +518,14 @@ fn resource_id_from_path<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
     Some(resource_id)
 }
 
+fn agent_action_id_from_path<'a>(path: &'a str, action: &str) -> Option<&'a str> {
+    let agent_id = path.strip_prefix("/api/agents/")?.strip_suffix(action)?;
+    if agent_id.is_empty() || agent_id.contains('/') {
+        return None;
+    }
+    Some(agent_id)
+}
+
 fn test_connection_id_from_path(path: &str) -> Option<&str> {
     let datasource_id = path
         .strip_prefix("/api/datasources/")?
@@ -456,6 +571,13 @@ fn handle_start_run(request: &mut Request, state: &ServerState<'_>) -> HttpRespo
         Ok(target) => target,
         Err(error) => return bad_request(error),
     };
+    // 目标端 agent 也在这里解一次并当场核对（ADR-0044 §4）。**它比其余三条链路更要紧**：
+    // 一次搬运会往目标库写，而「写得进去」曾经与「那台 agent 活着」毫无关系——
+    // 现场把 agent 停掉、同步照跑，正是这条缺失造成的。
+    let agent = match resolve_target_agent(state, &task.target_datasource_id) {
+        Ok(agent) => agent,
+        Err(error) => return json_response(502, &json!({ "kind": "agent", "message": error })),
+    };
 
     match start_run(
         state.config,
@@ -463,6 +585,7 @@ fn handle_start_run(request: &mut Request, state: &ServerState<'_>) -> HttpRespo
         &task,
         access,
         target,
+        agent_endpoint(&agent),
         input.run_params,
         state.history,
         state.runs,
@@ -635,12 +758,25 @@ fn history_response(history: &RunHistory) -> HttpResponse {
     json_response(200, &value)
 }
 
+/// 把注册表里那条记录压成子进程要用的端点（ADR-0044 §4）。
+/// **`instance_id` 一起钉进去**：子进程开跑前还要再核一次身份，
+/// 从「发起」到「真的开始写」之间那段时间里 agent 被换掉，仍然要被抓住。
+fn agent_endpoint(agent: &Agent) -> AgentEndpoint {
+    AgentEndpoint {
+        agent_id: agent.agent_id.clone(),
+        name: agent.name.clone(),
+        base_url: agent.base_url.clone(),
+        instance_id: agent.instance_id.clone(),
+    }
+}
+
 fn start_run(
     config: &SourceConfig,
     config_path: &Path,
     task: &Task,
     access: OracleAccess,
     target: TargetConnection,
+    agent: AgentEndpoint,
     run_params: RunParams,
     history_store: &HistoryStore,
     runs: &RunRegistry,
@@ -665,7 +801,7 @@ fn start_run(
         .insert(run_record_id.clone(), history.clone());
 
     let task_path =
-        match materialize_task(config, task, access, target, &run_params, &run_record_id) {
+        match materialize_task(config, task, access, target, agent, &run_params, &run_record_id) {
             Ok(path) => path,
             Err(error) => {
                 history.mark_parent_failure(error.clone(), Utc::now());
@@ -729,13 +865,14 @@ fn materialize_task(
     task: &Task,
     access: OracleAccess,
     target: TargetConnection,
+    agent: AgentEndpoint,
     run_params: &RunParams,
     run_record_id: &str,
 ) -> Result<PathBuf, String> {
     let directory = config.data_dir.join(RUN_TASKS_DIRECTORY);
     fs::create_dir_all(&directory).map_err(|error| format!("创建临时任务目录失败：{error}"))?;
     let path = directory.join(format!("task-{run_record_id}.toml"));
-    let task_config = task_config_from_task(task, access, target, run_params);
+    let task_config = task_config_from_task(task, access, target, agent, run_params);
     let contents = toml::to_string(&task_config)
         .map_err(|error| format!("序列化临时任务定义失败：{error}"))?;
     let mut file = OpenOptions::new()
@@ -757,12 +894,14 @@ fn task_config_from_task(
     task: &Task,
     access: OracleAccess,
     target: TargetConnection,
+    agent: AgentEndpoint,
     run_params: &RunParams,
 ) -> TaskConfig {
     TaskConfig {
         spec: task.spec.clone(),
         oracle: access,
         target,
+        agent,
         run_params: run_params.clone(),
     }
 }
@@ -953,14 +1092,40 @@ fn handle_list_datasources(store: &DatasourceStore) -> HttpResponse {
     }
 }
 
-fn handle_create_datasource(request: &mut Request, store: &DatasourceStore) -> HttpResponse {
+fn handle_create_datasource(request: &mut Request, state: &ServerState<'_>) -> HttpResponse {
     let input: DatasourceInput = match read_json_body(request) {
         Ok(input) => input,
         Err(error) => return bad_request(error),
     };
-    match store.create(input) {
+    if let Err(error) = check_bound_agent_exists(state, &input) {
+        return bad_request(error);
+    }
+    match state.datasources.create(input) {
         Ok(datasource) => json_response(201, &datasource.view()),
         Err(error) => bad_request(error),
+    }
+}
+
+/// MySQL 数据源绑的那台 agent 必须**真在注册表里**（ADR-0044 §3）。
+///
+/// 只检存在、**不在这里检在线**：一台临时掉线的 agent 不该让人连数据源的库名都改不了。
+/// 「在线」是用它的那一刻的判据（[`resolve_target_agent`]），不是编辑表单的判据。
+fn check_bound_agent_exists(
+    state: &ServerState<'_>,
+    input: &DatasourceInput,
+) -> Result<(), String> {
+    let db_qbs_source::DatasourceSettings::Mysql { agent_id, .. } = &input.settings else {
+        return Ok(());
+    };
+    if agent_id.trim().is_empty() {
+        // 空绑定的措辞归 `DatasourceSettings::validate`，那里那句更贴近表单。
+        return Ok(());
+    }
+    match with_agents(state.agents, |store| store.get(agent_id))? {
+        Some(_) => Ok(()),
+        None => Err(format!(
+            "目标端 agent（{agent_id}）不在注册表里，请先在「目标端 Agent」屏注册它"
+        )),
     }
 }
 
@@ -974,14 +1139,17 @@ fn handle_get_datasource(store: &DatasourceStore, datasource_id: &str) -> HttpRe
 
 fn handle_update_datasource(
     request: &mut Request,
-    store: &DatasourceStore,
+    state: &ServerState<'_>,
     datasource_id: &str,
 ) -> HttpResponse {
     let input: DatasourceInput = match read_json_body(request) {
         Ok(input) => input,
         Err(error) => return bad_request(error),
     };
-    match store.update(datasource_id, input) {
+    if let Err(error) = check_bound_agent_exists(state, &input) {
+        return bad_request(error);
+    }
+    match state.datasources.update(datasource_id, input) {
         Ok(Some(datasource)) => json_response(200, &datasource.view()),
         Ok(None) => not_found(),
         Err(error) => bad_request(error),
@@ -1011,6 +1179,182 @@ fn handle_delete_datasource(state: &ServerState<'_>, datasource_id: &str) -> Htt
         Ok(None) => not_found(),
         Err(error) => internal_error(error),
     }
+}
+
+/// 目标端 agent 的注册表（ADR-0044 §3）。列表是**读库**，不逐台现探——
+/// 后台探测线程 15 秒一轮已经在维护状态了，进屏时再串行探一遍只会把首屏拖到超时长度。
+fn handle_list_agents(state: &ServerState<'_>) -> HttpResponse {
+    match with_agents(state.agents, AgentStore::list) {
+        Ok(agents) => json_response(200, &agents),
+        Err(error) => internal_error(error),
+    }
+}
+
+/// 注册一台 agent。**当场探一次，探不通就不落库**（ADR-0044 §3）：
+/// 库里放一条从没连通过的记录，只会让人在数据源那一屏选到一台并不存在的 agent。
+fn handle_register_agent(request: &mut Request, state: &ServerState<'_>) -> HttpResponse {
+    let input: AgentInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    let base_url = match db_qbs_source::normalize_base_url(&input.base_url) {
+        Ok(base_url) => base_url,
+        Err(error) => return bad_request(error),
+    };
+    let info = match fetch_agent_info(&base_url) {
+        Ok(info) => info,
+        Err(error) => return agent_unreachable(&input.base_url, &error),
+    };
+    let now = now_rfc3339();
+    match with_agents(state.agents, |store| store.register(&input, &info, &now)) {
+        Ok(agent) => json_response(201, &agent),
+        Err(error) => internal_error(error),
+    }
+}
+
+/// 改名 / 改址。改址会**重新钉身份**——换机器是人明确发起的动作（ADR-0044 §3）。
+fn handle_update_agent(
+    request: &mut Request,
+    state: &ServerState<'_>,
+    agent_id: &str,
+) -> HttpResponse {
+    let input: AgentInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    let base_url = match db_qbs_source::normalize_base_url(&input.base_url) {
+        Ok(base_url) => base_url,
+        Err(error) => return bad_request(error),
+    };
+    let info = match fetch_agent_info(&base_url) {
+        Ok(info) => info,
+        Err(error) => return agent_unreachable(&input.base_url, &error),
+    };
+    let now = now_rfc3339();
+    match with_agents(state.agents, |store| {
+        store.update(agent_id, &input, &info, &now)
+    }) {
+        Ok(Some(agent)) => json_response(200, &agent),
+        Ok(None) => not_found(),
+        Err(error) => internal_error(error),
+    }
+}
+
+/// 手动探一台（列表上那个「探测」按钮）。**失败也回 200**：探测的结果本身就是信息，
+/// 界面要拿它把那一行标红并显示原因，报 5xx 会让前端把它当成请求失败。
+fn handle_probe_agent(state: &ServerState<'_>, agent_id: &str) -> HttpResponse {
+    match probe_and_record(state.agents, agent_id) {
+        Ok(Some(agent)) => json_response(200, &agent),
+        Ok(None) => not_found(),
+        Err(error) => internal_error(error),
+    }
+}
+
+/// 删一台 agent。**被数据源引用就拒**，与数据源被任务引用那条 409 同一形态（ADR-0039 §4）：
+/// 删掉之后那些数据源会立刻变成「绑着一台不存在的 agent」，那是个没人看得懂的状态。
+fn handle_delete_agent(state: &ServerState<'_>, agent_id: &str) -> HttpResponse {
+    let referencing = match state.datasources.list() {
+        Ok(datasources) => datasources
+            .into_iter()
+            .filter(|datasource| {
+                matches!(
+                    &datasource.settings,
+                    db_qbs_source::DatasourceSettings::Mysql { agent_id: bound, .. }
+                        if bound == agent_id
+                )
+            })
+            .map(|datasource| datasource.name)
+            .collect::<Vec<_>>(),
+        Err(error) => return internal_error(error),
+    };
+    if !referencing.is_empty() {
+        return json_response(
+            409,
+            &json!({
+                "error": {
+                    "message": format!(
+                        "这台 agent 仍被 {} 条数据源引用；请先改这些数据源绑定的 agent",
+                        referencing.len()
+                    ),
+                    "datasources": referencing,
+                }
+            }),
+        );
+    }
+    match with_agents(state.agents, |store| store.delete(agent_id)) {
+        Ok(Some(agent)) => json_response(200, &agent),
+        Ok(None) => not_found(),
+        Err(error) => internal_error(error),
+    }
+}
+
+fn with_agents<T>(
+    agents: &AgentRegistry,
+    action: impl FnOnce(&AgentStore) -> Result<T, String>,
+) -> Result<T, String> {
+    let store = agents.lock().map_err(|_| "agent 注册表锁已损坏".to_owned())?;
+    action(&store)
+}
+
+/// 探一台并把结果记进库。**探测在锁外做**：一台掉线的 agent 要等满连接超时，
+/// 攥着锁等于让同时进来的每个请求陪它一起卡住。
+fn probe_and_record(agents: &AgentRegistry, agent_id: &str) -> Result<Option<Agent>, String> {
+    let Some(agent) = with_agents(agents, |store| store.get(agent_id))? else {
+        return Ok(None);
+    };
+    let probed = fetch_agent_info(&agent.base_url);
+    let now = now_rfc3339();
+    with_agents(agents, |store| {
+        store.record_probe(agent_id, &probed, &now)
+    })
+}
+
+/// 「这条 MySQL 数据源该走哪台 agent，而且它现在能用吗」——**每一条目标端链路的入口**
+/// （ADR-0044 §4）：测连、取表、取列、发起运行，四处走的都是它。
+///
+/// 它当场探一次并核身份，因此「agent 停了」在**这一刻**就有后果，
+/// 不必等后台那一轮（最长 15 秒）。返回错误时给的是可以直接摆到界面上的人话。
+fn resolve_target_agent(state: &ServerState<'_>, datasource_id: &str) -> Result<Agent, String> {
+    resolve_agent(state, &state.datasources.target_agent_id(datasource_id)?)
+}
+
+/// 同上，但直接按 agent id 解——草稿测连走这一条：那组值还没存进库，
+/// 「这条数据源绑的是谁」只能从表单里当前选的那台取（ADR-0039 §3 同一条解释规则）。
+fn resolve_agent(state: &ServerState<'_>, agent_id: &str) -> Result<Agent, String> {
+    let agent = probe_and_record(state.agents, agent_id)?.ok_or_else(|| {
+        format!("目标端 agent（{agent_id}）不在注册表里，请先在「目标端 Agent」屏注册它")
+    })?;
+    match agent.status {
+        db_qbs_source::AgentStatus::Online => Ok(agent),
+        db_qbs_source::AgentStatus::Mismatch => Err(format!(
+            "目标端 agent「{}」身份不符：{}。目标库只能经它访问，在核对清楚之前这条链路不放行",
+            agent.name,
+            agent.last_error.unwrap_or_default()
+        )),
+        db_qbs_source::AgentStatus::Offline => Err(format!(
+            "目标端 agent「{}」不在线（{}）：{}。目标库只能经它访问，请先把它起起来",
+            agent.name,
+            agent.base_url,
+            agent.last_error.unwrap_or_default()
+        )),
+    }
+}
+
+fn agent_unreachable(base_url: &str, error: &str) -> HttpResponse {
+    json_response(
+        502,
+        &json!({
+            "kind": "agent",
+            "error": {
+                "message": format!("连不上这个地址上的目标端 agent（{base_url}）：{error}"),
+            },
+            "message": format!("连不上这个地址上的目标端 agent（{base_url}）：{error}"),
+        }),
+    )
+}
+
+fn now_rfc3339() -> String {
+    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 /// 草稿「测试连接」（ADR-0039 §3）：用**表单里当前填的值**测，不是库里存的那份。
@@ -1043,8 +1387,13 @@ fn handle_test_datasource_draft(request: &mut Request, state: &ServerState<'_>) 
                 Err(error) => oracle_failure(error),
             }
         }
-        db_qbs_source::DatasourceSettings::Mysql { database, .. } => {
+        db_qbs_source::DatasourceSettings::Mysql {
+            agent_id, database, ..
+        } => {
             let label = database.clone();
+            // 先判表单本身（字段齐不齐、有没有选 agent），再判 agent 在不在线：
+            // 顺序反过来的话，一份「什么都没填」的草稿会先撞上「agent 不在注册表里」，
+            // 那句话对着一个空表单说毫无意义。
             let target = match state
                 .datasources
                 .draft_target_connection(datasource_id, &input.draft.settings)
@@ -1052,7 +1401,15 @@ fn handle_test_datasource_draft(request: &mut Request, state: &ServerState<'_>) 
                 Ok(target) => target,
                 Err(error) => return bad_request(error),
             };
-            match test_target_connection(&state.config.sink_base_url, &target) {
+            // 目标端一律经 agent（ADR-0044 §1）：解出这条草稿选的那台并当场核一次，
+            // 它不在线就到此为止——底下那句「连不上 sink」说不清是库不通还是 agent 不通。
+            let agent = match resolve_agent(state, agent_id) {
+                Ok(agent) => agent,
+                Err(error) => {
+                    return json_response(502, &json!({ "kind": "agent", "message": error }))
+                }
+            };
+            match test_target_connection(&agent.base_url, &target) {
                 Ok(()) => test_connection_ok(started, label),
                 Err(error) => json_response(502, &json!({ "kind": "sink", "message": error })),
             }
@@ -1096,7 +1453,13 @@ fn handle_test_datasource(state: &ServerState<'_>, datasource_id: &str) -> HttpR
                 Ok(target) => target,
                 Err(error) => return bad_request(error),
             };
-            match test_target_connection(&state.config.sink_base_url, &target) {
+            let agent = match resolve_target_agent(state, datasource_id) {
+                Ok(agent) => agent,
+                Err(error) => {
+                    return json_response(502, &json!({ "kind": "agent", "message": error }))
+                }
+            };
+            match test_target_connection(&agent.base_url, &target) {
                 Ok(()) => json_response(200, &json!({ "ok": true })),
                 Err(error) => json_response(502, &json!({ "kind": "sink", "message": error })),
             }
@@ -1111,12 +1474,19 @@ fn handle_target_tables(request: &mut Request, state: &ServerState<'_>) -> HttpR
         Ok(input) => input,
         Err(error) => return bad_request(error),
     };
+    // 顺序：先解连接（数据源不存在 / 类型不对是 400，属请求本身的错），再解 agent
+    // （不在线是 502，属环境的错）。反过来的话，「拿一条 Oracle 数据源去要目标端表清单」
+    // 会先撞上 agent 那一关，报出来的是一句与真实成因无关的话。
     let target = match state.datasources.target_connection(&input.datasource_id) {
         Ok(target) => target,
         Err(error) => return bad_request(error),
     };
+    let agent = match resolve_target_agent(state, &input.datasource_id) {
+        Ok(agent) => agent,
+        Err(error) => return json_response(502, &json!({ "kind": "agent", "message": error })),
+    };
     match post_to_sink(
-        &state.config.sink_base_url,
+        &agent.base_url,
         "/v1/target/tables",
         &serde_json::to_value(&target).expect("target connection must serialize"),
     ) {
@@ -1134,12 +1504,17 @@ fn handle_target_columns(request: &mut Request, state: &ServerState<'_>) -> Http
     if input.target_table.trim().is_empty() {
         return bad_request("target_table 不能为空".to_owned());
     }
+    // 顺序同取表清单：数据源面的错 400，agent 面的错 502。
     let target = match state.datasources.target_connection(&input.datasource_id) {
         Ok(target) => target,
         Err(error) => return bad_request(error),
     };
+    let agent = match resolve_target_agent(state, &input.datasource_id) {
+        Ok(agent) => agent,
+        Err(error) => return json_response(502, &json!({ "kind": "agent", "message": error })),
+    };
     match post_to_sink(
-        &state.config.sink_base_url,
+        &agent.base_url,
         "/v1/target/columns",
         &json!({ "target": target, "target_table": input.target_table }),
     ) {
@@ -1152,8 +1527,8 @@ fn handle_target_columns(request: &mut Request, state: &ServerState<'_>) -> Http
 ///
 /// 与 [`test_target_connection`] 同一条通道、同一条部署前提（ADR-0037 §4：通道必须可信），
 /// 只是多一个「把响应体读回来」——`test-connection` 只关心成没成。
-fn post_to_sink(sink_base_url: &str, path: &str, body: &Value) -> Result<Value, String> {
-    let url = format!("{}{path}", sink_base_url.trim_end_matches('/'));
+fn post_to_sink(agent_base_url: &str, path: &str, body: &Value) -> Result<Value, String> {
+    let url = format!("{}{path}", agent_base_url.trim_end_matches('/'));
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(10))
         .timeout_read(Duration::from_secs(30))
@@ -1179,10 +1554,10 @@ fn post_to_sink(sink_base_url: &str, path: &str, body: &Value) -> Result<Value, 
 
 /// 把连接信息交给 sink 试一把。**口令在这里过线**——这是 ADR-0037 §1 认下的那条路径，
 /// 与发起运行走同一个通道、同一条部署前提（§4：通道必须可信）。
-fn test_target_connection(sink_base_url: &str, target: &TargetConnection) -> Result<(), String> {
+fn test_target_connection(agent_base_url: &str, target: &TargetConnection) -> Result<(), String> {
     let url = format!(
         "{}/v1/target/test-connection",
-        sink_base_url.trim_end_matches('/')
+        agent_base_url.trim_end_matches('/')
     );
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(10))

@@ -23,7 +23,7 @@ SQL `AS` 别名。**尚未在生产环境部署过。**
 
 | 可执行文件 | 位置 | 作用 |
 | --- | --- | --- |
-| `db-qbs-sink` | 目标端 | 长驻服务，写 MySQL |
+| `db-qbs-sink` | 目标端 | 长驻服务，写 MySQL；它就是「目标端 agent」，源端在界面上注册它（ADR-0044） |
 | `db-qbs-source` | 源端 | 长驻服务，Web UI + 任务编排（M2） |
 | `db-qbs-source-run` | 源端 | 一次性进程，跑一趟导入（由 `db-qbs-source` 拉起，也可单独跑） |
 
@@ -45,13 +45,16 @@ SQL `AS` 别名。**尚未在生产环境部署过。**
 cargo build --release
 
 # 目标端
-cp config/sink.toml.example sink.toml && chmod 0600 sink.toml   # 填 mysql_dsn / database / listen
-./target/release/db-qbs-sink --config sink.toml
+cp config/sink.toml.example sink.toml && chmod 0600 sink.toml   # 只填 listen
+./target/release/db-qbs-sink --config sink.toml                 # 首启会在 sink.toml 隔壁生成 agent-id
 
 # 源端
 cp config/source.toml.example source.toml && chmod 0600 source.toml
 ./target/release/db-qbs-source --config source.toml            # 浏览器打开配置里的 listen
 ```
+
+界面上的第一站是 **目标端 Agent**：填上面那个 sink 的地址注册一台（探通才存得下），
+之后建 MySQL 数据源时选它。**目标库只能经 agent 访问**，没有全局兜底地址。
 
 两处 `listen` **都没有鉴权**，默认只绑回环；要多人访问得自己在前面放反向代理做鉴权与 TLS
 （ADR-0024 §1、§4）。不经 UI 直接跑一趟：

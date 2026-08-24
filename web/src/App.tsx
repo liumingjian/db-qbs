@@ -6,6 +6,7 @@ import {
   Menu,
   PanelLeftClose,
   Plus,
+  Radio,
   RefreshCw,
   Search,
   Server,
@@ -24,6 +25,7 @@ import {
   fetchBuilderTables,
   fetchTargetColumns,
   fetchTargetTables,
+  listAgents,
   listDatasources,
   generateBuilderSql,
   listRunHistory,
@@ -32,6 +34,7 @@ import {
   updateTask,
 } from "./api";
 import type {
+  Agent,
   BuilderColumn,
   BuilderSql,
   BuilderTable,
@@ -47,6 +50,7 @@ import type {
   TaskSpec,
 } from "./api";
 import { messageFrom } from "./errors";
+import { AgentScreen } from "./AgentScreen";
 import { JobCenterScreen } from "./JobCenterScreen";
 import { latestRunByTask } from "./listing";
 import { RunScreen } from "./RunScreen";
@@ -77,15 +81,22 @@ type DialogState =
   | null;
 
 /**
- * 导航三项（ADR-0043 §2）：**作业中心 · 数据源 · 系统设置**。
+ * 导航四项（ADR-0044 §6 在 ADR-0043 §2 的三项上加了第一项）：
+ * **目标端 Agent · 作业中心 · 数据源 · 系统设置**。
  * 「运行历史」独立屏随作业中心的合并整屏取消。
+ *
+ * agent 排在最前不是排版偏好：一条 MySQL 数据源必须先有一台已注册的 agent 才建得出来，
+ * 所以新装一台机器时，这一屏是第一站。
  */
-type Page = "jobs" | "datasources" | "settings";
+type Page = "agents" | "jobs" | "datasources" | "settings";
 
 /** 旧的运行历史地址。**重定向而不是 404**：它还在旧链接与旧文档里流通，接住比让人撞墙便宜。 */
 const RETIRED_HISTORY_HASHES = ["#history", "#/history"];
 
 function pageFromHash(hash: string): Page {
+  if (hash === "#agents") {
+    return "agents";
+  }
   if (hash === "#datasources") {
     return "datasources";
   }
@@ -120,6 +131,7 @@ function writeCollapsed(collapsed: boolean) {
 }
 
 const NAV_ITEMS: readonly { page: Page; label: string }[] = [
+  { page: "agents", label: "目标端 Agent" },
   { page: "jobs", label: "作业中心" },
   { page: "datasources", label: "数据源" },
   { page: "settings", label: "系统设置" },
@@ -127,6 +139,8 @@ const NAV_ITEMS: readonly { page: Page; label: string }[] = [
 
 function navIcon(page: Page, size: number) {
   switch (page) {
+    case "agents":
+      return <Radio size={size} aria-hidden="true" />;
     case "jobs":
       return <Database size={size} aria-hidden="true" />;
     case "datasources":
@@ -153,6 +167,11 @@ export function App() {
   // 所以这里不再是「读一次就完」。
   const [datasources, setDatasources] = useState<Datasource[]>([]);
   const [datasourcesLoading, setDatasourcesLoading] = useState(true);
+  /**
+   * 目标端 agent 注册表（ADR-0044）。**与数据源同一次读取**：数据源屏那一列要显示
+   * 「这条库走哪台 agent、它在不在线」，两半分开读会出现一半新一半旧的画面。
+   */
+  const [agents, setAgents] = useState<Agent[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(true);
   /**
@@ -225,9 +244,15 @@ export function App() {
     setDatasourcesLoading(true);
     try {
       // 读不到数据源不该把整个作业中心打成错误——构建器会以「没有可选的数据源」自陈。
-      setDatasources(await listDatasources());
+      const [nextDatasources, nextAgents] = await Promise.all([
+        listDatasources(),
+        listAgents(),
+      ]);
+      setDatasources(nextDatasources);
+      setAgents(nextAgents);
     } catch {
       setDatasources([]);
+      setAgents([]);
     } finally {
       setDatasourcesLoading(false);
     }
@@ -425,9 +450,19 @@ export function App() {
             />
           )}
 
+          {activeRun === null && page === "agents" && (
+            <AgentScreen
+              agents={agents}
+              datasources={datasources}
+              loading={datasourcesLoading}
+              onChanged={loadDatasources}
+            />
+          )}
+
           {activeRun === null && page === "datasources" && (
             <DatasourceScreen
               datasources={datasources}
+              agents={agents}
               tasks={tasks ?? []}
               loading={datasourcesLoading}
               onChanged={loadDatasources}
@@ -490,6 +525,8 @@ export function App() {
 
 function pageLabel(page: Page): string {
   switch (page) {
+    case "agents":
+      return "目标端 Agent";
     case "jobs":
       return "作业中心";
     case "datasources":

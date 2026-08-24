@@ -91,6 +91,10 @@ fn the_task_file_carries_a_spec_and_this_run_parameters_and_nothing_else() {
     // 两端连接由编排进程解好写进来（ADR-0037 §1/§8）——子进程不碰数据源库、也不碰密钥。
     assert_eq!(loaded.oracle.username, "source");
     assert_eq!(loaded.target.database, "qbs");
+    // 目标端 agent 同样由编排进程解好写进来（ADR-0044 §4）：子进程不读进程级的全局地址，
+    // 也因此不存在「任务文件说 A、进程配置说 B」这种两个真相源。
+    assert_eq!(loaded.agent.base_url, "http://127.0.0.1:8080");
+    assert_eq!(loaded.agent.instance_id, "6f1a9c2d");
     // SQL 由规格现算（ADR-0036 §2）——两端算的是同一份，不存在「存下来的那份对不上」。
     assert!(loaded.source_sql().contains("TO_DATE(:d_biz,'YYYY-MM-DD')"));
     assert_eq!(
@@ -178,6 +182,12 @@ fn valid_task() -> &'static str {
      username = \"sink\"\n\
      password = \"change-me\"\n\
      database = \"qbs\"\n\
+     \n\
+     [agent]\n\
+     agent_id = \"a1\"\n\
+     name = \"目标端 A\"\n\
+     base_url = \"http://127.0.0.1:8080\"\n\
+     instance_id = \"6f1a9c2d\"\n\
      \n\
      [run_params]\n\
      d_biz = \"2026-08-14\"\n"

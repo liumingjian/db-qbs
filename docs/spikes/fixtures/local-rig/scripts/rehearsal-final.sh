@@ -199,15 +199,26 @@ MYSQL_HOST=$(docker inspect -f '{{index .NetworkSettings.Networks "qbs-dst-side"
 echo "  Oracle（源端那边看到的）= ${ORACLE_HOST}:1521/${ORACLE_SERVICE}"
 echo "  MySQL（目标端那边看到的）= ${MYSQL_HOST}:3306/${MYSQL_DATABASE}"
 
-sub "② 两条数据源：Oracle 与目标库（目标库那条的凭据随 run 过线，测连要经隧道走到 sink）"
+sub "①.5 注册目标端 Agent（手册第 10.5 步）——目标库只能经它访问（ADR-0044 §1）"
+api POST /api/agents '{"name":"演练目标端","base_url":"http://127.0.0.1:8080"}'
+echo "  POST /api/agents → $API_STATUS $(head -c 160 <<<"$API_BODY")"
+AGENT_ID=$(jq -r '.agent_id // empty' <<<"$API_BODY")
+if [[ -z "$AGENT_ID" ]]; then
+  # 注册**探不通就不落库**，所以这里空着只有一种可能：隧道或目标端 agent 没起来。
+  api GET /api/agents
+  AGENT_ID=$(jq -r '.[0].agent_id // empty' <<<"$API_BODY")
+fi
+[[ -n "$AGENT_ID" ]] || die "目标端 agent 没注册上——隧道或 sink 没起（ADR-0044 §3：探不通就不落库）"
+
+sub "② 两条数据源：Oracle 与目标库（目标库那条绑上面那台 agent，凭据随 run 过线，测连要经隧道走到它）"
 api POST /api/datasources "$(jq -nc --arg cs "//${ORACLE_HOST}:1521/${ORACLE_SERVICE}" \
   --arg u "$ORACLE_USER" --arg p "$ORACLE_PASSWORD" \
   '{name:"演练 Oracle", kind:"oracle", connect_string:$cs, username:$u, password:$p}')"
 echo "  POST /api/datasources (oracle) → $API_STATUS"
 ORACLE_DS=$(jq -r '.datasource_id // empty' <<<"$API_BODY")
 api POST /api/datasources "$(jq -nc --arg h "$MYSQL_HOST" --arg u "$MYSQL_USER" \
-  --arg p "$MYSQL_PASSWORD" --arg d "$MYSQL_DATABASE" \
-  '{name:"演练目标库", kind:"mysql", host:$h, port:3306, username:$u, password:$p, database:$d}')"
+  --arg p "$MYSQL_PASSWORD" --arg d "$MYSQL_DATABASE" --arg a "$AGENT_ID" \
+  '{name:"演练目标库", kind:"mysql", agent_id:$a, host:$h, port:3306, username:$u, password:$p, database:$d}')"
 echo "  POST /api/datasources (mysql)  → $API_STATUS"
 TARGET_DS=$(jq -r '.datasource_id // empty' <<<"$API_BODY")
 [[ -n "$ORACLE_DS" && -n "$TARGET_DS" ]] || die "数据源没建成：oracle=$ORACLE_DS target=$TARGET_DS"

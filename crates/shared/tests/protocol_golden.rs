@@ -8,9 +8,9 @@
 //! 附带作用：以后谁再把定义抄回两端，这组测试会立刻变成两份、自己暴露出来。
 
 use db_qbs_shared::{
-    AbortResponse, BatchPayload, BatchResponse, ColumnSupport, CommitRequest, CommitResponse,
-    ErrorBody, ErrorEnvelope, OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn,
-    RangeCheckResult, RunResponse, SourceColumn, TargetConnection, Terminal,
+    AbortResponse, AgentInfo, BatchPayload, BatchResponse, ColumnSupport, CommitRequest,
+    CommitResponse, ErrorBody, ErrorEnvelope, OpenRunRequest, OpenRunResponse, PrecheckIssue,
+    RangeCheckColumn, RangeCheckResult, RunResponse, SourceColumn, TargetConnection, Terminal,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -437,4 +437,22 @@ fn error_envelope_tolerates_unknown_details_keys() {
     }))
     .expect("信封必须容得下没见过的明细键");
     assert_eq!(decoded.error.code, "VERIFY_FAILED");
+}
+
+/// agent 身份自述（ADR-0044 §2）。三个字段全必填、**一个凭据字段都没有**——
+/// 这个端点是未鉴权面（ADR-0024），钉死形状就是钉死「这里读不到别的东西」。
+#[test]
+fn agent_info_shape() {
+    round_trip(
+        AgentInfo {
+            agent_id: "6f1a9c2d4e8b47f0a1b2c3d4e5f60718".to_owned(),
+            name: "target-a".to_owned(),
+            version: "0.1.0".to_owned(),
+        },
+        json!({
+            "agent_id": "6f1a9c2d4e8b47f0a1b2c3d4e5f60718",
+            "name": "target-a",
+            "version": "0.1.0",
+        }),
+    );
 }

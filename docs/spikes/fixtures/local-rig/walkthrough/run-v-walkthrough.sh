@@ -2,6 +2,10 @@
 # 整份 V1–V25 走查的一键编排：起桩后端 → 跑机器观察 → 收摊。
 # 桩与探针都在本目录下（与四份 acceptance 台架同处一棵树，一起入库）。
 # 探针要 playwright，装在仓库外的虚拟环境里：默认 ~/pwvenv，用 PW_PYTHON 覆盖。
+# **还要 pillow**：V5 那条「灰度后中位亮度差 ≥ 25/255」是真的去截图上取样的。
+# 换一台机器时这两样一起装：
+#   python3 -m venv ~/pwvenv && ~/pwvenv/bin/pip install playwright pillow
+#   ~/pwvenv/bin/python -m playwright install chromium
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PORT=${PORT:-18097}

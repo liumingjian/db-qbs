@@ -62,8 +62,16 @@ SPEC = {
 DATASOURCES = [
     {"datasource_id": "ds-oracle", "name": "源库（走查）", "kind": "oracle",
      "connect_string": "//oracle:1521/XE", "username": "spike", "has_password": True},
-    {"datasource_id": "ds-mysql", "name": "目标库（走查）", "kind": "mysql",
+    {"datasource_id": "ds-mysql", "name": "目标库（走查）", "kind": "mysql", "agent_id": "agent-a",
      "host": "127.0.0.1", "port": 3306, "username": "sink", "database": "qbs", "has_password": True},
+]
+
+# 见 v-mock.py 里同名常量：外壳把数据源与 agent 当成同一次读取（ADR-0044），
+# 少了这个端点，数据源清单会跟着一起被判成读不到。
+AGENTS = [
+    {"agent_id": "agent-a", "name": "目标端 A", "base_url": "http://127.0.0.1:8080",
+     "instance_id": "6f1a9c2d4e8b47f0a1b2c3d4e5f60718", "version": "0.1.0",
+     "last_seen_at": "2026-08-24T02:00:00Z", "status": "online", "last_error": None},
 ]
 
 TASK = {
@@ -203,6 +211,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, [TASK])
         if path == "/api/datasources":
             return self._send(200, DATASOURCES)
+        if path == "/api/agents":
+            return self._send(200, AGENTS)
         if path.startswith("/api/runs/"):
             return self._send(200, RUN_HISTORY)
         if path == "/api/runs":

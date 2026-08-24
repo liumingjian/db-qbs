@@ -36,9 +36,18 @@ DATASOURCES = [
     {"datasource_id": "ds-ora-core", "name": "生产核心库", "kind": "oracle",
      "connect_string": "//oracle-core:1521/ORCLPDB", "username": "app_reader",
      "has_password": True},
-    {"datasource_id": "ds-my-dw", "name": "数仓 MySQL", "kind": "mysql",
+    {"datasource_id": "ds-my-dw", "name": "数仓 MySQL", "kind": "mysql", "agent_id": "agent-a",
      "host": "10.0.0.12", "port": 3306, "username": "sink", "database": "dw_stage",
      "has_password": True},
+]
+
+# 目标端 agent 注册表（ADR-0044）。这份走查不判 agent 屏（那是 X19），
+# 但**外壳把数据源与 agent 当成同一次读取**——少了这个端点，数据源清单会一起被判成读不到，
+# 于是 V 系列里凡是要用到数据源的屏全都变成空态。
+AGENTS = [
+    {"agent_id": "agent-a", "name": "目标端 A", "base_url": "http://127.0.0.1:8080",
+     "instance_id": "6f1a9c2d4e8b47f0a1b2c3d4e5f60718", "version": "0.1.0",
+     "last_seen_at": "2026-08-24T02:00:00Z", "status": "online", "last_error": None},
 ]
 
 SPEC = {
@@ -292,6 +301,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
+        if path == "/api/agents":
+            return self._send(200, AGENTS)
         if path == "/api/datasources":
             return self._send(200, DATASOURCES)
         if path == "/api/tasks":

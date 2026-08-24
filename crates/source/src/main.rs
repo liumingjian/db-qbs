@@ -7,9 +7,9 @@ use std::time::Instant;
 
 use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
 use db_qbs_source::{
-    generate_run_id, load_source_config, load_task_config, run_transfer, FailureKind,
-    HttpSinkClient, OracleRowSource, RunStage, TransferEvent, TransferFailure, TransferRequest,
-    TransferSummary,
+    fetch_agent_info, generate_run_id, load_source_config, load_task_config, run_transfer,
+    FailureKind, HttpSinkClient, OracleRowSource, RunStage, TransferEvent, TransferFailure,
+    TransferRequest, TransferSummary,
 };
 use serde_json::{json, Map, Value};
 
@@ -51,7 +51,10 @@ fn run() -> bool {
         )],
     );
 
-    let source_config = match load_source_config(&arguments.config) {
+    // `source.toml` 仍然要读得动、解得开——**但这个进程已经不从里面取任何值了**：
+    // 目标端地址随任务文件里的 agent 端点过来（ADR-0044 §4），Oracle 客户端库目录在
+    // `task.oracle` 里。留着这一步是为了「配置坏了要在开跑前就报 CONFIG」这条行为不变。
+    let _source_config = match load_source_config(&arguments.config) {
         Ok(config) => config,
         Err(error) => {
             emit(
@@ -153,7 +156,27 @@ fn run() -> bool {
         ),
     }
 
-    let mut sink = match HttpSinkClient::new(&source_config.sink_base_url) {
+    // 开跑前核一次目标端 agent 的身份（ADR-0044 §4）。**这是「停了 agent 就搬不动」
+    // 那条保证的最后一道**：编排进程发起时核过一次，但从那一刻到真的开始写之间，
+    // agent 可能已经停掉或被顶替；这里不核，写入就又变成了「谁在那个地址上都行」。
+    if let Err(message) = verify_agent(&task) {
+        emit_with_run(
+            LogLevel::Error,
+            LogEvent::StageChanged,
+            Some(&run_id),
+            Some(&task_path),
+            [
+                ("stage", json!(RunStage::Failed.as_str())),
+                ("message", json!("target agent verification failed")),
+            ],
+        );
+        let failure =
+            TransferFailure::new(RunStage::Preparing, FailureKind::Network, message, 0, 0);
+        emit_failed_run(&failure, &run_id, &task_path);
+        return false;
+    }
+
+    let mut sink = match HttpSinkClient::new(&task.agent.base_url) {
         Ok(sink) => sink,
         Err(message) => {
             emit_with_run(
@@ -195,6 +218,27 @@ fn run() -> bool {
             false
         }
     }
+}
+
+/// 目标端 agent 的身份核对。**地址通还不够**：注册时钉下的 `instance_id` 必须仍是
+/// 现在应答的那一个，否则「同一个地址后面换了一台 agent」会被当成一切正常。
+///
+/// 迁移进来、还没探过的那条记录 `instance_id` 是空的（ADR-0044 §5）——那时候只核连通性，
+/// 因为根本没有可比的身份；第一次探测把它补上之后这条分支就不再走了。
+fn verify_agent(task: &db_qbs_source::TaskConfig) -> Result<(), String> {
+    let info = fetch_agent_info(&task.agent.base_url).map_err(|error| {
+        format!(
+            "目标端 agent「{}」（{}）不可用：{error}。目标库只能经它访问",
+            task.agent.name, task.agent.base_url
+        )
+    })?;
+    if !task.agent.instance_id.is_empty() && info.agent_id != task.agent.instance_id {
+        return Err(format!(
+            "目标端 agent「{}」（{}）身份不符：注册时钉的是 {}，现在应答的是 {}",
+            task.agent.name, task.agent.base_url, task.agent.instance_id, info.agent_id
+        ));
+    }
+    Ok(())
 }
 
 fn emit_successful_run(summary: &TransferSummary, run_id: &str, task: &Path) {

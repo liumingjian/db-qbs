@@ -205,7 +205,7 @@ chmod 600 /etc/stunnel/db-qbs/*.key
 
 | 占位符 | 填什么 |
 |---|---|
-| `@@SINK_LOCAL_PORT@@` | `8080` —— 必须与 `source.toml` 的 `sink_base_url` 端口**同一个值** |
+| `@@SINK_LOCAL_PORT@@` | `8080` —— 必须与第 10.5 步注册 agent 时填的地址端口**同一个值** |
 | `@@TARGET_HOST@@` | 客户给的目标端**公网 IP / 域名** |
 | `@@TARGET_PORT@@` | 客户开的白名单端口，与目标端那份配置里的 `@@WHITELIST_PORT@@` 同一个 |
 
@@ -252,7 +252,7 @@ tail -5 /var/log/db-qbs-stunnel-sink.log
 
 > ⚠ **真机差异 ⑦：`8080` 可能已经有人在听。**
 > `ss -ltnp | grep 8080` 先看。被占了就整体换一个端口，
-> **源端 `accept`、`source.toml` 的 `sink_base_url`、目标端的 `connect` 三处要一起改**——
+> **源端 `accept`、注册 agent 时填的地址、目标端的 `connect` 三处要一起改**——
 > 只改一处的话，报出来的是「连不上 sink」，而不是「端口配错了」。
 
 > ⚠ **真机差异 ⑧：防火墙。**
@@ -272,24 +272,25 @@ tail -5 /var/log/db-qbs-stunnel-sink.log
 mkdir -p /etc/db-qbs /var/lib/db-qbs-source
 cat > /etc/db-qbs/source.toml <<'EOF'
 oracle_client_lib_dir = "/opt/oracle/instantclient"
-sink_base_url = "http://127.0.0.1:8080"
 listen = "127.0.0.1:8088"
 data_dir = "/var/lib/db-qbs-source"
 EOF
 chmod 0600 /etc/db-qbs/source.toml
 ```
 
-四行，逐行的账：
+三行，逐行的账：
 
 - `oracle_client_lib_dir` —— ODPI-C 的 client 库**一个进程只初始化一次**，所以它是进程级配置、
   不是数据源级字段（ADR-0037 §6）。指第 4 步那根软链。
-- `sink_base_url` —— **仍然是 `http://127.0.0.1:8080`，不是目标端的地址**。
-  source 连的是本机隧道入口，明文只在回环上走一小段，出机器之前已经进了 TLS。
-  产品硬性拒绝非 `http` 的值，填 `https://` 直接启动失败。
 - `listen` —— 只绑回环（ADR-0024：两处 `listen` 都无鉴权，兜底就是只绑回环）。
-- `data_dir` —— 数据源、任务、运行历史都落这儿的 SQLite，口令加密落盘。**这是要备份的那个目录。**
+- `data_dir` —— 数据源、agent 注册表、任务、运行历史都落这儿的 SQLite，口令加密落盘。
+  **这是要备份的那个目录。**
 
-**不要写 `oracle_connect_string` / `oracle_username` / `oracle_password`。**
+**不要写 `sink_base_url`。** 它已退役（ADR-0044 §5）：目标端地址不再是进程级配置，
+而是**逐条数据源绑定的 agent**，在第 10.5 步用界面注册。写了它，首次启动会凭空多出一条
+名叫「默认」的 agent——那条路径是给**升级**的老部署准备的，新装的机器不该走。
+
+**也不要写 `oracle_connect_string` / `oracle_username` / `oracle_password`。**
 这三个字段已退役（ADR-0037 §10），只在首次启动且数据源表为空时被迁成一条叫「默认」的数据源——
 写了就会凭空多出一条你没建过的数据源。Oracle 连接信息在第 10 步用界面建。
 
@@ -364,7 +365,7 @@ QBS_ORACLE_HOST=<客户给的 Oracle 地址> /root/dist/preflight-source.sh; ech
 | S4 缺 `libaio.so.1` | 第 3 步的 `libaio` 没装上 |
 | S4 缺 `libnnz19.so`（说「加上目录就都在」） | 第 4 步的 `ldconfig` 那一段没做 |
 | S6 pid 文件指不到活进程 | stunnel 没起来。看 `/var/log/db-qbs-stunnel-sink.log`；配置里还留着占位符是最常见的一种 |
-| S7 隧道入口不通 | `accept` 的端口与 `sink_base_url` 的端口对不上 |
+| S7 隧道入口不通 | `accept` 的端口与注册 agent 时填的端口对不上 |
 | S8「隧道口连得上但没有应答」 | **目标端那一头的事**：先去目标端跑 `preflight-target.sh` |
 | S8「应答不是 sink」 | 隧道通到了别的服务：核对源端 `connect` 与目标端 `accept` / `connect` 三个端口 |
 
@@ -404,6 +405,42 @@ curl -sS -X POST http://127.0.0.1:8088/api/datasources \
 
 ---
 
+## 第 10.5 步：注册目标端 Agent（ADR-0044）
+
+**目标库只能经 agent 访问**，所以这一步不做，后面建 MySQL 数据源时会无处可选。
+
+界面 → **目标端 Agent** → 注册 Agent：
+
+| 填什么 | 填成什么 |
+|---|---|
+| 名称 | 随便起，认得出是哪台目标端主机就行（留空则用 agent 自报的主机名） |
+| 地址 | **`http://127.0.0.1:8080`——本机隧道入口，不是目标端的公网地址**。明文只在回环上走一小段，出机器之前已经进了 TLS。协议只收 `http`，填 `https://` 会被当场拒 |
+
+**保存即连接**：source 当场打一次 `GET /v1/agent/info`，探通才落库；探不通就报「连不上这个地址上的
+目标端 agent」，库里不留痕。所以这一步转绿，等于隧道 + 目标端 agent 两段一起验过了。
+
+没有浏览器时的等价命令：
+
+```sh
+curl -sS -X POST http://127.0.0.1:8088/api/agents \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"目标端 A","base_url":"http://127.0.0.1:8080"}'
+```
+
+回参里的 `instance_id` 就是那台 agent 自报的身份，source 已经把它钉在这条记录上了：
+日后同一个地址上换了另一台 agent 应答，界面会显示「身份不符」并停掉所有目标端链路，
+**而不是照常放行**。
+
+| 报什么 | 是什么事 |
+|---|---|
+| `连不上 agent：…connection refused` | 隧道没起（第 6 步）、或目标端主机上的 `db-qbs-sink` 没起 |
+| `这个地址回了 HTTP 4xx/5xx，它多半不是 db-qbs 的目标端 agent` | 8080 上听着的是别的东西；核对 stunnel 的 `accept` 端口 |
+| `agent 地址必须是 http://` | 填成了 `https://`——TLS 由隧道给，产品这一侧不做 |
+
+建 MySQL 数据源时，「目标端 Agent」是**必选项**；只注册了一台时界面会直接预选它。
+
+---
+
 ## 收尾核对
 
 ```sh
@@ -413,6 +450,7 @@ ls -l /etc/db-qbs/source.toml /etc/stunnel/db-qbs/source.key   # 都是 0600
 ```
 
 - [ ] 自检 S1–S8 全绿、退出码 0
+- [ ] 界面「目标端 Agent」里那台是**在线**（第 10.5 步）
 - [ ] 界面「测试连接」对客户的 Oracle 绿了
 - [ ] `8088` 与 `8080` 都只绑回环
 - [ ] `source.toml` 与私钥都是 `0600`
@@ -432,7 +470,7 @@ ls -l /etc/db-qbs/source.toml /etc/stunnel/db-qbs/source.key   # 都是 0600
 | ④ | 目标端地址 | `@@TARGET_HOST@@` 是客户给的公网 IP，不是 `host.docker.internal`。**拿不到它就是装机当天彻底停摆**（ADR-0041「风险」） | 6 |
 | ⑤ | systemd（stunnel） | 做成 unit 并 `enable --now`；容器里没有 systemd，这一段没验过 | 6 |
 | ⑥ | SELinux | `getenforce`；被拦时按 AVC 处置，**别关 SELinux** | 6 |
-| ⑦ | `8080` 已被占 | 换端口，源端 `accept` / `sink_base_url` / 目标端 `connect` 三处一起改 | 6 |
+| ⑦ | `8080` 已被占 | 换端口，源端 `accept` / agent 注册地址 / 目标端 `connect` 三处一起改 | 6 |
 | ⑧ | 防火墙 | 源端只需确认**出向**放行到目标端那个口；入向口在目标端那台 | 6 |
 | ⑨ | 界面要从笔记本看 | `ssh -L 8088:127.0.0.1:8088`，**不改 `listen`** | 7 |
 | ⑩ | systemd（source） | 同 ⑤，另加 `Restart=on-failure`；容器里没有 systemd，这一段没验过 | 8 |

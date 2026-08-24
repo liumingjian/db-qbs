@@ -10,12 +10,15 @@ import {
   updateDatasource,
 } from "./api";
 import type {
+  Agent,
   Datasource,
   DatasourceInput,
   DatasourceKind,
   Task,
 } from "./api";
 import {
+  agentLabel,
+  agentStatusOf,
   canSaveDatasource,
   connectionFingerprint,
   connectionSummary,
@@ -56,11 +59,14 @@ type DatasourceDialogState =
 
 export function DatasourceScreen({
   datasources,
+  agents,
   tasks,
   loading,
   onChanged,
 }: {
   datasources: Datasource[];
+  /** 注册表里那几台 agent（ADR-0044 §6）：MySQL 那一列显示名字，表单里是必选项。 */
+  agents: Agent[];
   tasks: Task[];
   loading: boolean;
   onChanged: () => Promise<void>;
@@ -159,6 +165,7 @@ export function DatasourceScreen({
       {datasources.length > 0 && (
         <DatasourceTable
           datasources={datasources}
+          agents={agents}
           referenceCounts={counts}
           rowTests={rowTests}
           onTest={testRow}
@@ -170,6 +177,7 @@ export function DatasourceScreen({
         <DatasourceFormDialog
           title="新建数据源"
           existing={null}
+          agents={agents}
           onClose={() => setDialog(null)}
           onChanged={onChanged}
         />
@@ -178,6 +186,7 @@ export function DatasourceScreen({
         <DatasourceFormDialog
           title={`编辑 · ${dialog.datasource.name}`}
           existing={dialog.datasource}
+          agents={agents}
           onClose={() => setDialog(null)}
           onChanged={async () => {
             // 连接字段可能刚被改过，上一次的行内结果当场作废。
@@ -207,12 +216,14 @@ const KIND_LABELS: Record<DatasourceKind, string> = {
 
 function DatasourceTable({
   datasources,
+  agents,
   referenceCounts,
   rowTests,
   onTest,
   onAction,
 }: {
   datasources: Datasource[];
+  agents: Agent[];
   referenceCounts: Map<string, number>;
   rowTests: Record<string, RowTestState>;
   onTest: (datasource: Datasource) => void;
@@ -226,6 +237,9 @@ function DatasourceTable({
             <th>名称</th>
             <th>类型</th>
             <th>连接</th>
+            {/* 「目标端 Agent」列（ADR-0044 §6）：这条库经哪台 agent 访问，此刻通不通。
+                它回答的是现场那句「我把 agent 停了，为什么还在同步」——现在停了就看得见。 */}
+            <th>目标端 Agent</th>
             <th>用户</th>
             <th>口令</th>
             <th>被引用</th>
@@ -244,6 +258,9 @@ function DatasourceTable({
                 </td>
                 <td>{KIND_LABELS[datasource.kind]}</td>
                 <td className="mono">{connectionSummary(datasource)}</td>
+                <td>
+                  <AgentCell datasource={datasource} agents={agents} />
+                </td>
                 <td className="mono">{datasource.username}</td>
                 <td>{datasource.has_password ? "已设置" : "未设置"}</td>
                 <td>{count === 0 ? "未被引用" : `${count} 个任务`}</td>
@@ -299,6 +316,37 @@ function DatasourceTable({
   );
 }
 
+/**
+ * 「目标端 Agent」格。Oracle 行是**空的**——源库由 source 直连，这一栏对它没有含义，
+ * 写「不适用」会让人以为这里少配了一样东西。
+ *
+ * MySQL 行显示 agent 名字；不在线 / 身份不符时跟一个状态标签，因为**此刻这条数据源不能用**：
+ * 点测试连接会失败、发起运行会被拒。把它藏起来只会让人在发起那一刻才发现。
+ */
+function AgentCell({
+  datasource,
+  agents,
+}: {
+  datasource: Datasource;
+  agents: Agent[];
+}) {
+  if (datasource.kind === "oracle") {
+    return null;
+  }
+  const label = agentLabel(datasource, agents);
+  const status = agentStatusOf(datasource, agents);
+  return (
+    <>
+      <span>{label}</span>
+      {status !== null && status !== "online" && (
+        <span className={`state ${status === "mismatch" ? "is-failed" : "is-unknown"}`}>
+          {status === "mismatch" ? "身份不符" : "不在线"}
+        </span>
+      )}
+    </>
+  );
+}
+
 type TestState =
   | { kind: "idle" }
   | { kind: "testing" }
@@ -318,11 +366,13 @@ type TestState =
 function DatasourceFormDialog({
   title,
   existing,
+  agents,
   onClose,
   onChanged,
 }: {
   title: string;
   existing: Datasource | null;
+  agents: Agent[];
   onClose: () => void;
   onChanged: () => Promise<void>;
 }) {
@@ -360,6 +410,9 @@ function DatasourceFormDialog({
         : {
             name: current.name,
             kind: "mysql",
+            // 只有一台 agent 时直接预选它：现场绝大多数部署就是一台，
+            // 让人在一个只有一个选项的下拉里再点一次没有任何意义。
+            agent_id: agents.length === 1 ? agents[0].agent_id : "",
             host: "",
             port: 3306,
             database: "",
@@ -451,6 +504,27 @@ function DatasourceFormDialog({
             </FormField>
           ) : (
             <>
+              <FormField label="目标端 Agent">
+                <select
+                  required
+                  value={draft.agent_id}
+                  onChange={(event) => patch({ agent_id: event.target.value })}
+                >
+                  <option value="">请选择</option>
+                  {agents.map((agent) => (
+                    <option key={agent.agent_id} value={agent.agent_id}>
+                      {agent.name}
+                      {agent.status === "online" ? "" : "（不可用）"}
+                    </option>
+                  ))}
+                </select>
+              </FormField>
+              {agents.length === 0 && (
+                <p className="drawer-note">
+                  还没有注册任何目标端 agent。目标库只能经 agent 访问，
+                  请先到「目标端 Agent」屏注册一台。
+                </p>
+              )}
               <FormField label="主机">
                 <input
                   required

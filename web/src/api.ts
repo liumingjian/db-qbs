@@ -71,6 +71,11 @@ export interface OracleDatasourceView {
 
 export interface MysqlDatasourceView {
   kind: "mysql";
+  /**
+   * 这条目标库经**哪台 agent** 访问（ADR-0044 §3）。回的是 id 不是地址——
+   * 名字与在线状态在 `/api/agents` 那份里，两处各有各的真相源。
+   */
+  agent_id: string;
   host: string;
   port: number;
   username: string;
@@ -88,6 +93,8 @@ export type DatasourceInput = { name: string } & (
   | { kind: "oracle"; connect_string: string; username: string; password: string }
   | {
       kind: "mysql";
+      /** 必填（ADR-0044 §1）：目标库只能经 agent 访问，没绑 agent 的数据源存不进去。 */
+      agent_id: string;
       host: string;
       port: number;
       username: string;
@@ -95,6 +102,32 @@ export type DatasourceInput = { name: string } & (
       database: string;
     }
 );
+
+/**
+ * 目标端 agent（ADR-0044）。**一台 agent = 目标端那个 sink 进程**，
+ * 目标库只能经它访问：元数据、测连、写入三条链都落在它身上。
+ *
+ * `status` 三档不是两档：`mismatch` 说的是「这个地址还通，但应答的是另一台 agent」，
+ * 它的处置与「没起来」完全不同，合并成一个「离线」等于把线索抹掉。
+ */
+export type AgentStatus = "online" | "offline" | "mismatch";
+
+export interface Agent {
+  agent_id: string;
+  name: string;
+  base_url: string;
+  /** agent 自报的稳定身份，注册那一刻钉下。迁移出来、还没探过的那条是空串。 */
+  instance_id: string;
+  version: string;
+  last_seen_at: string | null;
+  status: AgentStatus;
+  last_error: string | null;
+}
+
+export interface AgentInput {
+  name: string;
+  base_url: string;
+}
 
 export interface TaskInput {
   name: string;
@@ -347,6 +380,57 @@ export function taskInputFrom(
   };
 }
 
+export async function listAgents(): Promise<Agent[]> {
+  const response = await fetch("/api/agents", {
+    headers: { Accept: "application/json" },
+  });
+  return readJson<Agent[]>(response, "加载目标端 agent 失败");
+}
+
+/**
+ * 注册一台 agent。**服务端当场探一次，探不通就不落库**（ADR-0044 §3）——
+ * 所以这个调用失败的含义是「那个地址上没有一台活着的 agent」，不是「表单填错了」。
+ */
+export async function registerAgent(input: AgentInput): Promise<Agent> {
+  return postJson<Agent>("/api/agents", input, "注册目标端 agent 失败");
+}
+
+export async function updateAgent(
+  agentId: string,
+  input: AgentInput,
+): Promise<Agent> {
+  const response = await fetch(`/api/agents/${encodeURIComponent(agentId)}`, {
+    method: "PUT",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return readJson<Agent>(response, "更新目标端 agent 失败");
+}
+
+/** 手动探一台。**探测失败也是 200**：结果本身就是要显示的信息。 */
+export async function probeAgent(agentId: string): Promise<Agent> {
+  return postJson<Agent>(
+    `/api/agents/${encodeURIComponent(agentId)}/probe`,
+    {},
+    "探测目标端 agent 失败",
+  );
+}
+
+export async function deleteAgent(agentId: string): Promise<Agent> {
+  const response = await fetch(`/api/agents/${encodeURIComponent(agentId)}`, {
+    method: "DELETE",
+    headers: { Accept: "application/json" },
+  });
+  return readJson<Agent>(response, "删除目标端 agent 失败");
+}
+
+/**
+ * 删 agent 被拒（409）时，服务端点名的那几条数据源。与 [`referencedTasksFrom`] 同一形态。
+ */
+export function referencedDatasourcesFrom(error: unknown): string[] {
+  return namesFromConflict(error, "datasources");
+}
+
 export async function listDatasources(): Promise<Datasource[]> {
   const response = await fetch("/api/datasources", {
     headers: { Accept: "application/json" },
@@ -414,6 +498,11 @@ export async function testDatasourceDraft(
  * 拿不到就返回空数组——**报文正文里本来就带着同一句话**，列表只是把它摆成可扫的形状。
  */
 export function referencedTasksFrom(error: unknown): string[] {
+  return namesFromConflict(error, "tasks");
+}
+
+/** 409 报文里 `error.<key>` 那串名字。拿不到就空数组——正文里本来就带着同一句话。 */
+function namesFromConflict(error: unknown, key: string): string[] {
   if (!(error instanceof ApiError) || error.status !== 409) {
     return [];
   }
@@ -422,11 +511,13 @@ export function referencedTasksFrom(error: unknown): string[] {
     return [];
   }
   const detail = (body as { error: unknown }).error;
-  if (typeof detail !== "object" || detail === null || !("tasks" in detail)) {
+  if (typeof detail !== "object" || detail === null || !(key in detail)) {
     return [];
   }
-  const tasks = (detail as { tasks: unknown }).tasks;
-  return Array.isArray(tasks) ? tasks.filter((name): name is string => typeof name === "string") : [];
+  const names = (detail as Record<string, unknown>)[key];
+  return Array.isArray(names)
+    ? names.filter((name): name is string => typeof name === "string")
+    : [];
 }
 
 export async function testDatasource(datasourceId: string): Promise<{ ok: true }> {

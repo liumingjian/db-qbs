@@ -1,15 +1,15 @@
 use std::io::{self, Cursor, Read};
 use std::sync::Arc;
 
-use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
+use db_qbs_shared::{write_log_line_with_fields, AgentInfo, LogEvent, LogLevel};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::{
-    ApiError, BatchPayload, CommitRequest, Destination, DestinationFactory, MysqlDestination,
-    MysqlFactory, OpenRunRequest, SinkConfig, SinkService, TargetConnection,
+    load_agent_identity, ApiError, BatchPayload, CommitRequest, Destination, DestinationFactory,
+    MysqlDestination, MysqlFactory, OpenRunRequest, SinkConfig, SinkService, TargetConnection,
 };
 
 const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
@@ -54,21 +54,50 @@ pub fn serve(config: SinkConfig) -> Result<(), String> {
             }),
         );
     }
+    // 身份先于监听：起不来就别开门（ADR-0044 §2）。id 文件写不下去时 source 那侧的
+    // 「注册」会在下一次重启后认到另一个身份，那正是本票要挡的静默——所以这里硬失败。
+    let agent = Arc::new(load_agent_identity(
+        &config.agent_id_path(),
+        config.agent_name.as_deref(),
+    )?);
+    {
+        let stdout = io::stdout();
+        let mut writer = stdout.lock();
+        let _ = write_log_line_with_fields(
+            &mut writer,
+            LogLevel::Info,
+            LogEvent::SinkStarted,
+            None,
+            None,
+            json!({
+                "agent_id": &agent.agent_id,
+                "agent_name": &agent.name,
+                "version": &agent.version,
+                "message": "本进程即目标端 agent；请在 source 的「目标端 Agent」屏用这个地址注册它（ADR-0044 §3）",
+            }),
+        );
+    }
     // sink 启动**不再连 MySQL**：连接按 run 建，连不上的失败点在 POST /v1/runs。
     let service = Arc::new(SinkService::with_factory(MysqlFactory));
     let server = Server::http(&config.listen)
         .map_err(|error| format!("监听 {} 失败：{error}", config.listen))?;
 
     for request in server.incoming_requests() {
-        handle_request(request, &service);
+        handle_request(request, &service, &agent);
     }
     Ok(())
 }
 
-fn handle_request<F: DestinationFactory>(mut request: Request, service: &SinkService<F>) {
+fn handle_request<F: DestinationFactory>(
+    mut request: Request,
+    service: &SinkService<F>,
+    agent: &AgentInfo,
+) {
     let method = request.method().clone();
     let path = request.url().to_owned();
-    let response = if method == Method::Post && path == "/v1/runs" {
+    let response = if method == Method::Get && path == "/v1/agent/info" {
+        json_response(200, agent)
+    } else if method == Method::Post && path == "/v1/runs" {
         handle_open(&mut request, service)
     } else if method == Method::Post && path == "/v1/target/test-connection" {
         handle_test_connection(&mut request)
@@ -616,6 +645,30 @@ mod tests {
         assert_eq!(status, 400, "{missing_table}");
     }
 
+    /// 夹具的身份。**不落盘**：这一层测的是路由与报文，身份怎么来的由
+    /// `agent.rs` 自己的用例守（跨重启稳定那条）。
+    fn fixture_agent() -> AgentInfo {
+        AgentInfo {
+            agent_id: "fixture-agent".to_owned(),
+            name: "fixture".to_owned(),
+            version: "0.0.0-test".to_owned(),
+        }
+    }
+
+    /// `GET /v1/agent/info`（ADR-0044 §2）：未鉴权、无请求体、回三个字段。
+    /// source 的注册与每次开跑前的身份核对都打这里，路由掉了整条链就哑了。
+    #[test]
+    fn agent_info_is_served() {
+        let service = Arc::new(SinkService::new("qbs", Arc::new(FakeDestination::default())));
+
+        let (status, body) = exchange_method(service, "GET", "/v1/agent/info", "");
+
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["agent_id"], "fixture-agent");
+        assert_eq!(body["name"], "fixture");
+        assert!(body.get("version").is_some(), "{body}");
+    }
+
     fn exchange(
         service: Arc<SinkService<FixedDestination<FakeDestination>>>,
         path: &str,
@@ -634,7 +687,7 @@ mod tests {
         let address = server.server_addr().to_ip().unwrap();
         let worker = thread::spawn(move || {
             let request = server.recv().unwrap();
-            handle_request(request, &service);
+            handle_request(request, &service, &fixture_agent());
         });
 
         let mut stream = TcpStream::connect(address).unwrap();

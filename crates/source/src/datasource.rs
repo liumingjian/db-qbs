@@ -34,6 +34,14 @@ pub enum DatasourceSettings {
         password: String,
     },
     Mysql {
+        /// 这条目标库经**哪台 agent** 访问（ADR-0044 §3）。必填、且必须是注册表里已有的一台——
+        /// 存在性由写入面在落库前核（`server_main` 那两个 handler），不在这里核：
+        /// store 不认识 agent 表，把它拽进来等于给数据源层加一条它管不着的依赖。
+        ///
+        /// `#[serde(default)]` 只为读得动**本票之前**存下的那些行（它们没有这个字段），
+        /// 启动时的一次性回填会把它们补上（ADR-0044 §5）。
+        #[serde(default)]
+        agent_id: String,
         host: String,
         port: u16,
         username: String,
@@ -78,11 +86,18 @@ impl DatasourceSettings {
                 }
             }
             Self::Mysql {
+                agent_id,
                 host,
                 port,
                 database,
                 ..
             } => {
+                if agent_id.trim().is_empty() {
+                    return Err(
+                        "MySQL 数据源必须绑定一台目标端 agent——目标库只能经 agent 访问（ADR-0044 §1）"
+                            .to_owned(),
+                    );
+                }
                 if host.trim().is_empty() {
                     return Err("MySQL 数据源的 host 不能为空".to_owned());
                 }
@@ -135,6 +150,9 @@ pub enum DatasourceSettingsView {
         has_password: bool,
     },
     Mysql {
+        /// 绑定的 agent（ADR-0044 §3）。**回的是 id 不是地址**：地址属于 agent 那张表，
+        /// 界面要显示名字与在线状态时去 `/api/agents` 取，两处各有各的真相源。
+        agent_id: String,
         host: String,
         port: u16,
         username: String,
@@ -157,12 +175,14 @@ impl Datasource {
                 has_password,
             },
             DatasourceSettings::Mysql {
+                agent_id,
                 host,
                 port,
                 username,
                 database,
                 ..
             } => DatasourceSettingsView::Mysql {
+                agent_id: agent_id.clone(),
                 host: host.clone(),
                 port: *port,
                 username: username.clone(),
@@ -327,6 +347,7 @@ impl DatasourceStore {
                 username,
                 password,
                 database,
+                ..
             } => Ok(TargetConnection {
                 host,
                 port,
@@ -339,6 +360,61 @@ impl DatasourceStore {
                 datasource.name
             )),
         }
+    }
+
+    /// 这条 MySQL 数据源绑的是哪台 agent（ADR-0044 §3）。
+    ///
+    /// 元数据、测连、发起运行三条链都从这里取路由——**没有第二个取法**，
+    /// 尤其没有「取不到就退回进程级地址」那一档：那正是本票判废的兜底。
+    pub fn target_agent_id(&self, datasource_id: &str) -> Result<String, String> {
+        let datasource = self.require(datasource_id)?;
+        match datasource.settings {
+            DatasourceSettings::Mysql { agent_id, .. } if !agent_id.trim().is_empty() => {
+                Ok(agent_id)
+            }
+            DatasourceSettings::Mysql { .. } => Err(format!(
+                "数据源 {} 还没绑定目标端 agent，请先在数据源里选一台（ADR-0044 §1）",
+                datasource.name
+            )),
+            DatasourceSettings::Oracle { .. } => Err(format!(
+                "数据源 {} 是 Oracle，不能当目标端用",
+                datasource.name
+            )),
+        }
+    }
+
+    /// 一次性回填：把**本票之前**存下的、没有 agent 绑定的 MySQL 数据源指到迁移出来的那台
+    /// 「默认」agent 上（ADR-0044 §5）。返回补了几条。
+    ///
+    /// 只在有一条迁移记录时才由启动路径调用，所以它不会在正常运行期改任何人的绑定。
+    pub fn backfill_missing_agent_id(&self, agent_id: &str) -> Result<usize, String> {
+        let mut patched = 0;
+        for datasource in self.list()? {
+            let DatasourceSettings::Mysql {
+                agent_id: existing, ..
+            } = &datasource.settings
+            else {
+                continue;
+            };
+            if !existing.trim().is_empty() {
+                continue;
+            }
+            let mut settings = datasource.settings.clone();
+            if let DatasourceSettings::Mysql {
+                agent_id: slot, ..
+            } = &mut settings
+            {
+                *slot = agent_id.to_owned();
+            }
+            self.connection
+                .execute(
+                    "UPDATE datasources SET settings = ?2 WHERE datasource_id = ?1",
+                    params![datasource.datasource_id, settings_json(&settings)?],
+                )
+                .map_err(|error| format!("回填数据源 agent 绑定失败：{error}"))?;
+            patched += 1;
+        }
+        Ok(patched)
     }
 
     /// 把**表单里当前填的值**解成一份可用的 Oracle 连接信息（ADR-0039 §3）。
@@ -383,6 +459,7 @@ impl DatasourceStore {
                 username,
                 password,
                 database,
+                ..
             } => Ok(TargetConnection {
                 host: host.clone(),
                 port: *port,
@@ -538,6 +615,7 @@ mod tests {
         DatasourceInput {
             name: "目标库".to_owned(),
             settings: DatasourceSettings::Mysql {
+                agent_id: "agent-a".to_owned(),
                 host: "127.0.0.1".to_owned(),
                 port: 3306,
                 username: "sink".to_owned(),
@@ -590,6 +668,7 @@ mod tests {
 
         let mut input = mysql_input();
         input.settings = DatasourceSettings::Mysql {
+            agent_id: "agent-a".to_owned(),
             host: "10.0.0.9".to_owned(),
             port: 3307,
             username: "sink".to_owned(),
@@ -650,6 +729,65 @@ mod tests {
             None
         );
         assert_eq!(store.list().unwrap().len(), 1);
+
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// MySQL 数据源**必须**绑一台 agent（ADR-0044 §1）。这条不是形式校验：
+    /// 放行一条没绑定的，它在发起运行那一刻要么无路可走、要么退回全局地址——
+    /// 后者正是「停了 agent 照样同步」的成因。
+    #[test]
+    fn a_mysql_datasource_without_an_agent_is_refused() {
+        let directory = temp_directory();
+        let store = DatasourceStore::open(&directory).unwrap();
+
+        let mut input = mysql_input();
+        input.settings = DatasourceSettings::Mysql {
+            agent_id: String::new(),
+            host: "127.0.0.1".to_owned(),
+            port: 3306,
+            username: "sink".to_owned(),
+            password: "change-me".to_owned(),
+            database: "qbs".to_owned(),
+        };
+        let error = store.create(input).unwrap_err();
+        assert!(error.contains("agent"), "{error}");
+
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// 本票之前存下的行没有这个字段，读得动、并被一次性回填（ADR-0044 §5）。
+    /// 直接往库里塞旧形状的 JSON，因为写入面已经不产出这种行了。
+    #[test]
+    fn legacy_rows_without_an_agent_are_backfilled_once() {
+        let directory = temp_directory();
+        let store = DatasourceStore::open(&directory).unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO datasources (datasource_id, name, kind, settings) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    "legacy",
+                    "旧目标库",
+                    "mysql",
+                    r#"{"kind":"mysql","host":"127.0.0.1","port":3306,"username":"sink","password":"","database":"qbs"}"#
+                ],
+            )
+            .unwrap();
+
+        assert!(
+            store.target_agent_id("legacy").is_err(),
+            "回填之前它没有可用的路由，必须报错而不是猜一台"
+        );
+        assert_eq!(store.backfill_missing_agent_id("agent-a").unwrap(), 1);
+        assert_eq!(store.target_agent_id("legacy").unwrap(), "agent-a");
+        assert_eq!(
+            store.backfill_missing_agent_id("agent-b").unwrap(),
+            0,
+            "已经绑好的不许被第二次回填改掉"
+        );
 
         drop(store);
         std::fs::remove_dir_all(directory).unwrap();

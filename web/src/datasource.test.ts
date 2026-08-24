@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import type { Datasource, Task } from "./api";
+import type { Agent, Datasource, Task } from "./api";
 import {
+  agentLabel,
+  agentStatusOf,
   canSaveDatasource,
   connectionFingerprint,
   connectionSummary,
@@ -9,7 +11,22 @@ import {
   draftFrom,
   referenceCounts,
 } from "./datasource";
-import { referencedTasksFrom, ApiError } from "./api";
+import {
+  referencedDatasourcesFrom,
+  referencedTasksFrom,
+  ApiError,
+} from "./api";
+
+const agent: Agent = {
+  agent_id: "agent-a",
+  name: "目标端 A",
+  base_url: "http://127.0.0.1:8080",
+  instance_id: "6f1a9c2d",
+  version: "0.1.0",
+  last_seen_at: "2026-08-24T00:00:00Z",
+  status: "online",
+  last_error: null,
+};
 
 const oracle: Datasource = {
   datasource_id: "ds-1",
@@ -24,6 +41,7 @@ const mysql: Datasource = {
   datasource_id: "ds-2",
   name: "数仓 MySQL",
   kind: "mysql",
+  agent_id: "agent-a",
   host: "10.0.0.12",
   port: 3306,
   username: "sink",
@@ -110,6 +128,37 @@ describe("canSaveDatasource（测通才让存）", () => {
   });
 });
 
+describe("目标端 agent 绑定（ADR-0044 §6）", () => {
+  it("Oracle 那一栏是空的——源库由 source 直连，这一栏对它没有含义", () => {
+    expect(agentLabel(oracle, [agent])).toBe("");
+    expect(agentStatusOf(oracle, [agent])).toBeNull();
+  });
+
+  it("MySQL 显示 agent 的名字与它此刻的状态", () => {
+    expect(agentLabel(mysql, [agent])).toBe("目标端 A");
+    expect(agentStatusOf(mysql, [agent])).toBe("online");
+    expect(agentStatusOf(mysql, [{ ...agent, status: "mismatch" }])).toBe("mismatch");
+  });
+
+  it("绑的 agent 已经不在注册表里就点名说出来，并按不在线算", () => {
+    // 含糊成一个 id 片段会让人以为只是显示问题；这条数据源此刻是真的不能用。
+    expect(agentLabel(mysql, [])).toBe("已失效的 agent");
+    expect(agentStatusOf(mysql, [])).toBe("offline");
+  });
+
+  it("换一台 agent 就得重测：agent 进指纹", () => {
+    // 换 agent 等于换了一条到目标库的路，上一次的测连结果与新路没关系。
+    const initial = draftFrom(mysql);
+    const moved = { ...initial, agent_id: "agent-b" };
+    expect(canSaveDatasource(moved, initial, connectionFingerprint(initial))).toBe(false);
+    expect(connectionFingerprint(moved)).not.toBe(connectionFingerprint(initial));
+  });
+
+  it("编辑态带出原来绑的那台 agent", () => {
+    expect(draftFrom(mysql)).toMatchObject({ kind: "mysql", agent_id: "agent-a" });
+  });
+});
+
 describe("referenceCounts", () => {
   it("数的是任务不是绑定：一个任务两端都指着它也只算一个", () => {
     const counts = referenceCounts([
@@ -138,6 +187,21 @@ describe("referencedTasksFrom", () => {
     expect(referencedTasksFrom(new ApiError("坏了", 500, { error: { message: "x" } }))).toEqual([]);
     expect(referencedTasksFrom(new ApiError("坏了", 409, { error: { message: "x" } }))).toEqual([]);
     expect(referencedTasksFrom(new Error("网络断了"))).toEqual([]);
+  });
+});
+
+describe("referencedDatasourcesFrom", () => {
+  it("删 agent 被拒时，409 报文里点名的数据源原样取出来", () => {
+    const error = new ApiError("这台 agent 仍被 2 条数据源引用", 409, {
+      error: { message: "…", datasources: ["数仓 MySQL", "报表库"] },
+    });
+    expect(referencedDatasourcesFrom(error)).toEqual(["数仓 MySQL", "报表库"]);
+  });
+
+  it("两把钥匙各开各的门：tasks 那份取不出 datasources", () => {
+    const error = new ApiError("x", 409, { error: { message: "…", tasks: ["甲"] } });
+    expect(referencedDatasourcesFrom(error)).toEqual([]);
+    expect(referencedTasksFrom(error)).toEqual(["甲"]);
   });
 });
 

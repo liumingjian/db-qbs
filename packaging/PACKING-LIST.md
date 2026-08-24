@@ -14,7 +14,7 @@
 | 6 | stunnel 配置模板（两端各一份 + systemd unit） | `packaging/stunnel/{source,target}-side/` | `/etc/stunnel/db-qbs/` | `packaging/stunnel/README.md` 的六步。**两端的模板同名不同内容**，源端拿 `source-side/`、目标端拿 `target-side/` |
 | 7 | stunnel 双端证书材料 | `packaging/stunnel/gen-certs.sh` **出发前跑一次** | 两端 `/etc/stunnel/db-qbs/` | 私钥 `chmod 600`；**不进版本库**；两端各拿 `out/<side>-side/` 那一套，装完两边对 SHA-256 指纹 |
 | 8 | 六个包的 rpm（离线包）：`libaio` `stunnel` `openssl` `unzip` `curl` `iproute` | CentOS 7 vault 存档源，**出发前下好**（在一台能上网的 CentOS 7 上 `yumdownloader --resolve --destdir=... <六个包>`） | 两端 | 现场 yum 多半上不了外网。`libaio` 是 Instant Client 的硬依赖；没有 `unzip` 连 Instant Client 都解不开；`ss` 来自 `iproute`，**干净的 CentOS 7 上它不在**（演练台实测）。目标端只用到其中四个（`stunnel` `openssl` `curl` `iproute`） |
-| 9 | `config/source.toml.example` / `config/sink.toml.example` | 仓库 `config/` | 两端，填完 `chmod 0600` | 自检会从 `/etc/db-qbs/` 下读它们。`sink.toml` 只有 `listen` 一行，**别写已退役的 `mysql_dsn` / `database`** |
+| 9 | `config/source.toml.example` / `config/sink.toml.example` | 仓库 `config/` | 两端，填完 `chmod 0600` | 自检会从 `/etc/db-qbs/` 下读它们。`sink.toml` 只有 `listen` 一行，**别写已退役的 `mysql_dsn` / `database`**；`source.toml` 三行，**别写已退役的 `sink_base_url`**（目标端地址改成在界面上注册的 agent，ADR-0044 §5） |
 | 10 | 两份装机手册 | 目标端 [`docs/install/target-centos7.md`](../docs/install/target-centos7.md)（#156，**先装**）；源端 [`docs/install/source-centos7.md`](../docs/install/source-centos7.md)（#155） | 打印或离线带一份 | 每一行都在演练台上走过，实录在 [`docs/install/records/`](../docs/install/records/) |
 | 11 | 给客户 DBA 的纸条：MySQL 三前提 + 账号授权 | 目标端手册第 7 步（`character-set-server=utf8mb4`、`max_allowed_packet ≥ 64M`、没有 `init_connect` 改 `sql_mode`；`GRANT SELECT, INSERT, UPDATE, CREATE, DROP`） | **出发前就发给 DBA** | 目标端自检 D4–D7；改 `max_allowed_packet` 要重启 MySQL，窗口要提前约 |
 

@@ -173,6 +173,16 @@ chmod 0600 /etc/db-qbs/sink.toml
   是经第 8 步的 stunnel 服务端落到回环上来的。自检 D3 专门判这一条。
 - `8080` 必须与第 8 步 stunnel 配置里的 `@@SINK_PORT@@` **同一个值**。
 
+**这个进程就是「目标端 agent」**（ADR-0044）。可以什么都不加：起来的时候它会在
+`sink.toml` 隔壁生成一个 `agent-id` 文件（0600），那是它**跨重启稳定**的身份，
+源端在注册那一刻把它钉住。想给它起个名字就加一行 `agent_name = "目标端 A"`，
+留空则用主机名——名字不作判据，只进源端的界面。
+
+> **`agent-id` 是这台机器的一份状态，别删。** 删掉等于换了一个身份：
+> 源端会判「身份不符」并**停掉所有目标端链路**（这是有意的——「同一个地址上换了一台 agent」
+> 与「agent 没起来」是两种事故）。真删了，处置是在源端「目标端 Agent」屏对这台重新保存一次。
+> 备份这台机器时把它一起备。
+
 **不要写 `mysql_dsn` / `database`。** 这两个字段已退役（ADR-0037 §2）：目标库的凭据随每个 run 的请求
 从 source 过线，sink 自己不持有任何一份。写了不报错，但 sink 启动时会多打一条 warn，现场看到的人会以为配置出了问题。
 MySQL 的地址、账号、口令、库名都在**源端**的界面上填（`source-centos7.md` 的数据源那一步），这台机器上一个都不用配。
@@ -190,11 +200,16 @@ MySQL 的地址、账号、口令、库名都在**源端**的界面上填（`sou
 nohup /opt/db-qbs/bin/db-qbs-sink --config /etc/db-qbs/sink.toml >> /var/log/db-qbs-sink.log 2>&1 &
 sleep 1; tail -5 /var/log/db-qbs-sink.log
 curl -sS http://127.0.0.1:8080/v1/runs/__probe__; echo
+curl -sS http://127.0.0.1:8080/v1/agent/info; echo
 ```
 
-期望：日志里一条 `"event":"sink_started"`、`"listen":"127.0.0.1:8080"`（它自己把「本服务无鉴权」那句警告打出来，**这是正常的**）；
-`curl` 回一段 404 的 JSON，`"code":"RUN_UNKNOWN"`——**这就是「那头是 sink」的指纹**，
+期望：日志里两条 `"event":"sink_started"`——一条把「本服务无鉴权」那句警告打出来（**这是正常的**），
+一条报出这台 agent 的 `agent_id` / `agent_name` / `version`（ADR-0044 §2；`agent_id` 就是隔壁那个
+`agent-id` 文件里的值，源端注册时会钉住它）；
+第一条 `curl` 回一段 404 的 JSON，`"code":"RUN_UNKNOWN"`——**这就是「那头是 sink」的指纹**，
 自检 D2、源端自检 S8 认的都是它（「有人应答」不算，隧道通到别的服务上也会有人应答）。
+第二条回 `{"agent_id":…,"name":…,"version":…}`——**源端注册这台 agent 时打的就是它**，
+这里不通，源端第 10.5 步一定注册不上。
 
 sink 启动**不连 MySQL**：连接按 run 建，连不上的失败点在第 9 步的 D4（或发起运行那一刻）。
 所以这里起得来不等于库连得上，别把这一步的绿当成第 7 步的绿。
@@ -415,6 +430,8 @@ printf 'GET /v1/runs/__probe__ HTTP/1.0\r\n\r\n' | openssl s_client -connect <�
 # 4) 源端的 stunnel 客户端装完之后（source-centos7.md 第 6 步）：经源端本机的隧道入口到达 sink
 curl -sS http://127.0.0.1:8080/v1/runs/__probe__; echo
 # 期望：RUN_UNKNOWN 的那段 JSON —— 这就是源端自检 S8 判的事
+curl -sS http://127.0.0.1:8080/v1/agent/info; echo
+# 期望：这台 agent 的身份自述 —— 源端第 10.5 步注册它时打的就是这个地址（ADR-0044 §3）
 ```
 
 而「回环之外摸不到 sink」这一半在**本机**就能判：自检 D3 从这台机器的非回环地址反向摸 `8080` 必须不通，
@@ -429,12 +446,13 @@ curl -sS http://127.0.0.1:8080/v1/runs/__probe__; echo
 QBS_MYSQL_HOST=<MySQL 地址> QBS_MYSQL_USER=<账号> QBS_MYSQL_DATABASE=<库名> \
 QBS_MYSQL_PASSWORD_FILE=/root/.qbs-mysql-pass /root/dist/preflight-target.sh   # D1–D9 全 PASS
 ss -ltnp | grep -E '8080|15443'                          # 8080 只在 127.0.0.1 上；15443 在 0.0.0.0（或 *）上
-ls -l /etc/db-qbs/sink.toml /etc/stunnel/db-qbs/target.key /root/.qbs-mysql-pass   # 都是 0600
+ls -l /etc/db-qbs/sink.toml /etc/db-qbs/agent-id /etc/stunnel/db-qbs/target.key /root/.qbs-mysql-pass   # 都是 0600
 ```
 
 - [ ] 自检 D1–D9 全绿、退出码 0
 - [ ] `8080` 只绑回环；对外露出来的只有白名单那一个口
 - [ ] 第 10 步四条：明文拿不到、带证书拿到 `RUN_UNKNOWN`、不带证书被拒、经源端隧道入口拿到 `RUN_UNKNOWN`
+- [ ] `/etc/db-qbs/agent-id` 已生成、是 `0600`，且**在备份清单里**（删了等于换身份，见第 5 步）
 - [ ] `sink.toml`、私钥、口令文件都是 `0600`
 - [ ] 真机上：`db-qbs-sink` 与 `db-qbs-stunnel` 两个 unit 都 `enable` 了（重启后还在）；`firewalld` 放行了白名单口
 - [ ] DBA 那张纸条（第 7 步）已经发出去、窗口约好了

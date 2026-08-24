@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""第一版渲染面走查 X1–X18 的机器观察。
+"""第一版渲染面走查 X1–X19 的机器观察。
 
 ## 已跟进 ADR-0043（2026-08-21）
 
@@ -17,6 +17,8 @@
 * `observe_row_test`（X12）：行内测连改图标按钮，认 `title` / `aria-label`，不再认按钮文字。
 * 新增 `observe_sider_collapse`（X13）、`observe_job_columns`（X14）、`observe_bulk`（X15）、
   `observe_progress`（X16）、`observe_state_tags`（X17）、`observe_drawer`（X18）。
+* 2026-08-24（ADR-0044）：`observe_nav`（X1）改判成**四项、目标端 Agent 第一项**，
+  `observe_list`（X2）多量一列「目标端 Agent」，新增 `observe_agents`（X19）。
 
 屏的 id 从 `#tasks` 变成 `#jobs`，筛选条从 `.history-filters` 变成 `.filter-card`
 （而且它是表格卡的**兄弟**、不在卡内），卡内计数从 `.card-subtitle` 变成 `.table-count`。
@@ -85,6 +87,14 @@ def field_input(page, label):
     )
 
 
+def open_agents(page, width=1440, height=1200):
+    page.set_viewport_size({"width": width, "height": height})
+    page.goto(BASE, wait_until="networkidle")
+    page.wait_for_selector(f"{JOB} tbody tr")
+    page.click('nav[aria-label="主导航"] a[href="#agents"]')
+    page.wait_for_selector("#agents")
+
+
 def open_datasources(page, width=1440, height=1200):
     page.set_viewport_size({"width": width, "height": height})
     page.goto(BASE, wait_until="networkidle")
@@ -94,10 +104,11 @@ def open_datasources(page, width=1440, height=1200):
 
 
 def observe_nav(page):
-    """X1（ADR-0043 改判）：导航三项、数据源第二项、侧栏深色。
+    """X1（ADR-0044 再改判）：导航**四项**、目标端 Agent 第一项、数据源第三项、侧栏深色。
 
-    原判的「数据源是第三项」前提是任务屏与运行历史屏并列，那两屏已合并。
-    这里连侧栏底色一起量出来——「不再是白底左导航」这句话得有个数字兜着。
+    2026-08-24 之前判的是「三项、数据源第二项」（ADR-0043），更早判的是「四项、数据源第三项」
+    ——现在这四项与更早那次不是同一组。这里连侧栏底色一起量出来，
+    「不再是白底左导航」那句话得有个数字兜着。
     """
     page.set_viewport_size({"width": 1440, "height": 1200})
     page.goto(BASE, wait_until="networkidle")
@@ -107,7 +118,8 @@ def observe_nav(page):
         "order": [item.inner_text().strip().replace("\n", " ") for item in items],
         "tags": [item.evaluate("(el) => el.tagName") for item in items],
         "classes": [item.get_attribute("class") for item in items],
-        "second_item": items[1].inner_text().strip() if len(items) > 1 else None,
+        "first_item": items[0].inner_text().strip() if items else None,
+        "third_item": items[2].inner_text().strip() if len(items) > 2 else None,
         "sidebar_style": page.eval_on_selector(
             "aside.sidebar",
             "(el) => { const cs = getComputedStyle(el);"
@@ -123,7 +135,11 @@ def observe_nav(page):
 
 
 def observe_list(page):
-    """X2：列表七列，没有搜索框 / 类型筛选 / 连接状态列。"""
+    """X2（ADR-0044 改判）：列表八列——多一列「目标端 Agent」；
+    仍然没有搜索框 / 类型筛选 / **业务库的**连接状态列。
+
+    那一列 MySQL 行显示 agent 名字、绑的那台不在线时跟一个状态标签，Oracle 行是空的。
+    """
     open_datasources(page)
     headers = [h.inner_text() for h in page.query_selector_all("#datasources thead th")]
     rows = [[c.inner_text() for c in r.query_selector_all("td")]
@@ -136,6 +152,17 @@ def observe_list(page):
         "search_fields": len(page.query_selector_all("#datasources .search-field")),
         "selects_on_screen": len(page.query_selector_all("#datasources select")),
         "toolbars": len(page.query_selector_all("#datasources .toolbar")),
+        # 「目标端 Agent」那一列逐行取：Oracle 行必须是空串，MySQL 行是名字（不是 id），
+        # 绑在不在线的 agent 上那一行还要多出一个状态标签。
+        "agent_column_index": headers.index("目标端 Agent") if "目标端 Agent" in headers else None,
+        "agent_cells": [
+            {
+                "kind": row.query_selector_all("td")[1].inner_text(),
+                "text": row.query_selector_all("td")[3].inner_text().replace("\n", " "),
+                "state_tags": [t.inner_text() for t in row.query_selector_all("td:nth-child(4) .state")],
+            }
+            for row in page.query_selector_all("#datasources tbody tr")
+        ],
     }
 
 
@@ -1163,6 +1190,141 @@ def observe_empty_datasources(page):
     }
 
 
+def observe_agents(page):
+    """X19（新增，ADR-0044 §6）：目标端 Agent 屏。
+
+    五件事，一件都不许靠「看上去对」：
+      1. 列结构与三档状态**分开报**，且身份不符比不在线更红（量 `backgroundColor`）；
+      2. 注册一个打不通的地址 → **502 + 列表不多出一行**（探不通就不落库）；
+      3. 注册一个通的 → 状态在线、身份列有值；这一屏**没有「测试连接」按钮**；
+      4. 删一台被数据源引用的 → 被拒且**点名列出**是哪几条数据源；
+      5. 数据源对话框里 agent 是**必选下拉**，换一台之后保存按钮重新变灰。
+    """
+    open_agents(page)
+    headers = [h.inner_text() for h in page.query_selector_all("#agents thead th")]
+    rows_before = page.query_selector_all("#agents tbody tr")
+    states = [
+        {
+            "text": tag.inner_text(),
+            "background": tag.evaluate("(el) => getComputedStyle(el).backgroundColor"),
+        }
+        for tag in page.query_selector_all("#agents tbody .state")
+    ]
+    reasons = [r.inner_text() for r in page.query_selector_all("#agents tbody .row-test-result")]
+    page.screenshot(path=f"{SHOTS}/x19-agent-list.png", full_page=True)
+
+    # ①.5 点一行「探测」：只锁自己那一行，结果**落回那一行**，失败也不弹对话框。
+    #     采样口径与 X12 同一条：桩答得比采样快时会采到已落定的态，如实标出来。
+    probe_button = rows_before[1].query_selector(
+        'button[aria-label="探测"], button[aria-label="正在探测"]'
+    )
+    probe_button.click()
+    probe_click = {
+        "clicked_row_aria_label": probe_button.get_attribute("aria-label"),
+        "clicked_row_disabled": probe_button.is_disabled(),
+        "other_rows_disabled": [
+            b.is_disabled()
+            for b in (
+                r.query_selector('button[aria-label="探测"], button[aria-label="正在探测"]')
+                for r in [rows_before[0], rows_before[2]]
+            )
+            if b is not None
+        ],
+    }
+    page.wait_for_timeout(400)
+    probe_click["settled_aria_label"] = probe_button.get_attribute("aria-label")
+    probe_click["row_after"] = [
+        c.inner_text().replace("\n", " ") for c in rows_before[1].query_selector_all("td")
+    ][:3]
+    probe_click["dialogs_on_screen"] = len(page.query_selector_all(".modal"))
+
+    # ② 注册一个打不通的地址：报错，且列表不多出一行。
+    page.click("#agents .card-header button.is-primary")
+    page.wait_for_selector(".modal")
+    field_input(page, "名称").fill("走查 · 打不通的")
+    field_input(page, "地址").fill("http://127.0.0.1:59999")
+    page.click('.modal button[type="submit"]')
+    page.wait_for_selector(".modal .form-error")
+    dead_error = page.query_selector(".modal .form-error").inner_text()
+    has_test_button = any(
+        "测试连接" in b.inner_text() for b in page.query_selector_all(".modal button")
+    )
+    page.screenshot(path=f"{SHOTS}/x19-register-unreachable.png", full_page=True)
+
+    # ③ 改成通的那个地址：保存即连接。
+    field_input(page, "地址").fill("http://127.0.0.1:8080")
+    page.click('.modal button[type="submit"]')
+    page.wait_for_selector(".modal", state="detached")
+    page.wait_for_timeout(200)
+    rows_after = [
+        [c.inner_text().replace("\n", " ") for c in r.query_selector_all("td")]
+        for r in page.query_selector_all("#agents tbody tr")
+    ]
+    page.screenshot(path=f"{SHOTS}/x19-registered.png", full_page=True)
+
+    # ④ 删一台被数据源引用的：被拒 + 点名。
+    refusal = None
+    refusal_names = []
+    for row in page.query_selector_all("#agents tbody tr"):
+        cells = row.query_selector_all("td")
+        if "未被引用" in cells[6].inner_text():
+            continue
+        row.query_selector('button[aria-label="删除 Agent"]').click()
+        page.wait_for_selector(".modal")
+        page.click('.modal .modal-footer button.is-danger')
+        page.wait_for_selector(".modal .form-error")
+        refusal = page.query_selector(".modal .form-error").inner_text()
+        refusal_names = [li.inner_text() for li in page.query_selector_all(".modal li")]
+        page.screenshot(path=f"{SHOTS}/x19-delete-refused.png", full_page=True)
+        page.click('.modal .modal-footer button.is-ghost')
+        page.wait_for_selector(".modal", state="detached")
+        break
+
+    # ⑤ 数据源对话框里的 agent 下拉：必选、换一台之后保存重新变灰。
+    # **要挑一条 MySQL 的行**：Oracle 数据源不绑 agent（ADR-0044 §1），
+    # 对着它开对话框根本没有这个字段，量出来的 null 是「挑错了行」不是「字段没了」。
+    open_datasources(page)
+    for row in page.query_selector_all("#datasources tbody tr"):
+        if row.query_selector_all("td")[1].inner_text().strip() == "MySQL":
+            row.query_selector('button[aria-label="编辑数据源"]').click()
+            break
+    page.wait_for_selector(".modal")
+    selector = '.modal label.form-field:has(span.field-label:text-is("目标端 Agent")) select'
+    select = page.query_selector(selector)
+    dropdown = None
+    if select is not None:
+        options = [o.inner_text() for o in page.query_selector_all(f"{selector} option")]
+        submit = page.query_selector('.modal button[type="submit"]')
+        before = submit.is_disabled()
+        values = [o.get_attribute("value") for o in page.query_selector_all(f"{selector} option")]
+        other = next((v for v in values if v and v != select.input_value()), None)
+        if other is not None:
+            page.select_option(selector, other)
+        dropdown = {
+            "required": select.get_attribute("required") is not None,
+            "options": options,
+            "submit_disabled_before_switch": before,
+            "submit_disabled_after_switch": page.query_selector(
+                '.modal button[type="submit"]').is_disabled(),
+        }
+        page.screenshot(path=f"{SHOTS}/x19-datasource-agent-select.png", full_page=True)
+    page.click('.modal .modal-footer button.is-ghost')
+
+    return {
+        "columns": headers,
+        "row_count_before": len(rows_before),
+        "state_tags": states,
+        "reasons_on_row": reasons,
+        "probe_click": probe_click,
+        "register_unreachable_error": dead_error,
+        "register_dialog_has_test_button": has_test_button,
+        "rows_after_register": rows_after,
+        "delete_refusal": refusal,
+        "delete_refusal_names": refusal_names,
+        "datasource_agent_dropdown": dropdown,
+    }
+
+
 def main():
     os.makedirs(SHOTS, exist_ok=True)
     only_empty = os.environ.get("V1_MOCK_EMPTY_DATASOURCES") == "1"
@@ -1201,6 +1363,8 @@ def main():
             "X16_progress": observe_progress(page),
             "X17_state_tags": observe_state_tags(page),
             "X18_drawer": observe_drawer(page),
+            # X19 也会**改状态**（注册一台新 agent），所以同样排在只读的那些之后。
+            "X19_agents": observe_agents(page),
             # X9 摆在最后：它会**真的发起一次运行**，把桩里的最近一次运行换掉。
             # 放在前面会让 X16 / X17 / X8 看到的是被它改过的那一屏。
             "X9_rerun": observe_rerun(page),

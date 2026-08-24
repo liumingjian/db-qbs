@@ -515,9 +515,10 @@ fixture 是新建的 `acceptance/oracle-v1.sql` 与 `acceptance/mysql-v1.sql`，
 ```
 
 - **落点形态**：源端 stunnel 客户端只绑 `127.0.0.1:8080`，目标端 stunnel 服务端在白名单口
-  `15443` 上收、落到 `127.0.0.1:8080` 的 sink。`source` 的 `sink_base_url` 仍是
-  `http://127.0.0.1:8080`——**`config/source.toml.example` 里本来就是这个值**，
+  `15443` 上收、落到 `127.0.0.1:8080` 的 sink。`source` 打的仍是 `http://127.0.0.1:8080`，
   scheme 仍是 `http`，`protocol.rs` 那条「非 http 一律拒」的校验一个字不动。
+  **2026-08-24（ADR-0044 §5）**：那个地址不再是 `source.toml::sink_base_url`（已退役），
+  而是在界面「目标端 Agent」屏注册的那台 agent 的 `base_url`——**隧道形态与方向一个字未改**。
   **sink 仍然只绑回环**，ADR-0024 的兜底形态原样成立（判据 T4）。
 - **桩 sink，不是真 sink**：真 `sink` 要等 #156 装上来。本票要证的是隧道那一段，
   落点是不是真产品不影响判据——但**「只绑回环」这条必须一模一样**，桩就是照

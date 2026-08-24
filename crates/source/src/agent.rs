@@ -1,0 +1,555 @@
+//! 目标端 agent 注册表（ADR-0044）。
+//!
+//! **一台 agent = 一个 sink 进程。** 目标库只能经它访问：source 一条 MySQL 连接都不建
+//! （`CONTEXT.md` 那条不对称），元数据、测连、写入三条链全部落在这里选中的那台 agent 上。
+//!
+//! 三条边界，改动前先读 ADR-0044：
+//! 1. **没有全局兜底**（§1）——`source.toml` 的 `sink_base_url` 退役成一次性迁移。
+//!    没绑 agent 的 MySQL 数据源不是「用默认那台」，而是**不能用**。
+//! 2. **身份钉住地址**（§2）——注册时把 agent 自报的 `agent_id` 记下来（[`Agent::instance_id`]），
+//!    之后每次探测、每次开跑都比一次。地址还通但换了个 agent 应答，判**不在线**，
+//!    这正是「停了 agent 却照样同步」那类静默的抓手。
+//! 3. **注册要求对方活着**（§3）——注册与改址都当场打一次 `/v1/agent/info`，打不通就不落库。
+//!    库里因此不会出现「从没连通过的 agent」这种只会误导人的记录。
+
+use std::fs::{self, OpenOptions, Permissions};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::Path;
+use std::time::Duration;
+
+use db_qbs_shared::AgentInfo;
+use rand::RngCore;
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+const DATABASE_FILE: &str = "db-qbs.sqlite3";
+
+/// 注册表里的一台 agent。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Agent {
+    /// source 侧这条记录的 id，与 agent 自报的身份**不是一回事**。
+    pub agent_id: String,
+    /// 展示名。注册时预填 agent 自报的名字，之后由人改，改了不再被探测覆盖——
+    /// 界面上那一列是给人认机器的，被远端覆写会让人刚改完的名字自己变回去。
+    pub name: String,
+    pub base_url: String,
+    /// agent 自报的稳定身份（[`AgentInfo::agent_id`]），注册时钉下。
+    pub instance_id: String,
+    pub version: String,
+    /// 最近一次探通的时间（RFC 3339）。**从没探通过是 `None`**，
+    /// 但注册本身要求探通，所以新记录一定有值。
+    pub last_seen_at: Option<String>,
+    pub status: AgentStatus,
+    /// 最近一次探测失败的人话原因；在线时为 `None`。
+    pub last_error: Option<String>,
+}
+
+/// agent 的在线状态。**三档，不是两档**：`Mismatch` 与 `Offline` 分开报，
+/// 因为处置完全不同——一个是把服务起起来，一个是「这个地址后面站的不是你以为的那台」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStatus {
+    Online,
+    Offline,
+    Mismatch,
+}
+
+impl AgentStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Online => "online",
+            Self::Offline => "offline",
+            Self::Mismatch => "mismatch",
+        }
+    }
+}
+
+/// 注册 / 改址的请求体。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentInput {
+    pub name: String,
+    pub base_url: String,
+}
+
+pub struct AgentStore {
+    connection: Connection,
+}
+
+impl AgentStore {
+    pub fn open(data_dir: &Path) -> Result<Self, String> {
+        fs::create_dir_all(data_dir)
+            .map_err(|error| format!("创建 source 数据目录失败：{error}"))?;
+        let database_path = data_dir.join(DATABASE_FILE);
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&database_path)
+            .map_err(|error| format!("创建 SQLite 库文件失败：{error}"))?;
+        fs::set_permissions(&database_path, Permissions::from_mode(0o600))
+            .map_err(|error| format!("设置 SQLite 库文件权限失败：{error}"))?;
+
+        let connection = Connection::open(&database_path)
+            .map_err(|error| format!("打开 SQLite 库文件失败：{error}"))?;
+        connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS agents (
+                    agent_id     TEXT PRIMARY KEY NOT NULL,
+                    name         TEXT NOT NULL,
+                    base_url     TEXT NOT NULL,
+                    instance_id  TEXT NOT NULL,
+                    version      TEXT NOT NULL,
+                    last_seen_at TEXT,
+                    status       TEXT NOT NULL,
+                    last_error   TEXT
+                );",
+            )
+            .map_err(|error| format!("初始化 SQLite agent 表失败：{error}"))?;
+        Ok(Self { connection })
+    }
+
+    /// 注册一台已经探通的 agent。`info` 是刚探回来的那一份，**调用方负责先探**——
+    /// 把探测放在 store 里等于让它长出一条网络依赖，测试要起 HTTP 服务才跑得动。
+    pub fn register(
+        &self,
+        input: &AgentInput,
+        info: &AgentInfo,
+        now: &str,
+    ) -> Result<Agent, String> {
+        let agent = Agent {
+            agent_id: generate_agent_id(),
+            name: display_name(&input.name, info),
+            base_url: normalize_base_url(&input.base_url)?,
+            instance_id: info.agent_id.clone(),
+            version: info.version.clone(),
+            last_seen_at: Some(now.to_owned()),
+            status: AgentStatus::Online,
+            last_error: None,
+        };
+        self.connection
+            .execute(
+                "INSERT INTO agents (agent_id, name, base_url, instance_id, version, last_seen_at, status, last_error)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+                params![
+                    agent.agent_id,
+                    agent.name,
+                    agent.base_url,
+                    agent.instance_id,
+                    agent.version,
+                    agent.last_seen_at,
+                    agent.status.as_str(),
+                ],
+            )
+            .map_err(|error| format!("写入 SQLite agent 失败：{error}"))?;
+        Ok(agent)
+    }
+
+    /// 改名 / 改址。**改址会重新钉身份**：换机器、重装、换证书都会换出一个新的 `agent_id`，
+    /// 而这是一次人明确发起的动作，不是静默替换——静默那一类由探测抓（[`Self::record_probe`]）。
+    pub fn update(
+        &self,
+        agent_id: &str,
+        input: &AgentInput,
+        info: &AgentInfo,
+        now: &str,
+    ) -> Result<Option<Agent>, String> {
+        if self.get(agent_id)?.is_none() {
+            return Ok(None);
+        }
+        let agent = Agent {
+            agent_id: agent_id.to_owned(),
+            name: display_name(&input.name, info),
+            base_url: normalize_base_url(&input.base_url)?,
+            instance_id: info.agent_id.clone(),
+            version: info.version.clone(),
+            last_seen_at: Some(now.to_owned()),
+            status: AgentStatus::Online,
+            last_error: None,
+        };
+        self.connection
+            .execute(
+                "UPDATE agents SET name = ?2, base_url = ?3, instance_id = ?4, version = ?5,
+                                   last_seen_at = ?6, status = ?7, last_error = NULL
+                 WHERE agent_id = ?1",
+                params![
+                    agent.agent_id,
+                    agent.name,
+                    agent.base_url,
+                    agent.instance_id,
+                    agent.version,
+                    agent.last_seen_at,
+                    agent.status.as_str(),
+                ],
+            )
+            .map_err(|error| format!("更新 SQLite agent 失败：{error}"))?;
+        Ok(Some(agent))
+    }
+
+    pub fn list(&self) -> Result<Vec<Agent>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT agent_id, name, base_url, instance_id, version, last_seen_at, status, last_error
+                 FROM agents ORDER BY rowid",
+            )
+            .map_err(|error| format!("准备 SQLite agent 列表查询失败：{error}"))?;
+        let agents = statement
+            .query_map([], agent_from_row)
+            .map_err(|error| format!("查询 SQLite agent 列表失败：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("读取 SQLite agent 列表失败：{error}"))?;
+        Ok(agents)
+    }
+
+    pub fn get(&self, agent_id: &str) -> Result<Option<Agent>, String> {
+        self.connection
+            .query_row(
+                "SELECT agent_id, name, base_url, instance_id, version, last_seen_at, status, last_error
+                 FROM agents WHERE agent_id = ?1",
+                [agent_id],
+                agent_from_row,
+            )
+            .optional()
+            .map_err(|error| format!("查询 SQLite agent 失败：{error}"))
+    }
+
+    pub fn require(&self, agent_id: &str) -> Result<Agent, String> {
+        self.get(agent_id)?
+            .ok_or_else(|| format!("目标端 agent {agent_id} 不存在，请先在「目标端 Agent」屏注册"))
+    }
+
+    pub fn delete(&self, agent_id: &str) -> Result<Option<Agent>, String> {
+        let Some(agent) = self.get(agent_id)? else {
+            return Ok(None);
+        };
+        self.connection
+            .execute("DELETE FROM agents WHERE agent_id = ?1", [agent_id])
+            .map_err(|error| format!("删除 SQLite agent 失败：{error}"))?;
+        Ok(Some(agent))
+    }
+
+    /// 记一次探测结果。探通且身份对得上 → `Online`；身份对不上 → `Mismatch`；
+    /// 打不通 → `Offline`。**探测不改 `instance_id`**：钉住的那一份是判据本身，
+    /// 让探测覆写它等于让被顶替的 agent 自己把证据擦掉。
+    pub fn record_probe(
+        &self,
+        agent_id: &str,
+        result: &Result<AgentInfo, String>,
+        now: &str,
+    ) -> Result<Option<Agent>, String> {
+        let Some(existing) = self.get(agent_id)? else {
+            return Ok(None);
+        };
+        let (status, last_error, version, last_seen_at) = match result {
+            Ok(info)
+                if info.agent_id == existing.instance_id || existing.instance_id.is_empty() =>
+            {
+                (
+                    AgentStatus::Online,
+                    None,
+                    info.version.clone(),
+                    Some(now.to_owned()),
+                )
+            }
+            Ok(info) => (
+                AgentStatus::Mismatch,
+                Some(format!(
+                    "这个地址上应答的是另一台 agent（注册时钉的是 {}，现在应答的是 {}）",
+                    existing.instance_id, info.agent_id
+                )),
+                existing.version.clone(),
+                existing.last_seen_at.clone(),
+            ),
+            Err(error) => (
+                AgentStatus::Offline,
+                Some(error.clone()),
+                existing.version.clone(),
+                existing.last_seen_at.clone(),
+            ),
+        };
+        // 迁移进来的那条记录 `instance_id` 是空的（ADR-0044 §5）：第一次探通就把它补上，
+        // 从那一刻起它才真正被身份钉住。
+        let instance_id = match result {
+            Ok(info) if existing.instance_id.is_empty() => info.agent_id.clone(),
+            _ => existing.instance_id.clone(),
+        };
+        self.connection
+            .execute(
+                "UPDATE agents SET instance_id = ?2, version = ?3, last_seen_at = ?4,
+                                   status = ?5, last_error = ?6
+                 WHERE agent_id = ?1",
+                params![
+                    agent_id,
+                    instance_id,
+                    version,
+                    last_seen_at,
+                    status.as_str(),
+                    last_error,
+                ],
+            )
+            .map_err(|error| format!("更新 SQLite agent 探测结果失败：{error}"))?;
+        self.get(agent_id)
+    }
+
+    /// `source.toml` 的 `sink_base_url` 一次性迁移（ADR-0044 §5）。
+    ///
+    /// **判据是「表为空」**，与 ADR-0037 §10 那次 Oracle 迁移同一形态：迁完就有条目了，
+    /// 之后再启动一律跳过。迁出来的记录 `instance_id` 是空的、状态是 `Offline`——
+    /// 迁移发生在启动早期，这时候还不该去打网络；第一次探测会把它补齐。
+    pub fn migrate_legacy_sink_base_url(
+        &self,
+        sink_base_url: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        if !self.list()?.is_empty() {
+            return Ok(None);
+        }
+        let Some(base_url) = sink_base_url.map(str::trim).filter(|url| !url.is_empty()) else {
+            return Ok(None);
+        };
+        let agent_id = generate_agent_id();
+        self.connection
+            .execute(
+                "INSERT INTO agents (agent_id, name, base_url, instance_id, version, last_seen_at, status, last_error)
+                 VALUES (?1, '默认', ?2, '', '', NULL, 'offline', '尚未探测')",
+                params![agent_id, normalize_base_url(base_url)?],
+            )
+            .map_err(|error| format!("迁移 sink_base_url 失败：{error}"))?;
+        Ok(Some(agent_id))
+    }
+}
+
+/// 名字留空就用 agent 自报的那一个。**名字不作判据**，所以随便退化都不伤正确性。
+fn display_name(provided: &str, info: &AgentInfo) -> String {
+    let provided = provided.trim();
+    if !provided.is_empty() {
+        return provided.to_owned();
+    }
+    if info.name.trim().is_empty() {
+        return "未命名 agent".to_owned();
+    }
+    info.name.trim().to_owned()
+}
+
+/// 地址的规范形式：去掉尾巴上的 `/`，并按 [`crate::HttpSinkClient`] 那条同样的规矩校验。
+///
+/// **只收 http**：与 `protocol.rs` 里那条「非 http 一律拒」保持一字不差——机密性由部署者
+/// 自建的隧道给（ADR-0041 §4），产品这一侧不假装自己有 TLS。
+pub fn normalize_base_url(base_url: &str) -> Result<String, String> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return Err("agent 地址不能为空".to_owned());
+    }
+    let parsed = url::Url::parse(trimmed).map_err(|error| format!("agent 地址无效：{error}"))?;
+    if parsed.scheme() != "http" {
+        return Err("agent 地址必须是 http://（TLS 由部署者自建的隧道提供）".to_owned());
+    }
+    if parsed.host_str().is_none() {
+        return Err("agent 地址必须带主机名".to_owned());
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("agent 地址不能带 query 或 fragment".to_owned());
+    }
+    Ok(trimmed.trim_end_matches('/').to_owned())
+}
+
+/// 打一次 `GET /v1/agent/info`。**超时短**（连 5s、读 5s）：它挂在界面的同步路径上，
+/// 一台掉线的 agent 不该把整屏拖住。
+pub fn fetch_agent_info(base_url: &str) -> Result<AgentInfo, String> {
+    let url = format!("{}/v1/agent/info", base_url.trim_end_matches('/'));
+    let http = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        .timeout_read(Duration::from_secs(5))
+        .redirects(0)
+        .build();
+    match http.get(&url).call() {
+        Ok(response) => response
+            .into_json::<AgentInfo>()
+            .map_err(|error| format!("这个地址回的不是 agent 身份：{error}")),
+        Err(ureq::Error::Status(status, response)) => Err(response
+            .into_json::<Value>()
+            .ok()
+            .and_then(|body| Some(body.get("error")?.get("message")?.as_str()?.to_owned()))
+            .unwrap_or_else(|| {
+                format!("这个地址回了 HTTP {status}，它多半不是 db-qbs 的目标端 agent")
+            })),
+        Err(ureq::Error::Transport(error)) => Err(format!("连不上 agent：{error}")),
+    }
+}
+
+fn agent_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
+    let status: String = row.get("status")?;
+    Ok(Agent {
+        agent_id: row.get("agent_id")?,
+        name: row.get("name")?,
+        base_url: row.get("base_url")?,
+        instance_id: row.get("instance_id")?,
+        version: row.get("version")?,
+        last_seen_at: row.get("last_seen_at")?,
+        status: match status.as_str() {
+            "online" => AgentStatus::Online,
+            "mismatch" => AgentStatus::Mismatch,
+            _ => AgentStatus::Offline,
+        },
+        last_error: row.get("last_error")?,
+    })
+}
+
+fn generate_agent_id() -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let mut random_bytes = [0_u8; 16];
+    rand::thread_rng().fill_bytes(&mut random_bytes);
+    let mut agent_id = String::with_capacity(32);
+    for byte in random_bytes {
+        agent_id.push(HEX[(byte >> 4) as usize] as char);
+        agent_id.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    agent_id
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_dir() -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "db-qbs-agent-store-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    fn info(agent_id: &str) -> AgentInfo {
+        AgentInfo {
+            agent_id: agent_id.to_owned(),
+            name: "target-a".to_owned(),
+            version: "0.1.0".to_owned(),
+        }
+    }
+
+    fn input(base_url: &str) -> AgentInput {
+        AgentInput {
+            name: "目标端 A".to_owned(),
+            base_url: base_url.to_owned(),
+        }
+    }
+
+    #[test]
+    fn registering_pins_the_reported_identity() {
+        let store = AgentStore::open(&temp_dir()).unwrap();
+
+        let agent = store
+            .register(
+                &input("http://127.0.0.1:8080/"),
+                &info("aaa"),
+                "2026-08-24T00:00:00Z",
+            )
+            .unwrap();
+
+        assert_eq!(agent.instance_id, "aaa");
+        assert_eq!(agent.base_url, "http://127.0.0.1:8080", "尾斜杠要归一");
+        assert_eq!(agent.status, AgentStatus::Online);
+        assert_eq!(store.list().unwrap(), vec![agent]);
+    }
+
+    /// 本票的核心判定（ADR-0044 §2）：地址还通、但应答的是另一台 agent，判 `Mismatch`
+    /// 而不是 `Online`。判成在线就等于回到了「停掉 agent 照样同步」那个世界。
+    #[test]
+    fn a_different_agent_on_the_same_address_is_a_mismatch() {
+        let store = AgentStore::open(&temp_dir()).unwrap();
+        let agent = store
+            .register(
+                &input("http://127.0.0.1:8080"),
+                &info("aaa"),
+                "2026-08-24T00:00:00Z",
+            )
+            .unwrap();
+
+        let probed = store
+            .record_probe(&agent.agent_id, &Ok(info("bbb")), "2026-08-24T00:01:00Z")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(probed.status, AgentStatus::Mismatch);
+        assert_eq!(probed.instance_id, "aaa", "钉住的身份不许被探测覆写");
+        assert_eq!(
+            probed.last_seen_at.as_deref(),
+            Some("2026-08-24T00:00:00Z"),
+            "对不上的那次不算「见过」"
+        );
+        assert!(probed.last_error.unwrap().contains("bbb"));
+    }
+
+    #[test]
+    fn an_unreachable_agent_goes_offline() {
+        let store = AgentStore::open(&temp_dir()).unwrap();
+        let agent = store
+            .register(
+                &input("http://127.0.0.1:8080"),
+                &info("aaa"),
+                "2026-08-24T00:00:00Z",
+            )
+            .unwrap();
+
+        let probed = store
+            .record_probe(
+                &agent.agent_id,
+                &Err("连不上 agent：connection refused".to_owned()),
+                "2026-08-24T00:01:00Z",
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(probed.status, AgentStatus::Offline);
+        assert!(probed.last_error.unwrap().contains("connection refused"));
+    }
+
+    /// 迁移进来的那条记录没有身份（§5），第一次探通要把它补上——否则它永远处在
+    /// 「谁应答都算数」的状态，那条判定就是个摆设。
+    #[test]
+    fn migrated_agent_adopts_the_identity_on_first_successful_probe() {
+        let directory = temp_dir();
+        let store = AgentStore::open(&directory).unwrap();
+        let agent_id = store
+            .migrate_legacy_sink_base_url(Some("http://127.0.0.1:8080"))
+            .unwrap()
+            .unwrap();
+
+        let probed = store
+            .record_probe(&agent_id, &Ok(info("aaa")), "2026-08-24T00:01:00Z")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(probed.instance_id, "aaa");
+        assert_eq!(probed.status, AgentStatus::Online);
+        assert_eq!(
+            store
+                .migrate_legacy_sink_base_url(Some("http://127.0.0.1:9999"))
+                .unwrap(),
+            None,
+            "表非空就不再迁，迁移只发生一次"
+        );
+    }
+
+    #[test]
+    fn base_url_must_be_http_with_a_host() {
+        assert!(normalize_base_url("https://target:8080").is_err());
+        assert!(normalize_base_url("http://target:8080?x=1").is_err());
+        assert!(normalize_base_url("  ").is_err());
+        assert_eq!(
+            normalize_base_url("http://target:8080/").unwrap(),
+            "http://target:8080"
+        );
+    }
+}

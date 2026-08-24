@@ -295,6 +295,7 @@ describe("datasourceFilterOptions", () => {
       datasource_id: "ds-mysql",
       name: "报表库",
       kind: "mysql",
+      agent_id: "agent-a",
       host: "10.0.0.12",
       port: 3306,
       database: "dw",

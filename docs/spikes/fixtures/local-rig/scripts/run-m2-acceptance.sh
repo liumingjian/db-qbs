@@ -328,16 +328,22 @@ ensure_datasource() {
 }
 
 ensure_datasources() {
-  local payload
+  local payload agent_id
   payload=$(jq -nc --arg name "$ORACLE_DATASOURCE_NAME" '{
     name:$name, kind:"oracle",
     connect_string:"//127.0.0.1:1521/XE", username:"spike", password:"spike123"
   }') || return 1
   ORACLE_DATASOURCE_ID=$(ensure_datasource "$ORACLE_DATASOURCE_NAME" "$payload") || return 1
-  payload=$(jq -nc --arg name "$TARGET_DATASOURCE_NAME" '{
-    name:$name, kind:"mysql",
-    # sink 跑在 client 容器里、MySQL 是同网的 `mysql` 服务——目标端连接是**由 sink 用**的
-    # （ADR-0037 §1：凭据随 run 报文过线，sink 拿着它连），所以这里给的是容器内的名字，
+  # MySQL 数据源必须绑一台已注册的目标端 agent（ADR-0044 §1）。台架的 `source.toml` 仍写着
+  # `sink_base_url`，所以首启会把它迁成一条名叫「默认」的 agent（§5）——取的就是那一条。
+  api GET /api/agents || return 1
+  agent_id=$(jq -r '.[0].agent_id // empty' <<<"$API_BODY")
+  [[ -n "$agent_id" ]] ||
+    fail "agent 注册表是空的：sink_base_url 的一次性迁移（ADR-0044 §5）没发生" || return 1
+  payload=$(jq -nc --arg name "$TARGET_DATASOURCE_NAME" --arg agent "$agent_id" '{
+    name:$name, kind:"mysql", agent_id:$agent,
+    # agent（sink）跑在 client 容器里、MySQL 是同网的 `mysql` 服务——目标端连接是**由它用**的
+    # （ADR-0037 §1：凭据随 run 报文过线，agent 拿着它连），所以这里给的是容器内的名字，
     # 不是宿主机的 127.0.0.1。Oracle 那条相反：source 跑在宿主机上，走发布出来的端口。
     host:"mysql", port:3306, username:"spike", password:"spike123", database:"qbs"
   }') || return 1

@@ -41,12 +41,29 @@ DATASOURCES = [
      "connect_string": "//oracle-core:1521/ORCLPDB", "username": "app_reader", "has_password": True},
     {"datasource_id": "ds-ora-fa", "name": "财务库", "kind": "oracle",
      "connect_string": "//oracle-fa:1521/FAPDB", "username": "fa_reader", "has_password": True},
-    {"datasource_id": "ds-my-dw", "name": "数仓 MySQL", "kind": "mysql",
+    {"datasource_id": "ds-my-dw", "name": "数仓 MySQL", "kind": "mysql", "agent_id": "agent-a",
      "host": "10.0.0.12", "port": 3306, "username": "sink", "database": "dw_stage", "has_password": True},
-    {"datasource_id": "ds-my-mart", "name": "集市 MySQL", "kind": "mysql",
+    # 这一条故意绑在**不在线**的那台 agent 上：数据源屏「目标端 Agent」列的告警态要有对象（X19）。
+    {"datasource_id": "ds-my-mart", "name": "集市 MySQL", "kind": "mysql", "agent_id": "agent-b",
      "host": "10.0.0.13", "port": 3307, "username": "mart", "database": "dw_mart", "has_password": True},
-    {"datasource_id": "ds-my-spare", "name": "备用 MySQL", "kind": "mysql",
+    {"datasource_id": "ds-my-spare", "name": "备用 MySQL", "kind": "mysql", "agent_id": "agent-a",
      "host": "10.0.0.14", "port": 3306, "username": "spare", "database": "dw_spare", "has_password": False},
+]
+
+# 目标端 agent 注册表（ADR-0044）。三档状态各摆一台——X19 看的就是这三行同屏：
+# 在线 / 不在线 / 身份不符，且后两者各自带着自己的原因。
+AGENTS = [
+    {"agent_id": "agent-a", "name": "目标端 A", "base_url": "http://127.0.0.1:8080",
+     "instance_id": "6f1a9c2d4e8b47f0a1b2c3d4e5f60718", "version": "0.1.0",
+     "last_seen_at": "2026-08-24T02:00:00Z", "status": "online", "last_error": None},
+    {"agent_id": "agent-b", "name": "目标端 B（灾备）", "base_url": "http://127.0.0.1:8081",
+     "instance_id": "b21c7e0f5a934d18c0d2e3f405162738", "version": "0.1.0",
+     "last_seen_at": "2026-08-23T18:41:00Z", "status": "offline",
+     "last_error": "连不上 agent：Connection refused (os error 111)"},
+    {"agent_id": "agent-c", "name": "目标端 C（迁移中）", "base_url": "http://127.0.0.1:8082",
+     "instance_id": "c33d8f1a6b045e29d1e3f4a516273849", "version": "0.1.0",
+     "last_seen_at": "2026-08-22T09:12:00Z", "status": "mismatch",
+     "last_error": "这个地址上应答的是另一台 agent（注册时钉的是 c33d8f1a…，现在应答的是 99aa77bb…）"},
 ]
 
 SPEC = {
@@ -279,6 +296,8 @@ class Handler(BaseHTTPRequestHandler):
             if os.environ.get("V1_MOCK_EMPTY_DATASOURCES") == "1":
                 return self._send(200, [])
             return self._send(200, DATASOURCES)
+        if path == "/api/agents":
+            return self._send(200, AGENTS)
         if path == "/api/tasks":
             return self._send(200, TASKS)
         if path == "/api/runs":
@@ -359,10 +378,51 @@ class Handler(BaseHTTPRequestHandler):
             entry["datasource_id"] = f"ds-new-{len(DATASOURCES) + 1}"
             DATASOURCES.append(view_of(entry))
             return self._send(201, view_of(entry))
+        if path == "/api/agents":
+            # **注册要求对方活着**（ADR-0044 §3）：桩按端口造两态——8080 通，其余一律不通。
+            # 造的是「探不通就不落库」这条判定本身，不是网络。
+            draft = self._read()
+            base_url = (draft.get("base_url") or "").rstrip("/")
+            if not base_url.startswith("http://"):
+                return self._send(400, {"error": {
+                    "message": "agent 地址必须是 http://（TLS 由部署者自建的隧道提供）"}})
+            if not base_url.endswith(":8080"):
+                return self._send(502, {"kind": "agent", "message":
+                    f"连不上这个地址上的目标端 agent（{base_url}）：连不上 agent：Connection refused (os error 111)",
+                    "error": {"message":
+                        f"连不上这个地址上的目标端 agent（{base_url}）：连不上 agent：Connection refused (os error 111)"}})
+            entry = {
+                "agent_id": f"agent-new-{len(AGENTS) + 1}",
+                "name": draft.get("name") or "target-host",
+                "base_url": base_url,
+                "instance_id": "d44e9a2b7c156f3ae2f4a5b627384950",
+                "version": "0.1.0", "last_seen_at": "2026-08-24T02:05:00Z",
+                "status": "online", "last_error": None,
+            }
+            AGENTS.append(entry)
+            return self._send(201, entry)
+        if path.startswith("/api/agents/") and path.endswith("/probe"):
+            agent_id = path[len("/api/agents/"):-len("/probe")]
+            for entry in AGENTS:
+                if entry["agent_id"] == agent_id:
+                    # 探测**失败也回 200**：结果本身就是要显示的信息（ADR-0044 §6）。
+                    return self._send(200, entry)
+            return self._send(404, {"error": {"message": "agent not found"}})
         return self._send(404, {"error": {"message": "not found"}})
 
     def do_PUT(self):
         path = self.path.split("?")[0]
+        if path.startswith("/api/agents/"):
+            agent_id = path.rsplit("/", 1)[-1]
+            draft = self._read()
+            for index, entry in enumerate(AGENTS):
+                if entry["agent_id"] == agent_id:
+                    updated = dict(entry, name=draft.get("name") or entry["name"],
+                                   base_url=(draft.get("base_url") or entry["base_url"]).rstrip("/"),
+                                   status="online", last_error=None)
+                    AGENTS[index] = updated
+                    return self._send(200, updated)
+            return self._send(404, {"error": {"message": "agent not found"}})
         if path.startswith("/api/datasources/"):
             datasource_id = path.rsplit("/", 1)[-1]
             draft = self._read()
@@ -376,6 +436,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         path = self.path.split("?")[0]
+        if path.startswith("/api/agents/"):
+            agent_id = path.rsplit("/", 1)[-1]
+            bound = [d["name"] for d in DATASOURCES
+                     if d.get("kind") == "mysql" and d.get("agent_id") == agent_id]
+            if bound:
+                # 与「数据源被任务引用」那条 409 同一形态（ADR-0044 §6）。
+                return self._send(409, {"error": {
+                    "message": f"这台 agent 仍被 {len(bound)} 条数据源引用；请先改这些数据源绑定的 agent",
+                    "datasources": bound,
+                }})
+            for index, entry in enumerate(AGENTS):
+                if entry["agent_id"] == agent_id:
+                    return self._send(200, AGENTS.pop(index))
+            return self._send(404, {"error": {"message": "agent not found"}})
         if path.startswith("/api/datasources/"):
             datasource_id = path.rsplit("/", 1)[-1]
             names = referencing(datasource_id)

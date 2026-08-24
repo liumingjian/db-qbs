@@ -216,6 +216,9 @@ write_source_config() {
   local run_executable=$1
   mkdir -p "$SOURCE_DATA"
   # oracle_* 三件套已随 ADR-0037 §10 退役——真相源是数据源库。
+  # `sink_base_url` 也已随 ADR-0044 §5 退役，但**台架故意留着它**：它是那条一次性迁移
+  # （首启迁成一台名叫「默认」的 agent）的唯一入口，而 C1–C5 全都要用那台 agent。
+  # 换成「先起 source、再 POST /api/agents」也可以，但那等于让台架自己造一条真机上不走的路。
   cat > "$SOURCE_CONFIG" <<EOF
 oracle_client_lib_dir = "$M2_ORACLE_CLIENT_LIB_DIR"
 sink_base_url = "$SINK_URL"
@@ -349,17 +352,30 @@ oracle_datasource_payload() {
   }'
 }
 
-# 目标端连接是**由 sink 用**的（ADR-0037 §1：凭据随 run 报文过线），sink 跑在 client 容器里，
-# 所以给的是容器内的 `mysql`。Oracle 那条相反：source 跑在宿主机上，走发布出来的端口。
+# 台架上那台目标端 agent（ADR-0044）。**MySQL 数据源必须绑一台已注册的 agent**，
+# 而台架的 `source.toml` 还写着 `sink_base_url`，所以首启会把它迁成一条名叫「默认」的 agent
+# （§5）——这里取的就是那一条。取不到就是迁移这条路断了，直接判死，别静默跳过。
+AGENT_ID=""
+ensure_agent() {
+  api GET /api/agents || return 1
+  AGENT_ID=$(jq -r '.[0].agent_id // empty' <<<"$API_BODY")
+  [[ -n "$AGENT_ID" ]] ||
+    fail "agent 注册表是空的：sink_base_url 的一次性迁移（ADR-0044 §5）没发生"
+}
+
+# 目标端连接是**由 agent（sink）用**的（ADR-0037 §1：凭据随 run 报文过线），
+# agent 跑在 client 容器里，所以给的是容器内的 `mysql`。
+# Oracle 那条相反：source 跑在宿主机上，走发布出来的端口。
 target_datasource_payload() {
   local name=$1 password=$2
-  jq -nc --arg name "$name" --arg password "$password" '{
-    name:$name, kind:"mysql",
+  jq -nc --arg name "$name" --arg password "$password" --arg agent "$AGENT_ID" '{
+    name:$name, kind:"mysql", agent_id:$agent,
     host:"mysql", port:3306, username:"spike", password:$password, database:"qbs"
   }'
 }
 
 ensure_datasources() {
+  ensure_agent || return 1
   ORACLE_DATASOURCE_ID=$(ensure_datasource "$ORACLE_DATASOURCE_NAME" "$(oracle_datasource_payload)") || return 1
   TARGET_DATASOURCE_ID=$(ensure_datasource "$TARGET_DATASOURCE_NAME" \
     "$(target_datasource_payload "$TARGET_DATASOURCE_NAME" spike123)") || return 1
@@ -479,8 +495,8 @@ scenario_c1() {
   # 用一条一次性的数据源做，免得把 ①-④ 依赖的那两条名字改花。
   rename_id=$(ensure_datasource "V1 改名用" "$(target_datasource_payload "V1 改名用" spike123)") || return 1
   api PUT "/api/datasources/$rename_id" \
-    "$(jq -nc '{name:"V1 改名用（已改名）", kind:"mysql", host:"mysql", port:3306,
-                username:"spike", password:"", database:"qbs"}')" || return 1
+    "$(jq -nc --arg agent "$AGENT_ID" '{name:"V1 改名用（已改名）", kind:"mysql", agent_id:$agent,
+                host:"mysql", port:3306, username:"spike", password:"", database:"qbs"}')" || return 1
   assert_eq "C1⑤ rename without test-connection" 200 "$API_STATUS" || return 1
   assert_eq "C1⑤ new name stored" "V1 改名用（已改名）" "$(jq -r '.name' <<<"$API_BODY")" || return 1
   assert_eq "C1⑤ password kept" true "$(jq '.has_password' <<<"$API_BODY")" || return 1

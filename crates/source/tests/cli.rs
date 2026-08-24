@@ -149,6 +149,12 @@ fn write_task(directory: &Path) -> PathBuf {
          password = \"change-me\"\n\
          database = \"qbs\"\n\
          \n\
+         [agent]\n\
+         agent_id = \"a1\"\n\
+         name = \"目标端 A\"\n\
+         base_url = \"http://127.0.0.1:1\"\n\
+         instance_id = \"6f1a9c2d\"\n\
+         \n\
          [run_params]\n\
          biz_day = \"2026-08-14\"\n",
     )

@@ -8,6 +8,7 @@ rust-version.workspace = true
 chrono.workspace = true
 db-qbs-shared = { path = "../shared" }
 mysql = { version = "25.0.1", default-features = false, features = ["minimal-rust"] }
+rand.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
