@@ -219,6 +219,24 @@ describe("continueBlockReason", () => {
     );
   });
 
+  it("distinguishes an identity mismatch from an offline target agent", () => {
+    const mismatchGuard = evaluateEntry(
+      [
+        oracle("o1", "核心库"),
+        mysql("m1", "数仓", "agent-a"),
+        mysql("m3", "错接库", "agent-c"),
+      ],
+      [online, mismatch],
+      false,
+    );
+    if (mismatchGuard.kind !== "open") {
+      throw new Error("fixture must open the door");
+    }
+    expect(continueBlockReason(mismatchGuard, "o1", "m3")).toBe(
+      "「错接库」的目标端 Agent「目标端 C」身份不符，目标库只能经它访问",
+    );
+  });
+
   it("lets a live pair through", () => {
     expect(continueBlockReason(guard, "o1", "m1")).toBeNull();
   });
