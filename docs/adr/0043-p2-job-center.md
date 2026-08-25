@@ -1,333 +1,412 @@
-# ADR-0043: 作业中心（P2）——照搬 x2doris 的中后台外壳，运行历史并入任务列表，进度改为开跑前计数的整数百分比
+# ADR-0043: Job Center (P2) — copying the x2doris admin shell, folding run history into the task list, and progress as an integer percentage counted before the run
 
-**状态**: 已接受
-**日期**: 2026-08-21
-**输入**: 所有者 2026-08-21 的八条裁定（对话内，逐条列在 §1）；形态产物
-[`docs/prototypes/p2-job-center.html`](../prototypes/p2-job-center.html)
-**先例**: [ADR-0039](0039-v1-ui-increments.md)（第一版渲染面增量）、
-[ADR-0042](0042-p1-list-workflows.md)（P1 列表工作流）——本 ADR **推翻它们的若干条**，逐条列在 §9；
-[ADR-0025](0025-m2-visual-language-and-design-system.md)（设计方向 D）——本 ADR **改写它的取值来源**，见 §3
+**Status**: Accepted
+**Date**: 2026-08-21
+**Inputs**: the owner's eight rulings of 2026-08-21 (in conversation, listed one by one in §1); the
+shape artifact [`docs/prototypes/p2-job-center.html`](../prototypes/p2-job-center.html)
+**Precedent**: [ADR-0039](0039-v1-ui-increments.md) (v1 rendering-surface increments),
+[ADR-0042](0042-p1-list-workflows.md) (P1 list workflows) — this ADR **overturns several of their
+clauses**, listed one by one in §9; `ADR-0025` (design direction D) — this ADR **rewrites where its
+values come from**, see §3
 
-## 背景
+## Background
 
-P0 收窄、P1 把列表工作流补齐之后，剩下的问题不是「少了哪一项」，而是**整套外壳与参照物不是一路货**。
-所有者 2026-08-21 看完 P1 的截图，裁定从「参考 x2doris」升级为「**照搬 x2doris**」，
-并点名批评了上一轮的做法：**拿自己不成熟的想法去挡现成的最佳实践**。
+After P0's narrowing and P1's completion of the list workflows, the remaining problem was not "which
+item is missing" but that **the whole shell is not the same kind of thing as the reference.** Having
+looked at P1's screenshots on 2026-08-21, the owner upgraded the ruling from "take x2doris as a
+reference" to "**copy x2doris**", and named the fault in the previous round: **holding up our own
+immature ideas against an available best practice.**
 
-这句批评是本 ADR 的第一前提，写在这里是为了让下一个人在遇到取舍时**先服从参照物**，
-而不是重新论证一遍「我们这样也挺好」。ADR-0042 §背景里那句「**可复制的只有信息架构，不是视觉**」
-**由本 ADR 撤销**——视觉也照搬，且取值来自实测而非目测。
+That criticism is this ADR's first premise, written here so that the next person facing a trade-off
+**defers to the reference first** rather than re-arguing "our way is fine too". ADR-0042's background
+sentence — "**only the information architecture is copyable, not the visuals**" — **is revoked by this
+ADR**: the visuals are copied too, with values measured rather than eyeballed.
 
-参照物是 x2doris 1.2.0 的作业中心（StreamPark 系 vue-vben-admin + Ant Design 4）。
-它的实例地址与凭据由所有者在需要时提供，**不入库**；本 ADR、令牌文件与原型里都不记。
-它的前端打包在 jar 里，**不去啃 jar**——直接量运行中页面的计算样式，快且准。
+The reference is x2doris 1.2.0's job center (the StreamPark lineage: vue-vben-admin + Ant Design 4).
+Its instance address and credentials are supplied by the owner when needed and **are not committed**;
+neither this ADR, the token file, nor the prototype records them.
+Its front end is packed inside a jar, and **we do not dig into the jar** — measuring the computed
+styles of the running page directly is both faster and more accurate.
 
-## 决策
+## Decision
 
-### 1. 所有者 2026-08-21 的八条裁定（逐条，本 ADR 的输入）
+### 1. The owner's eight rulings of 2026-08-21 (verbatim, the inputs to this ADR)
 
-| # | 裁定 | 落在哪 |
+| # | Ruling | Where it lands |
 |---|---|---|
-| 1 | **照搬 x2doris**，不是参考：布局、字体、UX、列的内容、行内图标操作一律以它为准 | 全篇 |
-| 2 | **删掉「运行历史」独立屏**，并进作业中心；列表只展示**最近一次**运行，多次历史「另说」 | §2 §4 |
-| 3 | **列表列**：任务名 · 源表 · 目标表 · 迁移进度 · 运行状态 · 启动时间 · 运行时长 · 操作；主键 / 条件 / 错误码 / 目标表效果收进详情抽屉 | §2 §4 |
-| 4 | **行内操作全用图标**（发起运行 · 运行详情 · 编辑 · 改名 ｜ 删除），靠 `title` 认 | §5 |
-| 5 | **批量发起 + 批量删除**：勾选列，未选中时禁用 | §6 |
-| 6 | **迁移进度**：开跑前跑一次 `COUNT(*)` 拿分母（后端本版就改），只给一个**整数百分比**，不带小数、不附行数 | §7 |
-| 7 | **侧边栏支持折叠**（256px ⇄ 48px） | §8 |
-| 8 | **只做浅色**；但 x2doris 的浅色布局本身**侧栏就是深色** `#001529`，照搬 | §8 |
+| 1 | **Copy x2doris**, do not merely reference it: layout, typography, UX, column contents, and inline icon actions all defer to it | Throughout |
+| 2 | **Delete the standalone "run history" screen** and fold it into the job center; the list shows only the **most recent** run, and multiple history entries are "for later" | §2 §4 |
+| 3 | **List columns**: task name · source table · target table · migration progress · run status · start time · duration · actions; primary key / conditions / error code / target-table effect move into the detail drawer | §2 §4 |
+| 4 | **All inline actions are icons** (run · run detail · edit · rename ｜ delete), identified by `title` | §5 |
+| 5 | **Bulk run + bulk delete**: a checkbox column, disabled when nothing is selected | §6 |
+| 6 | **Migration progress**: run one `COUNT(*)` before the transfer to get the denominator (the backend changes in this release), and show a single **integer percentage** — no decimals, no row counts appended | §7 |
+| 7 | **The sider supports collapsing** (256px ⇄ 48px) | §8 |
+| 8 | **Light only**; but x2doris's light layout **has a dark `#001529` sider itself**, so copy that | §8 |
 
-### 2. 「运行历史」屏取消，作业中心是唯一的列表屏
+### 2. The "run history" screen is removed; the job center is the only list screen
 
-导航从四项（任务 / 运行历史 / 数据源 / …）收成三项：**作业中心 · 数据源 · 系统设置**。
-`HistoryScreen.tsx` 整屏删除，`#/history` 路由**重定向**到作业中心而不是给 404——
-旧链接与旧文档里那个地址还在流通，把它接住比让人撞墙便宜。
+The nav contracts from four items (tasks / run history / datasources / …) to three: **Job Center ·
+Datasources · Settings**. `HistoryScreen.tsx` is deleted entirely, and the `#/history` route
+**redirects** to the job center rather than 404ing — that address is still circulating in old links
+and old docs, and catching it is cheaper than letting people hit a wall.
 
-列表的一行 = **一个任务 + 它最近一次运行**。这条合并是裁定 2 的直接后果，也顺带取消了
-ADR-0042 §3 的「最近运行」列——那一列是在两屏并存的前提下做的索引，两屏合并之后它就是这张表本身。
+One row of the list = **one task plus its most recent run.** This merge follows directly from ruling 2,
+and it also cancels ADR-0042 §3's "latest run" column — that column was an index built on the premise
+of two coexisting screens, and once they merge it simply *is* this table.
 
-**一个任务的多次运行历史，本版不做**（裁定 2 原话「另说」）。挂账，触发信号见 §时效。
+**Multiple run histories for one task are out of scope for this release** (ruling 2's wording, "for
+later"). Recorded as a debt; the trigger is in §Validity.
 
-### 3. `tokens.css` 的取值来源改为实测，不再自拟
+### 3. `tokens.css` values now come from measurement, not invention
 
-ADR-0025 定的方向 D「调度台」与「只发浅色」两条**不变**；变的是**数值从哪来**。
-旧版令牌是自拟的（一套自洽但没有出处的数字），新版每一条后面标了 x2doris 的**计算样式实测值**，
-文件头写明了方法。**将来要改先回去量**，别凭手感调。
+ADR-0025's direction D and "light only" both **stand**; what changes is **where the numbers come from**.
+The old tokens were invented (a self-consistent set with no provenance); each new one records x2doris's
+**measured computed value**, and the file header states the method. **To change one in future, go back
+and measure**; do not tune by feel.
 
-变化最大的几处：主色 `#2C8AF0 → #3C7EFF`、行高 `44 → 41`、控件 `30 → 32`、
-表格字号 `13.5 → 14`、标签圆角 `3 → 0`（方角）、卡片**去掉 1px 边框**（分层只靠灰底衬白卡）、
-语义四色换成 Ant Design 4 那套、新增 `--sider-*` 一族与 `--head-h` / `--cell-pad` / `--topbar-h` 等密度令牌。
+The largest changes: brand `#2C8AF0 → #3C7EFF`, row height `44 → 41`, controls `30 → 32`, table font
+size `13.5 → 14`, tag radius `3 → 0` (square), cards **lose the 1px border** (layering is the white card
+on grey ground alone), the four semantic colours swap to Ant Design 4's set, and a `--sider-*` family
+plus density tokens such as `--head-h` / `--cell-pad` / `--topbar-h` are added.
 
-**唯一没照搬的是字体栈**：x2doris 是英文界面，栈里没有中文字体；db-qbs 面向中文用户，
-故在同一条栈尾部补三个思源 / Noto 的 CJK 回退。这是**修正参照物的缺口，不是不服从它**——
-macOS 与 Windows 上原栈已能落到中文字体，Linux 上没有兜底。
+**The one thing not copied is the font stack**: x2doris is an English interface with no CJK fonts in its
+stack, while db-qbs serves Chinese users, so three Source Han / Noto CJK fallbacks are appended to the
+same stack. This is **correcting a gap in the reference, not disobeying it** — on macOS and Windows the
+original stack already reaches a CJK font; on Linux there is no fallback.
 
-`web/src/app.css` 是 `@import` 这个文件的，令牌一改整个前端立刻换皮；
-但 `app.css` 里大量硬编码值（`.app-shell` 的 188px 左栏、`.data-grid` 的 12px 表头等）
-**不会自动跟着变**，逐条对齐是实现阶段的主要工作量，见 §10。
+`web/src/app.css` `@import`s this file, so changing a token reskins the whole front end instantly; but
+the many hard-coded values inside `app.css` (`.app-shell`'s 188px left column, `.data-grid`'s 12px
+header, and so on) **do not follow automatically**, and aligning them one by one is the bulk of the
+implementation work — see §10.
 
-### 4. 列与详情的分工：列表回答「跑没跑成」，抽屉回答「为什么」
+### 4. Division of labour between columns and detail: the list answers "did it work", the drawer answers "why"
 
-列序（裁定 3 逐字）：**☐ · 任务名 · 源表 · 目标表 · 迁移进度 · 运行状态 · 启动时间 · 运行时长 · 操作**。
-任务名下挂灰色 `task_id`，源 / 目标表下挂所属数据源名——两行一格，是参照物的做法。
-操作列吸附右侧（参照物的 `ant-table-cell-fix-right`）。
+Column order (ruling 3, verbatim): **☐ · task name · source table · target table · migration progress ·
+run status · start time · duration · actions**. The task name carries a grey `task_id` beneath it, and
+the source/target tables carry their datasource name beneath — two lines per cell, as the reference does.
+The action column pins right (the reference's `ant-table-cell-fix-right`).
 
-**运行状态列是一维的**：成功 / 失败 / 进行中 / 结局不明 / 尚未运行，五个词都是**实心方角标签**。
-这与 ADR-0025 §3「三条形状轴不得互换」**不冲突，因为它根本不是轴二**——
-它是一格索引，轴二（目标表效果）与轴三（错误码）**整体搬进抽屉**，在那里保持原有的块 / 标签形状。
-这一点必须在走查判据上钉死，否则下一个人会拿 V9 来判这一列，见文末「走查触发 · V 系列的改判」。
+**The run-status column is one-dimensional**: 成功 / 失败 / 进行中 / 结局不明 / 尚未运行, all five as
+**solid square tags**. This does **not** conflict with ADR-0025 §3's "the three shape axes must not be
+swapped", **because it is not axis 2 at all** — it is one cell of index. Axis 2 (target-table effect) and
+axis 3 (error code) **move wholesale into the drawer**, where they keep their original block and tag
+shapes. This must be pinned in the walkthrough criteria, or the next person will judge this column by V9;
+see "Walkthrough triggers · re-judging the V series" at the end.
 
-**详情抽屉**（右侧，760px）装这个任务**最近一次**运行的全部信息：
-人话结论条 + 轴二块 + 轴三标签、行数核对、分段耗时、任务定义（主键 / 条件）、
-运行参数与两个 id、源端 SQL。原运行历史屏展开行里有的，一样不少。
+**The detail drawer** (right side, 760px) holds everything about the task's **most recent** run:
+plain-language conclusion bar + axis-2 block + axis-3 tag, row-count reconciliation, per-stage timings,
+the task definition (primary key / conditions), run parameters and both ids, and the source SQL.
+Nothing that was in the old run-history screen's expanded row is missing.
 
-### 5. 行内操作全用图标——ADR-0042 §6 就此作废
+### 5. All inline actions are icons — ADR-0042 §6 is hereby void
 
-裁定 4 直接推翻 ADR-0042 §6「行内主动作给文字」。那一条的理由是「一排四个同色图标里认出哪个是跑，
-靠的是记位置」，**在参照物面前不成立**：参照物就是全图标，且用两道分隔线把
-「跑」｜「看 / 改 / 改名」｜「删」分成三组，删除单独染红。位置因此是**有结构的**，不是硬记。
+Ruling 4 directly overturns ADR-0042 §6's "inline primary actions get text". That clause reasoned that
+"picking out which one runs it from a row of four identically coloured icons relies on memorising
+positions", which **does not hold in front of the reference**: the reference is all icons, and it uses two
+dividers to split them into "run" ｜ "view / edit / rename" ｜ "delete", with delete alone tinted red.
+Position is therefore **structured**, not memorised.
 
-图标语义靠 `title` 承担（也是 `aria-label`）。`.button.is-row-action` 那个类随之删除。
+Icon semantics are carried by `title` (which is also the `aria-label`). The `.button.is-row-action` class
+is deleted with it.
 
-### 6. 批量发起与批量删除
+### 6. Bulk run and bulk delete
 
-勾选列在最左，表头是全选（只全选**当前页**——跨页全选会让人在看不见的行上执行动作）。
-两个批量按钮在卡片头右侧，**未选中时禁用**。
+The checkbox column sits at the far left, with select-all in the header — selecting **the current page
+only**, since selecting across pages would let someone act on rows they cannot see. The two bulk buttons
+sit at the right of the card header and are **disabled when nothing is selected.**
 
-- **批量发起**：前端逐条调既有的发起接口，**串行**，一条失败不中断后面的，跑完汇总一行
-  「发起 5 个：成功 4，失败 1（交易流水：目标端不可达）」。串行而非并发，是因为发起会真的打两端的库。
-- **批量删除**：一次二次确认，把要删的任务名**逐条列全**再删，同样串行、同样汇总。
+- **Bulk run**: the front end calls the existing submit endpoint once per row, **serially**, without
+  stopping on a failure, and summarises afterwards in one line: 「发起 5 个：成功 4，失败 1（交易流水：
+  目标端不可达）」. Serial rather than concurrent, because submitting really does hit databases at both ends.
+- **Bulk delete**: one confirmation step that **lists every task name to be deleted** before deleting,
+  likewise serial and likewise summarised.
 
-这两条都不需要后端加批量接口。**不加**——批量端点要定部分失败的语义、定原子性，
-那是它自己一票的体量，而现场规模（几十个任务）下逐条调用的代价是可忽略的。
+Neither needs a bulk endpoint on the backend. **None is added** — a bulk endpoint would have to define
+partial-failure semantics and atomicity, which is a ticket of its own, while at field scale (dozens of
+tasks) the cost of calling one by one is negligible.
 
-### 7. 迁移进度：开跑前 `COUNT(*)`，向下取整的整数百分比
+### 7. Migration progress: `COUNT(*)` before the run, floored to an integer percentage
 
-裁定 6 是本版**唯一的后端改动**：`source` 在开跑前对源端跑一次 `COUNT(*)`（带上任务的条件），
-把总行数落进 run 记录；已推送行数本来就有，前端算 `floor(done / total * 100)`。
+Ruling 6 is this release's **only backend change**: before starting, `source` runs one `COUNT(*)` against
+the source (with the task's conditions applied) and records the total into the run record. The pushed row
+count already exists, so the front end computes `floor(done / total * 100)`.
 
-四条边界：
+Four boundaries:
 
-1. **向下取整，不四舍五入。** `100%` 只在真跑完时出现——99.98% 显示成 100% 等于拿显示撒谎。
-2. **不带小数、不附行数**（裁定 6 原话）。小数点撑歪这一列的对齐，第二位小数对「跑到哪了」零信息量。
-3. **计数失败不阻断运行**：总行数记为空，进度列回退成 `—` 并在 `title` 上自陈「未取到总行数」。
-   为了一个进度条把整次搬运判死，是拿主功能换装饰。
-4. **「尚未运行」的行进度是 `—`**，不是 `0%`。0% 是「跑了但一行没动」，与「没跑过」不是一回事。
+1. **Floor, do not round.** `100%` appears only when it has genuinely finished — showing 99.98% as 100%
+   is lying with the display.
+2. **No decimals, no row counts appended** (ruling 6's wording). A decimal point skews this column's
+   alignment, and a second decimal place carries zero information about "how far along".
+3. **A failed count does not block the run**: the total is recorded empty, the progress column falls back
+   to `—`, and its `title` says so ("未取到总行数"). Failing an entire transfer for the sake of a progress
+   bar trades the main function for decoration.
+4. **A "not yet run" row shows `—`, not `0%`.** 0% means "it ran and moved no rows", which is not the same
+   as "it never ran".
 
-代价明码标价：**每次发起多一次源端全表计数**，大表上这一次 `COUNT(*)` 本身要花时间，
-且它与随后的读取之间存在时间差——分母是开跑那一刻的事实，不是实时的。
-这一次计数的耗时**单独计入分段耗时**（抽屉里的「开跑前计数」一栏），不混进读取耗时。
+The cost is stated openly: **every submission adds one full-table count on the source**, which on a large
+table takes real time, and there is a gap between it and the subsequent read — the denominator is the fact
+at the moment of starting, not a live one. That count's duration is **recorded as its own stage timing**
+(the "pre-run count" entry in the drawer) and is not mixed into the read duration.
 
-ADR-0026 §3「实时进度不显示百分比、用不确定进度条」**由本条推翻**：那条的前提是「拿不到分母」，
-裁定 6 把分母买下来了，前提没了。
+ADR-0026 §3, "live progress shows no percentage and uses an indeterminate bar", **is overturned by this
+clause**: its premise was "the denominator is unobtainable", and ruling 6 bought the denominator, so the
+premise is gone.
 
-### 8. 外壳：深色侧栏 + 可折叠 + 白顶栏
+### 8. The shell: dark sider + collapsible + white top bar
 
-侧栏 `#001529` 深色、宽 256px，菜单项是 10px 圆角块、选中项填主色。
-裁定 8 说的「只做浅色」指的是**不提供暗色主题、不做主题切换**——深色侧栏是参照物**浅色布局的一部分**，
-两者不矛盾。这一句要留痕，因为 ADR-0025 明文否掉过暗色主题，而 V25 的判据里有「没有暗色主题」一条。
+The sider is dark `#001529` at 256px wide, with 10px rounded menu blocks and the selected item filled with
+the brand colour. Ruling 8's "light only" means **no dark theme and no theme switch** — the dark sider is
+**part of the reference's light layout**, and the two do not conflict. This needs recording because
+ADR-0025 explicitly rejected a dark theme and V25's criteria include "no dark theme".
 
-折叠触发器在顶栏最左（`menu-fold ⇄ menu-unfold`），256px ⇄ 48px，折叠态只剩图标、靠 `title` 认。
-折叠状态**记进 `localStorage`**：它是每个人对自己屏幕宽度的一次性偏好，每次进来重置等于每次重做一遍决定。
+The collapse trigger sits at the far left of the top bar (`menu-fold ⇄ menu-unfold`), 256px ⇄ 48px, with
+the collapsed state showing icons only, identified by `title`. The collapsed state is **stored in
+`localStorage`**: it is a one-off preference about one's own screen width, and resetting it on every visit
+means remaking the decision every time.
 
-### 9. 本 ADR 推翻的既有条款（逐条，不含糊）
+### 9. Clauses this ADR overturns (one by one, unambiguously)
 
-| 出处 | 原条款 | 本 ADR 的处置 |
+| Source | Original clause | Disposition here |
 |---|---|---|
-| ADR-0042 §背景 | 「可复制的只有信息架构，不是视觉；不动 `tokens.css`」 | **撤销**。视觉照搬，令牌重取值（§3） |
-| ADR-0042 §6 | 行内主动作给文字，次要动作留图标 | **作废**。全图标（§5） |
-| ADR-0042 §3 | 任务屏「最近运行」列 | **并入本表**：两屏合并后它就是这张表（§2） |
-| ADR-0042 §1 §4 | 运行历史屏的筛选条与列序 | **随屏取消**（§2） |
-| ADR-0026 §3 | 实时进度不显示百分比、用不确定进度条 | **推翻**。分母已买下（§7） |
-| ADR-0039 §9 / ADR-0042 §7 | `app.css` 的既有规则表 | **重写**，见 §10 |
-| 设计系统 README §7 | 外壳 188px 白底左导航 / 52px 顶栏 / 卡片 1px 边 / 30px 控件 | **改写**（§10） |
+| ADR-0042 §Background | "Only the information architecture is copyable, not the visuals; `tokens.css` is untouched" | **Revoked.** Visuals are copied and tokens re-measured (§3) |
+| ADR-0042 §6 | Inline primary actions get text, secondary actions stay icons | **Void.** All icons (§5) |
+| ADR-0042 §3 | The task screen's "latest run" column | **Merged into this table**: once the two screens merge it *is* this table (§2) |
+| ADR-0042 §1 §4 | The run-history screen's filter strip and column order | **Cancelled with the screen** (§2) |
+| ADR-0026 §3 | Live progress shows no percentage, uses an indeterminate bar | **Overturned.** The denominator has been bought (§7) |
+| ADR-0039 §9 / ADR-0042 §7 | The existing rule table in `app.css` | **Rewritten**, see §10 |
+| Design system README §7 | Shell with a 188px white left nav / 52px top bar / 1px card border / 30px controls | **Rewritten** (§10) |
 
-**没有推翻的**：ADR-0025 的方向 D 与「不发暗色主题」；ADR-0025 §3 三条形状轴的形状语义
-（它们整体搬进抽屉，形状一个没变）；ADR-0037 的凭据边界；ADR-0041 增补 2 的重跑入口（见文末自行裁定 1）；
-ADR-0042 §2 的「客户端分页且不装成服务端分页」与 §5 的数据源屏行内测连。
+**What is not overturned**: ADR-0025's direction D and "no dark theme"; ADR-0025 §3's three shape axes and
+their semantics (they move wholesale into the drawer with not one shape changed); ADR-0037's credential
+boundary; ADR-0041 addendum 2's re-run entry point (see self-ruling 1 at the end); ADR-0042 §2's
+"client-side paging that does not pretend to be server-side" and §5's inline datasource connection test.
 
-### 10. 设计系统的账：`tokens.css` 与 README **都要改**
+### 10. The design-system ledger: **both `tokens.css` and the README change**
 
-与 ADR-0042 §7 相反，本次两个文件都动：
+Unlike ADR-0042 §7, this round touches both files:
 
-- `tokens.css`：§3 的重取值，**已落盘**。
-- `README.md` §7 组件清单：外壳那一行的 188px / 52px / 白底左导航、卡片那一行的「1px 边」、
-  筛选条那一行的 30px，**逐条与 P2 正面冲突**，必须改；同时新增
-  **侧栏折叠态**、**卡内标题块 + 工具条**、**分页条**、**勾选列**、**进度单元**、**详情抽屉** 六项，
-  并把「导航占位项（`M3+` 灰标）」一行标注为**已退役**（P0 撤掉了非 v1 导航占位）。
-  §7「预留位置」里的**历史列表**一条随 §2 退役。
+- `tokens.css`: the re-measurement of §3, **already landed**.
+- `README.md` §7's component inventory: the shell row's 188px / 52px / white left nav, the card row's "1px
+  border", and the filter row's 30px **each conflict head-on with P2** and must change. At the same time it
+  gains six entries — **collapsed sider**, **in-card title block + toolbar**, **pagination strip**,
+  **checkbox column**, **progress cell**, and **detail drawer** — and the "nav placeholder (`M3+` grey
+  label)" row is marked **retired** (P0 removed the non-v1 nav placeholders). The **history list** entry
+  under §7's "reserved placements" retires with §2.
 
-`app.css` 的规则表**整体重写**而不是增补：外壳、表格、按钮、卡片四类的硬编码值都要改到令牌上。
+`app.css`'s rule table is **rewritten wholesale** rather than amended: the hard-coded values across the
+shell, tables, buttons, and cards must all move onto tokens.
 
-**实现落地后的真实清单（2026-08-21 补）**：
+**The real list after implementation (added 2026-08-21)**:
 
-新增：`.app-shell.is-collapsed`（含 `.product-brand` / `.nav-item` 三条派生）· `.fold-toggle` ·
-`.topbar-right` · `.filter-card` · `.filter-field.is-wide` · `.filter-actions` · `.table-card` ·
-`.table-title-row` · `.table-title` · `.table-count` · `.table-toolbar` · `.toolbar-icons` ·
-`.job-grid` · `.check-column` · `.table-cell` · `.table-side` · `.time-cell` ·
-`.row-actions .divider` · `.progress` / `.progress-track` / `.progress-fill`（含 `.is-ok` / `.is-bad`）/
-`.progress-pct` · `.state`（含 `.is-succeeded` / `.is-failed` / `.is-live` / `.is-unknown` / `.is-none`）·
-`.page-btn`（含 `.is-active`）· `.page-size` · `.drawer-scrim` · `.drawer` · `.drawer-header` ·
+Added: `.app-shell.is-collapsed` (with three derived rules on `.product-brand` / `.nav-item`) ·
+`.fold-toggle` · `.topbar-right` · `.filter-card` · `.filter-field.is-wide` · `.filter-actions` ·
+`.table-card` · `.table-title-row` · `.table-title` · `.table-count` · `.table-toolbar` ·
+`.toolbar-icons` · `.job-grid` · `.check-column` · `.table-cell` · `.table-side` · `.time-cell` ·
+`.row-actions .divider` · `.progress` / `.progress-track` / `.progress-fill` (with `.is-ok` / `.is-bad`) /
+`.progress-pct` · `.state` (with `.is-succeeded` / `.is-failed` / `.is-live` / `.is-unknown` / `.is-none`) ·
+`.page-btn` (with `.is-active`) · `.page-size` · `.drawer-scrim` · `.drawer` · `.drawer-header` ·
 `.drawer-body` · `.drawer-footer` · `.drawer-note` · `.drawer-sql` · `.panel` / `.panel-body` ·
-`.kv`（含 `.is-pairs`、`.k` / `.v` / `.v.is-bad`）· `.bulk-summary`（含 `.is-failed`）·
-`.delete-copy ul` · `.settings-copy`。
+`.kv` (with `.is-pairs`, `.k` / `.v` / `.v.is-bad`) · `.bulk-summary` (with `.is-failed`) ·
+`.delete-copy ul` · `.settings-copy`.
 
-删除：`.latest-run-column` / `.latest-run` / `.latest-run-status` / `.latest-run-time` ·
+Removed: `.latest-run-column` / `.latest-run` / `.latest-run-status` / `.latest-run-time` ·
 `.button.is-row-action` · `.action-column.is-wide` · `.history-filters` · `.history-error` ·
-`.history-grid`（含 `.expand-column` / `.run-id-cell` / `.outcome-column` / `.is-expanded`）·
+`.history-grid` (with `.expand-column` / `.run-id-cell` / `.outcome-column` / `.is-expanded`) ·
 `.history-link` · `.history-time` · `.history-detail` / `.history-detail-row` ·
 `.history-metric-groups` · `.history-source-sql` · `.missing-run-id` · `.detail-toggle` ·
 `.identity-grid` / `.metric-grid` · `.live-summary` · `.unknown-summary` · `.neutral-outcome` ·
-`.pagination-page` / `.pagination-controls` · `.mono` 上那条 `.history-link` 的 `tabular-nums`。
+`.pagination-page` / `.pagination-controls` · the `tabular-nums` on `.mono`'s `.history-link`.
 
-改写（值改到令牌、形态未变）：`.app-shell` / `.sidebar` / `.product-brand` / `.nav-item` /
-`.topbar` / `.card` / `.button` / `.icon-button` / `.data-grid` / `.action-column` /
-`.list-pagination` / `.modal*` / `.form-*` / 构建器与运行详情页整段。
+Rewritten (values moved onto tokens, shapes unchanged): `.app-shell` / `.sidebar` / `.product-brand` /
+`.nav-item` / `.topbar` / `.card` / `.button` / `.icon-button` / `.data-grid` / `.action-column` /
+`.list-pagination` / `.modal*` / `.form-*` / the builder and run-detail page in full.
 
-顺手清掉的一处旧账：`app.css` 里有 5 处引用 `--lh-copy`，而 `tokens.css` **从来没有定义过它**
-（旧版只有 `--lh-ui` / `--lh-prose`）——那几处的行高一直是浏览器默认值。重写时改成 `--lh-prose`。
+One old debt cleared along the way: `app.css` referenced `--lh-copy` in five places, and `tokens.css`
+**never defined it** (the old file had only `--lh-ui` / `--lh-prose`), so those five line heights had always
+been the browser default. The rewrite changes them to `--lh-prose`.
 
-### 实现阶段的四处自行裁定（一并留痕）
+### Four self-made rulings during implementation (recorded here too)
 
-1. **导航第三项「系统设置」做成只读屏，不是占位灰标。** 裁定 2 把导航定成三项，
-   而这一版能改的东西只有两类，各自已有落点（连接信息在数据源屏、任务定义在构建器）。
-   剩下的是进程级配置，其中两项决定这台服务本身怎么起——在一个**未鉴权**的界面
-   （ADR-0024「端口即凭据」）上开出改自己启动参数的路，是拿主功能换一个设置页。
-   所以这一屏摆的是**事实与落点**：改什么、去哪儿改、`source.toml` 里的键名。
-   要做可写设置得先有鉴权，那是另一票。
-2. **卡内工具条只留「刷新」，不做「行高密度」与「列设置」。** 原型上那两个图标是照参照物摆的，
-   但我们这一版没有这两样能力。**宁可少一个图标，也不摆一颗点了没反应的按钮**——
-   假按钮比缺按钮更贵：它要人试一次才知道没用。
-3. **换过每页条数之后，分页条不再随「只剩一页」消失。** ADR-0042 §2 那条
-   「总数不超过一页时整条不出」在**默认档下一字未改**；例外只在人已经显式改过条数时成立。
-   否则选了 100 / 页、列表一页装下了，那个把你带过来的控件自己消失，就再也换不回 20。
-4. **批量发起对「带运行时参数」的任务当场判失败，不去打后端。** 批量面上没有地方填参数值，
-   送一个空参数集过去只会换回后端的「缺参数」。与其绕一圈拿回一句机器话，
-   不如当场写清「需要填运行参数，请单独发起」。**代价明码标价**：现场的任务多半都带
-   一个业务日期参数，所以批量发起在这一版**基本只对无参数任务有用**——
-   **所有者 2026-08-21 已裁定维持现状**（理由与时效见文末「两条收尾裁定」第二条）。
+1. **The third nav item, "Settings", is a read-only screen rather than a greyed-out placeholder.** Ruling 2
+   fixed the nav at three items, and the only two kinds of thing this release can change already have homes
+   (connection details on the datasource screen, task definitions in the builder). What remains is
+   process-level configuration, two entries of which determine how this service itself starts — and opening a
+   route to edit one's own startup parameters from an **unauthenticated** interface (ADR-0024, "the port is
+   the credential") trades the main function for a settings page. So this screen presents **facts and
+   locations**: what can be changed, where to change it, and the key names in `source.toml`. A writable
+   settings screen needs authentication first, which is another ticket.
+2. **The in-card toolbar keeps only "refresh"; no "row density" and no "column settings".** Those two icons
+   are on the prototype because the reference has them, but this release has neither capability.
+   **Better one icon fewer than a button that does nothing when clicked** — a fake button costs more than a
+   missing one: it makes someone try it to find out.
+3. **After changing the page size, the pagination strip no longer disappears when only one page remains.**
+   ADR-0042 §2's "the whole strip is hidden when the total fits on one page" is **unchanged at the default
+   setting**; the exception applies only once someone has explicitly changed the size. Otherwise, choosing
+   100 per page so that the list fits on one page would make the very control that brought you there vanish,
+   leaving no way back to 20.
+4. **Bulk run fails tasks with run-time parameters on the spot rather than calling the backend.** The bulk
+   surface has nowhere to enter parameter values, and sending an empty parameter set would only return the
+   backend's "missing parameter". Rather than a round trip for a machine's sentence, it states plainly
+   「需要填运行参数，请单独发起」. **Cost stated openly**: most tasks in the field carry a business-date
+   parameter, so in this release bulk run is **essentially only useful for parameterless tasks** —
+   **the owner ruled on 2026-08-21 to keep it as is** (reasoning and validity in "two closing rulings" at
+   the end).
 
-## 后果
+## Consequences
 
-1. **一次改版把三份门禁判据一起翻了。** V 系列、X 系列、README 都得跟着改，这不是可选项——
-   判据不跟着改，下一次走查跑的是一份对着旧界面写的清单，比不跑更坏（`CLAUDE.md` 规则 2 / 4）。
-2. **每次发起多一次源端 `COUNT(*)`。** 100MB 级的现场（ADR-0041 裁定 6）这一次计数是秒级；
-   若将来遇到大表，正解是**给计数加超时并降级成「未取到总行数」**，不是偷偷去掉进度列。
-3. **运行历史的多次记录暂时看不到了。** 后端一条没删、`/api/runs` 原样在，只是界面上只露最近一条。
-   这是裁定 2 明确接受的代价，不是遗漏。
-4. **列表的运行状态与真实状态之间仍有延迟**（ADR-0042 后果 3 原样有效）。本版仍**不轮询**；
-   刷新按钮在卡片头的工具图标里，是显式动作。
-5. **换皮期间界面会短暂地两不像**：令牌已改、`app.css` 未改的那段时间里，
-   数值来自新令牌而布局来自旧规则。因此 §10 的对齐必须**一次做完再合**，不许分批合进主干。
-6. **深色侧栏 + 白顶栏 + 灰内容区意味着三套前景色**。侧栏那套单列 `--sider-*`，
-   不许把 `--text` / `--dim` 拿去侧栏上用——那两个是黑系的，在 `#001529` 上不可读。
+1. **One redesign flipped three sets of gate criteria at once.** The V series, the X series, and the README
+   must all change with it, and this is not optional — criteria that do not follow leave the next walkthrough
+   running a checklist written against an old interface, which is worse than not running it (`CLAUDE.md`
+   rules 2 and 4).
+2. **Every submission adds one source-side `COUNT(*)`.** At the field's 100MB scale (ADR-0041 ruling 6) that
+   count takes seconds; should a large table appear later, the answer is **to give the count a timeout and
+   degrade to "total row count unavailable"**, not to quietly drop the progress column.
+3. **Multiple run-history records are temporarily invisible.** Not one has been deleted on the backend and
+   `/api/runs` is untouched; only the interface shows just the latest. This is a cost ruling 2 explicitly
+   accepted, not an omission.
+4. **There is still lag between the list's run status and the real state** (ADR-0042 consequence 3 stands
+   verbatim). This release still **does not poll**; the refresh button among the card header's tool icons is
+   an explicit action.
+5. **During the reskin the interface will briefly look like neither**: in the window where the tokens have
+   changed and `app.css` has not, the values come from the new tokens while the layout comes from the old
+   rules. So §10's alignment **must be finished in one go before merging**, never merged into trunk in
+   batches.
+6. **A dark sider + white top bar + grey content area means three sets of foreground colours.** The sider's
+   set is listed separately as `--sider-*`, and `--text` / `--dim` **may not** be used on the sider — they
+   are from the black family and are unreadable on `#001529`.
 
-## 时效
+## Validity
 
-| 条款 | 退役 / 重估的触发信号 |
+| Clause | Signal to retire or re-evaluate |
 |---|---|
-| §2 只看最近一次运行 | 现场提出「要查上一次跑成什么样」——那时开多次历史，形态是抽屉里加一条运行选择器，**不是把历史屏恢复** |
-| §7 开跑前 `COUNT(*)` | 出现让计数本身变慢到影响体感的表（分钟级）——那时降级成可选，不是删列 |
-| §6 前端串行批量 | 任务数上到几百，或现场要求批量的部分失败可重试——那时才谈后端批量端点 |
-| §3 令牌取值 | 参照物升版、或 db-qbs 出现参照物没有的屏——**先回去量，再改** |
+| §2, only the latest run is shown | The field asks "I need to see how the previous run went" — at which point multiple history opens up, shaped as a run selector inside the drawer, **not as restoring the history screen** |
+| §7, `COUNT(*)` before the run | A table appears where the count itself is slow enough to be felt (minutes) — at which point it degrades to optional, not to deleting the column |
+| §6, serial bulk in the front end | Task counts reach the hundreds, or the field requires partial bulk failures to be retryable — only then is a backend bulk endpoint discussed |
+| §3, token values | The reference releases a new version, or db-qbs grows a screen the reference does not have — **measure first, then change** |
 
-## 走查触发
+## Walkthrough triggers
 
-**三份全触发，且必须真跑，不许豁免**（`CLAUDE.md` 规则 1）：
+**All three fire, all must genuinely run, and no exemption is permitted** (`CLAUDE.md` rule 1):
 
-- **V1–V25**：改了 `docs/design-system/tokens.css` 与 `README.md`，字面命中触发条件第 2 条。
-- **X 系列**：作业中心取代任务屏 + 历史屏，命中每一条既有触发。
-- **W1–W6**：`app.css` 全面重写会碰到 `.precheck-reports` 的布局，命中触发。
+- **V1–V25**: `docs/design-system/tokens.css` and `README.md` both changed, matching trigger 2 literally.
+- **X series**: the job center replaces the task screen and the history screen, matching every existing
+  trigger.
+- **W1–W6**: rewriting `app.css` wholesale touches the `.precheck-reports` layout, matching the trigger.
 
-### V 系列的改判（逐条，不重编号）
+### Re-judging the V series (one by one, without renumbering)
 
-先纠一处**交接件里的错判**：V1–V25 判的是**形状与语义**，**没有一条判 44px / 13.5px / 圆角 / `#2C8AF0`
-这类数值**——令牌改数字本身不会让任何一条挂。真正要改的是下面四条，原因是屏的合并与字重：
+First, an **error in the handoff document** to correct: V1–V25 judge **shape and semantics**, and **not one
+of them judges numbers** like 44px / 13.5px / a radius / `#2C8AF0` — changing a token's number cannot by
+itself fail any of them. What genuinely changes is the four below, because of the screen merge and the
+weight:
 
-| # | 改判 | 理由 |
+| # | Re-judgement | Reason |
 |---|---|---|
-| V9 | **N/A（判据已随本 ADR 退役）**。原判「运行历史列表的结局列里块与灰字并存、视觉不齐，齐了就是假的」——列表整屏取消，且新列表的运行状态是**一维索引**（§4），五个词齐是**对的**。轴二「不齐」的判据整体移交给详情抽屉，由 V2 / V3 / V7 / V8 承担 | 对象消失且方向反转 |
-| V14 | **N/A（判据已随本 ADR 退役）**。原判「`run_record_id` 是运行历史列表第一列、主列、可点」——该列表没了。两个 id 的**关系**判据移到抽屉：`run_record_id` 在抽屉标题旁，`run_id` 在「运行参数与标识」里等宽灰一号 | 对象消失，关系判据保留并改锚点 |
-| V24 | **后半 N/A**。「构建器不是独立导航项」**照跑**；「调度只是占位灰标 `M3+`」的对象在 P0 已被撤掉（ADR-0042 §背景），本 ADR 补记这次静默退役。同时**新增判据**：导航三项、侧栏深色、折叠态只剩图标且**图标居中**（见自决 2） | 一半对象消失，一半新增 |
-| V25 | **改判**：强调字重从「**600 不是 700**」改为「**500**（实测表头 / 标题块 w500）」。其余照跑——中文走系统字体栈（栈尾补 CJK 回退）、数字走等宽栈 + `tabular-nums`、**没有暗色主题**（深色侧栏不是暗色主题，见 §8） | `--weight-em` 由实测取值 |
+| V9 | **N/A (the criterion retires with this ADR).** It originally judged "blocks and grey text coexist in the run-history outcome column; it looks uneven, and making it even would be a lie" — the whole list screen is gone, and the new list's run status is a **one-dimensional index** (§4), where five uniform words are **correct**. Axis 2's "unevenness" criterion transfers wholesale to the detail drawer, carried by V2 / V3 / V7 / V8 | The subject is gone and the direction is reversed |
+| V14 | **N/A (the criterion retires with this ADR).** It originally judged "`run_record_id` is the first, primary, clickable column of the run-history list" — that list is gone. The criterion about the **relation** between the two ids moves into the drawer: `run_record_id` beside the drawer title, `run_id` in "run parameters and identifiers" in monospace grey one size down | The subject is gone; the relational criterion is kept with a new anchor |
+| V24 | **Second half N/A.** "The builder is not a standalone nav item" **still runs**; the subject of "scheduling is only a greyed-out `M3+` placeholder" was removed back in P0 (ADR-0042 §Background), and this ADR records that silent retirement. **New criteria added**: three nav items, a dark sider, and a collapsed state showing icons only **with the icons centred** (see self-ruling 2) | Half the subject is gone, half is new |
+| V25 | **Re-judged**: the emphasis weight changes from "**600, not 700**" to "**500** (measured w500 on headers and title blocks)". The rest still runs — CJK on the system font stack (with CJK fallbacks appended), numbers on the monospace stack with `tabular-nums`, and **no dark theme** (a dark sider is not a dark theme, see §8) | `--weight-em` now comes from measurement |
 
-V1–V5 / V7 / V8 / V11 / V13 / V15 / V16 / V17 / V19 / V20 / V22 / V23 **判据一字不改**，
-只把「打开哪一屏」里的「运行详情」读作「**运行详情抽屉**」。
-N/A 的 V6 / V10 / V12 / V18 / V21 维持原状。
+V1–V5 / V7 / V8 / V11 / V13 / V15 / V16 / V17 / V19 / V20 / V22 / V23 have **criteria unchanged by one
+character**; only "which screen to open" reads "run detail" as "**the run detail drawer**".
+The N/A cases V6 / V10 / V12 / V18 / V21 stay as they are.
 
-### X 系列的处置：不重编号，退役的写 N/A，新增从 X13 起
+### Handling the X series: no renumbering, retired cases become N/A, new cases start at X13
 
-交接件建议「X 系列随作业中心重写」。**不重写，按 ADR-0040 增补的规则办**：
-编号一个不重编、不删行，对象消失的写 `N/A（判据已随 ADR-0043 退役）`，新形态**新增编号**。
-理由与 M2 的 A3/A6、V6/V10 先例同一条：旧走查记录要一直对得上，重编号会让 2026-08-21 那份 X1–X12
-实录在下一次翻出来时对不上任何东西。
+The handoff document suggested "rewrite the X series along with the job center". **It is not rewritten**;
+the rule added in ADR-0040 applies: nothing is renumbered, no row is deleted, a case whose subject is gone
+becomes `N/A (the criterion retired with ADR-0043)`, and new shapes get **new numbers.**
+The reasoning matches the M2 precedents of A3/A6 and V6/V10: old walkthrough records must keep matching up,
+and renumbering would leave the X1–X12 record of 2026-08-21 matching nothing when it is next opened.
 
-新增至少覆盖：作业中心八列的呈现、勾选与两个批量按钮的禁用态、进度百分比的取整与三种空态、
-运行状态五个词的标签形态、详情抽屉的分区与重跑入口、侧栏折叠的两态。
+The new cases must cover at least: the presentation of the job center's eight columns, the checkbox and the
+disabled states of the two bulk buttons, the flooring of the progress percentage and its three empty states,
+the tag shape of the five run-status words, the drawer's sections and re-run entry point, and the sider's
+two collapse states.
 
-### 台架跟着改
+### The rig follows
 
-`v1-probe.py` 的 `HISTORY_COLUMNS` 常量随历史屏退役、改成作业中心的列常量；
-`v1-mock.py` 的 `X_BULK` 桩数据要补总行数与已推送行数（否则进度列没对象）；
-`run-x-walkthrough.sh` 的两趟编排保留，加量那一趟同时用于批量勾选的观察。
+`v1-probe.py`'s `HISTORY_COLUMNS` constant retires with the history screen and becomes the job center's
+column constant; `v1-mock.py`'s `X_BULK` stub data must add total and pushed row counts (or the progress
+column has no subject); `run-x-walkthrough.sh` keeps its two-pass arrangement, with the bulk pass also
+serving to observe bulk selection.
 
-## 自行裁定（两处，需在此留痕）
+## Self-made rulings (two, recorded here)
 
-1. **重跑入口不随历史屏消失**：详情抽屉底部给「重跑」按钮，保住 ADR-0041 增补 2 与规格 #149 A 段。
-   历史屏是重跑原来的唯一入口，屏没了而入口没接住，等于本 ADR 顺手废掉一条别人的裁定。
-2. **折叠态图标居中，这一处不照抄**：x2doris 折叠后菜单项的 `padding-left: 20px` 没跟着改，
-   选中的蓝块被 48px 切成一条竖边。那是它的**渲染瑕疵**，不是它的设计。
-   照搬的是设计，不是 bug——判断标准写在这里：**能说出它坏在哪、且修法不引入新形态的，才可以不照抄。**
+1. **The re-run entry point does not vanish with the history screen**: a "re-run" button at the bottom of the
+   detail drawer preserves ADR-0041 addendum 2 and spec #149 section A. The history screen was the only entry
+   point for re-running, and removing the screen without catching the entry point would mean casually voiding
+   someone else's ruling.
+2. **Centre the icons when collapsed; this one detail is not copied**: x2doris does not adjust its menu items'
+   `padding-left: 20px` when collapsed, so the selected blue block is sliced into a vertical strip by the
+   48px width. That is its **rendering defect**, not its design.
+   What is copied is the design, not the bugs — and the test is written here: **you may skip a detail only if
+   you can say exactly how it is broken and your fix introduces no new shape.**
 
-## 实现落地记录（2026-08-21）
+## Implementation record (2026-08-21)
 
-三条强制命令与三份走查都真跑了，实录在库：
+All three mandatory commands and all three walkthroughs genuinely ran. The per-case verdicts are below; the
+three `*-20260821T051427Z.md` records are kept only in git history under the record-retention policy
+(`CLAUDE.md` §Record retention), and
+`git log --diff-filter=D -- 'docs/spikes/fixtures/local-rig/*-20260821T051427Z.md'` retrieves the originals.
 
-| 走查 | 实录 | 结果 |
-|---|---|---|
-| V1–V25 | `docs/spikes/fixtures/local-rig/m2-visual-walkthrough-20260821T051427Z.md` | 判据成立 17 条、N/A 6 条、**对象不存在 2 条（V19 / V20）** |
-| X1–X18 | `docs/spikes/fixtures/local-rig/v1-visual-walkthrough-20260821T051427Z.md` | 判据成立 18 条、N/A 半条（X11 前半） |
-| W1–W6 | `docs/spikes/fixtures/local-rig/m3-visual-walkthrough-20260821T051427Z.md` | 判据成立 3 条、**对象不存在 3 条（W3 / W4 / W5）** |
+| Walkthrough | Result |
+|---|---|
+| V1–V25 | 17 criteria met, 6 N/A, **2 with no subject (V19 / V20)** |
+| X1–X18 | 18 criteria met, half a case N/A (the first half of X11) |
+| W1–W6 | 3 criteria met, **3 with no subject (W3 / W4 / W5)** |
 
-`npm run typecheck` / `npm test -- --run`（132 passed）/ `npm run build` 全绿；
-`cargo test --workspace` 全绿。真跑一律派发到用户 mac（服务器内存不够）。
+`npm run typecheck` / `npm test -- --run` (132 passed) / `npm run build` all green;
+`cargo test --workspace` green. Real runs are always dispatched to the user's mac (the server lacks memory).
 
-### 走查捞出来的一件事：`47a2fed` 摘掉了构建器的取列卡，而那一票没跑走查
+### Something the walkthrough caught: `47a2fed` removed the builder's column-fetch card without running a walkthrough
 
-`47a2fed`（*Prepare x2doris P1 frontend handoff*）把构建器里整段
-「目标表建表 SQL / 拿建表 SQL / `.fetch-ready` / `.ddl-placeholder`」删掉了，
-并把字段映射面从取列表里拆出来、目标字段由输入框换成下拉。后果：
+`47a2fed` (*Prepare x2doris P1 frontend handoff*) deleted the entire "target DDL / fetch DDL /
+`.fetch-ready` / `.ddl-placeholder`" section from the builder, split the field-mapping surface out of the
+column-fetch table, and swapped the target field from an input to a dropdown. The consequences:
 
-- **V19 / V20 与 W3 / W4 / W5 的对象整体消失**——五条判据从此没有可看的东西。
-- **X6 的字面判据有两处出入**：「常驻输入框」实测是常驻下拉；「主键在目标字段右侧」
-  实测隔着「目标类型」与「约束」两列。判据的**意图**（常驻不是编辑态、主键与目标字段同行可见）仍成立。
-- `api.ts` 的 `fetchColumns()`（`POST /api/columns`）还在，界面上**没有一处调用它**。
+- **The subjects of V19 / V20 and W3 / W4 / W5 disappeared wholesale** — five criteria with nothing left to
+  look at.
+- **X6's literal criteria differ in two places**: "a permanent input box" measures as a permanent dropdown,
+  and "the primary key sits to the right of the target field" measures as two columns away ("target type"
+  and "constraint" in between). The criterion's **intent** (permanent rather than an edit state; the primary
+  key visible on the same row as the target field) still holds.
+- `api.ts`'s `fetchColumns()` (`POST /api/columns`) is still there, with **no call site anywhere in the
+  interface**.
 
-**这不是 P2 造成的回归**（`33e9ec5` 与 v1 验收的 `85805b1` 里对象都还在），
-但它是一次**门禁没接住的回退**：`CLAUDE.md` 规则 1 挡的正是「改了界面不跑走查」。
+**This is not a regression caused by P2** (the subjects were still present in `33e9ec5` and in v1's
+acceptance at `85805b1`), but it is **a regression the gate failed to catch**: `CLAUDE.md` rule 1 exists
+precisely to stop "the interface changed and no walkthrough ran".
 
-### 所有者 2026-08-21 的两条收尾裁定
+### The owner's two closing rulings of 2026-08-21
 
-**裁定一：取列卡就此判废，V19 / V20 与 W3 / W4 / W5 五条判据写 N/A。**
+**Ruling one: the column-fetch card is hereby void, and V19 / V20 plus W3 / W4 / W5 become N/A.**
 
-`47a2fed` 那次删除**按有意的收窄对待**，不是回滚对象。第一版因此**不提供建表 SQL**：
-目标表仍由用户自己在目标库建好（ADR-0027 的「产品不会替你建表」原样有效），
-只是产品不再替他把那段 SQL 拼出来。丢掉的是「一段可直接执行的 `CREATE TABLE`」这个便利，
-**没有丢掉任何判定**——映射预检仍在 sink 侧硬拒（ADR-0009），
-目标列参考表（`target-columns-title`）也还在，列名 / 类型 / 长度 / 可空 / 约束照给。
+That deletion in `47a2fed` is **treated as an intentional narrowing**, not something to roll back. V1
+therefore **does not provide target DDL**: the user still creates the target table in the target database
+themselves (ADR-0027's "the product will not create your table" stands verbatim); the product simply no
+longer assembles that statement for them. What is lost is the convenience of "a directly executable
+`CREATE TABLE`", and **no judgement is lost** — the mapping precheck still hard-rejects on the sink side
+(ADR-0009), and the target-column reference table (`target-columns-title`) is still there, still listing
+column names, types, lengths, nullability, and constraints.
 
-落到走查：`m2-visual-walkthrough.md` 的 V19 / V20 与 `m3-visual-walkthrough.md` 的
-W3 / W4 / W5 **改写成 `N/A（判据已随本 ADR 退役）`，编号一个不重编、一行不删**
-（照 ADR-0040 增补的规矩，理由与 V6 / V10 / V12 同一条：旧走查记录要一直对得上）。
-`api.ts` 的 `fetchColumns()` 与后端 `POST /api/columns` **都留着**——
-端点是协议面的东西，不因为界面上暂时没人调就删；函数上标一句「当前无 UI 调用方」。
+In the walkthroughs: V19 / V20 in `m2-visual-walkthrough.md` and W3 / W4 / W5 in `m3-visual-walkthrough.md`
+are **rewritten as `N/A (the criterion retired with this ADR)`, with nothing renumbered and no row deleted**
+(per the rule added in ADR-0040, for the same reason as V6 / V10 / V12: old walkthrough records must keep
+matching up). `api.ts`'s `fetchColumns()` and the backend's `POST /api/columns` **both stay** — an endpoint
+is part of the protocol surface and is not deleted merely because the interface has no caller for now; the
+function is annotated "currently has no UI caller".
 
-**时效**：现场提出「你给的类型我不知道该怎么建表」——那时再谈把建表 SQL 接回来，
-形态是目标列参考表旁边加一个「按这份映射生成建表 SQL」，**不是把整张取列卡搬回来**。
+**Validity**: when the field says "I do not know how to create a table from the types you gave me", the
+conversation about restoring target DDL reopens, shaped as a "generate the DDL from this mapping" action
+beside the target-column reference table — **not** as bringing the whole column-fetch card back.
 
-**裁定二：批量发起维持现状**（见 §10「实现阶段的四处自行裁定」第 4 条）。
-带运行时参数的任务当场判失败并提示单独发起，这一版**先只对无参数任务有用**。
-所有者的理由：宁可它在那类任务上等于摆设，也绝不拿一个旧日期去跑一遍生产数据。
+**Ruling two: bulk run stays as it is** (see §10, self-made ruling 4). Tasks with run-time parameters fail on
+the spot with a prompt to submit them individually, so in this release it is **useful only for parameterless
+tasks**. The owner's reasoning: better that it be useless for that class of task than that it ever run
+production data with a stale date.
 
-**时效**：现场真的需要成批跑带参数的任务时，正解是**批量时弹一个框、一次填一组参数给所有选中任务**
-（参数名对不上的仍单独发起），**不是**「按各自最近一次的运行参数再跑一遍」——后者会拿上一次的日期重跑。
+**Validity**: when the field genuinely needs to run parameterised tasks in bulk, the answer is **a dialog at
+bulk time collecting one set of parameters for all selected tasks** (those whose parameter names do not match
+still go individually) — **not** "re-run each with its own most recent parameters", which would re-run with
+last time's date.

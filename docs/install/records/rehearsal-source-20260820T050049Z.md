@@ -250,7 +250,7 @@ LISTEN 0 128 127.0.0.1:8080  users:(("stunnel",pid=451,fd=17))
 - **`T0–T11` 本趟没跑**：目标端落点换成真 sink 之后，`rehearsal-tunnel-check.sh` 的
   `T3/T5/T7` 按桩 sink 的标记 `QBS-TUNNEL-OK` 判，会红在标记上而不是隧道上。
   隧道那一段的加密取证是 #153 的账，实录在
-  [`../../spikes/fixtures/local-rig/rehearsal-tunnel-20260820T022000Z.md`](../../spikes/fixtures/local-rig/rehearsal-tunnel-20260820T022000Z.md)，本票不重做。
+  `docs/spikes/fixtures/local-rig/rehearsal-tunnel-20260820T022000Z.md`（已退役，见 git 历史），本票不重做。
 - **`P0–P11` 因为动了 `preflight-source.sh` 而重跑**：`--phase both` **13/13**，
   `C1–C9` **9/9**，两支静态自检 PASS。
 - **三份视觉走查**：本票零 UI 改动（改的是 `docs/`、`packaging/preflight/`、

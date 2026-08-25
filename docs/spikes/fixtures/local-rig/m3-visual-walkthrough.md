@@ -1,19 +1,19 @@
 # M3 渲染面人工走查清单
 
-**规格来源**：[ADR-0032 §8](../../../adr/0032-m3-acceptance-criteria-and-rig-extension.md)
+**规格来源**：`ADR-0032`
 （决策票 [#103](https://github.com/liumingjian/db-qbs/issues/103)）。
 界面增量的定形见 [#102](https://github.com/liumingjian/db-qbs/issues/102) 与
 [`docs/prototypes/0102-m3-ui-increments.html`](../../../prototypes/0102-m3-ui-increments.html)，
-裁定落 [ADR-0025 2026-08-16 增补](../../../adr/0025-m2-visual-language-and-design-system.md)、
-[ADR-0010 增补二](../../../adr/0010-http-protocol-contract.md)、
-[ADR-0027 增补二](../../../adr/0027-target-ddl-generation-and-cross-end-metadata.md)。
+裁定落 `ADR-0025`、
+`ADR-0010`、
+`ADR-0027`。
 视觉规则的唯一来源仍是 [`docs/design-system/`](../../../design-system/)。
 
 ## 这份清单为什么存在，以及为什么**不是**重跑 V1–V25
 
 #102 已判 **M3 零设计系统改动**——`docs/design-system/README.md` 与 `tokens.css`
 一个字没改，五处新信息位全部由既有元素承载。因此
-[ADR-0028 §6](../../../adr/0028-m2-acceptance-criteria-and-rig-extension.md) 的
+`ADR-0028` 的
 **第 2 条触发条件不成立，整份 `m2-visual-walkthrough.md` 不重跑**。
 
 要看的只有两类东西：**五处新信息位真的渲染出来了**，以及**一处 `web/src/app.css`
@@ -57,7 +57,7 @@ W1 / W2 / W6 判据一字未动。
 | **W2** | 同上，视口 **1024** 与 **1440** 各看一次 | 映射预检失败态下两栏**整宽堆叠**，第五列**全在框内、不需要横滚**（ADR-0025 增补 §3）。对照：`shape-failed` 态**仍是两栏并置**，不得一起改掉 |
 
 > **2026-08-19 订正（[#121](https://github.com/liumingjian/db-qbs/issues/121)）**：W2 那句对照
-> **失去对象**——SQL 形状预检整段随 [ADR-0036](../../../adr/0036-task-spec-structured.md) §5 取消，
+> **失去对象**——SQL 形状预检整段随 `ADR-0036` §5 取消，
 > `shape-failed` 这个态在 v1 不存在了，`.precheck-reports` 只剩映射预检一段（整宽）。
 > W2 现在只看「整宽 + 第五列不横滚」这半句。
 > 另：**造态手段也要重挑**——B1–B6 那套编排仍是退役形态，改造归

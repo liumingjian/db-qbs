@@ -1,158 +1,198 @@
-# ADR-0042: 前端列表工作流按 x2doris 的中后台范式补齐（P1）——筛选条、最近运行、客户端分页、行内测连
+# ADR-0042: Filling in the list workflows after the x2doris admin paradigm (P1) — filter strips, latest run, client-side paging, inline connection test
 
-**状态**: 已接受
-**日期**: 2026-08-21
-**输入**: [`docs/prototypes/p1-claude-code-handoff.md`](../prototypes/p1-claude-code-handoff.md)、
-[`docs/prototypes/p1-x2doris-reference.md`](../prototypes/p1-x2doris-reference.md)（去敏参考，随本次改动一并入库）
-**先例**: [ADR-0039](0039-v1-ui-increments.md)（第一版渲染面增量）——本 ADR 是它的**后继增量**，
-不推翻它的任何一条形态裁定；[ADR-0041](0041-v2-scope-trial-readiness.md)（第二版=试用就绪）
+**Status**: Accepted
+**Date**: 2026-08-21
+**Inputs**: the P1 handoff document and the redacted x2doris reference screenshots
+(`docs/prototypes/p1-claude-code-handoff.md`, `docs/prototypes/p1-x2doris-reference.md`,
+`docs/prototypes/assets/`). They were retired once P1 landed and survive only in git history;
+the body of this ADR *is* the ruling on those inputs.
+**Precedent**: [ADR-0039](0039-v1-ui-increments.md) (v1 rendering-surface increments) — this ADR is
+its **successor increment** and overturns none of its shape rulings;
+[ADR-0041](0041-v2-scope-trial-readiness.md) (v2 = trial readiness)
 
-## 背景
+## Background
 
-第一版闭环、第二版把交付路径打通之后，现场先反馈回来的不是「搬不动」，而是**列表不够用**：
-任务只有一个搜索框、看不出上一次跑成没跑成，运行历史只能按任务筛、一屏几十条只能滚。
+With v1 closing the loop and v2 opening the delivery path, the first feedback from the field was not
+"it cannot move the data" but **"the lists are not enough"**: tasks had only a search box and gave no
+sign of whether the last run succeeded, run history could be filtered by task alone, and dozens of
+rows on one screen could only be scrolled.
 
-参考对象是同类同步产品 x2doris 的中后台范式（见参考文件）。**可复制的只有信息架构，不是视觉**：
-db-qbs 已经有相近的浅色工作台外壳，本次**不引入 Ant Design、不动品牌视觉、不动 `tokens.css`**。
+The reference is x2doris, a comparable synchronisation product, and its admin paradigm.
+**Only the information architecture is copyable, not the visuals**: db-qbs already has a similar
+light workbench shell, so this round **introduces no Ant Design, changes no brand visuals, and does
+not touch `tokens.css`.**
 
-P0 已经先落了一批收窄（去掉建表 / 目标端 DDL 入口、去掉非 v1 导航占位、压掉内部行话），
-本 ADR 记的是它之后的这一层：**列表工作流**。
+P0 already landed a round of narrowing (removing the table-creation and target-DDL entry points,
+dropping the non-v1 nav placeholders, and flattening internal jargon). This ADR records the layer
+after it: **the list workflows.**
 
-## 决策
+## Decision
 
-### 1. 三屏一套列表范式：筛选条 → 表格卡片 → 分页条
+### 1. One list paradigm across three screens: filter strip → table card → pagination
 
-任务屏与运行历史屏统一成同一条骨架，数据源屏**不跟**（见 §5）。
+The task screen and the run-history screen share one skeleton. The datasource screen **does not
+follow it** (see §5).
 
-| 屏 | 筛选项 | 分页 |
+| Screen | Filters | Paging |
 |---|---|---|
-| `#/tasks` | 任务名、源端、目标端、最近状态 | 每页 20 |
-| `#/history` | 任务、状态 | 每页 20 |
-| `#/datasources` | **不给** | **不给** |
+| `#/tasks` | task name, source, target, latest status | 20 per page |
+| `#/history` | task, status | 20 per page |
+| `#/datasources` | **none** | **none** |
 
-**筛选是显式的**：改下拉不重筛，按「查询」才生效，「重置」清空并回到第 1 页。
-这不是新裁定，是把运行历史屏 P0 那条既有做法推到任务屏——
-列表一边打字一边跳行，在几十条的规模上比省一次点击贵。
+**Filtering is explicit**: changing a dropdown does not re-filter; it takes effect on pressing
+「查询」, and 「重置」 clears everything and returns to page 1.
+This is not a new ruling — it extends to the task screen what the run-history screen already did in
+P0. A list that jumps rows while you type costs more, at a scale of dozens of rows, than one extra
+click saves.
 
-实现上分成「正在填的那一组」与「已生效的那一组」两份 state，规则收在 `web/src/listing.ts`。
+In implementation this is two pieces of state — "the set being edited" and "the set in effect" —
+with the rules collected in `web/src/listing.ts`.
 
-### 2. 分页只能是客户端分页，且不许装成服务端分页
+### 2. Paging can only be client-side, and must not pretend to be server-side
 
-当前 API 没有 `limit/offset`（`listTasks()` / `listRunHistory()` 都是整份返回）。
-**本版不加**——加服务端分页要同时定排序、定游标、定「总数怎么来」，那是另一票的体量。
+The current API has no `limit/offset` (`listTasks()` and `listRunHistory()` both return the whole
+set). **This release does not add one** — server-side paging would also require fixing the ordering,
+the cursor, and where the total comes from, which is another ticket's worth of work.
 
-于是分页翻的是**已经取回来的那一整份**，并把这一点在界面上守住：
+So paging turns pages of **the whole set already fetched**, and the interface holds that line:
 
-- `共 N 条` 里的 N 是**筛完之后**的条数，不是服务端那份的总数；
-- 卡片头只有在「筛出来的 ≠ 总共有的」时才写两个数（`筛出 12 / 共 30 个`）——
-  没筛的时候写「筛出 30 / 共 30」是在制造一个不存在的区别；
-- 总数不超过一页时**整条分页不出**；
-- 页码越界一律夹回（`paginate` 保证），删掉最后一页上唯一那条之后退回上一页，不是一屏空白。
+- The N in `共 N 条` is the count **after filtering**, not the server's total.
+- The card header shows two numbers only when "filtered ≠ total" (`筛出 12 / 共 30 个`) — writing
+  「筛出 30 / 共 30」 with no filter applied manufactures a distinction that does not exist.
+- When the total fits on one page, **the pagination strip is not rendered at all**.
+- Out-of-range page numbers are always clamped (guaranteed by `paginate`); deleting the only row on
+  the last page falls back to the previous page rather than showing a blank screen.
 
-### 3. 任务屏「最近运行」：读一次，不轮询，且不把三轴压成一个彩色标签
+### 3. "Latest run" on the task screen: read once, no polling, and do not compress the three axes into one coloured tag
 
-任务屏进屏时**额外拉一次** `listRunHistory({})`，按 `task_id` 在客户端 join 出每个任务的最近一条。
-「最近」按 `started_at` 取最大，同一毫秒按 `run_record_id` 定序——不是因为 id 有语义，
-而是因为这一格必须**可复现**：同一份数据两次渲染不能给出不同的行。
+On entering the task screen it makes **one extra call** to `listRunHistory({})` and joins the latest
+row per task client-side by `task_id`. "Latest" means the greatest `started_at`, tie-broken by
+`run_record_id` — not because the id carries meaning, but because this cell must be **reproducible**:
+rendering the same data twice must not produce different rows.
 
-三条边界：
+Three boundaries:
 
-1. **不轮询、不自动刷新。** 任务屏不是运行监视屏。表头上直说「状态可能有延迟，以发起结果为准。」——
-   把这一点当面讲清，比让人拿它当实时看板便宜。
-2. **不着色、不出标签。** 三轴（运行结局 / 目标表效果 / 错误码）在运行历史屏各有形状，
-   任务屏这一格只是个索引；压成一个彩色圆点会让人以为它就是全部结论。完整那句人话挂在 `title` 上。
-3. **「尚未运行」与「读取失败」是两回事。** 前者是事实（这个任务没有历史记录），后者是这一次没读到。
-   运行历史读失败时**任务清单照常渲染**，只有这一列自陈「读取失败」——混成同一格等于替服务端下结论。
+1. **No polling, no auto-refresh.** The task screen is not a run monitor. The column header says so
+   outright: 「状态可能有延迟，以发起结果为准。」 Saying it to someone's face is cheaper than letting
+   them treat it as a live dashboard.
+2. **No colour, no tag.** The three axes (run outcome / target-table effect / error code) each have
+   their own shape on the run-history screen; this cell is merely an index. Compressing it into one
+   coloured dot would suggest it is the whole conclusion. The full plain-language sentence hangs off
+   `title`.
+3. **「尚未运行」 and 「读取失败」 are different things.** The first is a fact (this task has no
+   history); the second is that this particular read failed. When the history read fails **the task
+   list still renders**, and only this column reports 「读取失败」 — merging them would be drawing a
+   conclusion on the server's behalf.
 
-「最近状态」筛选项因此有五个值：成功 / 失败 / 进行中 / 结局不明 / 尚未运行。
-前四个逐字就是 `historyPresentation(row).kind`，**不另立词表**。
+The "latest status" filter therefore has five values: 成功 / 失败 / 进行中 / 结局不明 / 尚未运行.
+The first four are verbatim `historyPresentation(row).kind`; **no separate vocabulary is introduced.**
 
-### 4. 运行历史的列序：先看结论，ID 留在详情里
+### 4. Run-history column order: conclusion first, IDs in the detail
 
-新列序：**任务 · 结局 · 错误码 · 行数 · 耗时 · 发起于 · 操作 · 展开**。
+New order: **task · outcome · error code · rows · duration · started at · actions · expand**.
 
-**「运行参数」列撤掉**——它在展开详情里本来就有一份，而它是这一屏最容易被撑爆的一列
-（参数名由任务自己定义，长短不受控）。完整 ID、行数核对、分段耗时、源端 SQL 原样留在详情里，
-详情的结构一个字没动。
+**The "run parameters" column is dropped** — the expanded detail already carries it, and it is the
+column most easily blown out on this screen (parameter names are defined by the task itself, so
+their length is uncontrolled). Full IDs, row-count reconciliation, per-stage timings, and the source
+SQL all stay in the detail, whose structure is unchanged.
 
-### 5. 数据源屏加行内「测试连接」，但**仍然不给筛选条、不给「连接状态」列**
+### 5. The datasource screen gains an inline "test connection", but **still no filter strip and no "connection status" column**
 
-ADR-0039 §2 判掉的是**常驻的连接状态列**：它要么后台轮询所有库，要么显示一个过期的绿点。
-那条判定原样有效。本次加的是**行内一次问答**——你亲手点的那一次，有明确的提问时刻，
-不会替一分钟前的事实背书。结果是**瞬态**的：不进库、不轮询、刷新即没，
-编辑或删除那条数据源时当场清掉（连接字段可能刚被改过）。
+What ADR-0039 §2 ruled out was a **persistent connection-status column**: it would either poll every
+database in the background or display a stale green dot. That ruling stands verbatim. What is added
+here is **a single inline question and answer** — the one you clicked yourself, with an explicit
+moment of asking, which never vouches for a fact from a minute ago. The result is **transient**: not
+stored, not polled, gone on refresh, and cleared immediately when that datasource is edited or
+deleted (its connection fields may have just changed).
 
-呈现沿用 §3 的两条：成功是 `.inline-result` **一行纯文字**（`连接成功 · 186 ms · dw_stage`），
-失败**原样回显驱动报错、不出错误码标签**——测连不属于任何 run，错误码标签是 ADR-0010 闭集的东西。
+Presentation follows the two rules of §3: success is `.inline-result`, **one line of plain text**
+(`连接成功 · 186 ms · dw_stage`); failure **echoes the driver error verbatim with no error code tag**
+— a connection test belongs to no run, and error code tags come from the protocol's closed set.
 
-同时**不给数据源屏加筛选条**：现场只有 3~5 条，一屏看得完（所有者 2026-08-19 裁定 1 原样有效）。
-x2doris 的数据源页有筛选条，这一条明确**不抄**。
+Equally, **no filter strip is added to the datasource screen**: the field has only three to five
+rows, visible on one screen. x2doris does have filters on its datasource page, and that detail is
+**explicitly not copied**.
 
-#### 走的是草稿测连那条端点，不是按 id 那条
+#### It uses the draft test-connection endpoint, not the by-id one
 
-按 id 那条（`POST /api/datasources/{id}/test-connection`）只回 `{ ok: true }`，
-凑不出「连接成功 · 186 ms · dw_stage」这一行——耗时与库名都只在草稿那条里。
-行内测连因此传一份由库里那条数据源生成的草稿、**口令留空**，
-服务端按「留空 = 去库里取那一份」解释（ADR-0037 §5），与保存面同一条规则。
-界面仍然一个字的口令都没回读。
+The by-id endpoint (`POST /api/datasources/{id}/test-connection`) returns only `{ ok: true }`, which
+cannot produce the line `连接成功 · 186 ms · dw_stage` — the duration and the database name exist
+only on the draft endpoint. The inline test therefore sends a draft generated from the stored
+datasource **with the password left empty**, and the server reads "empty = use the stored one",
+matching the rule on the save path. The interface still reads back not one character of a password.
 
-**后端零改动**是本次的硬约束，这条路径正是为它选的。
+**Zero backend change** was a hard constraint this round, and this path was chosen precisely for it.
 
-### 6. 行内主动作给文字，次要动作留图标
+### 6. Inline primary actions get text; secondary actions stay icons
 
-任务行的「发起运行」、数据源行的「测试连接」改成带文字的幽灵按钮（`.button.is-row-action`）；
-编辑 / 改名 / 删除仍是图标按钮。理由照参考文件那句：**图标按钮用于次要动作，行内主动作可以带文字**——
-一排四个同色图标里认出「哪个是跑」，靠的是记位置。
+「发起运行」 on a task row and 「测试连接」 on a datasource row become ghost buttons with text
+(`.button.is-row-action`); edit / rename / delete stay icon buttons. The reasoning follows the
+reference: **icon buttons are for secondary actions, and an inline primary action may carry text** —
+picking out "which one runs it" from a row of four identically coloured icons relies on memorising
+positions.
 
-### 7. 设计系统的账：`tokens.css` 与 README **都不动**
+### 7. The design-system ledger: **neither `tokens.css` nor the README changes**
 
-新增 CSS 全部落在 `web/src/app.css`，`docs/design-system/` 下不新增任何类，
-README §7 的组件清单不因本次增减——筛选条、数据表、卡片、按钮四样都是既有组件的复用，
-分页条是「数据表」下面的一条工具行，不是新造的视觉语言。
+All new CSS lands in `web/src/app.css`; no class is added under `docs/design-system/`, and the
+component inventory in README §7 neither grows nor shrinks. Filter strip, data table, card, and
+button are all reuses of existing components, and the pagination strip is a tool row beneath the
+"data table", not a new piece of visual language.
 
-**新增规则**（与 ADR-0039 §9 那四条并列，互不覆盖）：
+**New rules** (parallel to the four in ADR-0039 §9; neither set overrides the other):
 
-| # | 规则 | 用途 |
+| # | Rule | Purpose |
 |---|---|---|
-| 1 | `.filter-field.is-compact` / `.history-filters .filters-refresh` | 筛选条上的窄项与右推的刷新按钮 |
-| 2 | `.button.is-row-action` | 行内带文字的主动作按钮 |
-| 3 | `.latest-run*` / `.data-grid th.latest-run-column small` | 任务屏「最近运行」两行纯文字与表头那句延迟说明 |
-| 4 | `.action-column.is-wide` / `.row-test-result` | 加宽的操作列与行内测连的瞬态结果 |
-| 5 | `.list-pagination` / `.pagination-*` | 客户端分页条 |
+| 1 | `.filter-field.is-compact` / `.history-filters .filters-refresh` | Narrow fields on the filter strip and the right-pushed refresh button |
+| 2 | `.button.is-row-action` | Inline primary action buttons carrying text |
+| 3 | `.latest-run*` / `.data-grid th.latest-run-column small` | The two plain-text lines of "latest run" and the staleness note in the header |
+| 4 | `.action-column.is-wide` / `.row-test-result` | The widened action column and the transient inline test result |
+| 5 | `.list-pagination` / `.pagination-*` | The client-side pagination strip |
 
-**删掉的**：`.toolbar` / `.search-field`（P0 那个单搜索框的样式，已无引用）、
-`.run-params-cell`（§4 撤掉那一列之后无引用）。`.history-grid` 的 `min-width` 从 1260px 收到 1120px。
+**Removed**: `.toolbar` / `.search-field` (the styling of P0's single search box, now unreferenced)
+and `.run-params-cell` (unreferenced once §4 dropped that column). `.history-grid`'s `min-width`
+tightens from 1260px to 1120px.
 
-## 后果
+## Consequences
 
-1. **任务屏多一次网络请求**（进屏拉一次运行历史）。历史条数随保留期增长，
-   90 天保留期下这一份仍是一次性整取——**这是 §2 那条「没有 `limit/offset`」的直接代价**，
-   出现现象前不优化；需要时的正解是给 `/api/runs` 加一个「每任务只回最近一条」的入口，不是前端截断。
-2. **筛选与分页都在客户端**，因此「共 N 条」是本地这一份的口径。服务端将来若加了分页，
-   这一层要连同 §2 一起重写，不能只把请求换掉。
-3. **「最近运行」会过期**。表头那句说明是明码标价买下的，不是免责声明——
-   若现场反馈这一列必须实时，正解是加一个显式的刷新或订阅，**不是**偷偷开轮询。
-4. **数据源行内测连打的是真库**。5 条数据源逐条点一遍等于连 5 次；
-   它没有批量入口正是因为这一点。
+1. **The task screen makes one more network request** (fetching run history on entry). The number of
+   history rows grows with the retention period, and under a 90-day retention this is still a
+   single whole-set fetch — **the direct cost of "no `limit/offset`" from §2.** Do not optimise it
+   before the symptom appears; the right fix when needed is an endpoint on `/api/runs` returning only
+   the latest row per task, not truncation in the front end.
+2. **Filtering and paging are both client-side**, so `共 N 条` is measured against the local copy. If
+   the server ever adds paging, this layer must be rewritten together with §2 rather than merely
+   swapping the request.
+3. **"Latest run" goes stale.** The note in the header is the price paid openly, not a disclaimer —
+   if the field reports that this column must be live, the right answer is an explicit refresh or a
+   subscription, **not** quietly enabling polling.
+4. **The inline datasource test hits a real database.** Clicking through five datasources means five
+   connections; the absence of a bulk entry point is exactly why.
 
-## 走查触发
+## Walkthrough triggers
 
-- **X 系列触发**：本次改了数据源屏（§5），照 `CLAUDE.md` 的字面命中既有触发条件第 2 条。
-  同时**给清单加了 X10–X12** 三条，把 P1 这三处新增信息位（任务屏筛选条 + 最近运行、
-  运行历史状态筛选 + 分页、数据源行内测连）纳入门禁——否则它们一条渲染面判据都没有。
-  触发条件因此从两条变三条，`CLAUDE.md` 的门禁表同步更新。
-  **实录**：[`v1-visual-walkthrough-20260821T025018Z.md`](../spikes/fixtures/local-rig/v1-visual-walkthrough-20260821T025018Z.md)，
-  X1–X12 逐条贴实际观察。
-- **V1–V25 不触发**：`docs/design-system/README.md` 与 `tokens.css` 均未改动（§7）。
-- **W1–W6 不触发**：`.precheck-reports` 布局与 `DiagnosticTable` 列结构均未改动。
+- **X series fires**: this round changed the datasource screen (§5), matching the literal wording of
+  existing trigger 2 in `CLAUDE.md`. It also **adds X10–X12** to the checklist, bringing P1's three
+  new information sites (task-screen filter strip + latest run, run-history status filter + paging,
+  inline datasource test) under the gate — without them there would be no rendering criterion at all.
+  The trigger list therefore goes from two entries to three, and the gate table in `CLAUDE.md` is
+  updated to match.
+  **Record**: `v1-visual-walkthrough-20260821T025018Z.md` (retired; see git history), with actual
+  observations recorded for X1–X12.
+- **V1–V25 does not fire**: neither `docs/design-system/README.md` nor `tokens.css` changed (§7).
+- **W1–W6 does not fire**: neither the `.precheck-reports` layout nor the `DiagnosticTable` column
+  structure changed.
 
-### 走查台架跟着改的三处
+### Three rig changes that follow the criteria
 
-台架跟着判据走，否则下一台机器会静默跑一份过期的观察（`CLAUDE.md` 规则 4）：
+The rig follows the criteria; otherwise the next machine silently runs a stale set of observations
+(`CLAUDE.md` rule 4):
 
-1. `v1-probe.py` 原来按**位置**取运行历史的单元格（`cells[4]` 是结局、`cells[9]` 是操作）。
-   §4 改了列序，这些索引当场取错——收进一个 `HISTORY_COLUMNS` 常量，位置只写一处。
-2. 新增 `observe_task_filters` / `observe_history_filters` / `observe_row_test` 三组观察（X10–X12）。
-3. 分页要有对象就得有 20 条以上，而填充行会把 X1–X9 的实录塞满噪声。
-   于是桩加一个 `X_BULK=1` 开关，`run-x-walkthrough.sh` 跑**两趟**：
-   常规一趟出 X1–X12，加量一趟（`X_ONLY=pagination`）只出 X10/X11 的分页与翻页。
+1. `v1-probe.py` read run-history cells **by position** (`cells[4]` was the outcome, `cells[9]` the
+   actions). §4 changed the column order, so those indices read the wrong cells outright — they are
+   collected into a `HISTORY_COLUMNS` constant so positions are written down once.
+2. Three new observation groups, `observe_task_filters` / `observe_history_filters` /
+   `observe_row_test` (X10–X12).
+3. Paging needs more than 20 rows to have anything to act on, but filler rows would bury the X1–X9
+   record in noise. The stub therefore gains an `X_BULK=1` switch, and `run-x-walkthrough.sh` makes
+   **two passes**: a normal pass producing X1–X12, and a bulk pass (`X_ONLY=pagination`) producing
+   only the paging and page-turning of X10/X11.

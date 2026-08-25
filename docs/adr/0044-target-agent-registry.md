@@ -1,192 +1,231 @@
-# ADR-0044: 目标端 sink 升格为「agent」：注册表 + 逐条数据源绑定，`sink_base_url` 退役
+# ADR-0044: The target sink becomes a first-class "agent": a registry, per-datasource binding, and the retirement of `sink_base_url`
 
-**状态**: 已接受
-**日期**: 2026-08-24
-**来源**: 所有者 2026-08-24 的 POC 实地反馈第 1 条（对话内）：
-「目标端 MySQL 并不是通过 sink agent 访问的——**我把 agent 服务停掉后发现依然能够同步**，
-这不合理；实际上 source 端与 MySQL 之间无法直连，管理元数据的时候也只能通过 agent。
-因此 agent 启动后前台要有一个注册的模块，这样在进行数据源管理的时候能够选择。」
-**关联**: [ADR-0037](0037-datasource-model-and-credential-boundary.md)（数据源模型；**§1 的
-「一个 sink 连任意 MySQL」由本 ADR §1 收窄成「一条数据源绑一台 agent」**，
-`SourceConfig::sink_base_url` 的注释「哪个 sink 与哪个库没有必须解绑的理由」由 §5 判废）、
-[ADR-0038](0038-column-mapping-and-target-metadata-face.md)（目标端元数据面 §3 的两个代理入口，
-路由由本 ADR §4 改成按 agent 解析）、
-[ADR-0041](0041-v2-scope-trial-readiness.md) §4（stunnel 隧道——**方向不变**，见 §3）、
-[ADR-0024](0024-m2-unauthenticated-inbound-exposure.md)（两处 `listen` 无鉴权；
-本 ADR 新增的 `GET /v1/agent/info` 落在同一片未鉴权面上，见 §2）、
-[ADR-0043](0043-p2-job-center.md) §2（导航三项，**由本 ADR §6 加到四项**）、
-[ADR-0039](0039-v1-ui-increments.md) §2/§3（数据源屏的列与「测通才让存」，本 ADR §6 各加一条）
+**Status**: Accepted
+**Date**: 2026-08-24
+**Origin**: the owner's first piece of field feedback from the POC on 2026-08-24 (in conversation):
+"the target MySQL is not actually reached through the sink agent — **I stopped the agent service and
+synchronisation still worked**, which makes no sense. In practice source cannot reach MySQL directly,
+and managing metadata also has to go through the agent. So once the agent starts there should be a
+registration module in the front end, so it can be selected during datasource management."
+**Related**: `ADR-0037` (the datasource model; **its §1 "one sink reaches any MySQL" is narrowed by §1
+here to "one datasource binds one agent"**, and the comment on `SourceConfig::sink_base_url` — "there
+is no compelling reason to bind a particular sink to a particular database" — is voided by §5),
+`ADR-0038` (the target metadata surface; the two proxy entry points in its §3 are re-routed per agent
+by §4 here), [ADR-0041](0041-v2-scope-trial-readiness.md) §4 (the stunnel tunnel — **direction
+unchanged**, see §3), `ADR-0024` (neither `listen` is authenticated; the `GET /v1/agent/info` added
+here lands on that same unauthenticated surface, see §2),
+[ADR-0043](0043-p2-job-center.md) §2 (three nav items, **raised to four by §6 here**),
+[ADR-0039](0039-v1-ui-increments.md) §2/§3 (the datasource screen's columns and "store only what
+connects"; §6 here adds one clause to each)
 
-## 背景
+## Background
 
-现场把产品装完、跑通之后，所有者做了一次最朴素的验证：**把目标端那台 agent 停掉，再跑一次同步**。
-它跑成功了。
+After installing the product in the field and getting it working, the owner ran the plainest possible
+check: **stop the agent on the target host and run the synchronisation again.** It succeeded.
 
-这个结果本身就是判据——**产品在这件事上说了假话**。目标端主机上那个进程，从用户的角度看
-是「这套系统在目标端的落脚点」；停掉它之后一切照旧，只能说明数据其实走了别的路。
+That result is itself the criterion — **the product was lying about this.** From a user's point of
+view, the process on the target host is "where this system stands on the target side"; if everything
+carries on after stopping it, the data must have taken another route.
 
-代码层面的事实比现象更值得记下来：**`source` 确实一条 MySQL 连接都没建**（`crates/source`
-连 MySQL 驱动都没有依赖），写入确实是某个 `sink` 进程干的。真正的缺口在这里——
+The facts in the code are worth recording more than the symptom: **`source` really does open no MySQL
+connection** (`crates/source` does not even depend on a MySQL driver), and the writes really were done
+by some `sink` process. The actual gap is here —
 
-> `sink` 的地址是**一个进程级的全局配置** `source.toml::sink_base_url`。
-> 「哪条 MySQL 数据源」与「哪台 sink」之间**没有任何绑定**，界面上也从来没出现过 sink。
+> The `sink` address is **a process-wide global setting**, `source.toml::sink_base_url`.
+> There is **no binding whatsoever** between "which MySQL datasource" and "which sink", and a sink has
+> never appeared in the interface at all.
 
-于是只要那个全局地址后面还站着**任何一个**能连上目标库的 sink（装在源端主机上的、
-另一台机器上的、上一次演练留下来忘了停的），停掉目标端主机上那一台就毫无后果。
-用户看到的「agent」和产品实际使用的 sink 是两个东西，而产品对这件事零感知、零显示。
+So as long as **any** sink capable of reaching the target database still stands behind that global
+address — one installed on the source host, one on another machine, one left running from a previous
+rehearsal — stopping the one on the target host has no consequence. The "agent" the user sees and the
+sink the product actually uses are two different things, and the product neither notices nor shows it.
 
-同一条缺口还有第二个后果，所有者在同一句话里点了名：**元数据也只能经 agent 拿**
-（取表清单、取列、测连），今天它们同样打那个全局地址。
+The same gap has a second consequence, which the owner named in the same sentence: **metadata must go
+through the agent too** (table listing, column fetch, connection test), and today those also hit the
+global address.
 
-## 决策
+## Decision
 
-### 1. sink 升格为一等概念「目标端 agent」，MySQL 数据源逐条绑定；没有全局兜底
+### 1. The sink becomes the first-class concept "target agent"; MySQL datasources bind one each; there is no global fallback
 
-> **一台 agent = 目标端那个 `sink` 进程。** 目标库的**每一条**链路——测连、取表清单、取列、
-> 发起运行的写入——都必须经由**这条数据源所绑定的那一台** agent。
-> **`source.toml::sink_base_url` 退役**（迁移见 §5）。
+> **One agent = the `sink` process on the target side.** **Every** path to the target database —
+> connection test, table listing, column fetch, and the writes of a run — must go through
+> **the one agent that this datasource is bound to**.
+> **`source.toml::sink_base_url` is retired** (migration in §5).
 
-三条随之而来的硬规则：
+Three hard rules follow:
 
-1. **MySQL 数据源的 `agent_id` 必填**，且必须是注册表里真实存在的一台。
-   空绑定不是「用默认那台」，是**存不进去**。
-2. **没有回退路径**。解不出 agent、agent 不在线、agent 身份不符——三种情况一律**当场失败**，
-   不存在「那就用进程级地址试试」这一档。这是本 ADR 的全部要害：
-   留一条兜底，就等于把现场撞到的那件事原样留着。
-3. **Oracle 数据源不绑 agent**。源库由 source 直连（`CONTEXT.md` 的部署形态未变），
-   给它一个 agent 字段只会让人以为源端也要装点什么。
+1. **`agent_id` is mandatory on a MySQL datasource** and must name an agent that really exists in the
+   registry. An empty binding does not mean "use the default one" — it **cannot be stored**.
+2. **There is no fallback path.** Agent unresolvable, agent offline, agent identity mismatched — all
+   three **fail on the spot**. There is no "well, try the process-wide address" tier. That is the whole
+   point of this ADR: leaving a fallback leaves the field incident exactly as it was.
+3. **Oracle datasources bind no agent.** The source database is reached directly by source (the
+   deployment shape in `CONTEXT.md` is unchanged), and giving it an agent field would only suggest
+   something must be installed on the source side too.
 
-**这条收窄了 ADR-0037 §1** 的「一个 sink 进程能连任意 MySQL，『哪个 sink』与『哪个库』
-在第一版没有必须解绑的理由」。理由现在有了，而且是实地撞出来的：不解绑，「换一台 agent」
-与「停掉一台 agent」这两个动作在产品里**都没有表示**。ADR-0037 的其余部分（凭据存 source、
-随 run 过线、口令不回读）**一字不动**——本 ADR 改的是路由，不是凭据。
+**This narrows ADR-0037 §1**, which said one sink process can reach any MySQL and that "which sink" and
+"which database" had no compelling reason to be bound in v1. There is a reason now, and it was found in
+the field: without the binding, "swap an agent" and "stop an agent" are **both unrepresented** in the
+product. The rest of ADR-0037 (credentials stored at source, crossing the wire with a run, never read
+back) is **untouched** — this ADR changes routing, not credentials.
 
-### 2. agent 有一个跨重启稳定的身份，`GET /v1/agent/info` 是它的自述
+### 2. An agent has an identity stable across restarts, and `GET /v1/agent/info` is how it introduces itself
 
-sink 侧新增一个端点，无请求体：
+A new endpoint on the sink side, with no request body:
 
 ```
 GET /v1/agent/info → { "agent_id": "...", "name": "...", "version": "..." }
 ```
 
-- `agent_id` **跨重启稳定**：落在 `sink.toml` 同目录的 `agent-id` 文件里（0600），
-  没有就现生成一个写下去。**不要求部署者准备它**——取值本身没有意义，有意义的只是「它不变」，
-  而让人手抄一个 uuid 只是多一步能抄错的活。
-- `name` 由 `sink.toml::agent_name` 给，留空取主机名。**不作判据**，只进界面。
-- `version` 是构建版本，排障时用来判两端是不是同一批二进制。
+- `agent_id` is **stable across restarts**: it lives in an `agent-id` file (0600) beside `sink.toml`,
+  generated and written on first use if absent. **Deployers are not asked to prepare it** — the value
+  itself carries no meaning, only its constancy does, and making someone copy a uuid by hand is just
+  one more step to get wrong.
+- `name` comes from `sink.toml::agent_name`, defaulting to the hostname. **It is never a criterion**;
+  it only reaches the interface.
+- `version` is the build version, used during troubleshooting to tell whether both ends are the same
+  batch of binaries.
 
-**为什么要身份、而不是只探连通性**：只探连通性挡不住「同一个地址后面换了一台 agent 应答」——
-而那恰好是现场那件事的一般形式（地址指错、另一个 sink 顶上、隧道连到了别处）。
-身份在**注册那一刻**被钉进 source 侧的记录，之后每次探测、每次开跑都比一次；
-比不上时判 `mismatch`，**不是** `online`。
+**Why an identity rather than a mere liveness probe**: liveness alone cannot catch "a different agent is
+answering at the same address" — which is precisely the general form of the field incident (a wrong
+address, another sink standing in, a tunnel pointing elsewhere). The identity is pinned into the
+source-side record **at the moment of registration**, and compared on every probe and every run start.
+A mismatch is judged `mismatch`, **not** `online`.
 
-**它落在 ADR-0024 那片未鉴权面上**，所以这个端点里**没有凭据字段，也永远不许加**：
-能连上 sink 端口的人本来就能读到它。报文形状由 `crates/shared/tests/protocol_golden.rs` 钉死。
+**It lands on the unauthenticated surface of ADR-0024**, so this endpoint carries **no credential field
+and never may**: anyone who can reach the sink port could already read it. The payload shape is pinned
+by `crates/shared/tests/protocol_golden.rs`.
 
-### 3. 注册是「source 主动去连」，不是「agent 反向注册」——网络方向一个字不变
+### 3. Registration is "source dials out", not "the agent registers itself" — the network direction does not change by one character
 
-所有者的原话是「agent 启动后前台要有一个注册的模块」。**兑现方式是前台的一屏，
-但握手方向仍是 source → agent**：在「目标端 Agent」屏填名字与地址，source 当场打一次
-`GET /v1/agent/info`，**探通才落库**；探不通就报「那个地址上没有活着的 agent」，库里不留痕。
+The owner's words were "once the agent starts there should be a registration module in the front end".
+**That is delivered as a front-end screen, but the handshake direction stays source → agent**: you enter
+a name and address on the "Target Agent" screen, source immediately issues one `GET /v1/agent/info`, and
+**it is stored only if the probe succeeds**. If it fails, the answer is "there is no live agent at that
+address" and nothing is left in the database.
 
-**否掉 agent 反向推送注册（agent → source）的理由**：ADR-0041 §4 的 stunnel 隧道是**单向**的
-——源端是客户端、目标端只 `accept`。让 agent 主动注册，要么加一条反向隧道、要么开一个
-目标端到源端的通道，等于为了一个「谁先说话」的偏好去改整套部署与两份装机手册。
-拉取式买到的东西完全一样：注册要求对方活着、状态跟着变、界面上看得见。
+**Why agent-initiated registration (agent → source) is rejected**: the stunnel tunnel of ADR-0041 §4 is
+**one-way** — the source side is the client and the target side only `accept`s. Letting the agent
+register itself would require either a reverse tunnel or a channel from target to source, i.e. changing
+the entire deployment and both installation manuals for a preference about who speaks first. The pull
+model buys exactly the same things: registration requires the other side to be alive, status follows it,
+and it is visible in the interface.
 
-在线状态由两处维护，**两处都要**：
+Liveness is maintained in two places, and **both are required**:
 
-- **后台探测**：source 每 15 秒把注册表里每台 agent 打一遍，更新 `status` / `last_seen_at` /
-  `last_error`。它是「停了 agent，列表上就看得见」的那一半。
-- **用之前当场探**：测连、取表、取列、发起运行这四条链路各自在开工前解一次 agent 并探一次。
-  它是「停了 agent，这件事**这一刻**就干不成」的那一半。只有后台探测的话有最长 15 秒的窗口期；
-  只有当场探的话，列表上永远显示着上一次的旧状态。
+- **Background probe**: source polls every agent in the registry every 15 seconds, updating `status` /
+  `last_seen_at` / `last_error`. This is the half that makes "stop the agent and the list shows it".
+- **An immediate probe before use**: connection test, table listing, column fetch, and run submission
+  each resolve and probe the agent before starting work. This is the half that makes "stop the agent and
+  **this very action** cannot be done". With only the background probe there is a window of up to 15
+  seconds; with only the immediate probe, the list would forever show the previous state.
 
-### 4. 四条目标端链路统一按数据源解析 agent；run 子进程再核一次身份
+### 4. All four target-side paths resolve the agent from the datasource; the run child process re-checks the identity
 
-| 链路 | 入口 | 路由 |
+| Path | Entry point | Routing |
 |---|---|---|
-| 草稿测连 | `POST /api/datasources/test-connection` | 表单里当前选的那台 agent |
-| 按 id 测连 | `POST /api/datasources/{id}/test-connection` | 该数据源绑的 agent |
-| 取表清单 | `POST /api/target/tables` | 同上 |
-| 取列 | `POST /api/target/columns` | 同上 |
-| 发起运行 | `POST /api/runs` | 任务的**目标端**数据源绑的 agent |
+| Draft connection test | `POST /api/datasources/test-connection` | The agent currently selected in the form |
+| By-id connection test | `POST /api/datasources/{id}/test-connection` | The agent bound to that datasource |
+| Table listing | `POST /api/target/tables` | Same |
+| Column fetch | `POST /api/target/columns` | Same |
+| Run submission | `POST /api/runs` | The agent bound to the task's **target** datasource |
 
-发起运行那条多一步：解出来的端点（`agent_id` / `name` / `base_url` / `instance_id`）
-**随临时任务文件钉给 run 子进程**（`TaskConfig::agent`），子进程在开跑前**再核一次身份**。
+Run submission takes one extra step: the resolved endpoint (`agent_id` / `name` / `base_url` /
+`instance_id`) is **pinned into the temporary task file handed to the run child process**
+(`TaskConfig::agent`), and the child **re-checks the identity** before starting.
 
-**为什么核两次**：从「点发起」到「真的开始写」之间隔着 Oracle 建连接、describe、
-`COUNT(*)` 这些秒级的活。那段时间里 agent 被停掉或被顶替，只核第一次就等于没核。
-子进程**不读 `source.toml` 的任何地址**——那个字段已经退役，两个真相源的问题从根上没了。
+**Why check twice**: between "submit" and "actually start writing" lie the seconds-long jobs of opening
+an Oracle connection, describing, and running `COUNT(*)`. If the agent is stopped or replaced during
+that window, checking only the first time is the same as not checking. The child process **reads no
+address from `source.toml`** — that field is retired, so the two-sources-of-truth problem is gone at the
+root.
 
-失败分类沿用既有闭集（ADR-0029，**不新增值**）：agent 打不通归 `NETWORK`。
+Failure classification reuses the existing closed set (ADR-0029, **no new values**): an unreachable agent
+classifies as `NETWORK`.
 
-### 5. `sink_base_url` 的退役与一次性迁移
+### 5. Retiring `sink_base_url`, with a one-time migration
 
-形态照抄 ADR-0037 §10 那次 Oracle 凭据迁移，判据同样是「表为空」，所以只可能发生一次：
+The shape copies the Oracle credential migration of ADR-0037 §10, with the same criterion of "the table
+is empty", so it can only happen once:
 
-- 字段改成**可选**，现存部署的 `source.toml` 仍然解析得动。
-- 首次启动、且 agent 表为空时，把它迁成一条名为**「默认」**的 agent
-  （`instance_id` 空、状态「未探测」——启动早期不该去打网络，第一次探测会补齐它），
-  并把**当时还没绑定 agent 的 MySQL 数据源**全部指向它。
-- 打一条 `warn` 让部署者删掉这个字段，并去「目标端 Agent」屏确认它在线。
+- The field becomes **optional**, so an existing deployment's `source.toml` still parses.
+- On first start with an empty agent table, it migrates into a single agent named **「默认」**
+  (`instance_id` empty, status "not yet probed" — the network should not be touched that early in
+  startup, and the first probe fills it in), and every **MySQL datasource not yet bound to an agent** is
+  pointed at it.
+- A `warn` is logged telling the deployer to delete the field and confirm on the "Target Agent" screen
+  that it is online.
 
-**为什么要连数据源一起回填**：不回填的话，升完级第一次发起运行会得到「这条数据源还没绑 agent」——
-一个用户从没配过、也无从预料的错误。回填之后行为与升级前一致，**差别只在于这条路现在有名字、
-有状态、停了看得见**。
+**Why backfill the datasources too**: without it, the first run submission after upgrading would report
+"this datasource has no agent bound" — an error the user never configured and could not have
+anticipated. With the backfill, behaviour matches the pre-upgrade state, and **the only difference is
+that this route now has a name, a status, and visibility when it stops.**
 
-### 6. 界面：导航加第一项「目标端 Agent」，数据源屏加一列一选项
+### 6. Interface: a new first nav item "Target Agent", plus one column and one field on the datasource screen
 
-- **导航从三项到四项**（改写 ADR-0043 §2）：**目标端 Agent · 作业中心 · 数据源 · 系统设置**。
-  它排在最前不是排版偏好——一条 MySQL 数据源必须先有一台已注册的 agent 才建得出来，
-  新装一台机器时这一屏是第一站。
-- **Agent 屏有「状态」列**，这是对 ADR-0039 §2「不给连接状态列」的一处**明确例外**，
-  理由是两者性质不同：那一条挡的是「后台轮询所有**业务库**」的代价与「过期的绿点」的谎；
-  探 agent 只是打自己进程的一个 `GET`，不碰任何业务库、不占任何数据库连接，
-  而「它现在活着吗」正是这一屏存在的全部意义。
-  状态三档：`online` / `offline` / `mismatch`——**`mismatch` 着红、`offline` 着灰**，
-  「东西没起来」和「这个地址后面站的不是你以为的那台」是两种事故，合并等于把线索抹掉。
-- **注册对话框没有「测试连接」按钮**：提交本身就是一次连接（§3），
-  多摆一个按钮只是让人多点一次，买不到新信息。
-- **数据源屏加一列「目标端 Agent」**：MySQL 行显示 agent 名字，不在线 / 身份不符时跟一个标签
-  ——此刻这条数据源就是不能用的，藏起来只会让人在发起那一刻才发现。**Oracle 行是空的**，
-  不写「不适用」（会让人以为少配了东西）。
-- **表单里 agent 是必选项**，且**进「测通才让存」的连接指纹**（ADR-0039 §3）：
-  换一台 agent 就是换了一条到目标库的路，上一次的测连结果与新路没关系。
-  注册表里只有一台时**直接预选**——现场绝大多数部署就是一台。
+- **The nav goes from three items to four** (rewriting ADR-0043 §2): **Target Agent · Job Center ·
+  Datasources · Settings**. It comes first not out of layout preference — a MySQL datasource cannot be
+  created without a registered agent, so this screen is the first stop when setting up a new machine.
+- **The agent screen has a "status" column**, an **explicit exception** to ADR-0039 §2's "no connection
+  status column", because the two differ in kind: that rule guards against the cost of background-polling
+  every **business database** and against the lie of a stale green dot. Probing an agent is one `GET`
+  against our own process — it touches no business database and consumes no database connection — and
+  "is it alive right now?" is the entire reason this screen exists.
+  Three states: `online` / `offline` / `mismatch` — **`mismatch` in red, `offline` in grey.** "It did not
+  start" and "the thing standing at that address is not the one you think" are two different incidents,
+  and merging them erases the clue.
+- **The registration dialog has no "test connection" button**: submitting *is* a connection (§3), so an
+  extra button only adds a click and buys no new information.
+- **The datasource screen gains a "Target Agent" column**: MySQL rows show the agent name, followed by a
+  tag when it is offline or mismatched — at that moment the datasource simply cannot be used, and hiding
+  that only defers the discovery to submission time. **Oracle rows are empty**, not "not applicable"
+  (which would suggest something was left unconfigured).
+- **The agent is a required field in the form**, and it **joins the connection fingerprint of "store only
+  what connects"** (ADR-0039 §3): swapping the agent means swapping the route to the target database, and
+  the previous test result says nothing about the new one. When the registry holds exactly one agent it is
+  **preselected** — most deployments in the field have exactly one.
 
-## 后果
+## Consequences
 
-- **升级后第一次启动会自动迁出一台「默认」agent**，并把现存 MySQL 数据源绑上去。
-  行为与升级前一致，但从此这条路在界面上是可见、可停、可换的。
-- **目标端主机上的 agent 现在是硬依赖**：它停了，测连、取元数据、发起运行**全部**失败。
-  这正是本票要买的东西——但它也意味着**一次运维疏忽（忘了起 agent）会以「全屏失败」的形式暴露**，
-  而不是像现在这样悄悄走另一条路。这是有意的取舍。
-- **多一次网络往返**：每条目标端链路开工前都要探一次 agent（连 5s / 读 5s 超时）。
-  代价是界面上多几十毫秒，换到的是「此刻它真的活着」这个断言。
-- **`agent-id` 文件成了目标端的一份状态**。误删它 = 那台 agent 换了身份，
-  source 侧会判 `mismatch` 并停掉所有链路，处置是在 Agent 屏重新保存一次（重新钉身份）。
-  这条要写进装机手册。
-- **本 ADR 不做鉴权**。agent 注册没有令牌，`/v1/agent/info` 无鉴权——ADR-0024 那条
-  「可达范围即权限暴露范围」原样成立，本票一个字都没改善它，也没有恶化它。
+- **The first start after upgrading automatically migrates one 「默认」 agent** and binds existing MySQL
+  datasources to it. Behaviour matches the pre-upgrade state, but from now on this route is visible,
+  stoppable, and swappable in the interface.
+- **The agent on the target host is now a hard dependency**: stop it and connection tests, metadata
+  fetches, and run submissions **all** fail. That is exactly what this ticket buys — but it also means
+  **one operational slip (forgetting to start the agent) surfaces as a screen-wide failure** rather than
+  quietly taking another route, as it does today. That is a deliberate trade.
+- **One more network round trip**: every target-side path probes the agent before starting (5s connect /
+  5s read timeouts). The cost is tens of milliseconds in the interface, in exchange for the assertion
+  "it is genuinely alive right now".
+- **The `agent-id` file becomes a piece of target-side state.** Deleting it by accident = that agent has
+  changed identity, source judges `mismatch` and stops every path, and the remedy is to save it again on
+  the agent screen (re-pinning the identity). This belongs in the installation manual.
+- **This ADR adds no authentication.** Agent registration has no token and `/v1/agent/info` is
+  unauthenticated — ADR-0024's "reachability equals privilege" stands verbatim. This ticket neither
+  improves nor worsens it.
 
-## 时效
+## Validity
 
-**重开信号**：出现「一台 source 要管十台以上 agent」的部署（届时列表、筛选、分组都要重做），
-或出现「agent 主动上报」的硬需求（例如目标端在 NAT 后、source 打不进去）——
-后者会直接推翻 §3 的方向裁定，那时要一起改的还有 ADR-0041 §4 的隧道形态。
+**Reopening signals**: a deployment where one source manages more than ten agents (at which point the
+list, filtering, and grouping all need redoing), or a hard requirement for **agent-initiated reporting**
+(the target sitting behind NAT so source cannot dial in). The latter would directly overturn the
+direction ruling of §3, and the tunnel shape of ADR-0041 §4 would have to change with it.
 
-## 走查触发
+## Walkthrough triggers
 
-数据源屏的列结构、数据源表单、以及外壳的导航项都改了，按 `CLAUDE.md` 的表：
+The datasource screen's column structure, the datasource form, and the shell's nav items all changed;
+per the table in `CLAUDE.md`:
 
-- **X 系列（v1 走查）触发**：**X1 改判**（导航从三项到四项，目标端 Agent 排第一、数据源变第三）、
-  **X2 改判**（数据源屏多一列「目标端 Agent」），新增 **X19**
-  「目标端 Agent 屏：注册 / 探测 / 状态三档 / 删除被拒 / 数据源表单里的必选下拉」。
-  X3 的判据一字未动，但**造它的手段多一步**（MySQL 草稿要先选一台 agent）。
-  编号规矩照旧：一个不重编、一行不删。
-- **V 系列（设计系统）触发**：`tokens.css` 与 `app.css` 一个字未改、**一个新组件都没有**，
-  但 `docs/design-system/README.md` §7 的屏幕清单加了「目标端 Agent 屏」那一条
-  （新屏不写进清单，清单就是错的）。按 CLAUDE.md 规则 1，**改了它就要跑 V1–V25，没有例外**——
-  「这只是一段文字」这种话正是那条规则不许说的。判据一条未变，跑的是回归。
-- **W 系列（M3）**：`.precheck-reports` 与 `DiagnosticTable` 未改，**不触发**。
+- **X series (v1 walkthrough) fires**: **X1 re-judged** (nav goes from three items to four, Target Agent
+  first, datasources third), **X2 re-judged** (the datasource screen gains a "Target Agent" column), and
+  **X19 added**: "Target Agent screen: registration / probing / the three states / deletion refused / the
+  required dropdown in the datasource form". X3's criterion is unchanged, but **reaching it takes one more
+  step** (a MySQL draft must select an agent first). The numbering rule holds as always: nothing is
+  renumbered, no line is deleted.
+- **V series (design system) fires**: `tokens.css` and `app.css` changed by not one character and there is
+  **not one new component**, but the screen inventory in `docs/design-system/README.md` §7 gained the
+  "Target Agent screen" entry (a new screen missing from the inventory makes the inventory wrong). Per
+  `CLAUDE.md` rule 1, **changing it means running V1–V25, with no exemption** — "it is only some text" is
+  exactly what that rule forbids saying. No criterion changed; this is a regression run.
+- **W series (M3)**: `.precheck-reports` and `DiagnosticTable` are unchanged, so it **does not fire**.

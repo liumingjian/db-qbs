@@ -248,7 +248,7 @@ fixture」。两种失败含义不同，混合会破坏 M0 结论的语义。
 
 ## M2 的验收编排
 
-规格见 [ADR-0028](../../adr/0028-m2-acceptance-criteria-and-rig-extension.md)（决策票
+规格见 `ADR-0028`（决策票
 [#59](https://github.com/liumingjian/db-qbs/issues/59)）。要点：
 
 - **入口独立**：`scripts/run-m2-acceptance.sh` 与 `run-m1-acceptance.sh` **并列，互不吞并**。
@@ -312,7 +312,7 @@ M2_HOST_CARGO_TARGET=x86_64-apple-darwin \
 
 ## M3 的验收编排
 
-规格见 [ADR-0032](../../adr/0032-m3-acceptance-criteria-and-rig-extension.md)（决策票
+规格见 `ADR-0032`（决策票
 [#103](https://github.com/liumingjian/db-qbs/issues/103)）。M3 是第三个独立入口，前置要求是
 先跑绿 M1 与 M2；它不会修改或代跑另外两份验收。
 
@@ -355,7 +355,7 @@ run ID 与 W1–W6 的对应关系。这样 [`m3-visual-walkthrough.md`](m3-visu
 
 ## 第一版的验收编排（第四个入口）
 
-判据见 [ADR-0040](../../adr/0040-v1-acceptance-criteria-and-rig-extension.md)（决策票
+判据见 [ADR-0040](../../../adr/0040-v1-acceptance-criteria-and-rig-extension.md)（决策票
 [#122](https://github.com/liumingjian/db-qbs/issues/122)，实现票
 [#135](https://github.com/liumingjian/db-qbs/issues/135)）。第一版的验收面是**四份**台架
 （ADR-0040 §5.4）：M1 / M2 / M3 加上本入口，四份**串行**跑，共用同一套 docker 台架与端口。
@@ -470,9 +470,9 @@ fixture 是新建的 `acceptance/oracle-v1.sql` 与 `acceptance/mysql-v1.sql`，
   得出的都是「不通」。**负判据一律按 IP 判、且正对照要同址**：R3 的正对照就是 R4（同一个 MySQL IP、
   同一个端口，从目标端连必须通），R5 的正对照是 R2。按容器名判出来的「不通」是假绿——
   `fa2c708` 那一版三条负判据全栽在这上面，实录见
-  [`rehearsal-topology-20260820T012000Z.md`](rehearsal-topology-20260820T012000Z.md)；
+  `rehearsal-topology-20260820T012000Z.md`（已退役，见 git 历史）；
   宿主网关那条路又漏了一轮，实录见
-  [`rehearsal-topology-20260820T014500Z.md`](rehearsal-topology-20260820T014500Z.md)。脚本**默认不重建**（演练进行到一半来复核拓扑是常态，不该顺手把已装好的
+  `rehearsal-topology-20260820T014500Z.md`（已退役，见 git 历史）。脚本**默认不重建**（演练进行到一半来复核拓扑是常态，不该顺手把已装好的
   source / stunnel 抹掉），此时 R9 不判；要判干净态就跑 `--reset`，它会先推倒重建、
   再在刚重建出来的干净两台主机上判其余各条。收尾一律回收探针进程并判 R10
   （`15443` 交还给 #153 的 stunnel）。
@@ -500,7 +500,7 @@ fixture 是新建的 `acceptance/oracle-v1.sql` 与 `acceptance/mysql-v1.sql`，
 ### stunnel 双端隧道（#153）
 
 演练台上把 `source → sink` 那条「公网」一跳换成加密隧道，兑现的是
-[ADR-0037](../../../adr/0037-datasource-model-and-credential-boundary.md) §4
+`ADR-0037` §4
 那条至今没人还过的账（MySQL 口令明文过线，通道必须可信）。
 **双端配置模板、证书生成、装法说明在 [`packaging/stunnel/`](../../../../packaging/stunnel/)**，
 随行李清单带走——工具不进仓库的门禁，下一台机器会静默跳过（`CLAUDE.md` 视觉门禁通则 4 的同一条纪律）。
@@ -539,7 +539,7 @@ fixture 是新建的 `acceptance/oracle-v1.sql` 与 `acceptance/mysql-v1.sql`，
 - **真机差异**：防火墙（`firewall-cmd --add-port=15443/tcp`）、SELinux、客户给的公网 IP
   取代 `host.docker.internal`、`8080` 可能已被占——四条逐条列在
   [`packaging/stunnel/README.md`](../../../../packaging/stunnel/README.md#真机上会不一样的地方)。
-- **实录**：[`rehearsal-tunnel-20260820T022000Z.md`](rehearsal-tunnel-20260820T022000Z.md)
+- **实录**：`rehearsal-tunnel-20260820T022000Z.md`（已退役，见 git 历史）
   ——从 `rehearsal-reset.sh` 推倒重建的干净机器起，stunnel 与证书全部在那一趟里从零装出来，
   拓扑 19/19、隧道 17/17。顺序颠倒时那四条红也一并记在里面，作为上一条裁定的证据。
 - **T 不是第五个台架字母**，与 R 同理（ADR-0041 增补 4(a)）：它编的是演练台上隧道那一段的自检，
@@ -573,7 +573,7 @@ fixture 是新建的 `acceptance/oracle-v1.sql` 与 `acceptance/mysql-v1.sql`，
   所以**只有回读跑完那一档才产生得了 PASS**：仪式在回读之前停下时，卡住的那一步记 FAIL、
   其余记未判定（「设过了」不等于「就是这个值」）。把未判定记成 PASS 是这里最危险的假绿，
   C3–C5 判的就是它，C9 判的是同一件事的另一面（认不出的回答也不许算合格）。
-- **实录**：[`rehearsal-preflight-20260820T035846Z.md`](rehearsal-preflight-20260820T035846Z.md)
+- **实录**：`rehearsal-preflight-20260820T035846Z.md`（已退役，见 git 历史）
   ——C1–C9 9/9、P0–P11 13/13、隧道 T0–T11 照旧 17/17，跑在一套被 Docker Desktop 升级
   清空之后从零重建的台架上。那一趟还抓到两件事并当场修掉：`${var}` 不加花括号、
   紧挨着中文时在 mac 的 bash 3.2 上会炸（判据脚本自己先炸，等于把整份判据吞掉），

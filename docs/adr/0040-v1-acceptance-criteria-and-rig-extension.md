@@ -3,14 +3,14 @@
 **状态**: 已接受
 **日期**: 2026-08-19
 **票**: [#122](https://github.com/liumingjian/db-qbs/issues/122)（地图 [#117](https://github.com/liumingjian/db-qbs/issues/117) 的第六票，也是最后一张）
-**先例**: [ADR-0028](0028-m2-acceptance-criteria-and-rig-extension.md)（M2 第一次）、[ADR-0032](0032-m3-acceptance-criteria-and-rig-extension.md)（M3 第二次）——本 ADR 是第三次，照着走
+**先例**: `ADR-0028`（M2 第一次）、`ADR-0032`（M3 第二次）——本 ADR 是第三次，照着走
 
 ## 背景
 
-第一版闭环地图的前五票已全部收口：[ADR-0035](0035-upsert-write-model.md)（主键 upsert）、
-[ADR-0036](0036-task-spec-structured.md)（结构化 `TaskSpec`）、
-[ADR-0037](0037-datasource-model-and-credential-boundary.md)（数据源与凭据）、
-[ADR-0038](0038-column-mapping-and-target-metadata-face.md)（字段映射与目标端列面）、
+第一版闭环地图的前五票已全部收口：`ADR-0035`（主键 upsert）、
+`ADR-0036`（结构化 `TaskSpec`）、
+`ADR-0037`（数据源与凭据）、
+`ADR-0038`（字段映射与目标端列面）、
 [ADR-0039](0039-v1-ui-increments.md)（界面增量）。本票定的是：**这五条怎么算验收通过，台架怎么扩。**
 
 ### 开票前的三条事实，查证后有两条翻了
@@ -19,7 +19,7 @@
 |---|---|
 | 「10 万行 / 约 100MB」是要新构造的用例 | **翻了。** M1 的 `wide-100k` 早就超额兑现，见 §1 |
 | 「三份既有台架要不要重跑」是个待判问题 | **翻了。** 不是要不要——三份**现在全部对不上新 API**，非改不可，见 §5 |
-| 「M3 的 W1–W6 要不要重跑」由 #123 决定 | **换了触发源。** #123 确实没碰，但 [ADR-0036](0036-task-spec-structured.md) §5 碰了，见 §6 |
+| 「M3 的 W1–W6 要不要重跑」由 #123 决定 | **换了触发源。** #123 确实没碰，但 `ADR-0036` §5 碰了，见 §6 |
 
 ### 所有者 2026-08-19 的两条裁定（本 ADR 的输入）
 
@@ -49,12 +49,12 @@
   68 列 + 2 列 = 70 列，不是巧合。**不另立判据。**
 
 **不设耗时判据**（所有者裁定 2）。台架 Oracle 是 amd64 模拟层，绝对秒数按
-[ADR-0005](0005-local-rig-as-v1-verification-baseline.md) 本来就不作数；
+`ADR-0005` 本来就不作数；
 现场是夜间批量，耗时也不构成体验约束。**报告里照记实测秒数，只看趋势、不判红绿。**
 
 ### 2. 另起第四个入口 `run-v1-acceptance.sh`，场景编号用 C 系列
 
-照 [ADR-0032](0032-m3-acceptance-criteria-and-rig-extension.md) §2 的 M3 先例：**另起，不往既有入口里塞。**
+照 `ADR-0032` §2 的 M3 先例：**另起，不往既有入口里塞。**
 理由与 M3 那次一字不改——既有入口的场景集是**该里程碑的常量**，往里塞新场景会让「9/9」「B1–B6」这类
 历史锚点随时间漂移，旧报告就对不上了。
 
@@ -130,7 +130,7 @@ peak(100k) - baseline  ≤  2 × ( peak(10k) - baseline )
 | **C6** | 内存形状 | §3 的两条斜率断言，source 与 sink 各一 | 本 ADR §3 |
 
 **C4 的第 ④ 条不许省。** 只验「跑两次行数不变」的话，`INSERT IGNORE` 也能过——
-而 `INSERT IGNORE` 会把「源端改了值」静默吞掉，正是 [ADR-0034](0034-v1-scope-from-customer-needs.md) §1b
+而 `INSERT IGNORE` 会把「源端改了值」静默吞掉，正是 `ADR-0034` §1b
 点名的那类**静默改值**。行数不变是必要条件，不是充分条件。
 
 **不设 C7 收「10w/100M」**，理由见 §1：那条判据留在 M1，重复设一个只会有两个会各自漂移的真源。
@@ -158,7 +158,7 @@ peak(100k) - baseline  ≤  2 × ( peak(10k) - baseline )
 调用面要从退役的 `source_sql` / `biz_date` 报文改到 `TaskSpec` + 数据源 id 绑定。判据面只有一处翻转：
 
 - **`A3-column-fetch-shape-failure` 与 `A6-run-shape-failure` 失去对象**——
-  [ADR-0036](0036-task-spec-structured.md) §5 整段取消了 SQL 形状预检（生成器结构性产不出坏形状）。
+  `ADR-0036` §5 整段取消了 SQL 形状预检（生成器结构性产不出坏形状）。
 - **裁定：保留编号，脚本里跳过，报告里打 `N/A（判据已随 ADR-0036 §5 退役）`。**
   **不删号、不重编、不拿别的场景补位。** 编号是历史锚点，重编之后 2026-08-16 那几份旧报告就对不上了;
   而一个写着「已退役及其依据」的 N/A 行，比一个消失的编号更能回答「A6 去哪了」。
@@ -196,7 +196,7 @@ peak(100k) - baseline  ≤  2 × ( peak(10k) - baseline )
 ADR-0039 §9 的自查结论「`.precheck-reports` 布局与 `DiagnosticTable` 列结构未变」
 **对 #123 成立，但对整个第一版不成立**：
 
-> [ADR-0036](0036-task-spec-structured.md) §5 取消了 SQL 形状预检，
+> `ADR-0036` §5 取消了 SQL 形状预检，
 > **`.precheck-reports` 从此只剩映射预检一段**——这正是 `CLAUDE.md` M3 门禁点名的
 > 「`.precheck-reports` 布局改动」。
 

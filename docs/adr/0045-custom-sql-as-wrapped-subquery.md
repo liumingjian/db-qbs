@@ -1,230 +1,277 @@
-# ADR-0045: 自定义 SQL 恢复为 v1 的第二条取数路径——SQL 是被包裹的子查询，结构化规格仍是真相源
+# ADR-0045: Custom SQL returns as v1's second data-retrieval path — the SQL is a wrapped subquery, and the structured spec remains the source of truth
 
-**状态**: 已接受
-**日期**: 2026-08-24
-**来源**: **补记**。本分支 `codex/p1-handoff-screenshots` 的 [`71e09b0`](../../commit/71e09b0) 已经把
-自定义 SQL 落进代码（`TaskSpec::source_sql`、`/api/builder/sql-columns`、构建器里的第二条 tab），
-`eae232e` 又把它加深（外层投影、列勾选、正文引导）。2026-08-24 的两轴 code review 发现
-**它与 [ADR-0036](0036-task-spec-structured.md) §1 正面冲突，且从未记账**。
-按 [ADR-0034](0034-v1-scope-from-customer-needs.md) §1「能力边界的变更必须显式落 ADR，
-不能在实现票里悄悄生效」，本 ADR 是这笔账的补记——**记账迟到了，这一点本身写在这里，不粉饰**。
-**关联**: [ADR-0036](0036-task-spec-structured.md)（**§1 的「v1 不提供任何编辑入口」由本 ADR §1 撤销；
-§3 由 §5 判废；§2 §4 §5 §6 §7 的逐条处置见 §5 的表**；**时效 1 的重开信号即本 ADR**）、
-[ADR-0023](0023-m2-sql-builder-boundary.md)（**§2 否掉方案 C 的理由一字不改**，见 §2 第 2 条）、
-[ADR-0035](0035-upsert-write-model.md) §3（条件形态与运行期传参——**本 ADR 不重开它**，
-只声明自定义 SQL 这条路径上它没有对象）、
-[ADR-0038](0038-column-mapping-and-target-metadata-face.md)（§1 投影别名即映射、§2 列映射存目标名、
-§8 列名大小写不敏感——**三条都一字不动**，本 ADR §3 是它们在自定义 SQL 上的落地细则）、
-[ADR-0011](0011-batch-payload-wire-format.md) §2（不发明第二套转义，见 §4）、
-[ADR-0009](0009-m1-mapping-precheck-rules.md)（映射预检**一个字不动**）、
-[ADR-0034](0034-v1-scope-from-customer-needs.md) §1（能力变更显式记账）
+**Status**: Accepted
+**Date**: 2026-08-24
+**Origin**: **recorded after the fact.** On this branch, `codex/p1-handoff-screenshots`,
+[`71e09b0`](../../commit/71e09b0) already landed custom SQL in the code (`TaskSpec::source_sql`,
+`/api/builder/sql-columns`, a second tab in the builder), and `eae232e` deepened it (the outer
+projection, column selection, prose guidance). A two-axis code review on 2026-08-24 found that
+**it conflicts head-on with `ADR-0036` §1 and was never recorded.**
+Per `ADR-0034` §1 — a change to a capability boundary must land as an explicit ADR and may not take
+effect quietly inside an implementation ticket — this ADR is that entry.
+**The bookkeeping is late, and that fact is written here rather than smoothed over.**
+**Related**: `ADR-0036` (**its §1 clause "v1 offers no editing entry point" is revoked by §1 here;
+its §3 is voided by §5; the disposition of §2, §4, §5, §6 and §7 is in the table in §5**; **its
+validity signal 1 is this ADR**), `ADR-0023` (**the reasoning by which its §2 rejected option C is
+unchanged**, see §2 item 2), `ADR-0035` §3 (condition shapes and run-time parameters — **this ADR does
+not reopen it**, it only declares that on the custom-SQL path it has no subject),
+`ADR-0038` (§1 the projection alias *is* the mapping, §2 column mappings store the target name, §8
+column names are case-insensitive — **all three untouched**; §3 here is how they land on custom SQL),
+`ADR-0011` §2 (do not invent a second escaping scheme, see §4),
+`ADR-0009` (the mapping precheck is **untouched**),
+`ADR-0034` §1 (capability changes are recorded explicitly)
 
-## 背景
+## Background
 
-[ADR-0036](0036-task-spec-structured.md) §1 判「结构化规格是唯一真相源，v1 不支持手改 SQL」，
-并按 ADR-0034 §1 的规矩把**代价明写**在正文里：
+`ADR-0036` §1 ruled that the structured spec is the single source of truth and that v1 does not
+support hand-edited SQL, and — following ADR-0034 §1 — **wrote the cost down explicitly** in its body:
 
-> **代价明写**：生产上那条 70+ 列、带 dblink 的现成查询在 v1 **不能直接粘进来跑**，
-> 只能用构建器重建；构建器表达不了的查询（多表 join、子查询、表达式列）在 v1 **没有出路**。
+> **Cost, stated plainly**: that existing production query with 70-plus columns and a dblink
+> **cannot simply be pasted in and run** in v1; it must be rebuilt in the builder. Queries the builder
+> cannot express (multi-table joins, subqueries, expression columns) have **no way out** in v1.
 
-同一份 ADR 的时效 1 写明了重开信号：
+The same ADR's validity signal 1 named the condition for reopening:
 
-> **手改 SQL —— v1 明确不做。** 出现「构建器表达不了、但业务上必须搬」的真实查询时重估。
+> **Hand-edited SQL — explicitly not in v1.** Re-evaluate when a real query appears that the builder
+> cannot express but the business must move.
 
-**这条信号命中了**——代码已经落地，构建器里现在有两条取数路径。问题不在于它该不该做，
-而在于它**绕过了记账**：ADR-0036 §1 那句「SQL 在界面上只读展示，v1 不提供任何编辑入口」
-至今一字未改地挂在仓库里，`CONTEXT.md` 两处复述它，而产品的行为已经与它相反。
-一份说假话的决议比没有决议更糟：下一个读它的人会照着它做判断。
+**That signal fired** — the code has landed, and the builder now has two data-retrieval paths. The
+problem is not whether it should have been done, but that it **bypassed the bookkeeping**: ADR-0036 §1's
+sentence "SQL is displayed read-only in the interface; v1 offers no editing entry point" still hangs in
+the repository unchanged, `CONTEXT.md` restates it in two places, and the product's behaviour is now the
+opposite. **A ruling that tells lies is worse than no ruling**: the next person to read it will make
+judgements from it.
 
-**关键在于形态**。如果落地的正是 ADR-0036 §1 逐字否掉的那个形态，正确处置是**撤掉代码**，
-而不是补一份 ADR 去追认。所以本 ADR 的第一件事是把形态摆到台面上比对——它确实不是同一个。
+**The shape is what matters.** If what landed were exactly the shape ADR-0036 §1 rejected word for word,
+the correct response would be **to remove the code**, not to file an ADR ratifying it. So this ADR's
+first job is to put the shape on the table for comparison — and it is genuinely not the same one.
 
-## 决策
+## Decision
 
-### 1. 采纳形态 D：SQL 是**输入**，不是权威
+### 1. Adopt shape D: the SQL is an **input**, not an authority
 
-沿用 [ADR-0023](0023-m2-sql-builder-boundary.md) §2 与 [ADR-0036](0036-task-spec-structured.md) §1 的分法，加一行：
+Reusing the taxonomy of `ADR-0023` §2 and `ADR-0036` §1, with one row added:
 
-| | 形态 | 判决 |
+| | Shape | Verdict |
 |---|---|---|
-| A | 一次性脚手架：向导吐出 SQL 文本，选择态不留存，文本是权威 | **退役**（ADR-0023 §2 原判，本 ADR 不重开） |
-| B | 结构化规格是权威：任务定义存表 / 列 / 条件 / 排序 / 主键，SQL 由它生成 | **采纳**（ADR-0036 §1，**仍然有效**，是默认路径） |
-| C | 双向同步：手改后反解析回结构化模型 | **否**（要写 Oracle SQL 解析器，ADR-0023 §2 的理由一字不改） |
-| **D** | **规格仍是权威，用户的 SELECT 作为不透明子查询嵌在里面**：外层投影由规格生成 | **采纳**（本 ADR，第二条路径） |
+| A | One-shot scaffolding: a wizard emits SQL text, the selection state is not kept, the text is authoritative | **Retired** (ADR-0023 §2's original ruling; not reopened here) |
+| B | The structured spec is authoritative: the task definition stores table / columns / conditions / ordering / primary key, and the SQL is generated from it | **Adopted** (ADR-0036 §1, **still in force**, the default path) |
+| C | Two-way sync: hand edits are parsed back into the structured model | **No** (it needs an Oracle SQL parser; ADR-0023 §2's reasoning is unchanged) |
+| **D** | **The spec remains authoritative, and the user's SELECT is embedded as an opaque subquery**: the outer projection is generated from the spec | **Adopted** (this ADR, the second path) |
 
-生成的形状：
+The generated shape:
 
 ```
-SELECT q.<源列> AS <目标字段>,
-       q.<源列> AS <目标字段>
+SELECT q.<source column> AS <target field>,
+       q.<source column> AS <target field>
   FROM (
-         <用户原样的 SELECT>
+         <the user's SELECT, verbatim>
        ) q
 ```
 
-**用户写的 SQL 从不原样执行。** 搬运链路只认结果列名（`transfer.rs` 把执行语句的
-`source.columns()` 原样交给 sink，所以「结果列名就是目标列名」）。不套这一层外层投影，
-勾选落不了地——没勾的列照样过线，目标字段改名也会被静默忽略。
+**The user's SQL is never executed verbatim.** The transfer chain recognises only result column names
+(`transfer.rs` hands `source.columns()` of the executed statement straight to sink, which is why "the
+result column name *is* the target column name"). Without this outer projection, column selection has
+nowhere to land — unselected columns would cross the wire anyway, and renaming a target field would be
+silently ignored.
 
-**为什么这不是 ADR-0036 §1 否掉的那条中间路线。** 那条被否的是「存一份 SQL 文本但设为只读」，
-理由原话是：
+**Why this is not the middle road ADR-0036 §1 rejected.** What that rejected was "store a piece of SQL
+text but mark it read-only", and its reasoning ran:
 
-> 它保留了「任务定义里躺着一份不可再生的 SQL」这个形态，于是参数清单照样推不出来、
-> 条件形状照样不可知——**手改的全部代价都留下了，却一点自由都没给**。
+> It keeps the shape in which an unreproducible piece of SQL lies inside the task definition, so the
+> parameter list still cannot be derived and the condition shapes are still unknowable — **it keeps
+> every cost of hand editing while granting no freedom at all.**
 
-D 把这句话的两头都改了。**自由给足了**：任意 SELECT，多表 join、子查询、表达式列、dblink 全都进得来，
-正是 ADR-0036 §1 记账时说「没有出路」的那些。**代价则由 §2 的三条约束结构性消掉**，
-不是靠解析消掉——这一点是 D 与 C 的分界，也是 D 能成立的全部原因。
+D changes both ends of that sentence. **The freedom is granted in full**: any SELECT — multi-table joins,
+subqueries, expression columns, dblinks — all of which are exactly what ADR-0036 §1 recorded as having
+"no way out". **The costs are then dissolved structurally by the three constraints in §2**, not by
+parsing — which is the boundary between D and C, and the whole reason D can stand.
 
-### 2. 三条约束，逐条消解 ADR-0036 §1 采纳 B 的三条理由
+### 2. Three constraints, dissolving one by one the three reasons ADR-0036 §1 adopted B
 
-**第 1 条：自定义 SQL 的任务没有过滤条件、没有排序，因此没有运行参数。**
-`TaskSpec::validate` 硬拒（`crates/source/src/task_spec.rs`）：
+**Constraint 1: a custom-SQL task has no filter conditions and no ordering, and therefore no run
+parameters.** `TaskSpec::validate` hard-rejects them (`crates/source/src/task_spec.rs`):
 
 > `自定义 SQL 模式不能再配置过滤条件或排序，请直接写入 SQL`
 
-ADR-0036 §1 的理由 1 是「ADR-0035 §3 的『运行时填』要求发起时能逐条列出参数并取值，
-只有结构声明的参数清单做得到」。在 D 上它**不适用**，因为这条路径上根本没有参数可列——
-不是「推不出来所以糊弄过去」，是**声明它不存在**，并由校验强制。
+ADR-0036 §1's first reason was that ADR-0035 §3's "fill at run time" requires enumerating parameters and
+collecting values at submission, which only a declared parameter list can do. On D it **does not apply**,
+because there are no parameters to enumerate on this path — this is not "we cannot derive them so we
+fudge it", it is **declaring that they do not exist**, enforced by validation.
 
-**代价明写**：自定义 SQL 的任务**不能带运行期参数**，也就是做不到「每天导昨天的」。
-要改条件只能改 SQL 文本本身，即改任务定义。这是一次真实的能力缺口，见「时效」1。
+**Cost, stated plainly**: a custom-SQL task **cannot carry run-time parameters**, so "import yesterday's
+rows each day" is out of reach. Changing the condition means changing the SQL text itself, i.e. changing
+the task definition. This is a real capability gap; see Validity 1.
 
-**第 2 条：永不反解析，永不双向同步。**
-规格对**投影、列映射、目标字段、主键**的权威**始终且只有**一份；`source_sql` 是一段不透明文本，
-系统从不读它的内容去推断任何东西。ADR-0036 §1 的理由 2「只要允许手改，结构与文本必然漂移，
-且『谁权威』要在每一处判定上重问一遍」在 D 上不成立：**不存在第二个权威**，所以没有漂移面。
-[ADR-0023](0023-m2-sql-builder-boundary.md) §2 否掉方案 C 的理由**一字不改**。
+**Constraint 2: never parse back, never sync two ways.**
+The spec's authority over **the projection, column mapping, target fields, and the primary key** is
+**always and only** one copy; `source_sql` is an opaque piece of text, and the system never reads its
+contents to infer anything. ADR-0036 §1's second reason — "once hand editing is allowed, structure and
+text will inevitably drift, and 'which is authoritative' must be re-asked at every decision point" —
+does not hold on D: **there is no second authority**, so there is no surface to drift on.
+`ADR-0023` §2's reasoning for rejecting option C is **unchanged**.
 
-**第 3 条：内层查询的每个结果列必须有一个未加引号的标识符名。**
-表达式列要自己起别名（`COUNT(*) AS CNT`）。这不是新规矩，是 `validate_identifier` 的既有面——
-它是**唯一**挡住把标识符拼进 SQL 的东西（值走绑定变量，标识符不能）。
-没起别名的表达式列在读取结果列这一步就落不进规格，**存不下去**，不会变成运行时才炸的问题。
+**Constraint 3: every result column of the inner query must have an unquoted identifier name.**
+Expression columns must supply their own alias (`COUNT(*) AS CNT`). This is not a new rule but the
+existing surface of `validate_identifier` — the **only** thing standing between an identifier and being
+concatenated into SQL (values go through bind variables; identifiers cannot). An expression column
+without an alias cannot land in the spec at the read-result-columns step, so it **cannot be stored**, and
+never becomes a problem that explodes at run time.
 
-### 3. 内层别名的引用规则：只在必要时加引号
+### 3. Quoting rules for inner aliases: quote only when necessary
 
-Oracle 对**未加引号**的引用一律折成大写。于是内层写了 `SELECT id AS "id"` 时，
-describe 回来的结果列名是小写 `id`，而外层生成的 `q.id` 会被折成 `Q.ID`——**打不中，ORA-00904，运行时才炸**。
+Oracle folds **unquoted** references to upper case. So when the inner query writes
+`SELECT id AS "id"`, the described result column name comes back as lower-case `id`, while the generated
+outer `q.id` folds to `Q.ID` — **a miss, ORA-00904, exploding only at run time.**
 
-判定：**规格里存的列名不是全大写时，外层引用加引号；全大写时保持不加引号。**
+Ruling: **when the column name stored in the spec is not all upper case, quote the outer reference; when
+it is all upper case, leave it unquoted.**
 
-- 全大写是绝大多数情况（Oracle 的默认折叠结果），保持不加引号意味着**既有任务生成的 SQL 文本一字不变**。
-- 否掉「一律加引号」：它会改动每一条既有任务的生成文本（连带动到运行历史里那份快照的可比性），
-  换来的正确性与本条完全相同，**收益为零、爆炸半径为全部**。
+- All upper case is the overwhelming majority (Oracle's default folding), and leaving it unquoted means
+  **the SQL text generated by existing tasks does not change by one character.**
+- "Always quote" is rejected: it would alter the generated text of every existing task (and with it the
+  comparability of the snapshot in run history) for exactly the same correctness as this rule —
+  **zero benefit, maximum blast radius.**
 
-目标字段那一侧不动：`AS <目标字段>` 折成大写后，sink 侧按
-[ADR-0038](0038-column-mapping-and-target-metadata-face.md) §8 大小写不敏感比对，本来就打得中。
+The target-field side is unchanged: `AS <target field>` folds to upper case, and sink compares
+case-insensitively per `ADR-0038` §8, so it hits regardless.
 
-### 4. 形状校验的面：三条，全部是结构性的
+### 4. The shape-validation surface: three rules, all structural
 
-[ADR-0036](0036-task-spec-structured.md) §5 取消的那六条规则**一条都不恢复**。
-自定义 SQL 只过 `validate_source_sql` 的三条：
+**None** of the six rules cancelled by `ADR-0036` §5 is restored. Custom SQL passes only the three rules
+of `validate_source_sql`:
 
-| # | 规则 | 性质 |
+| # | Rule | Nature |
 |---|---|---|
-| 1 | 非空 | 结构性 |
-| 2 | 只能是一条语句（去掉结尾一个 `;` 后不得再含 `;`） | 结构性 |
-| 3 | 首关键字必须是 `SELECT` | 结构性 |
+| 1 | Non-empty | Structural |
+| 2 | Exactly one statement (after stripping one trailing `;`, no `;` may remain) | Structural |
+| 3 | The first keyword must be `SELECT` | Structural |
 
-**明写它不做什么**：不解析 SQL、不判精度、不判表达式列、不判量级、不判它到底能不能跑。
-ADR-0036 §5 里第 6 条（精度不确定的列不再被拦截）那笔账**原样挂着**，本 ADR 没有偿还它。
+**What it explicitly does not do**: parse SQL, judge precision, judge expression columns, judge magnitude,
+or judge whether it will run at all. The debt from ADR-0036 §5 item 6 (columns of indeterminate precision
+are no longer intercepted) **stands as it was**; this ADR does not repay it.
 
-**与 [ADR-0011](0011-batch-payload-wire-format.md) §2「不发明第二套转义」的关系**：
-不冲突。系统**不往用户的 SQL 文本里拼任何东西**——外层投影拼的只有标识符，且逐个过
-`validate_identifier`。用户 SQL 里的字面值是用户自己写的，那是他对自己的语句负责，
-系统连碰都没碰，谈不上「第二套转义」。
+**Its relation to `ADR-0011` §2, "do not invent a second escaping scheme"**: no conflict. The system
+**concatenates nothing into the user's SQL text** — the outer projection concatenates identifiers only,
+each passed through `validate_identifier`. Literal values inside the user's SQL were written by the user,
+who is responsible for their own statement; the system never touches them, so no "second escaping scheme"
+arises.
 
-**注意判定并未消失**：[ADR-0009](0009-m1-mapping-precheck-rules.md) 的**映射预检**在 sink 侧、
-走游标 describe，白名单外类型、精度不足的 `DECIMAL`、无精度声明的 `NUMBER` 仍由它**硬拒**——
-自定义 SQL 的结果列走的是同一条 describe 链路，因此受同一道门禁管，一点没松。
+**Note that judgement has not disappeared**: `ADR-0009`'s **mapping precheck** runs on the sink side via
+cursor describe, and types outside the whitelist, `DECIMAL`s with insufficient precision, and `NUMBER`s
+without a declared precision are still **hard-rejected** by it. A custom SQL's result columns travel the
+same describe path and are therefore governed by the same gate, with nothing loosened.
 
-### 5. [ADR-0036](0036-task-spec-structured.md) 的逐条处置
+### 5. Disposition of `ADR-0036`, clause by clause
 
-| ADR-0036 | 原判 | 本 ADR 的处置 |
+| ADR-0036 | Original ruling | Disposition here |
 |---|---|---|
-| §1 前半 | 结构化规格是唯一真相源 | **一字不动**，D 仍然遵守它 |
-| §1「SQL 在界面上只读展示，v1 不提供任何编辑入口」 | 无编辑入口 | **撤销**。存在第二条取数路径，它有编辑入口 |
-| §1 的「代价明写」段 | join / 子查询 / 表达式列在 v1 没有出路 | **代价消失**，这正是本 ADR 兑现的东西 |
-| §2 | SQL 不进任务定义、现算；历史里钉快照 | **区分后仍然成立**，见下 |
-| §3 | 不给「以后恢复手改」预留任何结构位 | **判废**，见下 |
-| §4 | 旧任务定义直接丢弃换 schema | **一字不动**，已执行 |
-| §5 | SQL 形状预检整段取消 | **一字不动**；本 ADR §4 加回的三条是结构性校验，不是那六条中的任何一条 |
-| §6 | 派生面恰好三样 | **一字不动**。`source_sql` 是规格的**输入字段**，不是第四样派生物 |
-| §7 | 互斥键 = `task_id + 运行参数集` | **一字不动**。自定义 SQL 任务无参数，按原文退化成「同任务不许并跑」 |
-| 时效 1 | 出现构建器表达不了的真实查询时重估 | **本 ADR 即其兑现** |
+| §1, first half | The structured spec is the single source of truth | **Untouched**; D still obeys it |
+| §1 "SQL is read-only in the interface; v1 offers no editing entry point" | No editing entry point | **Revoked.** A second retrieval path exists and it has an editing entry point |
+| §1's "cost, stated plainly" paragraph | Joins / subqueries / expression columns have no way out in v1 | **The cost is gone**, which is precisely what this ADR delivers |
+| §2 | SQL does not enter the task definition, it is recomputed; history pins a snapshot | **Still holds, once distinguished**; see below |
+| §3 | Reserve no structural slot for "restoring hand editing later" | **Voided**; see below |
+| §4 | Discard old task definitions and swap the schema | **Untouched**, already carried out |
+| §5 | The SQL shape precheck is cancelled entirely | **Untouched**; the three rules restored in §4 here are structural validation, not any of those six |
+| §6 | There are exactly three derived surfaces | **Untouched.** `source_sql` is an **input field** of the spec, not a fourth derivative |
+| §7 | The mutual-exclusion key is `task_id` + the run-parameter set | **Untouched.** A custom-SQL task has no parameters and degrades, per that text, to "the same task may not run concurrently with itself" |
+| Validity 1 | Re-evaluate when a real query appears that the builder cannot express | **This ADR is its fulfilment** |
 
-**§2 为什么仍然成立。** 它判的是「**派生**的 SQL 不进任务定义」——那份仍然不存、仍然现算，
-每条运行记录仍然钉一份当次执行的快照。进任务定义的 `source_sql` 是**另一种东西**：
-它是规格的一个输入，与 `owner` / `table` / `columns` 同级，回答「这个任务从哪儿取数」，
-而不是「现在会生成什么」。两份 SQL 的性质区分（§2 原文那段）一点没被搅浑，只是多了第三份：
-**输入的子查询**（用户写的）、**派生的语句**（现算的）、**历史快照**（当时执行的）。
+**Why §2 still holds.** It ruled that the **derived** SQL does not enter the task definition — that copy
+is still not stored, still recomputed, and every run record still pins a snapshot of what was executed.
+The `source_sql` that does enter the task definition is **a different thing**: an input to the spec,
+peer to `owner` / `table` / `columns`, answering "where does this task get its data from" rather than
+"what will be generated now". The distinction between the two kinds of SQL (that paragraph of §2) is not
+muddied at all; there are simply now three: **the input subquery** (written by the user), **the derived
+statement** (recomputed), and **the history snapshot** (what actually ran).
 
-**§2 遗留的问题在此回答。** 它的时效 1 问：「手改之后，历史里那份 SQL 快照与规格是什么关系？」
-答：**快照存的是包裹后的完整语句**，与表模式完全同构——规格改了它不变，它是审计事实。
-自定义 SQL 没有给这个关系引入任何新形态。
+**§2's open question is answered here.** Its validity signal 1 asked: "after hand editing, what is the
+relation between the SQL snapshot in history and the spec?" Answer: **the snapshot stores the complete
+wrapped statement**, exactly isomorphic to the table mode — it does not change when the spec changes; it
+is an audit fact. Custom SQL introduces no new shape into that relation.
 
-**§3 为什么判废。** 它禁止的正是 `source_sql: Option<String>` 这个字段。它的论据是：
+**Why §3 is voided.** What it forbade is precisely the field `source_sql: Option<String>`. Its argument:
 
-> 一个只有单一取值的字段**既挡不住**将来真做手改时数据形状还得再变一次，
-> **又会让**读代码的人以为系统里存在两种任务形态。
+> A field with only one possible value **neither prevents** the data shape from having to change again
+> when hand editing is genuinely built, **nor stops** a reader of the code from believing two task shapes
+> exist in the system.
 
-现在这个字段有**两个真实取值**，系统里也**确实存在两种任务形态**——前提消失，论据随之失效。
-这是前提消失，**不是**论证被驳倒；若将来自定义 SQL 又被撤掉，§3 自动重新生效。
+That field now has **two real values**, and two task shapes **do** exist in the system — the premise is
+gone and the argument falls with it. This is a premise disappearing, **not** an argument being refuted;
+if custom SQL is ever withdrawn again, §3 automatically comes back into force.
 
-### 6. 界面：两条路径，一个岔路口
+### 6. Interface: two paths, one fork
 
-- **岔路口长在它控制的那张卡的头上**（源表 / 自定义 SQL 两个 tab），不在数据源卡的页脚。
-- **切换会清空**源表、结果列、字段映射、主键、过滤条件——**只在真有东西可丢时**弹一次确认。
-- **过滤条件卡在自定义 SQL 模式下不消失**，留一句说明去向。整卡消失会让人以为过滤没了，
-  而实际上是「换个地方写」。
-- **「构建 SQL」预览两种模式都渲染。** 这一条是硬的：用户写的 SQL **不是原样执行的**，
-  预览是**唯一**能核对最终语句的地方。SQL 模式下不渲染它，等于让人对着一段不会被执行的文本做判断。
-- **界面不承诺排序。** 内层的 `ORDER BY` 对外层**不绑定**——Oracle 不保证内联视图的序传递到外层查询。
-  搬运语义本身与序无关（upsert 按主键去重、幂等），所以**不修**，但正文里不许出现
-  「排序请写进 SQL」这类承诺。
+- **The fork lives on the header of the card it governs** (two tabs, source table / custom SQL), not in
+  the footer of the datasource card.
+- **Switching clears** the source table, result columns, field mappings, primary key, and filter
+  conditions — with a confirmation shown **only when there is genuinely something to lose**.
+- **The filter-condition card does not disappear in custom-SQL mode**; a sentence explains where filtering
+  has gone. Removing the whole card would suggest filtering was gone, when in fact it has just moved.
+- **The "build SQL" preview renders in both modes.** This one is hard: the user's SQL **is not executed
+  verbatim**, and the preview is the **only** place the final statement can be checked. Not rendering it
+  in SQL mode would ask someone to judge a piece of text that will never be executed.
+- **The interface promises nothing about ordering.** An inner `ORDER BY` **does not bind** the outer query
+  — Oracle does not guarantee an inline view's ordering propagates outward. The transfer semantics do not
+  depend on ordering anyway (upsert deduplicates on the primary key and is idempotent), so **this is not
+  fixed** — but no promise such as "put the ordering in your SQL" may appear in the prose.
 
-## 后果
+## Consequences
 
-- **`CONTEXT.md` 三处要改**：
-  1. 术语表「任务定义」那段的「**v1 不提供任何手改 SQL 的入口**（§1，一次显式的能力收窄：
-     现成的生产 SQL 粘不进来）」——与事实相反，改写。
-  2. 「V1 范围」里「**规格是唯一真相源，SQL 只读、不可手改**，见 ADR-0036」——前半句仍对，后半句要改。
-  3. 术语表**新增「自定义 SQL」词条**。它已经是一等概念（作业中心源表列的徽标、
-     `SourceSummary.kind` 的判别式），术语表里没有它就是缺口。
-- **[ADR-0036](0036-task-spec-structured.md) 的标题保持原样**（含「v1 不支持手改 SQL」那半句）。
-  改标题会让所有引用它的锚点失效，而处置已由本 ADR §5 的表逐条承担；
-  读 ADR-0036 的人应当先读它的「关联」行。
-- **界面正文里「比较符只有 `>` `<` `=` 三种（ADR-0035 §3）」引错了 ADR**。
-  [ADR-0035](0035-upsert-write-model.md) §3 的原文是「不做 `IN` / `BETWEEN` / `LIKE` / 表达式」——
-  排除的是**形态**，清单里**没有 `>=`**。本 ADR 不新增比较符（那是独立的产品决定），
-  但**不许再拿 ADR-0035 §3 当挡箭牌**，正文改成陈述现状而不引决议。
-- **精度不确定的列仍然不被拦截**（ADR-0036 §5 第 6 条的账）。自定义 SQL 让这类列更容易出现
-  （表达式列的精度尤其不可知），**这笔账因此变重了**，但处置不变，见「时效」2。
-- **实现落点**：`crates/source/src/task_spec.rs`（`source_sql()` / `projection()` / `validate()` /
-  `validate_source_sql()`）、`crates/source/src/server_main.rs`（`/api/builder/sql-columns`）、
-  `web/src/App.tsx`（两条路径的构建器）、`web/src/spec.ts`（`sourceSummary()`）。
+- **Three places in `CONTEXT.md` must change**:
+  1. In the glossary under "task definition": "**v1 offers no entry point for hand-editing SQL** (§1, an
+     explicit narrowing of capability: an existing production query cannot be pasted in)" — contrary to
+     fact; rewrite.
+  2. Under "V1 scope": "**the spec is the single source of truth, the SQL is read-only and cannot be hand
+     edited**, see ADR-0036" — the first half still holds, the second must change.
+  3. **Add a "custom SQL" glossary entry.** It is already a first-class concept (the badge in the job
+     center's source column, the discriminant of `SourceSummary.kind`), and its absence from the glossary
+     is a gap.
+- **`ADR-0036`'s title stays as it is** (including the "v1 does not support hand-edited SQL" half).
+  Changing the title would break every anchor referencing it, and the disposition is already carried
+  clause by clause by the table in §5 here; anyone reading ADR-0036 should read its "Related" line first.
+- **The interface prose cites the wrong ADR** where it says "the comparison operators are only `>` `<` `=`
+  (ADR-0035 §3)". `ADR-0035` §3 actually says "no `IN` / `BETWEEN` / `LIKE` / expressions" — it excludes
+  **shapes**, and `>=` **is not on that list**. This ADR adds no comparison operator (that is a separate
+  product decision), but **ADR-0035 §3 may no longer be used as cover**; the prose is changed to state the
+  present rather than cite a ruling.
+- **Columns of indeterminate precision are still not intercepted** (the debt of ADR-0036 §5 item 6).
+  Custom SQL makes such columns more likely (an expression column's precision is especially unknowable),
+  so **the debt grows heavier**, but its disposition is unchanged; see Validity 2.
+- **Where it lands**: `crates/source/src/task_spec.rs` (`source_sql()` / `projection()` / `validate()` /
+  `validate_source_sql()`), `crates/source/src/server_main.rs` (`/api/builder/sql-columns`),
+  `web/src/App.tsx` (the two-path builder), `web/src/spec.ts` (`sourceSummary()`).
 
-## 时效
+## Validity
 
-1. **运行参数 —— 自定义 SQL 的任务一个都没有。** 出现「这条现成 SQL 必须每天带参数跑」的真实需求时重估。
-   **正解大概率不是回去写解析器**，而是让用户在 SQL 里写命名占位符、并**自己列出参数清单**
-   （用户声明，与 `value_type` 同性质——见 ADR-0036 §6「describe 回来的类型不许进任务定义」的同一条逻辑）。
-   届时 ADR-0023 §2 否掉 C 的理由仍然成立，不受影响。
-2. **精度确定性 ——** ADR-0036 §5 的账原样挂着，且被本 ADR 加重。正解仍是挪进映射预检
-   （那一端本来就握着 describe 的精度信息），而不是把形状预检搬回来。
-3. **反解析 / 双向同步（形态 C）—— 永远否**，除非 ADR-0023 §2 的论证本身被推翻。
-   本 ADR 采纳 D **不是**向 C 靠近了一步：D 与 C 的分界正是「读不读那段文本」，而 D 永不读。
+1. **Run parameters — a custom-SQL task has none.** Re-evaluate when a real requirement appears that "this
+   existing SQL must run daily with a parameter".
+   **The answer is most likely not to go back and write a parser**, but to let the user write named
+   placeholders in the SQL and **enumerate the parameter list themselves** (a user declaration, the same
+   in kind as `value_type` — the same logic as ADR-0036 §6's "described types may not enter the task
+   definition"). ADR-0023 §2's reasoning against C would still hold, unaffected.
+2. **Precision determinacy** — the debt of ADR-0036 §5 stands as it was and is made heavier by this ADR.
+   The answer is still to move it into the mapping precheck (that end already holds the described
+   precision information), not to bring the shape precheck back.
+3. **Parse-back / two-way sync (shape C) — permanently rejected**, unless ADR-0023 §2's argument is itself
+   overturned. Adopting D here is **not** a step toward C: the boundary between D and C is precisely
+   "does it read that text", and D never reads it.
 
-## 走查触发
+## Walkthrough triggers
 
-本 ADR 是补记，自身不改代码；但**同批提交改了代码**（运行详情抽屉的源表渲染、构建器的保存禁用条件、
-探针对自定义 SQL 模式的覆盖、外层投影的引号规则），按 `CLAUDE.md` 的表判：
+This ADR is a retrospective record and changes no code itself; but **the same batch of commits did change
+code** (the source-table rendering in the run detail drawer, the builder's save-disable condition, probe
+coverage of custom-SQL mode, and the outer projection's quoting rule). Per the table in `CLAUDE.md`:
 
-- **X 系列（v1 走查）触发**：改了构建器的映射与保存条件、作业中心源表列的口径（`RunDrawer` 补齐）。
-  **X18 改判**——运行详情抽屉的「任务定义」面板此前对自定义 SQL 的任务打出一个裸点，
-  判据要写明它现在的形态。新增 **X20**「自定义 SQL 模式：tab 切换的确认、过滤条件卡的说明、
-  构建 SQL 预览渲染、结果列勾选生效」——**这一态此前从未被探针走到过**，
-  上一份实录（`20260824T113748Z`）里那句「SQL 模式下这张卡不再整个消失」是**无观察支撑的**，
-  按 `CLAUDE.md` 规则 2 在此认账。编号规矩照旧：一个不重编、一行不删。
-- **V 系列（设计系统）**：`docs/design-system/README.md` 与 `tokens.css` 均未改，**不触发**。
-- **W 系列（M3）**：`.precheck-reports` 与 `DiagnosticTable` 均未改，**不触发**。
+- **X series (v1 walkthrough) fires**: the builder's mapping and save conditions changed, as did the
+  reading of the job center's source-table column (`RunDrawer` filled in).
+  **X18 re-judged** — the "task definition" panel in the run detail drawer previously rendered a bare dot
+  for custom-SQL tasks, and the criterion must state its present shape. **X20 added**: "custom SQL mode:
+  the tab-switch confirmation, the filter-condition card's explanation, the build-SQL preview rendering,
+  result column selection taking effect" — **this state had never been reached by the probe before**, so
+  the sentence in the previous record (`20260824T113748Z`) claiming "this card no longer disappears
+  entirely in SQL mode" was **unsupported by observation**, and per `CLAUDE.md` rule 2 that is owned here.
+  The numbering rule holds as always: nothing is renumbered, no line is deleted.
+- **V series (design system)**: neither `docs/design-system/README.md` nor `tokens.css` changed, so it
+  **does not fire**.
+- **W series (M3)**: neither `.precheck-reports` nor `DiagnosticTable` changed, so it **does not fire**.

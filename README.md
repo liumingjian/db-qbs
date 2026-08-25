@@ -1,72 +1,79 @@
 # db-qbs
 
-数据库查询导入服务：对接异构数据库，执行查询并把结果导入到目标端。当前只需支持 **MySQL** 和 **Oracle** 两种数据源。
+A database query-and-import service: connect to heterogeneous databases, run a query, and import the
+result into a target. Only **MySQL** and **Oracle** need to be supported for now.
 
-## 范围
+## Scope
 
-- **支持的数据库**：MySQL、Oracle。其他数据库暂不在范围内。
-- **核心能力**：连接数据源 → 执行查询 → 导出/导入结果数据。
-- **形态**：服务（长期运行，对外提供接口触发导入任务）。
+- **Databases**: MySQL and Oracle. Others are out of scope.
+- **Core capability**: connect to a datasource → run a query → export/import the result.
+- **Shape**: a service (long-running, exposing an interface that triggers import tasks).
 
-## 状态
+## Status
 
-M1（一次性进程跑通一趟导入）、M2（source 常驻服务 + Web UI）与 M3（九行形态、映射预检与值域校核）
-**已实现**，验收记录在 `docs/spikes/fixtures/local-rig/`。M4 尚未开工，但错误分类已提前实现。列名映射已明确不做，改名使用
-SQL `AS` 别名。**尚未在生产环境部署过。**
+M1 (a one-shot process completing a single import), M2 (`source` as a resident service plus a web UI)
+and M3 (the nine-row type surface, the mapping precheck, and value-domain checks) are **implemented**;
+acceptance records live in `docs/spikes/fixtures/local-rig/`. M4 has not started, though failure
+classification landed ahead of it. Column-name mapping is explicitly out of scope — renaming uses a
+SQL `AS` alias. **Nothing has been deployed to production yet.**
 
-两端都是 Rust（`crates/`），Web UI 是 React + Vite（`web/`），构建时由 `crates/source/build.rs`
-调 `npm run build` 打包并嵌进 `db-qbs-source` 可执行文件。决策依据见 `CONTEXT.md` 与 `docs/adr/`。
+Both ends are Rust (`crates/`); the web UI is React + Vite (`web/`), bundled at build time by
+`crates/source/build.rs` calling `npm run build` and embedded into the `db-qbs-source` binary.
+See `CONTEXT.md` for the architecture and `docs/adr/` for the decisions still in force.
 
-## 快速开始
+## Quick start
 
-三个可执行文件：
+Three binaries:
 
-| 可执行文件 | 位置 | 作用 |
+| Binary | Side | Role |
 | --- | --- | --- |
-| `db-qbs-sink` | 目标端 | 长驻服务，写 MySQL；它就是「目标端 agent」，源端在界面上注册它（ADR-0044） |
-| `db-qbs-source` | 源端 | 长驻服务，Web UI + 任务编排（M2） |
-| `db-qbs-source-run` | 源端 | 一次性进程，跑一趟导入（由 `db-qbs-source` 拉起，也可单独跑） |
+| `db-qbs-sink` | target | Resident service, writes MySQL. It *is* the "target agent"; the source registers it from the UI (ADR-0044) |
+| `db-qbs-source` | source | Resident service, web UI plus task orchestration |
+| `db-qbs-source-run` | source | One-shot process running a single import (spawned by `db-qbs-source`, also runnable alone) |
 
-前提：源端装好 **Oracle Instant Client 19c Basic 包**（`oracle_client_lib_dir` 指向它），
-目标端有 **MySQL 8.0**；构建机需要 Rust 1.85+ 与 Node.js 22+（`Cargo.lock` 里的 `zeroize` 要 edition2024，
-1.85 以下的 Cargo 解析不动；node 16 编不过 `npm run build`）。
+Prerequisites: the source machine has the **Oracle Instant Client 19c Basic** bundle installed
+(`oracle_client_lib_dir` points at it) and the target has **MySQL 8.0**. The build machine needs Rust
+1.85+ and Node.js 22+ (`zeroize` in `Cargo.lock` requires edition2024, which Cargo below 1.85 cannot
+resolve; Node 16 cannot build `npm run build`).
 
-要装到 **CentOS 7（glibc 2.17）** 上的产物不能在这台构建机上直接编 —— 装上去启动即
-`GLIBC_2.xx not found`。那条路走 `packaging/centos7/build.sh`：一条命令把 `linux/amd64` 与
-`linux/arm64` 两套都编出来，并各自在同架构的干净 `centos:7` 上验一次启动，
-见 `packaging/centos7/README.md`。
+Artifacts destined for **CentOS 7 (glibc 2.17)** cannot be compiled directly on this build machine —
+installing them there fails at startup with `GLIBC_2.xx not found`. That path goes through
+`packaging/centos7/build.sh`, which builds both `linux/amd64` and `linux/arm64` in one command and
+verifies each one starts on a clean same-architecture `centos:7`. See `packaging/centos7/README.md`.
 
-装到客户机器上的那条路还有三件东西在 `packaging/` 下：出发前逐项核对的**行李清单**
-（`packaging/PACKING-LIST.md`）、上机第一件事跑的**两端环境自检**
-（`packaging/preflight/`，缺什么一次列全）、以及把 `source → sink` 那一跳加密起来的
-**stunnel 双端模板**（`packaging/stunnel/`）。
+Three more things under `packaging/` serve the path onto a customer machine: the **packing list**
+checked off item by item before departure (`packaging/PACKING-LIST.md`), the **preflight self-check
+for both ends** to run first thing on arrival (`packaging/preflight/`, which lists everything missing
+in one pass), and the **stunnel templates for both sides** that encrypt the `source → sink` hop
+(`packaging/stunnel/`).
 
 ```sh
 cargo build --release
 
-# 目标端
-cp config/sink.toml.example sink.toml && chmod 0600 sink.toml   # 只填 listen
-./target/release/db-qbs-sink --config sink.toml                 # 首启会在 sink.toml 隔壁生成 agent-id
+# target side
+cp config/sink.toml.example sink.toml && chmod 0600 sink.toml   # set listen only
+./target/release/db-qbs-sink --config sink.toml                 # first start writes agent-id next to sink.toml
 
-# 源端
+# source side
 cp config/source.toml.example source.toml && chmod 0600 source.toml
-./target/release/db-qbs-source --config source.toml            # 浏览器打开配置里的 listen
+./target/release/db-qbs-source --config source.toml             # open the configured listen in a browser
 ```
 
-界面上的第一站是 **目标端 Agent**：填上面那个 sink 的地址注册一台（探通才存得下），
-之后建 MySQL 数据源时选它。**目标库只能经 agent 访问**，没有全局兜底地址。
+The first stop in the UI is **Target Agent**: register one by entering the sink address above (it is
+stored only if the probe succeeds), then select it when creating a MySQL datasource. **The target
+database is reachable only through an agent**; there is no global fallback address.
 
-两处 `listen` **都没有鉴权**，默认只绑回环；要多人访问得自己在前面放反向代理做鉴权与 TLS
-（ADR-0024 §1、§4）。不经 UI 直接跑一趟：
+**Neither `listen` is authenticated**, and both bind loopback by default. Multi-user access requires
+your own reverse proxy in front doing auth and TLS. To run an import without the UI:
 
 ```sh
 db-qbs-source-run --config source.toml --task task.toml --biz-date 2026-08-14
 ```
 
-## 运行日志
+## Run logs
 
-`db-qbs-source-run` 与 `db-qbs-sink` 只向 stdout 输出 JSON Lines。失败记录可能包含业务列值；
-需要重定向到文件时，须在创建文件前收紧权限：
+`db-qbs-source-run` and `db-qbs-sink` emit JSON Lines to stdout only. Failure records may contain
+business column values, so tighten permissions *before* creating the file when redirecting:
 
 ```sh
 umask 077
@@ -74,29 +81,33 @@ db-qbs-source-run --config source.toml --task task.toml --biz-date 2026-08-14 > 
 chmod 0600 run.jsonl
 ```
 
-日志文件不得放宽为 0644，也不得采集或转发到目标端之外。完整字段契约见 ADR-0017 §6。
+Log files must not be loosened to 0644, and must not be collected or forwarded beyond the target.
+The full field contract is in `CONTEXT.md` under **Run Log**.
 
-## 开发
+## Development
 
 ```sh
-cargo test --workspace   # Rust 单元与集成测试
-npm install              # 首次
+cargo test --workspace   # Rust unit and integration tests
+npm install              # first time
 npm run typecheck        # tsc --noEmit
 npm test                 # vitest run
-npm run dev              # 只调前端时用（vite dev server）
+npm run dev              # front-end only (vite dev server)
 ```
 
-台架验收（M1 9 条、M2 A1–A14、M3 B1–B6）与 M2/M3 渲染走查是**带触发条件的手工门禁，不进 CI**
-（ADR-0014 §8）：脚本在 `docs/spikes/fixtures/local-rig/scripts/`，走查清单在
-`docs/spikes/fixtures/local-rig/m2-visual-walkthrough.md` 与
-`docs/spikes/fixtures/local-rig/m3-visual-walkthrough.md`。改 `docs/design-system/` 必须
-重跑 M2 走查；改 M3 失败态布局或诊断表列结构必须重跑 M3 走查，并记录实际观察。
+Rig acceptance (M1's 9 cases, M2's A1–A14, M3's B1–B6) and the M2/M3 visual walkthroughs are
+**manual gates with trigger conditions, deliberately kept out of CI**: the scripts live in
+`docs/spikes/fixtures/local-rig/scripts/` and the checklists in
+`docs/spikes/fixtures/local-rig/m2-visual-walkthrough.md` and
+`docs/spikes/fixtures/local-rig/m3-visual-walkthrough.md`. Changing `docs/design-system/` requires
+re-running the M2 walkthrough; changing the M3 failure-state layout or the diagnostic table's column
+structure requires re-running the M3 walkthrough — and recording the actual observations. See
+`CLAUDE.md` for the full gate table.
 
-## Agent 配置
+## Agent configuration
 
-本仓库按 `mattpocock/skills` 的约定做了 agent 配置：
+This repository follows the `mattpocock/skills` conventions:
 
-- `CLAUDE.md` — agent 指令入口，含 `## Agent skills` 块
-- `docs/agents/issue-tracker.md` — issue 走 GitHub Issues（`gh` CLI）
-- `docs/agents/triage-labels.md` — triage 标签词表
-- `docs/agents/domain.md` — 领域文档布局（single-context：根目录 `CONTEXT.md` + `docs/adr/`）
+- `CLAUDE.md` — the agent instruction entry point, containing the `## Agent skills` block
+- `docs/agents/issue-tracker.md` — issues go through GitHub Issues (`gh` CLI)
+- `docs/agents/triage-labels.md` — the triage label vocabulary
+- `docs/agents/domain.md` — domain doc layout (single-context: `CONTEXT.md` at the root plus `docs/adr/`)

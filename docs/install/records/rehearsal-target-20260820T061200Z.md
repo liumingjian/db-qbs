@@ -163,7 +163,7 @@ T11 PASS 源端经自己 172.20.0.3:8080 不通（隧道入口只绑回环）
 ```
 
 **这是隧道加密取证第一次落在真 sink 上**。#153 那份桩 sink 的实录
-（[`../../spikes/fixtures/local-rig/rehearsal-tunnel-20260820T022000Z.md`](../../spikes/fixtures/local-rig/rehearsal-tunnel-20260820T022000Z.md)）
+（`docs/spikes/fixtures/local-rig/rehearsal-tunnel-20260820T022000Z.md`（已退役，见 git 历史））
 是第一份证据，本趟是第二份。#155 写明的那条代价（`--sink real` 下 T3/T5/T7 会红在桩的标记上）
 在真 sink 成为交付物之后由 `--sink` 开关收回——见 ADR-0041 增补 8(b)。
 

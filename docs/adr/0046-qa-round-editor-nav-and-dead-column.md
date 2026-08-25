@@ -1,143 +1,179 @@
-# ADR-0046: 一轮 QA 修复——自定义 SQL 给高亮与格式化、导航按回访频次重排、数据源屏撤掉恒为真的「口令」列
+# ADR-0046: One QA round — syntax highlighting and formatting for custom SQL, nav reordered by revisit frequency, and the always-true "password" column dropped from the datasource screen
 
-**状态**: 已接受
-**日期**: 2026-08-24
-**来源**: 所有者在 [ADR-0045](0045-custom-sql-as-wrapped-subquery.md) 落地后的一轮**人工 QA**（桩后端 `v1-mock.py` + `web/dist`），
-提出三条：自定义 SQL 要能高亮和格式化；目标端 Agent 不该排在导航第一；数据源屏的「口令」列没有实际意义。
-三条都动了已被 ADR 钉过的判据（次序在 [ADR-0044](0044-target-agent-registry.md) §6、列结构在 X2 走查判据、
-SQL 输入框在 ADR-0045 §6），按 [ADR-0034](0034-v1-scope-from-customer-needs.md) §1 一并记在这里。
-**关联**: [ADR-0045](0045-custom-sql-as-wrapped-subquery.md)（§6 的输入框由本 ADR §1 增补，**§1–§5 一字不动**）、
-[ADR-0044](0044-target-agent-registry.md) §6（**导航次序由本 ADR §2 改写；该节其余各条原样有效**）、
-[ADR-0043](0043-p2-job-center.md) §2（导航项集合）、
-[ADR-0039](0039-v1-ui-increments.md) §3（测通才让存——本 ADR §3 的全部依据）、
-[ADR-0037](0037-datasource-model-and-credential-boundary.md) §5（口令永不回读——**一字不动**）、
-[ADR-0025](0025-m2-visual-language-and-design-system.md)（设计系统令牌的唯一来源，§1 往里加了四个色）
+**Status**: Accepted
+**Date**: 2026-08-24
+**Origin**: a round of **manual QA** by the owner after [ADR-0045](0045-custom-sql-as-wrapped-subquery.md)
+landed (stub backend `v1-mock.py` plus `web/dist`), raising three points: custom SQL needs
+highlighting and formatting; Target Agent should not be first in the nav; the "password" column on
+the datasource screen carries no meaning.
+All three touch criteria an ADR had already pinned (the ordering in [ADR-0044](0044-target-agent-registry.md) §6,
+the column structure in the X2 walkthrough criterion, the SQL input box in ADR-0045 §6), so per
+`ADR-0034` §1 they are recorded together here.
+**Related**: [ADR-0045](0045-custom-sql-as-wrapped-subquery.md) (its §6 input box is amended by §1
+here; **§1–§5 are untouched**), [ADR-0044](0044-target-agent-registry.md) §6 (**its ordering is
+rewritten by §2 here; every other clause in that section stands verbatim**),
+[ADR-0043](0043-p2-job-center.md) §2 (the nav item set),
+[ADR-0039](0039-v1-ui-increments.md) §3 (store only what connects — the entire basis of §3 here),
+`ADR-0037` §5 (a password is never read back — **untouched**),
+`ADR-0025` (the single source of design-system tokens; §1 adds four colours to it)
 
-## 背景
+## Background
 
-这三条来自同一次人工 QA，彼此没有技术关联，但有一个共同形状：
-**它们都不是「实现错了」，而是「当初的判断在真用起来之后不成立了」**。
-所以三条都不能当 bugfix 悄悄改掉——每一条都要说清楚推翻的是哪句话、为什么当初那句话看着是对的。
+The three points come from one QA session and are technically unrelated, but they share a shape:
+**none of them is "the implementation is wrong"; each is "the original judgement stopped holding once
+it was actually used".**
+So none can be slipped in as a quiet bugfix — each must state which sentence it overturns and why that
+sentence looked right at the time.
 
-## 决定
+## Decision
 
-### 1. 自定义 SQL 输入框给语法高亮与一键格式化
+### 1. Syntax highlighting and one-click formatting for the custom SQL input
 
-ADR-0045 §6 给的是一个裸 `textarea`。现场真正会粘进来的是「70+ 列、带 dblink 的现成查询」
-（ADR-0036 §1 明写的那个代价，正是 ADR-0045 买回来的东西）——那种东西在一个裸 `textarea` 里
-是一大坨，看不出哪里是 `FROM`、哪个引号没闭合。**这一格是该模式下唯一能看到查询的地方**
-（ADR-0045 §6 自己写的），它得能看。
+ADR-0045 §6 gave a bare `textarea`. What actually gets pasted in the field is "an existing 70-column
+query with a dblink" — precisely the cost ADR-0036 §1 wrote down and the thing ADR-0045 bought back.
+In a bare `textarea` that is one undifferentiated block: you cannot see where `FROM` is or which quote
+is unclosed. **This field is the only place the query is visible in that mode** (ADR-0045 §6 says so
+itself), so it has to be legible.
 
-**一个词法器，两个用途。** `web/src/sql.ts` 只导出 `tokenize` 与 `formatSql`，高亮和格式化共用
-同一次扫描。两边各认一遍字符，迟早在字符串字面量、行/块注释、双引号标识符这三处漂开，
-而这三处恰好是「看错一个字符就改错语义」的地方。
+**One lexer, two uses.** `web/src/sql.ts` exports only `tokenize` and `formatSql`; highlighting and
+formatting share a single scan. Two independent character walks would eventually drift apart on string
+literals, line/block comments, and double-quoted identifiers — exactly the three places where
+misreading one character changes the meaning.
 
-**不引第三方编辑器**（CodeMirror / Monaco）。这一格要的是「看清结构」，不是补全、折叠、多光标；
-换过去要多背几百 KB，还要在它的样式系统与本仓令牌之间再对一次账。
-高亮走**透明字 `textarea` 压在着色 `<pre>` 上**这条老路，两层同框的约束写死在一条合并选择器里。
+**No third-party editor** (CodeMirror, Monaco). This field needs "see the structure", not completion,
+folding, or multiple cursors; switching would carry hundreds of extra kilobytes and require reconciling
+its styling system against this repo's tokens. Highlighting takes the familiar route of a
+**transparent-text `textarea` over a coloured `<pre>`**, with the two layers' shared-box constraints
+pinned in one merged selector.
 
-**格式化只动空白，一个字符都不改。** 不变式：`tokenize(formatSql(s))` 去掉空白记号后，
-与 `tokenize(s)` 去掉空白记号后**逐字相等**，由 `sql.test.ts` 守着。
+**Formatting touches whitespace only and changes not one character.** The invariant:
+`tokenize(formatSql(s))` with whitespace tokens removed is **character-for-character equal** to
+`tokenize(s)` with whitespace tokens removed, guarded by `sql.test.ts`.
 
-这条把「关键字改大写」挡在门外，看着像是砍掉了格式化器的本分，但：
+That rules out "uppercase the keywords", which looks like amputating a formatter's basic job, but:
 
-- Oracle 上改大小写对**引号标识符**是致命的，而「哪些词是引号外的普通词」需要一个这里没有的分析器；
-- 更要紧的是，一旦允许改字符，**「格式化没改坏我的 SQL」就从可证明降成了要人肉核对**。
-  一个会偷偷改写用户 SQL 的按钮，在一个「SQL 是被原样包裹的子查询」（ADR-0045 §1）的系统里
-  是自相矛盾的。
+- On Oracle, changing case is fatal for **quoted identifiers**, and deciding "which words are ordinary
+  words outside quotes" needs an analyser this does not have.
+- More importantly, once characters may change, **"the formatter did not break my SQL" drops from
+  provable to manually verifiable.** A button that quietly rewrites the user's SQL is self-contradictory
+  in a system whose SQL is wrapped verbatim as a subquery (ADR-0045 §1).
 
-同理，**括号内一律压成单行**：没有分析器，猜不出括号里那段是子查询还是 `NVL(a, b)`，猜错就排出一坨。
-在「排版好看」与「排版可预测」之间选后者。
+By the same reasoning, **anything inside parentheses is collapsed onto one line**: with no analyser
+there is no way to tell a subquery from `NVL(a, b)`, and guessing wrong produces a mess. Between
+"pretty layout" and "predictable layout", take the latter.
 
-**格式化不清空已读的结果列。** 编辑 SQL 会清（列可能不再是同一批），格式化不会——
-既然不变式保证语义没变，结果列就是同一批，清掉等于罚人排一次版。
-这是 `SqlEditor` 有 `onChange` 和 `onFormat` 两个回调、而不是一个的全部理由。
+**Formatting does not clear already-fetched result columns.** Editing the SQL does (the columns may no
+longer be the same set); formatting does not — since the invariant guarantees the meaning is unchanged,
+the columns are the same set, and clearing them would punish someone for tidying their layout. This is
+the entire reason `SqlEditor` has both `onChange` and `onFormat` rather than one callback.
 
-**高亮的颜色自成一小组，不复用语义四色。** `--crit` / `--warn` / `--ok` 在三轴语言里各有职务
-（ADR-0025 §4）；拿 `--crit` 的红去染一个字符串字面量，等于在界面上凭空多出一句「这里出错了」。
-新增 `--sql-keyword` / `--sql-string` / `--sql-number` / `--sql-quoted` 四个令牌，只在这一格出现，
-不进任何状态、标签、图表。注释与标点故意落回既有的 `--mute` / `--dim`——它们要的是「退到后面去」，
-不是又一种新颜色。
+**The highlight colours form their own small group and do not reuse the four semantic colours.**
+`--crit` / `--warn` / `--ok` each have a job in the three-axis language (ADR-0025 §4); tinting a string
+literal with `--crit`'s red would conjure the sentence "something is wrong here" out of nowhere.
+Four new tokens — `--sql-keyword` / `--sql-string` / `--sql-number` / `--sql-quoted` — appear only in
+this field and never in a state, tag, or chart. Comments and punctuation deliberately fall back to the
+existing `--mute` / `--dim`: they want to recede, not to be yet another colour.
 
-**双引号标识符与单引号字面量必须不同色**：在 Oracle 上这两者天差地别，而它们在裸 `textarea` 里
-长得几乎一样。这是高亮在这个系统里买到的、最具体的一样东西。
+**Double-quoted identifiers and single-quoted literals must differ in colour**: on Oracle the two are
+worlds apart, yet they look nearly identical in a bare `textarea`. This is the most concrete thing
+highlighting buys in this system.
 
-**连字仍然必须关掉，且两层都要关。** ADR-0045 遗留的这条约束原样成立（`>=` 不得画成 `≥`），
-只关一层的话飘的就不只是字形，还有光标位置。
+**Ligatures must still be off, and off in both layers.** The constraint inherited from ADR-0045 holds
+verbatim (`>=` must never render as `≥`); disabling only one layer would misalign not just glyphs but
+the cursor position.
 
-### 2. 导航按回访频次排：作业中心 · 数据源 · 目标端 Agent · 系统设置
+### 2. Nav ordered by revisit frequency: Job Center · Datasources · Target Agent · Settings
 
-**改写 ADR-0044 §6 的次序判断**，该节其余各条（Agent 屏有状态列、注册对话框不给测连按钮、
-数据源屏多一列、表单里 agent 必选并进连接指纹）**一字不动**。
+**This rewrites the ordering judgement of ADR-0044 §6.** Every other clause in that section — the agent
+screen has a status column, the registration dialog has no test button, the datasource screen gains a
+column, the form requires an agent and folds it into the connection fingerprint — **stands verbatim**.
 
-ADR-0044 §6 把 agent 排第一，理由是「一条 MySQL 数据源必须先有一台已注册的 agent 才建得出来，
-新装一台机器时这一屏是第一站」。这句话本身没错，但它**只在第一次装机那一天成立**——
-之后 agent 屏是「出事了回去看一眼」的运维屏。用一次性的依赖链去决定一个天天要点的次序，
-是把安装手册的顺序当成了日常动线。
+ADR-0044 §6 put agents first, reasoning that "a MySQL datasource cannot be created without a registered
+agent, so this screen is the first stop when setting up a new machine". That sentence is not wrong, but
+**it holds only on the day of first installation** — afterwards the agent screen is an ops screen you
+return to when something breaks. Using a one-time dependency chain to fix an order someone clicks daily
+mistakes the installation manual's sequence for the everyday path.
 
-还有一处当初就不自洽：**落地页一直是作业中心**（`pageFromHash` 的兜底），
-导航第一项却是 agent，于是打开应用时高亮的那一项和展开的那一屏对不上。
-新次序把这个错位一并消掉。
+There was also an inconsistency from the start: **the landing page has always been the job center**
+(the fallback in `pageFromHash`), while the first nav item was agents — so on opening the app the
+highlighted item and the expanded screen disagreed. The new order removes that mismatch too.
 
-**判据换成一句可复用的**：导航按**回访频次**降序排，不按依赖链。
-`agents` 这一项在 `Page` 联合类型里的位置也跟着挪——类型的书写顺序不影响行为，
-但它是下一个人读到的第一份次序说明，让它和界面一致。
+**The criterion becomes one reusable sentence**: the nav is ordered by **revisit frequency**,
+descending, not by dependency chain.
+The position of `agents` in the `Page` union type moves accordingly — the order in which a type is
+written does not affect behaviour, but it is the first statement of ordering the next person reads, so
+it should match the interface.
 
-### 3. 数据源屏撤掉「口令」列
+### 3. Drop the "password" column from the datasource screen
 
-**「口令」这一列恒为「已设置」。** ADR-0039 §3 定的是「测通才让存」：一条存下来的数据源，
-它的口令必然是设过且能连上的。于是这一列从来只有一个值——**一列常量占着一格宽度，
-却答不了任何问题**。它当初写下来是因为 `has_password` 恰好在接口里（ADR-0037 §5 让界面
-只看得到这个布尔），**「有个字段」被误当成了「有件事要说」**。
+**That column is always 「已设置」.** ADR-0039 §3 established "store only what connects": a stored
+datasource necessarily has a password that was set and did connect. So the column has only ever had one
+value — **a column of constants occupying a cell's width while answering nothing.** It was written
+because `has_password` happened to be in the API (ADR-0037 §5 lets the interface see only that boolean),
+and **"there is a field" was mistaken for "there is something to say".**
 
-**表单里那个徽标留着，不动。** 编辑数据源时口令框旁边的 `已设置 · 留空 = 不改`
-（`.field-badge.is-neutral`）答的是完全另一个问题：**「我这次不填会怎样」**。
-那是一句关于本次操作后果的话，不是一句关于这条记录属性的话。
+**The badge in the form stays, untouched.** The `已设置 · 留空 = 不改` beside the password box when
+editing a datasource (`.field-badge.is-neutral`) answers an entirely different question:
+**"what happens if I leave this blank this time?"** That is a sentence about the consequence of this
+action, not about a property of the record.
 
-**接口不动。** `has_password` 仍在 `DatasourceView` 里，仍由 `datasource.rs` 计算，
-Rust 侧那条断言（`"has_password":true`）原样保留。撤的是一列展示，不是一份数据——
-表单还要用它，而为了删一列展示去改接口，是把可逆的事做成不可逆的。
+**The API does not change.** `has_password` remains in `DatasourceView`, is still computed by
+`datasource.rs`, and the Rust-side assertion (`"has_password":true`) stays as it is. What is withdrawn
+is one column of display, not a piece of data — the form still needs it, and changing the API to delete
+one column of display would turn a reversible act into an irreversible one.
 
-**ADR-0037 §5「口令永不回读、连密文都不回读」一字不动。** 本 ADR 一个字都没碰凭据边界。
+**ADR-0037 §5, "a password is never read back, not even the ciphertext", is untouched.** This ADR does
+not touch the credential boundary at all.
 
-## 后果
+## Consequences
 
-- **格式化按钮是一个会重写用户输入的控件**，这在本仓是第一个。§1 的不变式是它被允许存在的
-  唯一条件；哪天有人想给它加「关键字大写」「统一缩进风格」，先回来推翻那条不变式，
-  而不是在实现里加个开关。
-- **词法器是手写的，一定有认不准的输入**。代价被围在一个很小的范围里：认不准只影响**着色**，
-  而着色不影响执行——真正过线的是 `crates/source` 里那条被包裹的语句（ADR-0045 §1）。
-  格式化那一侧则由不变式挡着，认不准最多是排版难看，不会改坏语义。
-- **导航次序从此有判据、不再靠个案讨论**：按回访频次。下一个新屏往哪插，照这句话答。
-- **`has_password` 成了一个只有表单用的字段**。它现在只有一个消费者，
-  哪天表单那半也改掉，接口那一侧就该跟着退役——记在这里，免得它变成无人认领的字段。
-- **多了一组只在一处出现的令牌**（四个 SQL 高亮色）。这是设计系统里第一组「不承担状态语义」的颜色，
-  README §7 里因此多了一条组件。它有被误用的风险（有人拿 `--sql-keyword` 的紫去染别的东西），
-  令牌注释里已经写死「只出现在自定义 SQL 输入框」。
+- **The format button is a control that rewrites user input**, the first in this repository. The
+  invariant in §1 is the sole condition under which it is allowed to exist; the day someone wants to add
+  "uppercase keywords" or "unify the indentation style", they come back and overturn that invariant
+  rather than adding a switch in the implementation.
+- **The lexer is hand-written and will certainly misread some inputs.** The cost is fenced into a very
+  small area: a misread affects **colouring only**, and colouring does not affect execution — what
+  actually crosses the wire is the wrapped statement in `crates/source` (ADR-0045 §1). On the formatting
+  side the invariant holds the line, so a misread costs at worst an ugly layout, never a changed meaning.
+- **Nav ordering now has a criterion instead of a case-by-case argument**: revisit frequency. Where the
+  next new screen goes is answered by that sentence.
+- **`has_password` becomes a field used only by the form.** It now has exactly one consumer; if that half
+  of the form ever changes too, the API side should be retired with it — recorded here so it does not
+  become an unclaimed field.
+- **There is now a token group that appears in exactly one place** (the four SQL highlight colours). It is
+  the design system's first set of colours that **carry no state semantics**, so README §7 gains one
+  component entry. It risks misuse (someone tinting something else with `--sql-keyword`'s purple), so the
+  token comments pin down "appears only in the custom SQL input".
 
-## 时效
+## Validity
 
-**重开信号**：
+**Reopening signals**:
 
-1. 出现「需要看懂 SQL 结构才能做的事」（比如从 SQL 反推列、做真正的语法校验、给出错位置）——
-   那时手写词法器不够，要的是分析器，本 ADR §1「不引第三方」的结论要重算。
-   注意这个信号**不包括**「反向解析 SQL 回结构化规格」，那条被 ADR-0023 §2 永久否掉、
-   ADR-0045 §2 重申，与本 ADR 无关。
-2. 导航项超过六七个，或出现分组/二级导航的需求——那时「按回访频次排」这句话不够用了。
-3. 出现「不测连也能存」的数据源形态（例如离线导入一份配置）——那时 §3 的前提消失，
-   「口令」列可能要回来。
+1. Something appears that "requires understanding the SQL's structure" — inferring columns from SQL, real
+   syntax validation, pointing at an error's position. A hand-written lexer will not do; that needs an
+   analyser, and §1's "no third-party" conclusion must be recomputed.
+   Note this signal **excludes** "parse SQL back into a structured spec", which ADR-0023 §2 rejected
+   permanently and ADR-0045 §2 restated; it is unrelated to this ADR.
+2. The nav exceeds six or seven items, or grouping / second-level navigation is needed — at which point
+   "ordered by revisit frequency" is no longer sufficient.
+3. A datasource shape appears that can be stored without a connection test (importing a configuration
+   offline, say) — §3's premise disappears and the "password" column may need to return.
 
-## 走查触发
+## Walkthrough triggers
 
-三处都改了界面，按 `CLAUDE.md` 的表：
+All three changed the interface; per the table in `CLAUDE.md`:
 
-- **X 系列（v1 走查）触发**：**X1 再改判**（导航次序变成作业中心 · 数据源 · 目标端 Agent · 系统设置；
-  项集合与深色侧栏、折叠态判据不变）、**X2 再改判**（数据源屏撤掉「口令」列，表头从八列回到七列；
-  该条其余判据——无搜索框、无连接状态列、有「被引用」列、连接串各显各的、多一列「目标端 Agent」
-  ——一字不动）、**X20 增补**（自定义 SQL 那一格多了高亮层与格式化按钮）。
-  编号规矩照旧：一个不重编、一行不删。
-  **X19 的判据不变**，但**造它的路径变了**（agent 屏现在是导航第三项）。
-- **V 系列（设计系统）触发**：`docs/design-system/tokens.css` 加了四个令牌、
-  `README.md` §7 的组件清单加了「自定义 SQL 输入框」一条。按 `CLAUDE.md` 规则 1，
-  **改了它们就要跑 V1–V25，没有例外**。判据里唯一新增的是 §7 那条组件，其余跑的是回归。
-- **W 系列（M3）**：`.precheck-reports` 与 `DiagnosticTable` 一个字未改，**不触发**。
+- **X series (v1 walkthrough) fires**: **X1 re-judged** (nav order becomes Job Center · Datasources ·
+  Target Agent · Settings; the item set, the dark sider, and the collapse criteria are unchanged),
+  **X2 re-judged** (the datasource screen drops the "password" column, so the header goes from eight
+  columns back to seven; the rest of that criterion — no search box, no connection status column, a
+  "referenced by" column, connection strings shown per kind, plus the "Target Agent" column — is
+  untouched), **X20 added** (the custom SQL field gains a highlight layer and a format button).
+  The numbering rule holds as always: nothing is renumbered, no line is deleted.
+  **X19's criterion is unchanged**, but **the path to reach it changed** (the agent screen is now the
+  third nav item).
+- **V series (design system) fires**: `docs/design-system/tokens.css` gained four tokens and README §7's
+  component inventory gained the "custom SQL input" entry. Per `CLAUDE.md` rule 1, **changing them means
+  running V1–V25, with no exemption.** The only new criterion is that §7 component; the rest is regression.
+- **W series (M3)**: neither `.precheck-reports` nor `DiagnosticTable` changed by one character, so it
+  **does not fire**.

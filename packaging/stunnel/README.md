@@ -1,10 +1,10 @@
 # stunnel 双端隧道（#153 / ADR-0041 §4）
 
-`source` 把**目标库的 MySQL 口令随每个 run 的请求明文过线**给 `sink`（[ADR-0037](../../docs/adr/0037-datasource-model-and-credential-boundary.md) §4）。
+`source` 把**目标库的 MySQL 口令随每个 run 的请求明文过线**给 `sink`（`ADR-0037` §4）。
 那条前提原文是「通道必须可信——同主机、可信内网，或部署者自建 TLS / 隧道」。
 第二版第一次让它落到实处：通道是**互联网**，兑现方式是这一套。
 
-同时它让 `sink` 那条兜底原样成立：[ADR-0024](../../docs/adr/0024-m2-unauthenticated-inbound-exposure.md)
+同时它让 `sink` 那条兜底原样成立：`ADR-0024`
 说 `sink` 不做鉴权、靠**只绑回环**兜底。隧道服务端就落在目标端主机的回环上，
 公网上露出来的只有那个要证书才进得来的隧道口——`sink` 的 `listen` 一个字都不用改。
 

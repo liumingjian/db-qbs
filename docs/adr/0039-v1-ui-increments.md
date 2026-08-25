@@ -1,275 +1,347 @@
-# ADR-0039: 第一版闭环的界面增量——数据源屏进导航、映射两栏、目标表下拉；零设计系统改动
+# ADR-0039: Interface increments closing the v1 loop — the datasource screen enters the nav, two-column mapping, the target-table dropdown; zero design-system change
 
-**状态**: 已接受
-**日期**: 2026-08-19
-**来源**: [#123](https://github.com/liumingjian/db-qbs/issues/123)（地图 [#117](https://github.com/liumingjian/db-qbs/issues/117)）
-**原型**: [`docs/prototypes/0123-v1-ui-increments.html`](../prototypes/0123-v1-ui-increments.html)（6 屏 + 1 组变体对照，已实跑渲染核对）
-**关联**:
-[ADR-0025](0025-m2-visual-language-and-design-system.md)（视觉语言与设计系统的权威；**本 ADR 不动 `tokens.css`、不新增组件**，
-但要求订正 `docs/design-system/README.md` 的两处事实性表述，见 §9）、
-[ADR-0037](0037-datasource-model-and-credential-boundary.md)（§5 判废「UI 不提供连接配置的读写面」——本 ADR 是它的界面兑现；
-§6 字段集、§7 删除拒绝、§8 绑定挂 `Task` 一字不改）、
-[ADR-0038](0038-column-mapping-and-target-metadata-face.md)（§2 映射形状、§3 目标表升级为下拉、§6 主键勾选面、
-§10 单位标注——**该 ADR 只定语义，本 ADR 定呈现**）、
-[ADR-0035](0035-upsert-write-model.md)（主键必选）、
-[ADR-0036](0036-task-spec-structured.md)（结构化规格是唯一真源，界面只读 SQL）、
-[ADR-0023](0023-m2-sql-builder-boundary.md)（§4「只亮不判」原样成立）、
-[ADR-0026](0026-m2-in-flight-observation.md)（「禁用状态本身会说谎」的态度，本 ADR §2 援引）、
-[ADR-0024](0024-m2-unauthenticated-inbound-exposure.md)（§2 的负面条款已由 ADR-0037 §5 判废一半）、
-[ADR-0033](0033-char-length-byte-semantics.md)（两套 `length` 单位，本 ADR §7 只标注不修）、
-[#122](https://github.com/liumingjian/db-qbs/issues/122)（走查入口与用例编号归它，本 ADR 只交账）
+**Status**: Accepted
+**Date**: 2026-08-19
+**Source**: [#123](https://github.com/liumingjian/db-qbs/issues/123) (map [#117](https://github.com/liumingjian/db-qbs/issues/117))
+**Prototype**: [`docs/prototypes/0123-v1-ui-increments.html`](../prototypes/0123-v1-ui-increments.html)
+(6 screens + one variant comparison, rendered and checked for real)
+**Related**:
+`ADR-0025` (the authority on visual language and the design system; **this ADR does not touch
+`tokens.css` and adds no component**, but requires correcting two factual statements in
+`docs/design-system/README.md`, see §9),
+`ADR-0037` (its §5 voided "the UI offers no read/write surface for connection configuration" — this
+ADR is that ruling's interface delivery; its §6 field set, §7 deletion refusal, and §8 binding hung
+off `Task` are untouched),
+`ADR-0038` (§2 the mapping shape, §3 the target table upgraded to a dropdown, §6 the primary-key
+selection surface, §10 unit annotation — **that ADR fixes semantics only; this one fixes presentation**),
+`ADR-0035` (the primary key is mandatory),
+`ADR-0036` (the structured spec is the single source of truth; the interface shows SQL read-only),
+`ADR-0023` (§4 "illuminate, never judge" stands verbatim),
+`ADR-0026` (the stance that "a disabled state itself lies", invoked by §2 here),
+`ADR-0024` (its §2 negative clause was half-voided by ADR-0037 §5),
+`ADR-0033` (two units for `length`; §7 here annotates without fixing),
+[#122](https://github.com/liumingjian/db-qbs/issues/122) (the walkthrough entry point and case
+numbering belong to it; this ADR only settles the account)
 
-## 背景
+## Background
 
-本图前四票（#118/#119/#120/#121）已把语义全部定完，落成 ADR-0035~0038。
-剩下的是**它们在屏幕上长什么样**——而这一票比 M3 那次界面增量重：M3 只加了五处信息位，
-本票要加**整整一屏**（数据源管理）。
+The first four tickets on this map (#118/#119/#120/#121) settled all the semantics, landing as
+ADR-0035 through ADR-0038. What remains is **what they look like on screen** — and this ticket is
+heavier than the M3 interface increment: M3 added five information sites, while this one adds
+**an entire screen** (datasource management).
 
-因此本票唯一真正的风险是**顶开设计系统**：改 `docs/design-system/README.md` 或 `tokens.css`
-按 `CLAUDE.md` 要**重跑整份 V1–V25 走查**。M3 的答案是「零设计系统改动」（#102），本票要争取同样的结论。
+So this ticket's only real risk is **prising open the design system**: per `CLAUDE.md`, changing
+`docs/design-system/README.md` or `tokens.css` means **re-running the whole V1–V25 walkthrough**.
+M3's answer was "zero design-system change" (#102), and this ticket aims for the same verdict.
 
-**结论：争到了。** 全部六屏由既有元素拼成，`tokens.css` 一个字节不动，
-落在 `web/src/app.css` 的新增 CSS 共 **4 条规则**（§8）。
+**Verdict: won.** All six screens are assembled from existing elements, `tokens.css` does not change
+by one byte, and the new CSS landing in `web/src/app.css` totals **4 rules** (§9).
 
-### 所有者 2026-08-19 的两条裁定（本 ADR 的输入）
+### The owner's two rulings on 2026-08-19 (inputs to this ADR)
 
-1. **现场只有 3~5 个数据源。**
-2. **保存数据源前必须先测试连接通过**（推翻本票原先「不强制、只提示」的建议，见 §3）。
+1. **The field has only three to five datasources.**
+2. **A datasource must pass a connection test before it can be saved** (overturning this ticket's
+   earlier proposal of "not enforced, only hinted"; see §3).
 
-## 决策
+## Decision
 
-### 1. 数据源进导航，成为第三项
+### 1. Datasources enter the nav as the third item
 
-> 左导航从 `任务 / 运行历史` 变成 `任务 / 运行历史 / 数据源`，非 V1 占位项（定时调度 / 告警）位置不变。
+> The left nav goes from `Tasks / Run history` to `Tasks / Run history / Datasources`; the non-V1
+> placeholders (scheduling, alerting) keep their positions.
 
-**不塞进任务屏**：数据源被多个任务共享、独立增删改；塞进去就要在建任务的同时管凭据，
-那正是 ADR-0037 §7「删除时若仍有任务引用则拒绝」要防的耦合。
+**Not folded into the task screen**: datasources are shared by several tasks and are created, edited,
+and deleted independently. Folding them in would mean managing credentials while creating a task —
+exactly the coupling ADR-0037 §7 ("refuse deletion while tasks still reference it") guards against.
 
-**排第三**：它是**先建一次、之后很少回来**的东西，不该占第一项。
+**Third, not first**: it is a thing you **set up once and rarely return to**, so it should not occupy
+the first slot.
 
-**导航项本身零改动**——`.nav-item` 与 §7 的「导航占位项」规则原样复用，只多一个条目。
-README §7 的组件清单因此不变，变的是它旁边那句预留位置的事实描述（§9）。
+**The nav item itself changes nothing** — `.nav-item` and §7's "nav placeholder" rule are reused
+verbatim with one more entry. README §7's component inventory is therefore unchanged; what changes is
+the factual description of the reserved placement beside it (§9).
 
-### 2. 数据源列表：不给过滤条，不给「连接状态」列
+### 2. The datasource list: no filter strip, no "connection status" column
 
-- **不给过滤条与类型筛选**（所有者裁定 1）：3~5 条一屏看得完，搜索框是纯噪音。
-  任务屏那条工具条是因为任务会长到几十个才成立的，**不要照抄**。
-- **不给「连接状态」列**：要么后台轮询所有库，要么显示一个过期的绿点——
-  两者都比不显示更坏（同 ADR-0026「禁用状态本身会说谎」）。连不连得上，点「测试连接」当场问。
-- **给「被引用」列**（`3 个任务` / `未被引用`）：那份计数为了判 §4 的 409 本来就要查，摆出来是零成本的，
-  而它正好回答「这条能不能删」。
-- **列表列**：名称（含 `datasource_id` 小字）/ 类型 / 连接 / 用户 / 口令 / 被引用 / 操作。
-  连接一栏 Oracle 显示 `connect_string`、MySQL 显示 `host:port / database`——
-  **两类字段集不同，同一列各显各的**，不造一个假的统一「连接串」（ADR-0037 §6 不存 DSN 串是同一条理由）。
+- **No filter strip and no type filter** (owner ruling 1): three to five rows fit on one screen, and a
+  search box is pure noise. The toolbar on the task screen exists because tasks grow into the dozens —
+  **do not copy it across.**
+- **No "connection status" column**: it would either poll every database in the background or show a
+  stale green dot, and both are worse than showing nothing (the same stance as ADR-0026, "a disabled
+  state itself lies"). Whether it connects is asked on the spot by clicking "test connection".
+- **A "referenced by" column** (`3 个任务` / `未被引用`): that count must be queried anyway to decide
+  §4's 409, so displaying it is free — and it happens to answer "can I delete this?".
+- **Columns**: name (with `datasource_id` in small text) / type / connection / user / password /
+  referenced by / actions. The connection cell shows `connect_string` for Oracle and
+  `host:port / database` for MySQL — **two different field sets, each shown in its own way in one
+  column**, rather than fabricating a fake unified "connection string" (the same reason ADR-0037 §6
+  does not store a DSN string).
 
-### 3. 新建 / 编辑对话框：一套表单，两类字段；**测通才让存**
+### 3. Create / edit dialog: one form, two field sets; **store only what connects**
 
-- **类型建时选、编辑时不可改**：改类型等于换一个数据源，而任务已按 id 绑定了它（ADR-0037 §8）。
-- **字段集照 ADR-0037 §6**：Oracle 三个（`connect_string` / `username` / `password`），
-  MySQL 五个（`host` / `port` / `database` / `username` / `password`）。
-- **口令是只写字段**：编辑时永远显示为空，右上角挂中性徽标「已设置 · 留空 = 不改」/「未设置」。
-  界面**永不回读**口令，连密文都不回（ADR-0037 §5）。
-- **「测试连接」用表单里当前填的值**，不是库里存的那份——否则改完口令没法验证。
-  **编辑态口令留空时，测试用已存的那份口令**：与保存的「留空 = 不改」是同一条解释规则，两处不许分岔。
+- **Type is chosen at creation and immutable when editing**: changing the type means a different
+  datasource, and tasks are already bound to it by id (ADR-0037 §8).
+- **Field sets follow ADR-0037 §6**: three for Oracle (`connect_string` / `username` / `password`),
+  five for MySQL (`host` / `port` / `database` / `username` / `password`).
+- **The password is write-only**: it always displays empty when editing, with a neutral badge at the
+  top right reading 「已设置 · 留空 = 不改」 or 「未设置」. The interface **never reads a password
+  back**, not even the ciphertext (ADR-0037 §5).
+- **"Test connection" uses the values currently in the form**, not the stored ones — otherwise a
+  changed password could not be verified.
+  **When the password is left empty while editing, the test uses the stored password**: the same
+  interpretation rule as "empty = unchanged" on save, and the two must never diverge.
 
-> **保存门槛（所有者裁定 2）：当前表单的连接字段组合必须有过一次成功的测试连接，否则保存按钮禁用。**
-> 连接字段一改，上一次的结果当场作废、要重测。
-> **唯一例外：只改名称。** 连接字段一字未动时免测直接存——那组值没变，重测买不到任何新信息，
-> 却要求库在改名的那一刻恰好在线。
+> **Save threshold (owner ruling 2): the current form's combination of connection fields must have
+> passed a connection test at least once, or the save button is disabled.**
+> Changing any connection field invalidates the previous result immediately and requires a retest.
+> **One exception: renaming only.** With no connection field touched, it saves without a retest — that
+> set of values has not changed, a retest buys no new information, and it would require the database to
+> happen to be online at the moment of a rename.
 
-**代价认下**：库还没开通、网络还没放行时，这条数据源**根本录不进来**，人得等运维放行后再回来填一遍。
-换来的是**库里每一条数据源都曾经真的连通过**，「连不上」不会推迟到发起运行那一刻才炸。
-这是所有者在「录入自由度」与「录进去的都可用」之间选了后者。
+**Cost accepted**: while the database is not yet provisioned or the network not yet opened, this
+datasource **simply cannot be entered**, and someone must come back and fill it in after ops opens the
+way. What that buys is **every datasource in the database having genuinely connected at least once**,
+so "cannot connect" does not defer its explosion to the moment a run is submitted. The owner chose
+"everything entered is usable" over "freedom to enter".
 
-**测试结果的呈现**：成功是**一行纯文字**（`连接成功 · 186 ms · dw_stage`），失败复用既有 `.form-error`。
-**不出错误码标签**——`test-connection` 不属于任何 run，画一个 `SINK_ENVIRONMENT` 标签
-会让人以为这是一次运行的失败，撞 ADR-0025 README §3「三轴只服务于 run、形状不得复用」。
-失败正文**原样回显驱动报错**（`ORA-12541: TNS:no listener`）再跟一句人话，顺序照 README §3「人话在前、码在后」。
+**Presenting the test result**: success is **one line of plain text** (`连接成功 · 186 ms · dw_stage`);
+failure reuses the existing `.form-error`.
+**No error code tag** — `test-connection` belongs to no run, and drawing a `SINK_ENVIRONMENT` tag would
+suggest a run had failed, colliding with ADR-0025 README §3 ("the three axes serve runs only; their
+shapes may not be reused"). The failure body **echoes the driver error verbatim**
+(`ORA-12541: TNS:no listener`) followed by a plain-language sentence, ordered per README §3 ("prose
+first, code second").
 
-### 4. 删除被引用的数据源：拒绝，并把任务点名列出
+### 4. Deleting a referenced datasource: refuse, and name the tasks
 
-ADR-0037 §7 定了 409，但只回一句「仍有任务引用」不够用——人得自己去任务屏一个个翻。
-**把任务名列出来**：那份引用清单为了判 409 本来就要查。
-形态是既有删除对话框 `.delete-copy` 正文里多一段列表，**零新元素**。
+ADR-0037 §7 fixed the 409, but answering only "tasks still reference it" is not enough — the person then
+has to page through the task screen one by one. **List the task names**: that reference list must be
+queried anyway to decide the 409.
+The shape is one extra list inside the existing delete dialog's `.delete-copy` body — **zero new
+elements**.
 
-### 5. 构建器·目标端：原生 `datalist` 承载可过滤下拉
+### 5. Builder, target side: a native `datalist` carries the filterable dropdown
 
-ADR-0038 §3 要求目标表**从人手填升级为可过滤下拉**。
+ADR-0038 §3 required the target table to be **upgraded from a hand-typed field to a filterable dropdown**.
 
-> **做法：原生 `<input list="..."> + <datalist>`。**
+> **Method: native `<input list="..."> + <datalist>`.**
 
-- **零新组件、零新 CSS**，浏览器自带子串过滤与键盘操作；
-- **打字仍然能打**——记得全名的人不必翻列表，这正是所有者给的场景（只记得一两个关键字，手打比选更难）；
-- **代价写明**：`datalist` 的下拉样式归浏览器管，标不了每项副标，Safari 下体验略糙。
-  换自绘 combobox 要新增一整个组件加一套键盘可达性，**第一版不买**。
+- **Zero new components, zero new CSS**; the browser supplies substring filtering and keyboard operation.
+- **Typing still works** — someone who remembers the full name need not scroll a list, which is exactly
+  the scenario the owner described (remembering one or two keywords makes typing harder than picking).
+- **Cost written down**: `datalist`'s dropdown styling belongs to the browser, no per-item subtitle is
+  possible, and Safari's experience is a little rough. Replacing it with a hand-drawn combobox would add
+  a whole component plus a keyboard-accessibility layer — **not bought in v1.**
 
-**目标表列清单（`POST /v1/target/columns` 的结果）用既有 `.data-grid` 呈现**，
-列为：目标表列 / 类型 / 长度（字符）/ 可空 / 默认值 / 约束 / 映射自。
+**The target table's column list (the result of `POST /v1/target/columns`) is presented with the existing
+`.data-grid`**, with columns: target column / type / length (characters) / nullable / default / constraint
+/ mapped from.
 
-- **只亮不判**（ADR-0038 §3 末段、ADR-0023 §4）：`PRIMARY` / `UNIQUE u_code` 摆在「约束」栏供参考，
-  **主键仍由用户勾**；「未映射 + 非空 + 无默认值」的列（预检会拒的那一类）在这里**不拦**，
-  只是整行压暗显示。构建器放行、预检拒，是刻意的——`information_schema` 与运行那一刻的目标表可以不一致。
-- **未映射的行整行压暗**（1 条 CSS）：它是参考信息，不是待办项。
-- 卡片脚注写明这份结果**刷新即丢**（ADR-0038 §8）。
+- **Illuminate, never judge** (ADR-0038 §3's closing paragraph, ADR-0023 §4): `PRIMARY` / `UNIQUE u_code`
+  sit in the "constraint" column for reference, and **the primary key is still ticked by the user**.
+  Columns that are unmapped, non-nullable, and without a default (the class the precheck will reject) are
+  **not blocked here**, only dimmed as a whole row. The builder permitting what the precheck rejects is
+  deliberate — `information_schema` and the target table at the moment of the run may disagree.
+- **Unmapped rows are dimmed entirely** (1 CSS rule): they are reference information, not a to-do item.
+- The card's footnote states that this result **is discarded on refresh** (ADR-0038 §8).
 
-### 6. 构建器·映射两栏：常驻输入框，主键勾选挪到目标字段右侧
+### 6. Builder, two-column mapping: a permanent input box, with the primary-key tick moved beside the target field
 
-> 既有六列表加一列**「目标字段」**，默认预填源名（ADR-0038 §2：那不是将就的默认值，
-> 它就是恒等映射的正确表达）。
+> The existing six-column table gains a **"target field"** column, pre-filled with the source name by
+> default (ADR-0038 §2: that is not a make-do default; it *is* the correct expression of identity mapping).
 
-**控件形态选 A「常驻输入框」，否掉 B「点开才编辑」**：
+**Control shape A, "a permanent input box", is chosen over B, "click to edit"**:
 
-- 客户点名的需求是「默认同名映射、不同名可手选」，**改名是常规动作不是例外动作**，
-  每改一列多一次点击是按最坏情况收费；
-- B 的收益（改过的列自带痕迹）**在两栏并排时本来就有**——左边源名、右边目标名，不同就是改过；
-- A 是纯 `<input>`，B 要一个「文字 ↔ 输入框」的切换态，**多一个状态就多一处能出错的地方**。
+- The customer's named requirement is "same-name mapping by default, hand-pick when they differ", so
+  **renaming is a routine action, not an exceptional one**, and charging an extra click per renamed column
+  prices it at the worst case.
+- B's benefit (edited columns carry a visible trace) **already exists once the two columns sit side by
+  side** — source name on the left, target name on the right; different means edited.
+- A is a plain `<input>`, while B needs a "text ↔ input" toggle state, and **one more state is one more
+  place to go wrong.**
 
-**主键勾选从最左挪到目标字段右侧**：ADR-0038 §6 定了**主键存的是目标列名**，
-勾的东西必须挨着它指的那个名字；停在最左会让人以为勾的是源列。
+**The primary-key tick moves from far left to the right of the target field**: ADR-0038 §6 fixed that the
+primary key stores **target column names**, so the thing being ticked must sit beside the name it refers
+to. Leaving it at the far left would suggest the source column is being ticked.
 
-**未选中的行**：目标字段输入框与主键勾选**双双禁用并压暗**——没选的列谈不上目标名。
+**Unselected rows**: the target-field input and the primary-key tick are **both disabled and dimmed** —
+an unselected column has no target name to speak of.
 
-### 7. 单位标注：表头写「（字符）」，脚下贴一句静态说明
+### 7. Unit annotation: write "(characters)" in the header, with a static note beneath
 
-ADR-0038 §10 的兑现，两件事：
+Delivering ADR-0038 §10, in two parts:
 
-1. 源列与目标列的长度栏表头**都写「长度（字符）」**——两栏单位其实一致；
-2. 表下贴一句**静态说明**：这一栏是字符，而**映射预检按字节判**（ADR-0033），
-   含中文的列上两者会对不上（`utf8mb4` 下 10 个汉字是 30 字节），第一版不统一，撞上时以预检结论为准。
+1. The length headers of both source and target columns **read "长度（字符）"** — the two columns do in
+   fact share a unit.
+2. A **static note** beneath the table: this column is in characters, while **the mapping precheck judges
+   in bytes** (ADR-0033), so on columns containing Chinese the two disagree (10 Chinese characters are 30
+   bytes under `utf8mb4`). V1 does not unify them; when they collide, the precheck's verdict governs.
 
-**零判定、零元数据**——同 ADR-0027 §8 处理 `ERROR 1118` 的手法。
-只标单位不写这句话是不够的：现场第一个中文列就会撞上，而没人知道为什么。
+**Zero judgement, zero metadata** — the same handling as ADR-0027 §8's treatment of `ERROR 1118`.
+Annotating the unit without that sentence is not enough: the first Chinese column in the field will hit it
+and nobody will know why.
 
-### 8. 任务屏：加一列「源 → 目标」，用名字不用 id
+### 8. Task screen: one more column, "source → target", by name not by id
 
-- 任务列表加**一列**，一行两段：`生产核心库 → 数仓 MySQL`。**用数据源的名字**，`datasource_id` 只在数据源屏出现。
-- 建任务对话框的两个下拉 ADR-0037 落地时已接线，本票只补一件事：
-  **一个数据源都没有时，下拉里给的不是空白，而是一条通往数据源屏的路**（「去『数据源』建一个 →」）。
-- **不做「就地弹出新建数据源」**：对话框套对话框会让同一套表单有两个入口，
-  两处的「测通才让存」（§3）行为一旦分岔就是最难查的一类不一致。代价是建任务被打断一次，
-  但按裁定 1（3~5 个数据源）这件事一共只发生几次。
+- The task list gains **one column** holding two segments per row: `生产核心库 → 数仓 MySQL`. **Use the
+  datasource names**; `datasource_id` appears only on the datasource screen.
+- The two dropdowns in the create-task dialog were already wired when ADR-0037 landed; this ticket adds one
+  thing: **when there is no datasource at all, the dropdown offers not a blank but a route to the
+  datasource screen** (「去『数据源』建一个 →」).
+- **No "create a datasource inline"**: a dialog inside a dialog would give one form two entry points, and
+  once the "store only what connects" behaviour (§3) diverges between them, the resulting inconsistency is
+  the hardest kind to find. The cost is one interruption while creating a task, but per ruling 1 (three to
+  five datasources) it happens only a handful of times in total.
 
-### 9. 设计系统的账：`tokens.css` 不动，README 只改事实性文字
+### 9. The design-system ledger: `tokens.css` untouched, the README corrected on facts only
 
-**新增 CSS 共 4 条，全部落在 `web/src/app.css`，`docs/design-system/` 下不新增任何类：**
+**Four new CSS rules in total, all landing in `web/src/app.css`; no class is added under
+`docs/design-system/`:**
 
-| # | 规则 | 用途 |
+| # | Rule | Purpose |
 |---|---|---|
-| 1 | `.data-grid .cell-input` | 表格内的目标字段输入框（与单元格同高） |
-| 2 | `.field-badge.is-neutral` | 口令「已设置 / 未设置」徽标的中性变体——既有类换三个色令牌，同 M3 `.row-size-warning.is-crit` 的走法 |
-| 3 | `.inline-result` | 测试连接成功的一行纯文字 |
-| 4 | `.data-grid tr.is-unmapped td` | 未映射的目标列整行压暗 |
+| 1 | `.data-grid .cell-input` | The target-field input inside a table (matching the cell height) |
+| 2 | `.field-badge.is-neutral` | The neutral variant of the password "set / not set" badge — an existing class with three colour tokens swapped, the same route as M3's `.row-size-warning.is-crit` |
+| 3 | `.inline-result` | The single line of plain text for a successful connection test |
+| 4 | `.data-grid tr.is-unmapped td` | Dimming an unmapped target column's whole row |
 
-**但 `docs/design-system/README.md` 必须改两处事实性表述**——它们已被 ADR-0037 判废，留着就是假的：
+**But `docs/design-system/README.md` must be corrected in two factual places** — both were voided by
+ADR-0037, and leaving them makes the file false:
 
-- **§5 末段**「没有连接配置管理页，不是还没画，是不画」（复述 ADR-0024 §2 的负面条款）——
-  该条款已由 ADR-0037 §5 判废一半，这句话自 2026-08-19 起不再是现行裁定；
-- **§7 的「预留位置」**——补一条数据源屏，形态是「应用外壳 + 卡片 + 数据表 + 对话框，不新造组件」。
+- **The closing paragraph of §5**, "there is no connection-configuration management page; that is a
+  decision, not an omission" (restating ADR-0024 §2's negative clause) — that clause was half-voided by
+  ADR-0037 §5 and has not been the operative ruling since 2026-08-19.
+- **The "reserved placements" in §7** — add the datasource screen, shaped as "app shell + card + data
+  table + dialog, with no new components".
 
-> **裁定：README 的这两处改动照 `CLAUDE.md` 的字面触发整份 V1–V25 走查，认下，不找豁免。**
+> **Ruling: these two README changes trigger the whole V1–V25 walkthrough by the literal wording of
+> `CLAUDE.md`. Accepted; no exemption sought.**
 
-理由是**门禁的可信度比这一次的省事值钱**：一旦开了「文字改动可豁免」的口子，
-下一次判「这算文字还是视觉」的成本，比老老实实跑一遍走查高得多——
-M2 的 `--ok-bg` 事故（README §8 记录）就是判据被软化之后失守的。
-**走查什么时候跑、算哪张票的验收，归 [#122](https://github.com/liumingjian/db-qbs/issues/122)**；
-本 ADR 只负责把这笔账记在这里，**不许在实现票里悄悄跳过**。
+The reason is that **the gate's credibility is worth more than the convenience of this one occasion**: once
+"text changes may be exempt" is opened up, the cost of adjudicating "is this text or visual?" next time far
+exceeds simply running the walkthrough — M2's `--ok-bg` incident (recorded in README §8) is what happens
+after a criterion is softened.
+**When the walkthrough runs, and which ticket's acceptance it counts toward, belongs to
+[#122](https://github.com/liumingjian/db-qbs/issues/122)**; this ADR only records the debt here, and
+**it may not be quietly skipped inside an implementation ticket.**
 
-**M3 的 W1–W6 走查**照 `CLAUDE.md` 同样适用：本票动了 `DiagnosticTable` 之外的表格，
-但 `.precheck-reports` 布局与 `DiagnosticTable` 列结构**未变**——W1–W6 是否重跑同归 #122 判。
+**M3's W1–W6 walkthrough** is governed the same way by `CLAUDE.md`: this ticket touched tables other than
+`DiagnosticTable`, but the `.precheck-reports` layout and `DiagnosticTable`'s column structure are
+**unchanged** — whether W1–W6 re-runs is likewise #122's call.
 
-## 代价与时效
+## Costs and validity
 
-1. **强制测连挡掉「库还没开通就先录进来」的用法**（§3）。若现场反馈这一步太硬，
-   正解是加一个显式的「暂存未验证」状态，**不是**悄悄放开门槛。
-2. **README 改动触发整份 V1–V25**（§9）。这是本票最贵的一笔，且是明码标价买下的。
-3. **`datalist` 的样式与 Safari 体验**（§5）。要更好的下拉就要自绘组件，那会顶开 README §7 的组件清单。
-4. **`length` 口径差只标注不修**（§7）。ADR-0033 已定，第一版之后再统一。
-5. **目标表 / 目标列每次点开都真连一次 MySQL**（ADR-0038 §8 不缓存）。表多时首屏会慢，
-   无现象前不优化；需要时的正解是前端过滤，而 `datalist` 本来就是前端过滤。
+1. **The mandatory connection test blocks "enter it before the database is provisioned"** (§3). If the field
+   reports this step is too rigid, the answer is an explicit "saved but unverified" state, **not** quietly
+   loosening the threshold.
+2. **The README change triggers the whole of V1–V25** (§9). This is the most expensive item in the ticket,
+   and it is bought at a stated price.
+3. **`datalist`'s styling and its Safari experience** (§5). A better dropdown means a hand-drawn component,
+   which would prise open README §7's component inventory.
+4. **The `length` unit discrepancy is annotated, not fixed** (§7). ADR-0033 settled it; unification comes
+   after v1.
+5. **Target tables and target columns really connect to MySQL each time they are opened** (ADR-0038 §8 does
+   not cache). With many tables the first screen will be slow; do not optimise before the symptom appears.
+   The answer when needed is front-end filtering, and `datalist` is front-end filtering already.
 
-## 影响面清单
+## Impact list
 
-| 位置 | 改动 |
+| Location | Change |
 |---|---|
-| `web/src/App.tsx` | 导航加第三项与 `Page` 类型；新建 `DatasourceScreen` 与数据源对话框；映射列与主键列改位；目标端卡（`datalist` + 目标列参考表）；任务列表加「源 → 目标」列；空数据源时的引导 |
-| `web/src/api.ts` | 新增 `/api/target/tables`、`/api/target/columns` 两个调用（ADR-0038 §3 的 source 侧代理）；`TaskSpec.columns` 改 `ColumnMapping[]` |
-| `web/src/app.css` | §9 的 4 条规则；删掉 `.target-side-note` 里「不给目标表下拉…是不画，不是没画完」那段已失效文案 |
-| `docs/design-system/README.md` | §5 末段与 §7 预留位置两处事实订正（**触发整份 V1–V25**，入口归 #122） |
-| `docs/design-system/tokens.css` | **不动** |
-| 走查 | 数据源屏 / 映射两栏 / 目标列参考三处的新增用例，编号与归属归 #122 |
+| `web/src/App.tsx` | A third nav item and the `Page` type; a new `DatasourceScreen` and the datasource dialog; the mapping and primary-key columns repositioned; the target-side card (`datalist` + target column reference table); a "source → target" column on the task list; the guidance shown when there is no datasource |
+| `web/src/api.ts` | Two new calls, `/api/target/tables` and `/api/target/columns` (the source-side proxies of ADR-0038 §3); `TaskSpec.columns` becomes `ColumnMapping[]` |
+| `web/src/app.css` | §9's four rules; deletion of the now-void copy in `.target-side-note` reading "no target-table dropdown … is a decision, not an unfinished feature" |
+| `docs/design-system/README.md` | Two factual corrections, in §5's closing paragraph and §7's reserved placements (**triggers the whole of V1–V25**; the entry point belongs to #122) |
+| `docs/design-system/tokens.css` | **Untouched** |
+| Walkthrough | New cases for the datasource screen, the two-column mapping, and the target column reference; numbering and ownership belong to #122 |
 
-**门槛**：本 ADR 只改前端呈现，但实现票会同时落 ADR-0038 的搬运语义变更，
-故实现票**必须跑 M1/M2/M3 三份台架**加 `npm run typecheck && npm run build && npm test`。
-在跑之前，任何报告不许写「通过」。
+**Threshold**: this ADR changes front-end presentation only, but the implementation ticket also lands
+ADR-0038's transfer-semantics change, so that ticket **must run all three rigs (M1/M2/M3)** plus
+`npm run typecheck && npm run build && npm test`. Until those have run, no report may say "passed".
 
-## 增补（2026-08-19，实现规格开票期）：改目标名时主键跟着走；`column_precision` 不进第一版界面
+## Addendum (2026-08-19, during implementation-spec ticketing): the primary key follows a renamed target; `column_precision` gets no v1 interface
 
-拆实现票时长出两处 ADR-0035~0039 都没答的界面行为，所有者当场裁定，记在这里以免实现时各判各的。
+Breaking down the implementation tickets surfaced two interface behaviours that none of ADR-0035 through
+ADR-0039 answered. The owner ruled on both on the spot, recorded here so implementers do not each decide
+separately.
 
-### 1. 目标字段改名，已勾的主键跟着改名走
+### 1. Renaming a target field carries the ticked primary key with it
 
-§6 定了主键勾选挪到目标字段右侧、[ADR-0038](0038-column-mapping-and-target-metadata-face.md) §6
-定了 `TaskSpec.primary_key` 存**目标列名**。两条合起来留了一个空当：
-**用户把某列的目标名从 `C_ID` 改成 `CUST_ID`，而这一列已被勾成主键**——那一刻 `primary_key`
-里躺着的 `C_ID` 就指向一个不再存在的名字。
+§6 moved the primary-key tick beside the target field, and `ADR-0038` §6 fixed that
+`TaskSpec.primary_key` stores **target column names**. Together they left a gap: **the user renames a
+column's target from `C_ID` to `CUST_ID` while that column is ticked as the primary key** — at that moment
+the `C_ID` sitting in `primary_key` points at a name that no longer exists.
 
-> **裁定（所有者 2026-08-19）：勾选状态保留，`primary_key` 里的那一项同步改成新目标名。**
+> **Ruling (owner, 2026-08-19): the tick is preserved, and that entry in `primary_key` is renamed to match.**
 
-理由是**用户感知里勾的是「这一行」，不是「这个字符串」**。改名是 §6 明写的常规动作
-（「改名是常规动作不是例外动作」），让常规动作把另一处状态打掉，是拿实现细节
-（主键存的是名字不是行号）去收费。
+The reason is that **in the user's perception they ticked "this row", not "this string"**. Renaming is a
+routine action per §6's own words ("renaming is a routine action, not an exceptional one"), and letting a
+routine action knock out state elsewhere charges the user for an implementation detail (that the primary key
+stores names rather than row numbers).
 
-**否掉的两条**：
+**Two alternatives rejected**:
 
-- **改名即清掉该列的主键勾选**——改一个字母就要重勾，正常改名被当成异常处理；
-- **改名后禁止保存直到重新确认主键**——最硬，但它打断的恰恰是常规动作。
+- **Renaming clears that column's primary-key tick** — changing one letter would require re-ticking,
+  treating a normal rename as an anomaly.
+- **Renaming blocks saving until the primary key is re-confirmed** — the hardest option, and it interrupts
+  precisely the routine action.
 
-**实现面因此有一条约束**：目标名的输入框与主键集合**不是两份独立状态**，
-`primary_key` 必须由「哪几行被勾中」派生，或在改名时同步重写。
-**不许出现「界面勾着、`TaskSpec` 里是旧名」的中间态**——那会一路走到 sink 预检才炸成
-「主键列必须落在本次选中的列里」，而用户什么都没做错。
+**One implementation constraint follows**: the target-name input and the primary-key set **are not two
+independent pieces of state**. `primary_key` must either be derived from "which rows are ticked" or be
+rewritten in sync on rename.
+**No intermediate state may exist in which the interface shows a tick while `TaskSpec` holds the old name** —
+that would travel all the way to the sink precheck before exploding as "primary key columns must be among the
+columns selected", with the user having done nothing wrong.
 
-### 2. `column_precision` 第一版不补界面入口
+### 2. `column_precision` gets no interface entry point in v1
 
-裸 `NUMBER` / 数值表达式列的 `(p,s)`（[ADR-0030](0030-m3-type-whitelist.md) §4.2）目前只能改任务文件
-或直接调 API，构建器上没有编辑入口。
+The `(p,s)` of a bare `NUMBER` or a numeric expression column (`ADR-0030` §4.2) can currently only be changed
+by editing the task file or calling the API directly; the builder has no editing entry point.
 
-> **裁定（所有者 2026-08-19）：第一版不补，留后续。**
+> **Ruling (owner, 2026-08-19): not added in v1; deferred.**
 
-现场表基本都是声明了 `NUMBER(p,s)` 的列，撞上裸 `NUMBER` 的概率低；真撞上时任务建不出来，
-是**建不起来**而不是**搬错**，失效模式在门禁那一侧，可接受。
+Tables in the field almost always declare `NUMBER(p,s)`, so hitting a bare `NUMBER` is unlikely; and when it
+does happen the task simply **cannot be created** rather than **moving data incorrectly** — the failure mode
+is on the gate's side, which is acceptable.
 
-**取列面「待配精度」那个标记不撤**（ADR-0032 的 M3 五处信息位之一）：它仍如实说明哪几列需要人动手，
-只是动手的地方暂时不在界面上。**也不为此加任何静态说明**——第一版不为一个低频形态在主路径上贴文案。
+**The "precision to be configured" marker on the column-fetch surface stays** (one of ADR-0032's five M3
+information sites): it still states truthfully which columns need human attention, only the place to act is
+not in the interface for now. **No static note is added for it either** — v1 does not paste copy onto the main
+path for a low-frequency shape.
 
-**时效**：现场出现第一例裸 `NUMBER` 列时补入口，形态是取列表格里那一列就地填 `(p,s)`，
-不新开屏、不新造组件。
+**Validity**: add the entry point when the first bare `NUMBER` column appears in the field, shaped as filling
+`(p,s)` in place in that column of the fetch table — no new screen, no new component.
 
-### 3. 「测通才让存」必须有一个**草稿测连**端点，`POST /api/datasources/test-connection`
+### 3. "Store only what connects" requires a **draft** test-connection endpoint, `POST /api/datasources/test-connection`
 
-（2026-08-19 增补，来源 [#130](https://github.com/liumingjian/db-qbs/issues/130) 实现期）
+(Added 2026-08-19, from the implementation of [#130](https://github.com/liumingjian/db-qbs/issues/130))
 
-§3 定了「**「测试连接」用表单里当前填的值，不是库里存的那份**」，但影响面清单只列了
-`web/src` 与 `api.ts` 三行——**那不够**。既有的测连入口是
-`POST /api/datasources/<id>/test-connection`，它按 id 去库里读一条出来测：
+§3 fixed that **"test connection" uses the values currently in the form, not the stored ones**, but the impact
+list named only three lines under `web/src` and `api.ts` — **which is not enough.** The existing test entry
+point is `POST /api/datasources/<id>/test-connection`, which reads a row from the database by id and tests it:
 
-- **新建态根本没有 id**：库里还没有这条数据源，「测通才让存」的门槛在新建的那一刻无从谈起；
-- **编辑态改了口令时按 id 测的是旧口令**，测通的与要存下去的不是同一组值——
-  而测连正是为了防这件事。
+- **In creation there is no id at all**: the datasource is not yet in the database, so "store only what
+  connects" has no subject at the moment of creation.
+- **When editing with a changed password, testing by id tests the old password**, so what passed and what is
+  about to be stored are not the same set of values — which is precisely what the test exists to prevent.
 
-> **裁定：加一个不带 id 的草稿入口 `POST /api/datasources/test-connection`。**
-> 请求体是 `DatasourceInput` 再加一个可选的 `datasource_id`（编辑态才有）。
+> **Ruling: add an id-less draft endpoint, `POST /api/datasources/test-connection`.**
+> The body is a `DatasourceInput` plus an optional `datasource_id` (present only when editing).
 
-- **口令留空的解释规则与保存**（`PUT`）**完全一致**：给了 `datasource_id` 就取库里那一份，
-  新建态留空就是真的没有口令。§3 明写「两处不许分岔」，这里是把它落成同一个私有函数
-  （`DatasourceStore::draft_password`），不是两处各写一遍。
-- **不写任何存储**：解出来的连接用完即弃，不产生数据源、不进 run 注册表——
-  与 [ADR-0038](0038-column-mapping-and-target-metadata-face.md) §3 的两个目标端元数据入口同一处置。
-- **回报带 `elapsed_ms` 与 `label`**（MySQL 给库名、Oracle 给连接串），
-  §3 那一行 `.inline-result`（`连接成功 · 186 ms · dw_stage`）要用。**仍不出错误码标签**。
-- **既有的按 id 入口保留**：它是「这条存着的数据源现在还连得上吗」，与草稿测连是两个问题。
-- **路由顺序是硬的**：草稿入口必须排在按 id 那条前面，否则 `test-connection` 那一截
-  会被当成一个数据源 id 吃掉。用例 `the_draft_test_connection_reads_the_form_values_and_writes_nothing`
-  就守着这一点（被吃掉时回的是 404 而不是 400）。
+- **The interpretation of an empty password is identical to that of saving** (`PUT`): given a `datasource_id`
+  it uses the stored one, and in creation an empty password genuinely means no password. §3 states "the two
+  must never diverge", and here that is delivered as one shared private function
+  (`DatasourceStore::draft_password`) rather than written twice.
+- **It writes to no store**: the resolved connection is discarded after use, creating no datasource and no
+  entry in the run registry — the same handling as ADR-0038 §3's two target metadata entry points.
+- **The reply carries `elapsed_ms` and `label`** (the database name for MySQL, the connect string for Oracle),
+  which §3's `.inline-result` line (`连接成功 · 186 ms · dw_stage`) needs. **Still no error code tag.**
+- **The existing by-id endpoint stays**: it answers "can this stored datasource still connect?", a different
+  question from the draft test.
+- **Route ordering is hard**: the draft endpoint must precede the by-id one, or the `test-connection` segment
+  will be swallowed as a datasource id. The case
+  `the_draft_test_connection_reads_the_form_values_and_writes_nothing` guards exactly this (when swallowed it
+  returns 404 rather than 400).
 
-**这不改变 §9 的「零设计系统改动」结论**：新增的是一个后端入口，界面上仍只有那 4 条 CSS。
+**This does not change §9's "zero design-system change" verdict**: what is added is a backend endpoint, and the
+interface still has only those four CSS rules.
