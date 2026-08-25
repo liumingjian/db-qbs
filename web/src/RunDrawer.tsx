@@ -1,7 +1,9 @@
-import { Play, X } from "lucide-react";
-import { useEffect } from "react";
+import { Play, Trash2, X } from "lucide-react";
+import { useEffect, useState } from "react";
 
+import { cleanupRun } from "./api";
 import type { RunHistory, Task } from "./api";
+import { messageFrom } from "./errors";
 import {
   ErrorCodeTag,
   SensitiveValue,
@@ -33,6 +35,7 @@ export function RunDrawer({
   tasks,
   onClose,
   onRerun,
+  onCleaned,
 }: {
   task: Task;
   run: RunHistory;
@@ -40,7 +43,10 @@ export function RunDrawer({
   tasks: Task[] | null;
   onClose: () => void;
   onRerun: (task: Task) => void;
+  onCleaned: () => void;
 }) {
+  const [cleaning, setCleaning] = useState(false);
+  const [cleanupError, setCleanupError] = useState<string | null>(null);
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
@@ -53,6 +59,20 @@ export function RunDrawer({
 
   const presentation = historyPresentation(run);
   const rerun = rerunAction(run, tasks);
+
+  async function cleanWrittenRows() {
+    if (!window.confirm("确定清理这一次运行写入的数据？此操作不可撤销。")) return;
+    setCleaning(true);
+    setCleanupError(null);
+    try {
+      await cleanupRun(run.run_record_id);
+      onCleaned();
+    } catch (error) {
+      setCleanupError(messageFrom(error));
+    } finally {
+      setCleaning(false);
+    }
+  }
 
   return (
     <>
@@ -214,6 +234,21 @@ export function RunDrawer({
             这一条已是最近一次运行；同一个任务的多次历史本版不展示。
           </span>
           <span className="spacer" />
+          {cleanupError !== null && <span className="form-error">{cleanupError}</span>}
+          {run.cleanup_status === "available" && (
+            <button
+              className="button is-danger"
+              type="button"
+              disabled={cleaning}
+              onClick={() => void cleanWrittenRows()}
+            >
+              <Trash2 size={14} aria-hidden="true" />
+              {cleaning ? "正在清理" : "清理本次写入"}
+            </button>
+          )}
+          {run.cleanup_status === "cleaned" && (
+            <span className="drawer-note">已清理 {run.cleaned_rows ?? 0} 行</span>
+          )}
           <button className="button is-ghost" type="button" onClick={onClose}>
             关闭
           </button>

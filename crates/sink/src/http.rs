@@ -1,7 +1,7 @@
 use std::io::{self, Cursor, Read};
 use std::sync::Arc;
 
-use db_qbs_shared::{write_log_line_with_fields, AgentInfo, LogEvent, LogLevel};
+use db_qbs_shared::{write_log_line_with_fields, AgentInfo, CleanupRunRequest, LogEvent, LogLevel};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -116,6 +116,8 @@ fn handle_request<F: DestinationFactory>(
         json_response(200, agent)
     } else if method == Method::Post && path == "/v1/runs" {
         handle_open(&mut request, service)
+    } else if method == Method::Post && path == "/v1/runs/cleanup" {
+        handle_cleanup(&mut request, service)
     } else if method == Method::Post && path == "/v1/target/test-connection" {
         handle_test_connection(&mut request)
     } else if method == Method::Post && path == "/v1/target/tables" {
@@ -184,6 +186,23 @@ fn handle_open(
     match service.open(request) {
         // 两种 outcome 都是 200，区别写在报文里——那份暗号由 `OpenOutcome` 一处编码。
         Ok(outcome) => json_response(200, &outcome.into_response()),
+        Err(error) => error_response(error),
+    }
+}
+
+fn handle_cleanup(
+    request: &mut Request,
+    service: &SinkService<impl DestinationFactory>,
+) -> HttpResponse {
+    if !has_json_content_type(request) {
+        return error_response(unsupported_media_type(None));
+    }
+    let request: CleanupRunRequest = match read_json(request) {
+        Ok(request) => request,
+        Err(error) => return error_response(error),
+    };
+    match service.cleanup(request) {
+        Ok(response) => json_response(200, &response),
         Err(error) => error_response(error),
     }
 }

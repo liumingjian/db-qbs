@@ -27,8 +27,8 @@ use std::sync::Mutex;
 use db_qbs_shared::RowCounts;
 
 use crate::{
-    AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, CreateStagingError, Destination,
-    DropStagingError, TargetColumn, TargetKey, WriteBatchError,
+    AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, CleanupRunError, CreateStagingError,
+    Destination, DropStagingError, TargetColumn, TargetKey, WriteBatchError,
 };
 
 /// One `write_batch` call, recorded whole so batching tests can assert on the
@@ -70,6 +70,8 @@ pub struct InMemoryDestination {
     /// the number is carried through rather than invented on the way out.
     pub purged_rows: Mutex<u64>,
     pub count_ms: Mutex<u64>,
+    pub target_rows: Mutex<HashMap<(String, String), Vec<Option<String>>>>,
+    pub write_ledger: Mutex<Vec<(String, String, String, bool)>>,
 }
 
 impl Default for InMemoryDestination {
@@ -93,6 +95,8 @@ impl Default for InMemoryDestination {
             affected_rows: Mutex::new(None),
             purged_rows: Mutex::new(0),
             count_ms: Mutex::new(0),
+            target_rows: Mutex::new(HashMap::new()),
+            write_ledger: Mutex::new(Vec::new()),
         }
     }
 }
@@ -133,6 +137,16 @@ impl InMemoryDestination {
                 return;
             }
         }
+    }
+
+    pub fn target_row_values(&self, target_table: &str) -> Vec<Vec<Option<String>>> {
+        self.target_rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|((table, _), _)| table == target_table)
+            .map(|(_, row)| row.clone())
+            .collect()
     }
 }
 
@@ -231,6 +245,37 @@ impl Destination for InMemoryDestination {
             });
         }
 
+        let key_indices = request
+            .primary_key
+            .iter()
+            .map(|key| {
+                request
+                    .columns
+                    .iter()
+                    .position(|column| column.eq_ignore_ascii_case(key))
+                    .expect("the service precheck keeps primary keys among selected columns")
+            })
+            .collect::<Vec<_>>();
+        let rows = self.staging.lock().unwrap()[&request.staging_table].clone();
+        let mut target_rows = self.target_rows.lock().unwrap();
+        let mut ledger = self.write_ledger.lock().unwrap();
+        for row in rows {
+            let key = serde_json::to_string(
+                &key_indices
+                    .iter()
+                    .map(|index| &row[*index])
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            target_rows.insert((request.target_table.clone(), key.clone()), row);
+            ledger.push((
+                request.run_id.clone(),
+                request.target_table.clone(),
+                key,
+                false,
+            ));
+        }
+
         Ok(AtomicSwapResult {
             staged_rows,
             purged_rows: *self.purged_rows.lock().unwrap(),
@@ -249,6 +294,44 @@ impl Destination for InMemoryDestination {
         self.staging.lock().unwrap().remove(staging_table);
         self.dropped.lock().unwrap().push(staging_table.to_owned());
         Ok(())
+    }
+
+    fn cleanup_run(
+        &self,
+        run_id: &str,
+        target_table: &str,
+        _primary_key: &[String],
+    ) -> Result<u64, CleanupRunError> {
+        let mut ledger = self.write_ledger.lock().unwrap();
+        let removable = ledger
+            .iter()
+            .enumerate()
+            .filter(|(_, (writer, table, _, cleaned))| {
+                writer == run_id && table == target_table && !cleaned
+            })
+            .filter(|(index, (_, table, key, _))| {
+                !ledger
+                    .iter()
+                    .skip(index + 1)
+                    .any(|(_, later_table, later_key, _)| later_table == table && later_key == key)
+            })
+            .map(|(_, (_, _, key, _))| key.clone())
+            .collect::<Vec<_>>();
+        let mut target_rows = self.target_rows.lock().unwrap();
+        let deleted = removable
+            .iter()
+            .filter(|key| {
+                target_rows
+                    .remove(&(target_table.to_owned(), (*key).clone()))
+                    .is_some()
+            })
+            .count() as u64;
+        for (writer, table, _, cleaned) in ledger.iter_mut() {
+            if writer == run_id && table == target_table {
+                *cleaned = true;
+            }
+        }
+        Ok(deleted)
     }
 }
 

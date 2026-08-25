@@ -21,7 +21,7 @@ use std::thread;
 use std::time::Duration;
 
 use chrono::Utc;
-use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel, RunStage};
+use db_qbs_shared::{write_log_line_with_fields, CleanupRunRequest, LogEvent, LogLevel, RunStage};
 use rand::RngCore;
 use signal_hook::consts::SIGTERM;
 use serde::de::DeserializeOwned;
@@ -354,6 +354,9 @@ pub fn routes() -> &'static [Route] {
             Route::new(Post, "/api/runs/{}/cancel", |state, _request, id| {
                 handle_cancel_run(state.runs, id)
             }),
+            Route::new(Post, "/api/runs/{}/cleanup", |state, _request, id| {
+                handle_cleanup_run(state, id)
+            }),
             Route::new(Get, "/api/runs", |state, request, _id| {
                 handle_list_history(state.runs, state.history, request.query())
             }),
@@ -541,7 +544,10 @@ fn handle_get_run(
         );
     }
     match history_store.get(run_record_id) {
-        Ok(Some(history)) => history_response(&history),
+        Ok(Some(history)) => history_response(
+            &history,
+            history_store.cleanup(run_record_id).ok().flatten(),
+        ),
         Ok(None) => not_found(),
         Err(error) => internal_error(error),
     }
@@ -560,7 +566,18 @@ fn handle_list_history(
     }
     match history_store.list(task_id.as_deref()) {
         Ok(history) => match merge_live_history(runs, history, task_id.as_deref()) {
-            Ok(merged) => json_response(200, &merged),
+            Ok(merged) => {
+                let values = merged
+                    .iter()
+                    .map(|history| {
+                        history_value(
+                            history,
+                            history_store.cleanup(&history.run_record_id).ok().flatten(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                json_response(200, &values)
+            }
             Err(error) => internal_error(error),
         },
         Err(error) => internal_error(error),
@@ -598,14 +615,99 @@ fn merge_live_history(
     Ok(history)
 }
 
-fn history_response(history: &RunHistory) -> HttpResponse {
+fn history_response(history: &RunHistory, cleanup: Option<crate::RunCleanup>) -> HttpResponse {
+    json_response(200, &history_value(history, cleanup))
+}
+
+fn history_value(history: &RunHistory, cleanup: Option<crate::RunCleanup>) -> Value {
     let mut value =
         serde_json::to_value(history).expect("serializing a run history response must succeed");
-    value
+    let object = value
         .as_object_mut()
-        .expect("run history serializes as an object")
-        .insert("live".to_owned(), Value::Bool(false));
-    json_response(200, &value)
+        .expect("run history serializes as an object");
+    object.insert("live".to_owned(), Value::Bool(false));
+    object.insert(
+        "cleanup_status".to_owned(),
+        cleanup.as_ref().map_or(Value::Null, |item| {
+            let status = if item.status == "pending"
+                && history.outcome.as_deref() == Some("SUCCEEDED")
+            {
+                "available"
+            } else {
+                &item.status
+            };
+            Value::String(status.to_owned())
+        }),
+    );
+    object.insert(
+        "cleaned_rows".to_owned(),
+        cleanup
+            .and_then(|item| item.deleted_rows)
+            .map_or(Value::Null, |rows| json!(rows)),
+    );
+    value
+}
+
+fn handle_cleanup_run(state: &Api<'_>, run_record_id: &str) -> HttpResponse {
+    let history = match state.history.get(run_record_id) {
+        Ok(Some(history)) => history,
+        Ok(None) => return not_found(),
+        Err(error) => return internal_error(error),
+    };
+    let cleanup = match state.history.cleanup(run_record_id) {
+        Ok(Some(cleanup)) => cleanup,
+        Ok(None) => {
+            return json_response(
+                409,
+                &json!({ "error": { "message": "这次运行没有可用的写入账本" } }),
+            )
+        }
+        Err(error) => return internal_error(error),
+    };
+    let cleanup_available = cleanup.status == "available"
+        || (cleanup.status == "pending" && history.outcome.as_deref() == Some("SUCCEEDED"));
+    if !cleanup_available {
+        return json_response(
+            409,
+            &json!({ "error": { "message": "这次运行已清理或尚未成功完成" } }),
+        );
+    }
+    let Some(run_id) = history.run_id else {
+        return json_response(
+            409,
+            &json!({ "error": { "message": "这次运行没有目标端运行号" } }),
+        );
+    };
+    let target = match state
+        .datasources
+        .target_connection(&cleanup.target_datasource_id)
+    {
+        Ok(target) => target,
+        Err(error) => return bad_request(error),
+    };
+    let agent = match resolve_target_agent(state, &cleanup.target_datasource_id) {
+        Ok(agent) => agent,
+        Err(error) => return json_response(502, &json!({ "kind": "agent", "message": error })),
+    };
+    let client = match crate::HttpSinkClient::new(&agent.base_url) {
+        Ok(client) => client,
+        Err(error) => return internal_error(error),
+    };
+    match client.cleanup(&CleanupRunRequest {
+        run_id,
+        target_table: cleanup.target_table,
+        target,
+        primary_key: cleanup.primary_key,
+    }) {
+        Ok(response) => match state
+            .history
+            .mark_cleaned(run_record_id, response.deleted_rows)
+        {
+            Ok(()) => json_response(200, &json!({ "deleted_rows": response.deleted_rows })),
+            Err(error) => internal_error(error),
+        },
+        Err(error) => json_response(502, &json!({ "error": { "message": error.message } })),
+    }
 }
 
 /// 把注册表里那条记录压成子进程要用的端点（ADR-0044 §4）。
@@ -640,6 +742,17 @@ fn start_run(
     );
     register_active_run(runs, &run_record_id, &task.task_id)?;
     if let Err(error) = history_store.insert(&history, Utc::now(), config.history_retention_days) {
+        remove_active_run(runs, &run_record_id);
+        return Err(StartRunError::Internal(error));
+    }
+    if let Err(error) = history_store.register_cleanup(
+        &run_record_id,
+        &task.target_datasource_id,
+        &task.spec.target_table,
+        &task.spec.primary_key,
+    ) {
+        history.mark_parent_failure(error.clone(), Utc::now());
+        let _ = history_store.save(&history, Utc::now(), config.history_retention_days);
         remove_active_run(runs, &run_record_id);
         return Err(StartRunError::Internal(error));
     }
@@ -784,6 +897,9 @@ fn supervise_run(
                 .is_err()
         {
             continue;
+        }
+        if is_terminal && history.outcome.as_deref() == Some("SUCCEEDED") {
+            let _ = history_store.mark_cleanup_available(&run_record_id);
         }
         if is_terminal {
             remove_live_history(&runs, &run_record_id);

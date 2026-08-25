@@ -8,10 +8,11 @@ use serde_json::json;
 use crate::precheck::{precheck_with_primary_key, range_check_columns, range_check_issue};
 use crate::{
     AbortResponse, ActiveRun, ApiError, AtomicSwapError, AtomicSwapRequest, BatchPayload,
-    BatchResponse, CommitResponse, CreateStagingError, Destination, DestinationFactory,
-    DropStagingError, FixedDestination, OpenRunRequest, PrecheckIssue, RangeCheckColumn,
-    RangeCheckResult, RunResponse, SinkService, SourceColumn, TargetColumn, Terminal,
-    WriteBatchError, MAX_PREPARED_STATEMENT_PLACEHOLDERS, TOMBSTONE_LIMIT,
+    BatchResponse, CleanupRunError, CleanupRunRequest, CleanupRunResponse, CommitResponse,
+    CreateStagingError, Destination, DestinationFactory, DropStagingError, FixedDestination,
+    OpenRunRequest, PrecheckIssue, RangeCheckColumn, RangeCheckResult, RunResponse, SinkService,
+    SourceColumn, TargetColumn, Terminal, WriteBatchError, MAX_PREPARED_STATEMENT_PLACEHOLDERS,
+    TOMBSTONE_LIMIT,
 };
 
 static RUN_ID_RE: LazyLock<Regex> =
@@ -185,6 +186,7 @@ impl<F: DestinationFactory> SinkService<F> {
             .map(|column| column.name.clone())
             .collect();
         let active_run = ActiveRun {
+            run_id: request.run_id.clone(),
             staging_table: staging_table.clone(),
             max_rows_per_insert: MAX_PREPARED_STATEMENT_PLACEHOLDERS / source_columns.len(),
             source_columns,
@@ -323,6 +325,7 @@ impl<F: DestinationFactory> SinkService<F> {
 
         let received_batches = run.next_seq - 1;
         let swap_request = AtomicSwapRequest {
+            run_id: run.run_id.clone(),
             staging_table: run.staging_table.clone(),
             target_table: run.target_table.clone(),
             primary_key: run.primary_key.clone(),
@@ -398,6 +401,42 @@ impl<F: DestinationFactory> SinkService<F> {
                 Err(error)
             }
         }
+    }
+
+    pub fn cleanup(&self, request: CleanupRunRequest) -> Result<CleanupRunResponse, ApiError> {
+        if request.primary_key.is_empty() {
+            return Err(ApiError {
+                status: 400,
+                code: "BAD_REQUEST",
+                message: "primary_key 不能为空".to_owned(),
+                run_id: Some(request.run_id),
+                details: json!({}),
+            });
+        }
+        let connected = self
+            .factory
+            .connect(&request.target)
+            .map_err(|message| ApiError {
+                status: 500,
+                code: "SINK_ENVIRONMENT",
+                message: format!("连接目标端失败：{message}"),
+                run_id: Some(request.run_id.clone()),
+                details: json!({ "kind": "OTHER" }),
+            })?;
+        let deleted_rows = connected
+            .destination
+            .cleanup_run(&request.run_id, &request.target_table, &request.primary_key)
+            .map_err(|CleanupRunError::Environment(message)| ApiError {
+                status: 500,
+                code: "SINK_ENVIRONMENT",
+                message: format!("清理运行写入的数据失败：{message}"),
+                run_id: Some(request.run_id.clone()),
+                details: json!({ "kind": "OTHER" }),
+            })?;
+        Ok(CleanupRunResponse {
+            run_id: request.run_id,
+            deleted_rows,
+        })
     }
 
     pub fn get(&self, run_id: &str) -> Result<RunResponse, ApiError> {

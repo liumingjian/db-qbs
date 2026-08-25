@@ -279,6 +279,8 @@ export interface RunHistory {
   ms: number;
   last_ts: string | null;
   mapping_issues: MappingIssue[];
+  cleanup_status?: "pending" | "available" | "cleaned" | null;
+  cleaned_rows?: number | null;
 }
 
 export interface LiveRunDetail {
@@ -541,6 +543,16 @@ export async function cancelRun(
     `/api/runs/${encodeURIComponent(runRecordId)}/cancel`,
     {},
     "取消运行失败",
+  );
+}
+
+export async function cleanupRun(
+  runRecordId: string,
+): Promise<{ deleted_rows: number }> {
+  return postJson<{ deleted_rows: number }>(
+    `/api/runs/${encodeURIComponent(runRecordId)}/cleanup`,
+    {},
+    "清理运行写入的数据失败",
   );
 }
 

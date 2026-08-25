@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, TimeDelta, Utc};
 use rusqlite::{named_params, params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{FailureKind, RunStage};
@@ -352,6 +352,15 @@ pub struct HistoryStore {
     database_path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunCleanup {
+    pub target_datasource_id: String,
+    pub target_table: String,
+    pub primary_key: Vec<String>,
+    pub status: String,
+    pub deleted_rows: Option<u64>,
+}
+
 impl HistoryStore {
     pub fn open(data_dir: &Path) -> Result<Self, String> {
         fs::create_dir_all(data_dir)
@@ -413,7 +422,15 @@ impl HistoryStore {
                     mapping_issues      TEXT NOT NULL DEFAULT '[]'
                 );
                  CREATE INDEX IF NOT EXISTS run_history_task_started
-                     ON run_history(task_id, started_at_ms);",
+                     ON run_history(task_id, started_at_ms);
+                 CREATE TABLE IF NOT EXISTS run_cleanup (
+                    run_record_id        TEXT PRIMARY KEY NOT NULL,
+                    target_datasource_id TEXT NOT NULL,
+                    target_table         TEXT NOT NULL,
+                    primary_key          TEXT NOT NULL,
+                    status               TEXT NOT NULL DEFAULT 'pending',
+                    deleted_rows         INTEGER
+                 );",
             )
             .map_err(|error| format!("初始化 SQLite 运行历史表失败：{error}"))?;
         ensure_json_column(&connection, "mapping_issues")?;
@@ -512,6 +529,69 @@ impl HistoryStore {
             )
             .optional()
             .map_err(|error| format!("查询 SQLite 运行历史失败：{error}"))
+    }
+
+    pub fn register_cleanup(
+        &self,
+        run_record_id: &str,
+        target_datasource_id: &str,
+        target_table: &str,
+        primary_key: &[String],
+    ) -> Result<(), String> {
+        let encoded = serde_json::to_string(primary_key)
+            .map_err(|error| format!("序列化运行写入账本主键失败：{error}"))?;
+        self.connection()?.execute(
+            "INSERT INTO run_cleanup (run_record_id, target_datasource_id, target_table, primary_key)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![run_record_id, target_datasource_id, target_table, encoded],
+        ).map_err(|error| format!("登记运行写入账本失败：{error}"))?;
+        Ok(())
+    }
+
+    pub fn cleanup(&self, run_record_id: &str) -> Result<Option<RunCleanup>, String> {
+        self.connection()?
+            .query_row(
+                "SELECT target_datasource_id, target_table, primary_key, status, deleted_rows
+               FROM run_cleanup WHERE run_record_id = ?1",
+                [run_record_id],
+                |row| {
+                    let encoded: String = row.get("primary_key")?;
+                    let primary_key = serde_json::from_str(&encoded).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            row.as_ref().column_index("primary_key").unwrap(),
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
+                    Ok(RunCleanup {
+                        target_datasource_id: row.get("target_datasource_id")?,
+                        target_table: row.get("target_table")?,
+                        primary_key,
+                        status: row.get("status")?,
+                        deleted_rows: row.get("deleted_rows")?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| format!("查询运行写入账本失败：{error}"))
+    }
+
+    pub fn mark_cleanup_available(&self, run_record_id: &str) -> Result<(), String> {
+        self.connection()?
+            .execute(
+                "UPDATE run_cleanup SET status = 'available' WHERE run_record_id = ?1",
+                [run_record_id],
+            )
+            .map_err(|error| format!("开放运行清理动作失败：{error}"))?;
+        Ok(())
+    }
+
+    pub fn mark_cleaned(&self, run_record_id: &str, deleted_rows: u64) -> Result<(), String> {
+        self.connection()?.execute(
+            "UPDATE run_cleanup SET status = 'cleaned', deleted_rows = ?2 WHERE run_record_id = ?1",
+            params![run_record_id, deleted_rows],
+        ).map_err(|error| format!("记录运行清理结果失败：{error}"))?;
+        Ok(())
     }
 
     /// 按业务日期筛选随「业务日期」这个一等概念一起退役（ADR-0035 §3）：
@@ -621,6 +701,10 @@ fn cleanup_transaction(
             [cutoff.timestamp_millis()],
         )
         .map_err(|error| format!("清理过期 SQLite 运行历史失败：{error}"))?;
+    transaction.execute(
+        "DELETE FROM run_cleanup WHERE run_record_id NOT IN (SELECT run_record_id FROM run_history)",
+        [],
+    ).map_err(|error| format!("清理孤立运行写入账本失败：{error}"))?;
     Ok(())
 }
 

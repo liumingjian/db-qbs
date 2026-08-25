@@ -185,6 +185,23 @@ pub struct CommitResponse {
     pub count_ms: u64,
 }
 
+/// Delete the target rows whose latest successful writer is this run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanupRunRequest {
+    pub run_id: String,
+    pub target_table: String,
+    pub target: TargetConnection,
+    pub primary_key: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanupRunResponse {
+    pub run_id: String,
+    pub deleted_rows: u64,
+}
+
 /// `POST /v1/runs/{run_id}/abort` 的响应体。请求体是空对象 `{}`。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
