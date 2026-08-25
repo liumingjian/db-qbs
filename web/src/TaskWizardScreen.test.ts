@@ -139,3 +139,25 @@ describe("the mapping step UI", () => {
     expect(entry).not.toContain("required");
   });
 });
+
+describe("the preview step UI", () => {
+  it("offers preview only as an explicit action and renders canonical null cells", () => {
+    let draft = done(apply(mappingDraft(), { type: "toggle-primary-key", target: "ID" }));
+    draft = done(apply(draft, { type: "advance" }));
+    draft = done(apply(draft, {
+      type: "preview-arrived",
+      preview: {
+        columns: ["ID", "C_NAME"],
+        rows: [["1", null]],
+        truncated: true,
+        elapsed_ms: 9,
+      },
+    }));
+
+    const html = renderWizard(draft);
+    expect(html).toContain("预览前 10 条");
+    expect(html).toContain("NULL");
+    expect(html).toContain("结果已截断，仅显示前 10 条");
+    expect(html).toContain("9 ms");
+  });
+});

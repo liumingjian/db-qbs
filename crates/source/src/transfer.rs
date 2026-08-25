@@ -23,6 +23,9 @@ pub struct SourceReadError {
     /// 成因分类。**在出错的那一步定下**，不靠事后从人话或错误码反推——
     /// 同一个 Oracle 码在建连接与取数两步上指的不是同一件事（ADR-0029 §2）。
     pub kind: FailureKind,
+    /// Oracle's typed timeout outcome. Only the preview HTTP surface treats this
+    /// differently; sync failures retain their existing failure classification.
+    pub timed_out: bool,
 }
 
 impl SourceReadError {
@@ -47,6 +50,7 @@ impl SourceReadError {
             column: None,
             value: None,
             kind,
+            timed_out: false,
         }
     }
 

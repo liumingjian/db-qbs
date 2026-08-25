@@ -1,6 +1,6 @@
 use db_qbs_shared::{canon_date, canon_number, canon_text, canon_timestamp};
 use oracle::sql_type::{OracleType, Timestamp};
-use oracle::{Connection, InitParams, ResultSet, Row};
+use oracle::{Connection, ErrorKind, InitParams, ResultSet, Row};
 
 use crate::{
     builder_column_query, builder_dblink_query, builder_table_query, classify_column,
@@ -37,6 +37,33 @@ impl OracleRowSource {
             value_kinds,
             access: task.oracle.clone(),
             source_sql,
+        })
+    }
+
+    /// Preview has its own timeout and connection. The timeout applies to each
+    /// Oracle round-trip, as defined by ODPI-C, rather than total wall time.
+    pub fn preview(
+        access: &OracleAccess,
+        source_sql: &str,
+        call_timeout: std::time::Duration,
+    ) -> Result<Self, SourceReadError> {
+        let connection = open_connection(access)?;
+        connection
+            .set_call_timeout(Some(call_timeout))
+            .map_err(oracle_error)?;
+        let statement = connection
+            .statement(source_sql)
+            .fetch_array_size(FETCH_ARRAY_SIZE)
+            .build()
+            .map_err(oracle_error)?;
+        let rows = statement.into_result_set(&[]).map_err(oracle_error)?;
+        let (columns, value_kinds) = describe_columns(rows.column_info());
+        Ok(Self {
+            rows,
+            columns,
+            value_kinds,
+            access: access.clone(),
+            source_sql: source_sql.to_owned(),
         })
     }
 
@@ -376,6 +403,7 @@ fn invalid_value(message: String, column: &str, value: String) -> SourceReadErro
         column: Some(column.to_owned()),
         value: Some(value),
         kind: FailureKind::SourceValue,
+        timed_out: false,
     }
 }
 
@@ -458,7 +486,11 @@ fn describe_column(name: &str, oracle_type: &OracleType) -> (SourceColumn, Value
 
 /// 会话已经建起来之后撞上的 Oracle 错误：可能是本地查询，也可能是 dblink 那一头。
 fn oracle_error(error: oracle::Error) -> SourceReadError {
-    SourceReadError::new(error.to_string(), oracle_code(&error))
+    let timed_out = matches!(error.kind(), ErrorKind::DpiError) && error.dpi_code() == Some(1067)
+        || matches!(error.kind(), ErrorKind::OciError) && error.oci_code() == Some(3114);
+    let mut converted = SourceReadError::new(error.to_string(), oracle_code(&error));
+    converted.timed_out = timed_out;
+    converted
 }
 
 /// 建连接那一步撞上的 Oracle 错误——同样的码在这一步指的是**本地**库。

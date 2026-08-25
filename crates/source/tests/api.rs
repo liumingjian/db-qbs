@@ -348,6 +348,13 @@ fn every_route_reaches_its_handler() {
             r#"{"datasource_id":"x","source_sql":"select 1 from dual"}"#.into(),
             400,
         ),
+        (
+            Method::Post,
+            "/api/builder/preview",
+            "/api/builder/preview".into(),
+            r#"{"source_datasource_id":"missing","spec":{},"limit":10}"#.into(),
+            400,
+        ),
         (Method::Get, "/api/agents", "/api/agents".into(), String::new(), 200),
         (Method::Post, "/api/agents", "/api/agents".into(), "{}".into(), 400),
         (
@@ -742,6 +749,38 @@ fn builder_dblinks_and_columns_reject_before_reaching_oracle() {
         r#"{"datasource_id":"no-such-datasource","dblink":"bad link","owner":"APP","table":"HOLDINGS"}"#,
     );
     assert_eq!(bad_dblink.status, 400, "{}", bad_dblink.body_text());
+}
+
+#[test]
+fn builder_preview_validates_spec_and_limit_before_reaching_oracle() {
+    let rig = Rig::new();
+    let incomplete = rig.post(
+        "/api/builder/preview",
+        r#"{"source_datasource_id":"missing","spec":{"owner":"","table":"","target_table":"","primary_key":[],"columns":[]},"limit":10}"#,
+    );
+    assert_eq!(incomplete.status, 400);
+    assert!(incomplete.body_text().contains("owner"));
+
+    let invalid_sql = rig.post(
+        "/api/builder/preview",
+        r#"{"source_datasource_id":"missing","spec":{"source_sql":"DELETE FROM APP.T","owner":"","table":"","target_table":"T","primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":10}"#,
+    );
+    assert_eq!(invalid_sql.status, 400);
+    assert!(invalid_sql.body_text().contains("SELECT"));
+
+    let zero = rig.post(
+        "/api/builder/preview",
+        r#"{"source_datasource_id":"missing","spec":{"source_sql":"SELECT ID FROM APP.T","owner":"","table":"","target_table":"T","primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":0}"#,
+    );
+    assert_eq!(zero.status, 400);
+    assert!(zero.body_text().contains("limit 必须大于 0"));
+
+    let custom_sql = rig.post(
+        "/api/builder/preview",
+        r#"{"source_datasource_id":"missing","spec":{"source_sql":"SELECT ID FROM APP.T","owner":"","table":"","target_table":"T","primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":1000}"#,
+    );
+    assert_eq!(custom_sql.status, 400);
+    assert!(custom_sql.body_text().contains("数据源 missing 不存在"));
 }
 
 /// 请求体超过 1 MiB 时的那句话，判定只有一处。

@@ -16,6 +16,8 @@ import {
   fetchTargetColumns,
   fetchTargetTables,
   generateBuilderSql,
+  previewBuilderRows,
+  previewErrorMessage,
 } from "./api";
 import type { BuilderSql, BuilderTable } from "./api";
 import { messageFrom } from "./errors";
@@ -46,15 +48,17 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
   const [sourceFilter, setSourceFilter] = useState("");
   const [targetFilter, setTargetFilter] = useState("");
   const [expandedOwners, setExpandedOwners] = useState<ReadonlySet<string>>(new Set());
-  const [busy, setBusy] = useState<"tables" | "columns" | "target" | "submit" | null>(null);
+  const [busy, setBusy] = useState<"tables" | "columns" | "target" | "preview" | "submit" | null>(null);
   const tableRequest = useRef(0);
   const sourceColumnRequest = useRef(0);
   const targetColumnRequest = useRef(0);
+  const previewRequest = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [sql, setSql] = useState<BuilderSql | null>(null);
   const [sqlError, setSqlError] = useState<string | null>(null);
   const model = view(draft);
   const advanceBlocked = model.step.blockers.length > 0;
+  const sqlIdentity = JSON.stringify(toSpec(draft));
 
   function change(intent: Change) {
     const current = draftRef.current;
@@ -222,6 +226,33 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
     void loadTarget();
   }
 
+  async function loadPreview() {
+    const request = ++previewRequest.current;
+    const current = draftRef.current;
+    const identity = previewIdentity(current);
+    setBusy("preview");
+    setError(null);
+    try {
+      const preview = await previewBuilderRows(
+        current.source.datasource_id,
+        toSpec(current),
+        10,
+      );
+      if (request !== previewRequest.current || previewIdentity(draftRef.current) !== identity) {
+        return;
+      }
+      change({ type: "preview-arrived", preview });
+    } catch (previewError) {
+      if (request === previewRequest.current && previewIdentity(draftRef.current) === identity) {
+        setError(previewErrorMessage(previewError));
+      }
+    } finally {
+      if (request === previewRequest.current) {
+        setBusy((currentBusy) => currentBusy === "preview" ? null : currentBusy);
+      }
+    }
+  }
+
   useEffect(() => {
     let active = true;
     void Promise.all([
@@ -280,14 +311,12 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
       setSqlError(null);
       return;
     }
-    if (canAdvance(draft, 1).length > 0) {
-      setSql(null);
-      setSqlError(null);
-      return;
-    }
     let active = true;
+    const spec = toSpec(draft);
+    setSql(null);
+    setSqlError(null);
     const timer = window.setTimeout(() => {
-      void generateBuilderSql(toSpec(draft))
+      void generateBuilderSql(spec)
         .then((next) => {
           if (active) {
             setSql(next);
@@ -300,7 +329,7 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
       active = false;
       window.clearTimeout(timer);
     };
-  }, [draft]);
+  }, [draft.step, sqlIdentity]);
 
   const sourceGroups = useMemo(() => {
     const query = sourceFilter.trim().toLocaleLowerCase();
@@ -475,6 +504,7 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
             change={change}
             loadSourceColumns={() => void loadSourceColumns()}
             loadTarget={refreshTarget}
+            loadPreview={() => void loadPreview()}
           />
           {error !== null && <div className="form-error" role="alert">{error}</div>}
         </div>
@@ -519,6 +549,7 @@ function StepBody({
   change,
   loadSourceColumns,
   loadTarget,
+  loadPreview,
 }: {
   draft: Draft;
   sql: BuilderSql | null;
@@ -527,6 +558,7 @@ function StepBody({
   change: (intent: Change) => void;
   loadSourceColumns: () => void;
   loadTarget: () => void;
+  loadPreview: () => void;
 }) {
   const model = view(draft).step;
   if (model.step === 1) {
@@ -556,8 +588,11 @@ function StepBody({
     return <section className="wizard-step">
       <header><h1>过滤与验证</h1><p>检查最终查询与样例数据，并判断是否需要补充 WHERE 条件。</p></header>
       {model.whereEditable ? <div className="where-clause-editor"><HighlightedSqlInput value={model.where} placeholder="STATUS = 'ACTIVE' AND CREATED_AT >= DATE '2026-01-01'" label="WHERE 条件" rows={5} onChange={(clause) => change({ type: "where", clause })} /></div> : <div className="wizard-readonly">自定义 SQL 的过滤条件直接写在左侧 SQL 中。</div>}
-      <section className="generated-sql"><header><div><strong>构建 SQL</strong><span>实际执行的源端查询</span></div></header>{sqlError ? <div className="form-error">{sqlError}</div> : sql ? <pre className="ddl-output">{sql.source_sql}</pre> : <p className="spec-empty">先完成字段映射与主键，系统才有完整 SQL。</p>}</section>
-      <div className="wizard-placeholder"><strong>数据预览</strong><span>前 10 行真实数据预览将在 #188 接入。</span></div>
+      <section className="generated-sql"><header><div><strong>构建 SQL</strong><span>实际执行的源端查询</span></div></header>{sqlError ? <div className="form-error">{sqlError}</div> : sql ? <pre className="ddl-output">{sql.source_sql}</pre> : <p className="spec-empty">正在生成最终查询。</p>}</section>
+      <section className="preview-panel">
+        <header><div><strong>数据预览</strong><span>使用上方最终查询读取源端数据</span></div><button className="button" type="button" disabled={busy === "preview"} onClick={loadPreview}>{busy === "preview" ? <LoaderCircle className="is-spinning" size={15} /> : null}预览前 10 条</button></header>
+        {model.preview.value ? <><div className="table-wrap"><table className="data-grid preview-table"><thead><tr>{model.preview.value.columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{model.preview.value.rows.map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, columnIndex) => <td key={`${rowIndex}-${columnIndex}`}><span className="mono">{cell ?? "NULL"}</span></td>)}</tr>)}</tbody></table></div><footer><span>{model.preview.value.rows.length} 条 · {model.preview.value.elapsed_ms} ms</span>{model.preview.value.truncated && <span>结果已截断，仅显示前 10 条</span>}</footer></> : <p className="spec-empty">点击按钮后读取真实数据；修改查询条件后需重新预览。</p>}
+      </section>
       <Blockers blockers={model.blockers} />
     </section>;
   }
@@ -581,6 +616,13 @@ function StepBody({
     </dl>
     <Blockers blockers={model.blockers} />
   </section>;
+}
+
+function previewIdentity(draft: Draft): string {
+  return JSON.stringify({
+    source_datasource_id: draft.source.datasource_id,
+    spec: toSpec(draft),
+  });
 }
 
 function Blockers({ blockers: allBlockers }: { blockers: ReturnType<typeof canAdvance> }) {
