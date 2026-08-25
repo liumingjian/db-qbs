@@ -475,9 +475,13 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .wizard-placeholder.is-prominent { min-height: 180px; justify-content: center; }
 .wizard-mapping { min-width: 680px; }
 .wizard-mapping tr.is-problem td { background: var(--crit-bg); }
+.wizard-mapping tr.is-problem select { border-color: var(--crit); }
 .wizard-mapping td small { display: block; max-width: 260px; margin-top: 3px; color: var(--crit); font-size: var(--size-cap); white-space: normal; }
 .wizard-mapping .auto-mark { display: inline; margin-left: 5px; color: var(--ok); }
 .wizard-mapping select { width: 100%; min-width: 140px; }
+.wizard-mapping-problems { display: flex; align-items: baseline; gap: 10px; padding: 10px 12px; border-left: 3px solid var(--crit); background: var(--crit-bg); color: var(--crit); }
+.wizard-mapping-problems strong { flex: none; font-size: var(--size-meta); }
+.wizard-mapping-problems ul { margin: 0; padding-left: 18px; line-height: var(--lh-prose); }
 .wizard-blockers { margin: 0; padding: 10px 10px 10px 30px; border-left: 3px solid var(--crit); background: var(--crit-bg); color: var(--crit); line-height: var(--lh-prose); }
 .wizard-name { max-width: 520px; color: var(--text); font-weight: var(--weight-em); }
 .wizard-confirm-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; margin: 0; padding: 1px; background: var(--line); }

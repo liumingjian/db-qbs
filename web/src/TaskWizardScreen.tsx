@@ -28,7 +28,7 @@ import {
   toSpec,
   view,
 } from "./wizard";
-import type { Change, Draft, Step } from "./wizard";
+import type { Change, Draft } from "./wizard";
 
 export interface TaskWizardScreenProps {
   initial: Draft;
@@ -51,6 +51,7 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
   const [sql, setSql] = useState<BuilderSql | null>(null);
   const [sqlError, setSqlError] = useState<string | null>(null);
   const model = view(draft);
+  const advanceBlocked = model.step.blockers.length > 0;
 
   function change(intent: Change) {
     const current = draftRef.current;
@@ -408,7 +409,7 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
               <button
                 className="button is-primary"
                 type="button"
-                disabled={draft.step !== 3 && canAdvance(draft, draft.step).length > 0}
+                disabled={draft.step !== 3 && advanceBlocked}
                 onClick={advance}
               >{draft.step === 3 ? "查看确认页" : "下一步"}</button>
             ) : (
@@ -445,6 +446,7 @@ function StepBody({
 }) {
   const model = view(draft).step;
   if (model.step === 1) {
+    const mappingBlockers = model.blockers.filter((blocker) => blocker.column === null);
     return <section className="wizard-step">
       <header><h1>选列与字段映射</h1><p>确认要搬哪些列，以及每一列写到目标表的哪里。</p></header>
       {draft.fetchMode === "sql" && (
@@ -456,13 +458,13 @@ function StepBody({
         <div className="table-wrap"><table className="data-grid wizard-mapping"><thead><tr><th>同步</th><th>源列</th><th>目标列</th><th>主键</th></tr></thead><tbody>
           {model.rows.map((row) => <tr className={row.problem ? "is-problem" : ""} key={row.source}>
             <td><input type="checkbox" checked={row.selected} onChange={() => change({ type: "toggle-column", source: row.source })} /></td>
-            <td><span className="mono">{row.source}</span>{row.problem && <small>{row.problem}</small>}</td>
-            <td>{!row.selected ? "—" : row.control === "auto" ? <span>{row.target} <small className="auto-mark">自动匹配</small></span> : <select value={row.target} onChange={(event) => change({ type: "rename-target", source: row.source, target: event.target.value })}><option value="">请选择</option>{draft.targetColumns.map((column) => <option key={column.name}>{column.name}</option>)}</select>}</td>
+            <td><span className="mono">{row.source}</span></td>
+            <td>{!row.selected ? "—" : <>{row.control === "auto" ? <span>{row.target} <small className="auto-mark">自动匹配</small></span> : <select aria-invalid={row.problem ? true : undefined} value={row.target} onChange={(event) => change({ type: "rename-target", source: row.source, target: event.target.value })}><option value="">请选择</option>{draft.targetColumns.map((column) => <option key={column.name}>{column.name}</option>)}</select>}{row.problem && <small>{row.problem}</small>}</>}</td>
             <td><input type="checkbox" disabled={!row.selected || row.target === "" || row.primaryKeyLock !== null} title={row.primaryKeyLock ?? undefined} checked={row.primaryKey} onChange={() => change({ type: "toggle-primary-key", target: row.target })} />{row.primaryKeyLock && <small>{row.primaryKeyLock}</small>}</td>
           </tr>)}
         </tbody></table></div>
       )}
-      <Blockers draft={draft} step={1} />
+      {mappingBlockers.length > 0 && <div className="wizard-mapping-problems" role="alert"><strong>映射与主键</strong><ul>{mappingBlockers.map((blocker) => <li key={blocker.message}>{blocker.message}</li>)}</ul></div>}
     </section>;
   }
   if (model.step === 2) {
@@ -471,7 +473,7 @@ function StepBody({
       {model.whereEditable ? <div className="where-clause-editor"><HighlightedSqlInput value={model.where} placeholder="STATUS = 'ACTIVE' AND CREATED_AT >= DATE '2026-01-01'" label="WHERE 条件" rows={5} onChange={(clause) => change({ type: "where", clause })} /></div> : <div className="wizard-readonly">自定义 SQL 的过滤条件直接写在左侧 SQL 中。</div>}
       <section className="generated-sql"><header><div><strong>构建 SQL</strong><span>实际执行的源端查询</span></div></header>{sqlError ? <div className="form-error">{sqlError}</div> : sql ? <pre className="ddl-output">{sql.source_sql}</pre> : <p className="spec-empty">先完成字段映射与主键，系统才有完整 SQL。</p>}</section>
       <div className="wizard-placeholder"><strong>数据预览</strong><span>前 10 行真实数据预览将在 #188 接入。</span></div>
-      <Blockers draft={draft} step={2} />
+      <Blockers blockers={model.blockers} />
     </section>;
   }
   if (model.step === 3) {
@@ -492,11 +494,11 @@ function StepBody({
       <div className="is-wide"><dt>字段映射</dt><dd>{confirmView.mappings.map((mapping) => <span className="mapping-chip" key={mapping.source}>{mapping.source} → {mapping.target}</span>)}</dd></div>
       <div className="is-wide"><dt>目标表检查</dt><dd>{confirmView.findings.length === 0 ? "检查功能待 #187 接入" : `${confirmView.findings.length} 项结论`}</dd></div>
     </dl>
-    <Blockers draft={draft} step={4} />
+    <Blockers blockers={model.blockers} />
   </section>;
 }
 
-function Blockers({ draft, step }: { draft: Draft; step: Step }) {
-  const blockers = canAdvance(draft, step).filter((blocker) => blocker.column === null);
+function Blockers({ blockers: allBlockers }: { blockers: ReturnType<typeof canAdvance> }) {
+  const blockers = allBlockers.filter((blocker) => blocker.column === null);
   return blockers.length === 0 ? null : <ul className="wizard-blockers">{blockers.map((blocker) => <li key={blocker.message}>{blocker.message}</li>)}</ul>;
 }

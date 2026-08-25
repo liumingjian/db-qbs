@@ -122,7 +122,6 @@ export function SqlEditor({
         value={value}
         placeholder={placeholder}
         label="自定义 SQL"
-        required
         rows={8}
         textareaRef={textareaRef}
         onChange={onChange}

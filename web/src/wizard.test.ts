@@ -252,15 +252,23 @@ describe("the advance gate", () => {
     draft = done(apply(draft, { type: "rename-target", source: "C_NAME", target: "ID" }));
     const blockers = canAdvance(draft, 1).filter((blocker) => blocker.message.includes("重复"));
     expect(blockers.map((blocker) => blocker.column).sort()).toEqual(["C_NAME", "ID"]);
+    const step = view(draft, 1).step;
+    if (step.step !== 1) throw new Error("expected step 1");
+    expect(step.rows.filter((row) => row.problem?.includes("目标字段 ID 重复")).map((row) => row.source).sort()).toEqual([
+      "C_NAME",
+      "ID",
+    ]);
   });
 
   it("blocks on a missing primary key and says so", () => {
     let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t" }));
     draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
     draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
-    expect(canAdvance(draft, 1).map((blocker) => blocker.message)).toContain(
-      "主键必选：至少要勾一列作为 upsert 的去重键",
-    );
+    expect(canAdvance(draft, 1)).toContainEqual({
+      step: 1,
+      column: null,
+      message: "主键必选：至少要勾一列作为 upsert 的去重键",
+    });
   });
 
   it("catches the target field shapes the server would reject", () => {
