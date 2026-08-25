@@ -22,7 +22,7 @@ import {
   previewBuilderRows,
   previewErrorMessage,
 } from "./api";
-import type { BuilderSql, BuilderTable } from "./api";
+import type { BuilderSql, BuilderTable, PreviewResult } from "./api";
 import { messageFrom } from "./errors";
 import type { DatasourceOption } from "./entry";
 import { HighlightedSqlInput, SqlEditor } from "./SqlEditor";
@@ -735,7 +735,7 @@ function StepBody({
       <section className="generated-sql"><header><div><strong>构建 SQL</strong><span>实际执行的源端查询</span></div></header>{sqlError ? <div className="form-error">{sqlError}</div> : sql ? <pre className="ddl-output">{sql.source_sql}</pre> : <p className="spec-empty">正在生成最终查询。</p>}</section>
       <section className="preview-panel">
         <header><div><strong>数据预览</strong><span>使用上方最终查询读取源端数据</span></div><button className="button" type="button" disabled={busy === "preview"} onClick={loadPreview}>{busy === "preview" ? <LoaderCircle className="is-spinning" size={15} /> : null}预览前 10 条</button></header>
-        {model.preview.value ? <><div className="table-wrap"><table className="data-grid preview-table"><thead><tr>{model.preview.value.columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{model.preview.value.rows.map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, columnIndex) => <td key={`${rowIndex}-${columnIndex}`}><span className="mono">{cell ?? "NULL"}</span></td>)}</tr>)}</tbody></table></div><footer><span>{model.preview.value.rows.length} 条 · {model.preview.value.elapsed_ms} ms</span>{model.preview.value.truncated && <span>结果已截断，仅显示前 10 条</span>}</footer></> : <p className="spec-empty">点击按钮后读取真实数据；修改查询条件后需重新预览。</p>}
+        {model.preview.value ? <PreviewData preview={model.preview.value} /> : <p className="spec-empty">点击按钮后读取真实数据；修改查询条件后需重新预览。</p>}
       </section>
       <Blockers blockers={model.blockers} />
     </section>;
@@ -780,8 +780,19 @@ function StepBody({
       <div className="is-wide"><dt>字段映射</dt><dd>{confirmView.mappings.map((mapping) => <span className="mapping-chip" key={mapping.source}>{mapping.source} → {mapping.target}</span>)}</dd></div>
       <div className="is-wide"><dt>目标表检查</dt><dd>{confirmView.findings.length === 0 ? "已通过" : `${confirmView.findings.length} 项问题`}</dd></div>
     </dl>
+    {confirmView.preview !== null && <section className="preview-panel">
+      <header><div><strong>数据预览</strong><span>最终确认的源端样例数据</span></div></header>
+      <PreviewData preview={confirmView.preview} />
+    </section>}
     <Blockers blockers={model.blockers} />
   </section>;
+}
+
+function PreviewData({ preview }: { preview: PreviewResult }) {
+  return <>
+    <div className="table-wrap"><table className="data-grid preview-table"><thead><tr>{preview.columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{preview.rows.map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, columnIndex) => <td key={`${rowIndex}-${columnIndex}`}><span className="mono">{cell ?? "NULL"}</span></td>)}</tr>)}</tbody></table></div>
+    <footer><span>{preview.rows.length} 条 · {preview.elapsed_ms} ms</span>{preview.truncated && <span>结果已截断，仅显示前 10 条</span>}</footer>
+  </>;
 }
 
 function previewIdentity(draft: Draft): string {

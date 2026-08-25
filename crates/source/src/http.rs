@@ -148,6 +148,8 @@ struct TargetMetadataInput {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TargetCheckInput {
+    // The task spec has names but no Oracle type/length metadata; target comparison must describe
+    // the selected source columns through the bound source datasource first.
     source_datasource_id: String,
     target_datasource_id: String,
     target_table: String,

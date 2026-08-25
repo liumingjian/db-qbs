@@ -484,8 +484,8 @@ impl HistoryStore {
                  );",
             )
             .map_err(|error| format!("初始化 SQLite 运行历史表失败：{error}"))?;
-        ensure_json_column(&connection, "mapping_issues")?;
-        ensure_json_object_column(&connection, "evidence")?;
+        ensure_json_column(&connection, "mapping_issues", "[]")?;
+        ensure_json_column(&connection, "evidence", "{}")?;
         ensure_nullable_text_column(&connection, "failure_kind")?;
         ensure_nullable_integer_column(&connection, "total_rows")?;
         ensure_nullable_integer_column(&connection, "precount_ms")?;
@@ -793,7 +793,7 @@ fn retention_cutoff(now: DateTime<Utc>, retention_days: u64) -> Option<DateTime<
     now.checked_sub_signed(TimeDelta::try_days(days)?)
 }
 
-fn ensure_json_column(connection: &Connection, name: &str) -> Result<(), String> {
+fn ensure_json_column(connection: &Connection, name: &str, default: &str) -> Result<(), String> {
     let exists: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('run_history') WHERE name = ?1)",
@@ -806,27 +806,7 @@ fn ensure_json_column(connection: &Connection, name: &str) -> Result<(), String>
     }
     connection
         .execute(
-            &format!("ALTER TABLE run_history ADD COLUMN {name} TEXT NOT NULL DEFAULT '[]'"),
-            [],
-        )
-        .map_err(|error| format!("迁移 SQLite 运行历史列 {name} 失败：{error}"))?;
-    Ok(())
-}
-
-fn ensure_json_object_column(connection: &Connection, name: &str) -> Result<(), String> {
-    let exists: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('run_history') WHERE name = ?1)",
-            [name],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("检查 SQLite 运行历史列 {name} 失败：{error}"))?;
-    if exists {
-        return Ok(());
-    }
-    connection
-        .execute(
-            &format!("ALTER TABLE run_history ADD COLUMN {name} TEXT NOT NULL DEFAULT '{{}}'"),
+            &format!("ALTER TABLE run_history ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'"),
             [],
         )
         .map_err(|error| format!("迁移 SQLite 运行历史列 {name} 失败：{error}"))?;
