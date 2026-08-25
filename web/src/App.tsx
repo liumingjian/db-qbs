@@ -61,16 +61,17 @@ import {
   targetFieldOf,
 } from "./spec";
 import { DatasourceScreen } from "./DatasourceScreen";
-import { evaluateEntry } from "./entry";
+import { evaluateEdit, evaluateEntry, gateFix, gateReason } from "./entry";
+import type { EntryFix, EntryGuard } from "./entry";
 import { TaskEntryDialog } from "./TaskEntryDialog";
 import { TaskWizardScreen } from "./TaskWizardScreen";
 import { FormField, Modal, ModalFooter } from "./ui";
-import { openNew, taskName, toSpec } from "./wizard";
-import type { Draft } from "./wizard";
+import { openExisting, openNew, taskName, toSpec } from "./wizard";
+import type { Draft, Step } from "./wizard";
 
 type DialogState =
   | { kind: "entry" }
-  | { kind: "edit"; task: Task }
+  | { kind: "edit"; task: Task; requestedStep: Step }
   | { kind: "rename"; task: Task }
   | { kind: "delete"; task: Task }
   | null;
@@ -312,6 +313,30 @@ export function App() {
     }
   }, [page, wizardDraft]);
 
+  useEffect(() => {
+    if (dialog?.kind !== "edit") return;
+    const guard = evaluateEdit(dialog.task, datasources, agents, datasourcesLoading);
+    if (guard.kind !== "open") return;
+    const source = guard.sources.find(
+      (option) => option.datasource_id === dialog.task.source_datasource_id,
+    );
+    const target = guard.targets.find(
+      (option) => option.datasource_id === dialog.task.target_datasource_id,
+    );
+    if (source === undefined || target === undefined) return;
+    setActiveRun(null);
+    setWizardDraft(openExisting(
+      dialog.task,
+      { datasource_id: source.datasource_id, name: source.name },
+      { datasource_id: target.datasource_id, name: target.name },
+      target.agentStatus === "online",
+      dialog.requestedStep,
+    ));
+    setDialog(null);
+    setPage("wizard");
+    window.location.hash = "wizard";
+  }, [agents, datasources, datasourcesLoading, dialog]);
+
   const latestRuns = useMemo(() => latestRunByTask(runHistory), [runHistory]);
 
   function toggleSider() {
@@ -337,12 +362,23 @@ export function App() {
   }
 
   async function handleWizardSubmit(draft: Draft, action: "start" | "save-only") {
-    const created = await createTask({
+    const input = {
       name: taskName(draft),
       source_datasource_id: draft.source.datasource_id,
       target_datasource_id: draft.target.datasource_id,
       spec: toSpec(draft),
-    });
+    };
+    if (draft.mode === "edit" && draft.taskId !== null) {
+      const updated = await updateTask(draft.taskId, input);
+      setTasks((currentTasks) =>
+        currentTasks?.map((task) => task.task_id === updated.task_id ? updated : task) ?? [updated],
+      );
+      setFocusTaskId(updated.task_id);
+      navigate("jobs");
+      void loadList();
+      return;
+    }
+    const created = await createTask(input);
     setTasks((currentTasks) => [...(currentTasks ?? []), created]);
     if (action === "start") {
       try {
@@ -465,7 +501,13 @@ export function App() {
           </nav>
           <span className="breadcrumb">
             数据导入 <span aria-hidden="true">/</span>{" "}
-            <strong>{activeRun !== null ? "运行详情" : pageLabel(page)}</strong>
+            <strong>
+              {activeRun !== null
+                ? "运行详情"
+                : page === "wizard" && wizardDraft?.mode === "edit"
+                  ? "编辑任务"
+                  : pageLabel(page)}
+            </strong>
           </span>
           <span className="topbar-right">
             <span className="environment">当前工作台</span>
@@ -508,7 +550,9 @@ export function App() {
                 void loadList();
               }}
               onRelaunch={() => void handleStart(activeRun.task)}
-              onEditTask={() => setDialog({ kind: "edit", task: activeRun.task })}
+              onEditTask={(requestedStep) =>
+                setDialog({ kind: "edit", task: activeRun.task, requestedStep })
+              }
             />
           )}
 
@@ -520,7 +564,7 @@ export function App() {
               refreshing={refreshing}
               onRefresh={() => void loadList()}
               onCreate={openCreateDialog}
-              onEdit={(task) => setDialog({ kind: "edit", task })}
+              onEdit={(task) => setDialog({ kind: "edit", task, requestedStep: 1 })}
               onRename={(task) => setDialog({ kind: "rename", task })}
               onDelete={(task) => setDialog({ kind: "delete", task })}
               startingTaskId={startingTaskId}
@@ -590,14 +634,13 @@ export function App() {
           />
         )}
         {page === "jobs" && dialog?.kind === "edit" && (
-          <TaskFormDialog
-            title={`编辑 · ${dialog.task.name}`}
-            initial={taskInputFrom(dialog.task)}
-            datasources={datasources}
-            submitLabel="保存"
-            hideName
+          <TaskEditGuardDialog
+            guard={evaluateEdit(dialog.task, datasources, agents, datasourcesLoading)}
             onClose={closeDialog}
-            onSubmit={(input) => handleUpdate(dialog.task, input)}
+            onFix={(fix) => {
+              closeDialog();
+              navigate(fix);
+            }}
           />
         )}
         {page === "jobs" && dialog?.kind === "rename" && (
@@ -632,6 +675,45 @@ function pageLabel(page: Page): string {
     case "wizard":
       return "新建导入";
   }
+}
+
+function TaskEditGuardDialog({
+  guard,
+  onClose,
+  onFix,
+}: {
+  guard: EntryGuard;
+  onClose: () => void;
+  onFix: (fix: EntryFix) => void;
+}) {
+  if (guard.kind === "open") return null;
+  if (guard.kind === "loading") {
+    return (
+      <Modal title="检查编辑条件" onClose={onClose} busy={false} narrow>
+        <div className="modal-body entry-loading">
+          <LoaderCircle className="is-spinning" size={18} aria-hidden="true" />
+          正在检查任务绑定的数据源
+        </div>
+      </Modal>
+    );
+  }
+  const fix = gateFix(guard.gate);
+  return (
+    <Modal title="暂时不能编辑任务" onClose={onClose} busy={false} narrow>
+      <div className="modal-body entry-blocked">
+        <strong>{gateReason(guard.gate)}</strong>
+        <span>补齐这项条件后，再从作业中心编辑任务。</span>
+      </div>
+      <footer className="modal-footer">
+        <button className="button is-ghost" type="button" onClick={onClose}>
+          取消
+        </button>
+        <button className="button is-primary" type="button" onClick={() => onFix(fix)}>
+          {fix === "agents" ? "前往目标端 Agent" : "前往数据源"}
+        </button>
+      </footer>
+    </Modal>
+  );
 }
 
 type TargetMetaState =
