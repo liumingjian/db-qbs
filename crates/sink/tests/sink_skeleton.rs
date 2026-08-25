@@ -3,12 +3,11 @@ use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+use db_qbs_sink::test_support::InMemoryDestination;
 use db_qbs_sink::{
     build_staging_ddl, check_connection_settings, precheck, precheck_with_primary_key,
-    AtomicSwapError, AtomicSwapRequest,
-    AtomicSwapResult, CreateStagingError, Destination, DropStagingError, OpenRunRequest,
-    RangeCheckColumn, RangeCheckResult, SinkConfig, SinkService, SourceColumn, TargetColumn,
-    TargetConnection, TargetKey, WriteBatchError,
+    CreateStagingError, DropStagingError, OpenRunRequest, RangeCheckColumn, RangeCheckResult,
+    SinkConfig, SinkService, SourceColumn, TargetColumn, TargetConnection, TargetKey,
 };
 
 const RUN_ID: &str = "20260814091530_a3f19c";
@@ -600,84 +599,6 @@ fn connection_ritual_reports_variable_expected_and_actual_values() {
     assert!(error.contains("16777216"), "{error}");
 }
 
-struct FakeDestination {
-    columns: Vec<TargetColumn>,
-    /// 目标表上的唯一约束。缺省给一条 `PRIMARY KEY (D_BIZ)`——多数用例的目标表是「配好的」，
-    /// 缺约束是要单独立用例去证的例外，不是默认状态。
-    keys: Vec<TargetKey>,
-    created: Mutex<Vec<(String, String)>>,
-    dropped: Mutex<Vec<String>>,
-    create_error: Mutex<Option<CreateStagingError>>,
-    drop_error: Mutex<Option<DropStagingError>>,
-}
-
-impl Default for FakeDestination {
-    fn default() -> Self {
-        Self {
-            columns: Vec::new(),
-            keys: vec![TargetKey {
-                name: "PRIMARY".to_owned(),
-                columns: vec!["D_BIZ".to_owned()],
-            }],
-            created: Mutex::new(Vec::new()),
-            dropped: Mutex::new(Vec::new()),
-            create_error: Mutex::new(None),
-            drop_error: Mutex::new(None),
-        }
-    }
-}
-
-impl Destination for FakeDestination {
-    fn target_columns(&self, _target_table: &str) -> Result<Vec<TargetColumn>, String> {
-        Ok(self.columns.clone())
-    }
-
-    fn target_keys(&self, _target_table: &str) -> Result<Vec<TargetKey>, String> {
-        Ok(self.keys.clone())
-    }
-
-    fn create_staging(&self, staging_table: &str, ddl: &str) -> Result<(), CreateStagingError> {
-        if let Some(error) = self.create_error.lock().unwrap().take() {
-            return Err(error);
-        }
-        self.created
-            .lock()
-            .unwrap()
-            .push((staging_table.to_owned(), ddl.to_owned()));
-        Ok(())
-    }
-
-    fn write_batch(
-        &self,
-        _staging_table: &str,
-        _columns: &[String],
-        rows: &[Vec<Option<String>>],
-        _max_rows_per_insert: usize,
-    ) -> Result<u64, WriteBatchError> {
-        Ok(rows.len() as u64)
-    }
-
-    fn atomic_swap(
-        &self,
-        request: &AtomicSwapRequest,
-    ) -> Result<AtomicSwapResult, AtomicSwapError> {
-        Ok(AtomicSwapResult {
-            staged_rows: request.source_rows,
-            purged_rows: 0,
-            swapped_rows: request.source_rows,
-            count_ms: 0,
-        })
-    }
-
-    fn drop_staging(&self, staging_table: &str) -> Result<(), DropStagingError> {
-        if let Some(error) = self.drop_error.lock().unwrap().take() {
-            return Err(error);
-        }
-        self.dropped.lock().unwrap().push(staging_table.to_owned());
-        Ok(())
-    }
-}
-
 fn open_request(source_columns: Vec<SourceColumn>) -> OpenRunRequest {
     OpenRunRequest {
         run_id: RUN_ID.to_owned(),
@@ -698,9 +619,9 @@ fn open_request(source_columns: Vec<SourceColumn>) -> OpenRunRequest {
 #[test]
 fn open_creates_staging_then_abort_is_idempotent() {
     let (sources, targets) = valid_columns();
-    let destination = Arc::new(FakeDestination {
+    let destination = Arc::new(InMemoryDestination {
         columns: targets,
-        ..FakeDestination::default()
+        ..InMemoryDestination::default()
     });
     let service = SinkService::new("qbs", destination.clone());
 
@@ -748,7 +669,7 @@ fn poc_relaxed_precheck_allows_mixed_types_not_null_and_split_keys() {
             3,
         ),
     ];
-    let destination = Arc::new(FakeDestination {
+    let destination = Arc::new(InMemoryDestination {
         columns: targets,
         keys: vec![
             TargetKey {
@@ -760,7 +681,7 @@ fn poc_relaxed_precheck_allows_mixed_types_not_null_and_split_keys() {
                 columns: vec!["SUB_ID".to_owned()],
             },
         ],
-        ..FakeDestination::default()
+        ..InMemoryDestination::default()
     });
     let service = SinkService::new_relaxed_precheck("qbs", destination.clone());
     let mut request = open_request(sources);
@@ -804,9 +725,9 @@ fn bare_number_range_check_delays_staging_and_rejects_invalid_rows() {
             2,
         ),
     ];
-    let destination = Arc::new(FakeDestination {
+    let destination = Arc::new(InMemoryDestination {
         columns: targets,
-        ..FakeDestination::default()
+        ..InMemoryDestination::default()
     });
     let service = SinkService::new("qbs", destination.clone());
 
@@ -876,9 +797,9 @@ fn bare_number_range_check_with_no_invalid_rows_creates_staging() {
             2,
         ),
     ];
-    let destination = Arc::new(FakeDestination {
+    let destination = Arc::new(InMemoryDestination {
         columns: targets,
-        ..FakeDestination::default()
+        ..InMemoryDestination::default()
     });
     let service = SinkService::new("qbs", destination.clone());
 
@@ -900,10 +821,10 @@ fn open_rejects_a_primary_key_the_target_table_has_no_constraint_for() {
     // 撤掉 DELETE 之后这是**唯一**挡住静默重复的东西：目标表没有对应唯一约束时，
     // `ON DUPLICATE KEY UPDATE` 不报错、写得进去、重跑就多一份行。
     let (sources, targets) = valid_columns();
-    let destination = Arc::new(FakeDestination {
+    let destination = Arc::new(InMemoryDestination {
         columns: targets,
         keys: Vec::new(),
-        ..FakeDestination::default()
+        ..InMemoryDestination::default()
     });
     let service = SinkService::new("qbs", destination);
 
@@ -925,9 +846,9 @@ fn open_rejects_a_primary_key_the_target_table_has_no_constraint_for() {
 fn open_rejects_a_nullable_primary_key_column() {
     let (sources, mut targets) = valid_columns();
     targets[0].nullable = true;
-    let destination = Arc::new(FakeDestination {
+    let destination = Arc::new(InMemoryDestination {
         columns: targets,
-        ..FakeDestination::default()
+        ..InMemoryDestination::default()
     });
     let service = SinkService::new("qbs", destination);
 
@@ -949,13 +870,13 @@ fn open_rejects_a_nullable_primary_key_column() {
 #[test]
 fn open_rejects_a_primary_key_column_that_is_not_among_the_selected_columns() {
     let (sources, targets) = valid_columns();
-    let destination = Arc::new(FakeDestination {
+    let destination = Arc::new(InMemoryDestination {
         columns: targets,
         keys: vec![TargetKey {
             name: "PRIMARY".to_owned(),
             columns: vec!["C_MISSING".to_owned()],
         }],
-        ..FakeDestination::default()
+        ..InMemoryDestination::default()
     });
     let service = SinkService::new("qbs", destination);
     let mut request = open_request(sources);
@@ -998,9 +919,9 @@ fn open_accepts_a_supported_timestamp_business_date_column() {
         None,
         1,
     )];
-    let destination = Arc::new(FakeDestination {
+    let destination = Arc::new(InMemoryDestination {
         columns: targets,
-        ..FakeDestination::default()
+        ..InMemoryDestination::default()
     });
     let service = SinkService::new("qbs", destination);
 
@@ -1012,10 +933,10 @@ fn open_accepts_a_supported_timestamp_business_date_column() {
 #[test]
 fn existing_staging_table_is_never_dropped_and_message_names_its_time() {
     let (sources, targets) = valid_columns();
-    let destination = Arc::new(FakeDestination {
+    let destination = Arc::new(InMemoryDestination {
         columns: targets,
         create_error: Mutex::new(Some(CreateStagingError::TableExists)),
-        ..FakeDestination::default()
+        ..InMemoryDestination::default()
     });
     let service = SinkService::new("qbs", destination.clone());
 
@@ -1033,10 +954,10 @@ fn existing_staging_table_is_never_dropped_and_message_names_its_time() {
 #[test]
 fn staging_permission_errors_name_create_or_drop() {
     let (sources, targets) = valid_columns();
-    let create_denied = Arc::new(FakeDestination {
+    let create_denied = Arc::new(InMemoryDestination {
         columns: targets.clone(),
         create_error: Mutex::new(Some(CreateStagingError::PermissionDenied)),
-        ..FakeDestination::default()
+        ..InMemoryDestination::default()
     });
     let service = SinkService::new("qbs", create_denied);
 
@@ -1044,9 +965,9 @@ fn staging_permission_errors_name_create_or_drop() {
     assert!(error.message.contains("CREATE"), "{}", error.message);
     assert_eq!(error.details["operation"], "CREATE");
 
-    let drop_denied = Arc::new(FakeDestination {
+    let drop_denied = Arc::new(InMemoryDestination {
         columns: targets,
-        ..FakeDestination::default()
+        ..InMemoryDestination::default()
     });
     let service = SinkService::new("qbs", drop_denied.clone());
     service.open(open_request(sources)).unwrap();

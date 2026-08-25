@@ -1,106 +1,26 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use db_qbs_sink::test_support::{datetime_target_column, InMemoryDestination};
 use db_qbs_sink::{
-    AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, BatchPayload, CreateStagingError,
-    Destination, DropStagingError, OpenRunRequest, SinkService, SourceColumn, TargetColumn,
-    TargetConnection, TargetKey, WriteBatchError,
+    AtomicSwapError, BatchPayload, DropStagingError, OpenRunRequest, SinkService, SourceColumn,
+    TargetConnection,
 };
 
 const RUN_ID: &str = "20260814091530_a3f19c";
 
-struct FakeDestination {
-    swap_requests: Mutex<Vec<AtomicSwapRequest>>,
-    staged_rows: Mutex<u64>,
-    purged_rows: Mutex<u64>,
-    swap_error: Mutex<Option<AtomicSwapError>>,
-    drop_error: Mutex<Option<DropStagingError>>,
-    dropped: Mutex<Vec<String>>,
-}
-
-impl FakeDestination {
-    fn new() -> Self {
-        Self {
-            swap_requests: Mutex::new(Vec::new()),
-            staged_rows: Mutex::new(1),
-            purged_rows: Mutex::new(7),
-            swap_error: Mutex::new(None),
-            drop_error: Mutex::new(None),
-            dropped: Mutex::new(Vec::new()),
-        }
-    }
-}
-
-impl Destination for FakeDestination {
-    fn target_columns(&self, _target_table: &str) -> Result<Vec<TargetColumn>, String> {
-        Ok(vec![TargetColumn {
-            name: "D_BIZ".to_owned(),
-            column_type: "datetime".to_owned(),
-            data_type: "datetime".to_owned(),
-            precision: None,
-            scale: None,
-            length: None,
-            datetime_precision: Some(0),
-            // 主键列必须 NOT NULL（ADR-0035 §2 第 3 条）。
-            nullable: false,
-            character_set: None,
-            ordinal: 1,
-            default_value: None,
-            extra: String::new(),
-        }])
-    }
-
-    fn target_keys(&self, _target_table: &str) -> Result<Vec<TargetKey>, String> {
-        Ok(vec![TargetKey {
-            name: "PRIMARY".to_owned(),
-            columns: vec!["D_BIZ".to_owned()],
-        }])
-    }
-
-    fn create_staging(&self, _staging_table: &str, _ddl: &str) -> Result<(), CreateStagingError> {
-        Ok(())
-    }
-
-    fn write_batch(
-        &self,
-        _staging_table: &str,
-        _columns: &[String],
-        rows: &[Vec<Option<String>>],
-        _max_rows_per_insert: usize,
-    ) -> Result<u64, WriteBatchError> {
-        Ok(rows.len() as u64)
-    }
-
-    fn atomic_swap(
-        &self,
-        request: &AtomicSwapRequest,
-    ) -> Result<AtomicSwapResult, AtomicSwapError> {
-        self.swap_requests.lock().unwrap().push(request.clone());
-        if let Some(error) = self.swap_error.lock().unwrap().take() {
-            return Err(error);
-        }
-        let staged_rows = *self.staged_rows.lock().unwrap();
-        if staged_rows != request.source_rows || request.received_batches != request.source_batches
-        {
-            return Err(AtomicSwapError::VerifyFailed {
-                staged_rows,
-                count_ms: 4,
-            });
-        }
-        Ok(AtomicSwapResult {
-            staged_rows,
-            purged_rows: *self.purged_rows.lock().unwrap(),
-            swapped_rows: staged_rows,
-            count_ms: 4,
-        })
-    }
-
-    fn drop_staging(&self, staging_table: &str) -> Result<(), DropStagingError> {
-        if let Some(error) = self.drop_error.lock().unwrap().take() {
-            return Err(error);
-        }
-        self.dropped.lock().unwrap().push(staging_table.to_owned());
-        Ok(())
-    }
+/// 这些用例的目标表是同一张：单列 `D_BIZ datetime`，主键就是它。
+///
+/// `purged_rows` 与 `count_ms` 给的是**不像默认值的值**：生产里 `purged_rows` 恒为 0
+/// （ADR-0035 §4），所以只有让 fake 报一个 7，才证得出这两个数是被一路带出来的、
+/// 不是在出口处现编的。
+fn destination() -> InMemoryDestination {
+    let destination = InMemoryDestination {
+        columns: vec![datetime_target_column("D_BIZ")],
+        ..InMemoryDestination::default()
+    };
+    *destination.purged_rows.lock().unwrap() = 7;
+    *destination.count_ms.lock().unwrap() = 4;
+    destination
 }
 
 fn open_request() -> OpenRunRequest {
@@ -141,7 +61,7 @@ fn one_row() -> BatchPayload {
 
 #[test]
 fn commit_atomically_swaps_then_exposes_a_sealed_swapped_tombstone() {
-    let destination = Arc::new(FakeDestination::new());
+    let destination = Arc::new(destination());
     let service = SinkService::new("qbs", destination.clone());
     service.open(open_request()).unwrap();
     service.write_batch(RUN_ID, one_row()).unwrap();
@@ -187,11 +107,12 @@ fn commit_atomically_swaps_then_exposes_a_sealed_swapped_tombstone() {
 
 #[test]
 fn verification_failure_reports_database_loss_and_discards_staging() {
-    let destination = Arc::new(FakeDestination::new());
-    *destination.staged_rows.lock().unwrap() = 0;
+    let destination = Arc::new(destination());
     let service = SinkService::new("qbs", destination.clone());
     service.open(open_request()).unwrap();
     service.write_batch(RUN_ID, one_row()).unwrap();
+    // 写入说了「收下了」，行却没在暂存表里——门禁存在的理由就是这一幕。
+    destination.lose_staged_rows(1);
 
     let error = service.commit(RUN_ID, 1, 1).unwrap_err();
 
@@ -216,8 +137,7 @@ fn verification_failure_reports_database_loss_and_discards_staging() {
 
 #[test]
 fn verification_failure_reports_a_missing_batch_and_discards_staging() {
-    let destination = Arc::new(FakeDestination::new());
-    *destination.staged_rows.lock().unwrap() = 0;
+    let destination = Arc::new(destination());
     let service = SinkService::new("qbs", destination.clone());
     service.open(open_request()).unwrap();
 
@@ -237,8 +157,7 @@ fn verification_failure_reports_a_missing_batch_and_discards_staging() {
 
 #[test]
 fn zero_row_commit_is_valid_and_returns_the_actual_purge_count() {
-    let destination = Arc::new(FakeDestination::new());
-    *destination.staged_rows.lock().unwrap() = 0;
+    let destination = Arc::new(destination());
     *destination.purged_rows.lock().unwrap() = 9;
     let service = SinkService::new("qbs", destination);
     service.open(open_request()).unwrap();
@@ -253,7 +172,7 @@ fn zero_row_commit_is_valid_and_returns_the_actual_purge_count() {
 
 #[test]
 fn swap_failure_discards_staging_and_records_a_discarded_tombstone() {
-    let destination = Arc::new(FakeDestination::new());
+    let destination = Arc::new(destination());
     *destination.swap_error.lock().unwrap() =
         Some(AtomicSwapError::Other("duplicate target key".to_owned()));
     let service = SinkService::new("qbs", destination.clone());
@@ -275,7 +194,7 @@ fn swap_failure_discards_staging_and_records_a_discarded_tombstone() {
 #[test]
 fn lock_wait_timeout_and_deadlock_report_target_busy() {
     for errno in [1205, 1213] {
-        let destination = Arc::new(FakeDestination::new());
+        let destination = Arc::new(destination());
         *destination.swap_error.lock().unwrap() = Some(AtomicSwapError::TargetBusy { errno });
         let service = SinkService::new("qbs", destination.clone());
         service.open(open_request()).unwrap();
@@ -298,7 +217,7 @@ fn lock_wait_timeout_and_deadlock_report_target_busy() {
 
 #[test]
 fn drop_failure_after_successful_swap_still_records_a_swapped_tombstone() {
-    let destination = Arc::new(FakeDestination::new());
+    let destination = Arc::new(destination());
     *destination.drop_error.lock().unwrap() = Some(DropStagingError::PermissionDenied);
     let service = SinkService::new("qbs", destination.clone());
     service.open(open_request()).unwrap();
@@ -330,13 +249,13 @@ fn drop_failure_after_successful_swap_still_records_a_swapped_tombstone() {
 
 #[test]
 fn drop_failure_after_verify_failure_keeps_the_gate_numbers_and_discards_the_run() {
-    let destination = Arc::new(FakeDestination::new());
-    *destination.staged_rows.lock().unwrap() = 0;
+    let destination = Arc::new(destination());
     *destination.drop_error.lock().unwrap() =
         Some(DropStagingError::Other("connection lost".to_owned()));
     let service = SinkService::new("qbs", destination.clone());
     service.open(open_request()).unwrap();
     service.write_batch(RUN_ID, one_row()).unwrap();
+    destination.lose_staged_rows(1);
 
     let error = service.commit(RUN_ID, 1, 1).unwrap_err();
 
@@ -358,7 +277,7 @@ fn drop_failure_after_verify_failure_keeps_the_gate_numbers_and_discards_the_run
 
 #[test]
 fn drop_failure_after_swap_failure_keeps_swap_failed_and_discards_the_run() {
-    let destination = Arc::new(FakeDestination::new());
+    let destination = Arc::new(destination());
     *destination.swap_error.lock().unwrap() =
         Some(AtomicSwapError::Other("duplicate target key".to_owned()));
     *destination.drop_error.lock().unwrap() =
@@ -385,7 +304,7 @@ fn drop_failure_after_swap_failure_keeps_swap_failed_and_discards_the_run() {
 
 #[test]
 fn abort_records_discarded_tombstones_and_the_33rd_evicts_the_oldest() {
-    let destination = Arc::new(FakeDestination::new());
+    let destination = Arc::new(destination());
     let service = SinkService::new("qbs", destination);
     let run_ids = (0..33)
         .map(|index| format!("20260814{index:06}_{index:06x}"))

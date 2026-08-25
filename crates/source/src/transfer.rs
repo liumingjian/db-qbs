@@ -5,8 +5,9 @@ use chrono::Utc;
 use rand::RngCore;
 
 use crate::{
-    BatchPayload, FailureKind, OpenRunRequest, RangeCheckColumn, RangeCheckResult, RunResponse,
-    RunStage, SinkClient, SinkError, SinkErrorKind, SourceColumn, TargetConnection, Terminal,
+    swap_rows_in_range, BatchPayload, FailureKind, OpenRunRequest, RangeCheckColumn,
+    RangeCheckResult, RowCounts, RunResponse, RunStage, SinkClient, SinkError, SinkErrorKind,
+    SourceColumn, TargetConnection, Terminal,
 };
 
 pub const FETCH_ARRAY_SIZE: u32 = 100;
@@ -543,14 +544,25 @@ pub fn run_transfer(
         }
     };
 
-    // `swapped_rows` 的判据是**区间**不是等值：MySQL 在 `ON DUPLICATE KEY UPDATE` 下
-    // 插入记 1、更新记 2（ADR-0035 §4），值真变了的重跑必然大于 `staged_rows`。
-    // sink 侧 `mysql_destination.rs` 早已改成区间，这里的镜像断言当时漏改，
-    // 结果是「重跑改值」这条主路径必失败——#135 的 C4④ 抓到的就是它。
+    // 这道闸是**故意**留着的第二道：`source_rows` 是本地自报的，sink 审计不了，
+    // 而 sink 回来的数字反过来 source 也不该照单全收——这里是整条链上唯一能发现
+    // 「sink 的判据和我不一样」（版本不同、被换过）的地方。
+    //
+    // 但判据本身不再手写：它和 sink 读同一份 `shared::verification`。
+    // 上一次两端各写一份的代价是 #135 的 C4④——sink 把 `swapped_rows` 改成区间，
+    // 这面镜子的等值断言漏改，「重跑改值」整条主路径必失败。
+    //
+    // 批次那条腿这里没有独立信源（commit 响应不带批次数），所以两个批次数都填
+    // `total_batches`：本地能复核的只有行数这条腿，写成相等就是把这件事说出来。
+    let counts = RowCounts {
+        source_rows,
+        staged_rows: committed.staged_rows,
+        source_batches: total_batches,
+        received_batches: total_batches,
+    };
     if committed.source_rows != source_rows
-        || committed.staged_rows != source_rows
-        || committed.swapped_rows < committed.staged_rows
-        || committed.swapped_rows > committed.staged_rows.saturating_mul(2)
+        || !counts.verdict().passed()
+        || !swap_rows_in_range(committed.staged_rows, committed.swapped_rows)
     {
         observe(TransferEvent::StageChanged(RunStage::Failed));
         return Err(Box::new(

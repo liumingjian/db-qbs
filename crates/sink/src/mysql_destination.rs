@@ -1,7 +1,22 @@
+//! 目标端的真实 [`Destination`]：连接、元数据、写暂存表、切换。
+//!
+//! **这个文件里的三件事没有单元测试守，守它们的是 `docs/spikes/fixtures/local-rig`
+//! 的验收台架**（需要一台起得了 docker MySQL 的机器）：
+//!
+//! - `CLIENT_FOUND_ROWS` 把「值未变的既有行记 0」抹平（#138），也就是
+//!   `swap_rows_in_range` 的下界之所以能是 `staged_rows` 的前提；
+//! - upsert 的 `affected_rows` 落在 `[staged, 2×staged]`（`run-v1-acceptance.sh` 的 C4②）；
+//! - Connection Ritual 挂在连接池的建连钩子上，池里第**二**条连接也照做。
+//!
+//! 这是刻意的分工，不是遗漏：这三件事出错的方式是「MySQL 的语义变了」或「有人动了建连钩子」，
+//! 不是每次改代码都会碰的东西；把它们塞进 `cargo test` 等于让「测试全绿」从此依赖 docker。
+//! 拿测试替身换掉本文件时，换掉的正是这三件事——见 `test_support` 的模块说明。
+
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use db_qbs_shared::{swap_rows_in_range, RowCounts};
 use mysql::prelude::Queryable;
 use mysql::{
     consts::CapabilityFlags, params, Conn, Error as MysqlError, Opts, OptsBuilder, Params, TxOpts,
@@ -280,9 +295,15 @@ SELECT INDEX_NAME, COLUMN_NAME
                     .as_millis()
                     .try_into()
                     .unwrap_or(u64::MAX);
-                if staged_rows != request.source_rows
-                    || request.received_batches != request.source_batches
-                {
+                // 判据在 `shared::verification` 里，两端读同一份：这里之所以要在事务内
+                // 取 `staged_rows` 再问它，是因为「数的那份」和「切的那份」必须是同一个快照。
+                let counts = RowCounts {
+                    source_rows: request.source_rows,
+                    staged_rows,
+                    source_batches: request.source_batches,
+                    received_batches: request.received_batches,
+                };
+                if !counts.verdict().passed() {
                     transaction.rollback()?;
                     let error = AtomicSwapError::VerifyFailed {
                         staged_rows,
@@ -300,12 +321,10 @@ SELECT INDEX_NAME, COLUMN_NAME
                 );
                 transaction.query_drop(insert_statement)?;
                 let swapped_rows = transaction.affected_rows();
-                // MySQL 在 `ON DUPLICATE KEY UPDATE` 下 `affected_rows` **插入记 1、更新记 2**，
-                // 所以旧模型那条 `swapped_rows == staged_rows` 会把成功的任务全判成失败。
-                // 断言改成区间（ADR-0035 §4）——它仍抓得住「灌回时少写了行」这类真故障。
-                // 第三档「值未变的既有行记 0」由连接上的 `CLIENT_FOUND_ROWS` 抹平（#138），
-                // 所以这里的下界仍是 `staged_rows`，**不能**放宽到 0。
-                if swapped_rows < staged_rows || swapped_rows > staged_rows.saturating_mul(2) {
+                // 区间判据（而非等值）连同它的三条理由都在 `swap_rows_in_range` 的文档里，
+                // source 侧那面镜子读的也是它——上一次两端各写一份时，
+                // sink 改了区间、source 的等值断言没跟上，「重跑改值」整条主路径必失败（#135 C4④）。
+                if !swap_rows_in_range(staged_rows, swapped_rows) {
                     transaction.rollback()?;
                     let message = format!(
                         "暂存表有 {staged_rows} 行，切换 upsert 报告影响 {swapped_rows} 行，不落在 [{staged_rows}, {}] 区间内",

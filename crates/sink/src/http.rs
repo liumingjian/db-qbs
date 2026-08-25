@@ -423,85 +423,24 @@ fn json_response(status: u16, value: &impl Serialize) -> HttpResponse {
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpStream;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::thread;
 
     use serde_json::Value;
 
     use super::*;
-    use crate::{
-        AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, CreateStagingError, Destination,
-        DropStagingError, FixedDestination, TargetColumn, TargetKey, WriteBatchError,
-    };
+    use crate::test_support::{datetime_target_column, InMemoryDestination};
+    use crate::FixedDestination;
 
     /// 报文里的目标端连接（ADR-0037 §1）。夹具走 `FixedDestination`，这份值被忽略，
     /// 但**必须带**——`OpenRunRequest` 的 `deny_unknown_fields` 与必填字段一起把它钉住了。
     const TARGET_JSON: &str = r#""target":{"host":"127.0.0.1","port":3306,"username":"sink","password":"change-me","database":"qbs"},"#;
 
-    #[derive(Default)]
-    struct FakeDestination {
-        dropped: Mutex<Vec<String>>,
-    }
-
-    impl Destination for FakeDestination {
-        fn target_columns(&self, _target_table: &str) -> Result<Vec<TargetColumn>, String> {
-            Ok(vec![TargetColumn {
-                name: "D_BIZ".to_owned(),
-                column_type: "datetime".to_owned(),
-                data_type: "datetime".to_owned(),
-                precision: None,
-                scale: None,
-                length: None,
-                datetime_precision: Some(0),
-                // 主键列必须 NOT NULL（ADR-0035 §2 第 3 条）。
-                nullable: false,
-                character_set: None,
-                ordinal: 1,
-                default_value: None,
-                extra: String::new(),
-            }])
-        }
-
-        fn target_keys(&self, _target_table: &str) -> Result<Vec<TargetKey>, String> {
-            Ok(vec![TargetKey {
-                name: "PRIMARY".to_owned(),
-                columns: vec!["D_BIZ".to_owned()],
-            }])
-        }
-
-        fn create_staging(
-            &self,
-            _staging_table: &str,
-            _ddl: &str,
-        ) -> Result<(), CreateStagingError> {
-            Ok(())
-        }
-
-        fn write_batch(
-            &self,
-            _staging_table: &str,
-            _columns: &[String],
-            rows: &[Vec<Option<String>>],
-            _max_rows_per_insert: usize,
-        ) -> Result<u64, WriteBatchError> {
-            Ok(rows.len() as u64)
-        }
-
-        fn atomic_swap(
-            &self,
-            request: &AtomicSwapRequest,
-        ) -> Result<AtomicSwapResult, AtomicSwapError> {
-            Ok(AtomicSwapResult {
-                staged_rows: request.source_rows,
-                purged_rows: 0,
-                swapped_rows: request.source_rows,
-                count_ms: 0,
-            })
-        }
-
-        fn drop_staging(&self, staging_table: &str) -> Result<(), DropStagingError> {
-            self.dropped.lock().unwrap().push(staging_table.to_owned());
-            Ok(())
+    /// 这些用例开的都是同一张表：单列 `D_BIZ datetime`，主键就是它。
+    fn d_biz_destination() -> InMemoryDestination {
+        InMemoryDestination {
+            columns: vec![datetime_target_column("D_BIZ")],
+            ..InMemoryDestination::default()
         }
     }
 
@@ -526,10 +465,7 @@ mod tests {
 
     #[test]
     fn http_open_batch_and_abort_lifecycle_uses_contract_statuses_and_bodies() {
-        let service = Arc::new(SinkService::new(
-            "qbs",
-            Arc::new(FakeDestination::default()),
-        ));
+        let service = Arc::new(SinkService::new("qbs", Arc::new(d_biz_destination())));
         let run_id = "20260814091530_a3f19c";
         let open_body = format!(
             r#"{{"run_id":"{run_id}",{TARGET_JSON}"target_table":"T_POSITION","primary_key":["D_BIZ"],"source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
@@ -563,10 +499,7 @@ mod tests {
 
     #[test]
     fn http_commit_and_get_expose_the_terminal_resource() {
-        let service = Arc::new(SinkService::new(
-            "qbs",
-            Arc::new(FakeDestination::default()),
-        ));
+        let service = Arc::new(SinkService::new("qbs", Arc::new(d_biz_destination())));
         let run_id = "20260814091530_a3f19c";
         let open_body = format!(
             r#"{{"run_id":"{run_id}",{TARGET_JSON}"target_table":"T_POSITION","primary_key":["D_BIZ"],"source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
@@ -603,10 +536,7 @@ mod tests {
     fn the_target_metadata_face_fails_as_an_environment_fault_and_leaves_no_run_behind() {
         // 连不上目标端 → SINK_ENVIRONMENT + details.kind = "OTHER"，码闭集不增
         // （ADR-0038 §9，与 test-connection 同一个码）。127.0.0.1:1 上没有 MySQL。
-        let service = Arc::new(SinkService::new(
-            "qbs",
-            Arc::new(FakeDestination::default()),
-        ));
+        let service = Arc::new(SinkService::new("qbs", Arc::new(d_biz_destination())));
         let target = r#"{"host":"127.0.0.1","port":1,"username":"sink","password":"x","database":"qbs"}"#;
 
         let (status, body) = exchange(service.clone(), "/v1/target/tables", target);
@@ -634,10 +564,7 @@ mod tests {
     fn the_columns_endpoint_nests_the_connection_and_refuses_a_stray_field() {
         // 连接嵌在 `target` 里（与 OpenRunRequest 同形），顶层只多一个 `target_table`。
         // flatten 进顶层就得放弃 `deny_unknown_fields`，拼错字段名会静默通过。
-        let service = Arc::new(SinkService::new(
-            "qbs",
-            Arc::new(FakeDestination::default()),
-        ));
+        let service = Arc::new(SinkService::new("qbs", Arc::new(d_biz_destination())));
         let target = r#"{"host":"127.0.0.1","port":1,"username":"sink","password":"x","database":"qbs"}"#;
 
         let (status, flattened) = exchange(
@@ -667,7 +594,7 @@ mod tests {
     /// source 的注册与每次开跑前的身份核对都打这里，路由掉了整条链就哑了。
     #[test]
     fn agent_info_is_served() {
-        let service = Arc::new(SinkService::new("qbs", Arc::new(FakeDestination::default())));
+        let service = Arc::new(SinkService::new("qbs", Arc::new(d_biz_destination())));
 
         let (status, body) = exchange_method(service, "GET", "/v1/agent/info", "");
 
@@ -678,7 +605,7 @@ mod tests {
     }
 
     fn exchange(
-        service: Arc<SinkService<FixedDestination<FakeDestination>>>,
+        service: Arc<SinkService<FixedDestination<InMemoryDestination>>>,
         path: &str,
         body: &str,
     ) -> (u16, Value) {
@@ -686,7 +613,7 @@ mod tests {
     }
 
     fn exchange_method(
-        service: Arc<SinkService<FixedDestination<FakeDestination>>>,
+        service: Arc<SinkService<FixedDestination<InMemoryDestination>>>,
         method: &str,
         path: &str,
         body: &str,

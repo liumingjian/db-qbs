@@ -9,6 +9,7 @@ use serde::{Serialize, Serializer};
 mod protocol;
 mod run_stage;
 mod target_shape;
+mod verification;
 
 pub use protocol::{
     AbortResponse, AgentInfo, BatchPayload, BatchResponse, ColumnSupport, CommitRequest,
@@ -20,6 +21,7 @@ pub use target_shape::{
     classify_column, column_support, derive_number_shape, is_business_date_column,
     is_supported_decimal_shape, ColumnShape, ShapeRejection, TargetShape,
 };
+pub use verification::{swap_rows_in_range, RowCounts, Verdict};
 
 static CANONICAL_NUMBER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(0|-?[1-9][0-9]*(\.[0-9]*[1-9])?|-?0\.[0-9]*[1-9])$")

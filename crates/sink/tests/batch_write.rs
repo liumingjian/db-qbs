@@ -1,97 +1,14 @@
 use std::sync::{Arc, Mutex};
 
 use db_qbs_shared::BatchPayload;
+use db_qbs_sink::test_support::InMemoryDestination;
 use db_qbs_sink::{
-    AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, CreateStagingError, Destination,
-    DropStagingError, OpenRunRequest, SinkService, SourceColumn, TargetColumn, TargetConnection,
-    TargetKey, WriteBatchError,
+    OpenRunRequest, SinkService, SourceColumn, TargetColumn, TargetConnection, WriteBatchError,
 };
 
 const RUN_ID: &str = "20260814091530_a3f19c";
 const GOLDEN_PAYLOAD: &str =
     include_str!("../../../docs/spikes/fixtures/batch-payload-golden.json");
-
-#[derive(Clone, Debug)]
-struct BatchCall {
-    columns: Vec<String>,
-    rows: Vec<Vec<Option<String>>>,
-    max_rows_per_insert: usize,
-}
-
-#[derive(Default)]
-struct FakeDestination {
-    columns: Vec<TargetColumn>,
-    calls: Mutex<Vec<BatchCall>>,
-    committed_rows: Mutex<Vec<Vec<Option<String>>>>,
-    fail_chunk: Mutex<Option<usize>>,
-    affected_rows: Mutex<Option<u64>>,
-    write_error: Mutex<Option<WriteBatchError>>,
-}
-
-impl Destination for FakeDestination {
-    fn target_columns(&self, _target_table: &str) -> Result<Vec<TargetColumn>, String> {
-        Ok(self.columns.clone())
-    }
-
-    fn target_keys(&self, _target_table: &str) -> Result<Vec<TargetKey>, String> {
-        Ok(vec![TargetKey {
-            name: "PRIMARY".to_owned(),
-            columns: vec!["D_BIZ".to_owned()],
-        }])
-    }
-
-    fn create_staging(&self, _staging_table: &str, _ddl: &str) -> Result<(), CreateStagingError> {
-        Ok(())
-    }
-
-    fn write_batch(
-        &self,
-        _staging_table: &str,
-        columns: &[String],
-        rows: &[Vec<Option<String>>],
-        max_rows_per_insert: usize,
-    ) -> Result<u64, WriteBatchError> {
-        if let Some(error) = self.write_error.lock().unwrap().take() {
-            return Err(error);
-        }
-        self.calls.lock().unwrap().push(BatchCall {
-            columns: columns.to_vec(),
-            rows: rows.to_vec(),
-            max_rows_per_insert,
-        });
-
-        let fail_chunk = *self.fail_chunk.lock().unwrap();
-        for (chunk_index, _) in rows.chunks(max_rows_per_insert).enumerate() {
-            if fail_chunk == Some(chunk_index) {
-                return Err(WriteBatchError::Other(format!(
-                    "sub-statement {chunk_index} failed"
-                )));
-            }
-        }
-        self.committed_rows.lock().unwrap().extend_from_slice(rows);
-        Ok(self
-            .affected_rows
-            .lock()
-            .unwrap()
-            .unwrap_or(rows.len() as u64))
-    }
-
-    fn atomic_swap(
-        &self,
-        request: &AtomicSwapRequest,
-    ) -> Result<AtomicSwapResult, AtomicSwapError> {
-        Ok(AtomicSwapResult {
-            staged_rows: request.source_rows,
-            purged_rows: 0,
-            swapped_rows: request.source_rows,
-            count_ms: 0,
-        })
-    }
-
-    fn drop_staging(&self, _staging_table: &str) -> Result<(), DropStagingError> {
-        Ok(())
-    }
-}
 
 #[test]
 fn value_errors_name_the_column_and_value_as_data_problems() {
@@ -101,14 +18,14 @@ fn value_errors_name_the_column_and_value_as_data_problems() {
         (1366, "无法按目标列字符集写入"),
     ] {
         let (sources, targets) = columns(3);
-        let destination = Arc::new(FakeDestination {
+        let destination = Arc::new(InMemoryDestination {
             columns: targets,
             write_error: Mutex::new(Some(WriteBatchError::DataValue {
                 mysql_code,
                 column: "C_1".to_owned(),
                 value: Some("bad-value".to_owned()),
             })),
-            ..FakeDestination::default()
+            ..InMemoryDestination::default()
         });
         let service = SinkService::new("qbs", destination);
         service.open(open_request(sources)).unwrap();
@@ -129,14 +46,14 @@ fn value_errors_name_the_column_and_value_as_data_problems() {
 #[test]
 fn note_1265_is_a_distinct_p0_precheck_escape() {
     let (sources, targets) = columns(3);
-    let destination = Arc::new(FakeDestination {
+    let destination = Arc::new(InMemoryDestination {
         columns: targets,
         write_error: Mutex::new(Some(WriteBatchError::PrecheckEscape {
             mysql_code: 1265,
             column: Some("C_1".to_owned()),
             value: Some("rounded".to_owned()),
         })),
-        ..FakeDestination::default()
+        ..InMemoryDestination::default()
     });
     let service = SinkService::new("qbs", destination);
     service.open(open_request(sources)).unwrap();
@@ -156,10 +73,10 @@ fn note_1265_is_a_distinct_p0_precheck_escape() {
 #[test]
 fn error_1153_points_to_environment_configuration_not_data() {
     let (sources, targets) = columns(3);
-    let destination = Arc::new(FakeDestination {
+    let destination = Arc::new(InMemoryDestination {
         columns: targets,
         write_error: Mutex::new(Some(WriteBatchError::Environment { mysql_code: 1153 })),
-        ..FakeDestination::default()
+        ..InMemoryDestination::default()
     });
     let service = SinkService::new("qbs", destination);
     service.open(open_request(sources)).unwrap();
@@ -191,9 +108,9 @@ fn golden_payload_keeps_source_order_null_and_empty_string() {
         .retain(|key, _| !key.starts_with('_'));
     let payload: BatchPayload = serde_json::from_value(fixture).unwrap();
     let (sources, targets) = golden_columns();
-    let destination = Arc::new(FakeDestination {
+    let destination = Arc::new(InMemoryDestination {
         columns: targets,
-        ..FakeDestination::default()
+        ..InMemoryDestination::default()
     });
     let service = SinkService::new("qbs", destination.clone());
     service.open(open_request(sources)).unwrap();
@@ -218,9 +135,9 @@ fn golden_payload_keeps_source_order_null_and_empty_string() {
 #[test]
 fn narrow_batch_uses_one_statement_and_wide_batch_is_split_at_placeholder_limit() {
     let (narrow_sources, narrow_targets) = columns(3);
-    let narrow_destination = Arc::new(FakeDestination {
+    let narrow_destination = Arc::new(InMemoryDestination {
         columns: narrow_targets,
-        ..FakeDestination::default()
+        ..InMemoryDestination::default()
     });
     let narrow_service = SinkService::new("qbs", narrow_destination.clone());
     narrow_service.open(open_request(narrow_sources)).unwrap();
@@ -238,9 +155,9 @@ fn narrow_batch_uses_one_statement_and_wide_batch_is_split_at_placeholder_limit(
     );
 
     let (wide_sources, wide_targets) = columns(70);
-    let wide_destination = Arc::new(FakeDestination {
+    let wide_destination = Arc::new(InMemoryDestination {
         columns: wide_targets,
-        ..FakeDestination::default()
+        ..InMemoryDestination::default()
     });
     let wide_service = SinkService::new("qbs", wide_destination.clone());
     wide_service.open(open_request(wide_sources)).unwrap();
@@ -259,10 +176,10 @@ fn narrow_batch_uses_one_statement_and_wide_batch_is_split_at_placeholder_limit(
 #[test]
 fn sub_statement_failure_commits_nothing_and_does_not_advance_sequence() {
     let (sources, targets) = columns(70);
-    let destination = Arc::new(FakeDestination {
+    let destination = Arc::new(InMemoryDestination {
         columns: targets,
         fail_chunk: Mutex::new(Some(1)),
-        ..FakeDestination::default()
+        ..InMemoryDestination::default()
     });
     let service = SinkService::new("qbs", destination.clone());
     service.open(open_request(sources)).unwrap();
@@ -274,7 +191,7 @@ fn sub_statement_failure_commits_nothing_and_does_not_advance_sequence() {
     assert!(error.message.contains("第 1 批"), "{}", error.message);
     // 写暂存表失败不得再借用 SWAP_FAILED——那是切换那一步的码，两者混用会让排障从第一行走错方向。
     assert_eq!((error.status, error.code), (500, "BATCH_WRITE_FAILED"));
-    assert!(destination.committed_rows.lock().unwrap().is_empty());
+    assert!(destination.staged_row_values().is_empty());
     *destination.fail_chunk.lock().unwrap() = None;
     assert!(service.write_batch(RUN_ID, payload(1, 1_000, 70)).is_ok());
 }
@@ -282,9 +199,9 @@ fn sub_statement_failure_commits_nothing_and_does_not_advance_sequence() {
 #[test]
 fn unknown_run_wrong_sequence_and_wrong_row_width_are_rejected_before_writing() {
     let (sources, targets) = columns(3);
-    let destination = Arc::new(FakeDestination {
+    let destination = Arc::new(InMemoryDestination {
         columns: targets,
-        ..FakeDestination::default()
+        ..InMemoryDestination::default()
     });
     let service = SinkService::new("qbs", destination.clone());
 
@@ -306,10 +223,10 @@ fn unknown_run_wrong_sequence_and_wrong_row_width_are_rejected_before_writing() 
 #[test]
 fn affected_rows_mismatch_names_batch_and_counts() {
     let (sources, targets) = columns(3);
-    let destination = Arc::new(FakeDestination {
+    let destination = Arc::new(InMemoryDestination {
         columns: targets,
         affected_rows: Mutex::new(Some(4_999)),
-        ..FakeDestination::default()
+        ..InMemoryDestination::default()
     });
     let service = SinkService::new("qbs", destination.clone());
     service.open(open_request(sources)).unwrap();

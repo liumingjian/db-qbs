@@ -3,6 +3,7 @@ mod http;
 mod mysql_destination;
 mod precheck;
 mod service;
+pub mod test_support;
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;

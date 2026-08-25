@@ -37,6 +37,8 @@ pub use db_qbs_shared::{
     classify_column, column_support, derive_number_shape, is_business_date_column,
     is_supported_decimal_shape, ColumnShape, ShapeRejection, TargetShape,
 };
+// 校验门禁的判据同样只有一份定义，与 sink 共用（`shared::verification`）。
+pub use db_qbs_shared::{swap_rows_in_range, RowCounts, Verdict};
 pub use failure_kind::{oracle_kind, FailureKind};
 pub use oracle_source::OracleRowSource;
 pub use protocol::{HttpSinkClient, SinkClient, SinkError, SinkErrorKind, SinkGateDetails};

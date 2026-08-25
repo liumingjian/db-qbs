@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, LazyLock, Mutex};
 
+use db_qbs_shared::{RowCounts, Verdict};
 use regex::Regex;
 use serde_json::json;
 
@@ -660,10 +661,20 @@ fn verify_failed_error(
     let source_rows = request.source_rows;
     let source_batches = request.source_batches;
     let received_batches = request.received_batches;
-    let message = if source_batches == received_batches
+    // 哪条腿垮了由 `shared::verification` 说，这里只挑话说：`Verdict::RowsDiffer` 意味着
+    // 批次全到齐了，所以「sink 逐批报告写了这么多、暂存表里却少了」才是**写入过程丢数据**；
+    // 其余情形一律落到「有批次未送达」。`sink_reported_rows` 不参与门禁，只参与措辞——
+    // 它是 sink 自报的中间数，正是门禁要怀疑的那一环。
+    let counts = RowCounts {
+        source_rows,
+        staged_rows,
+        source_batches,
+        received_batches,
+    };
+    let rows_lost_after_an_accepted_write = matches!(counts.verdict(), Verdict::RowsDiffer { .. })
         && sink_reported_rows == source_rows
-        && staged_rows < sink_reported_rows
-    {
+        && staged_rows < sink_reported_rows;
+    let message = if rows_lost_after_an_accepted_write {
         format!(
             "校验未通过：源端读出 {source_rows} 行，sink 逐批报告已写入 {sink_reported_rows} 行，但暂存表实际只有 {staged_rows} 行——数据在写入 MySQL 的过程中丢失。目标表未被触碰，可直接重跑；重跑仍失败请报 issue。"
         )
