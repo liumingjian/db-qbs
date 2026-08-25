@@ -1,5 +1,7 @@
 import {
+  Check,
   Clock3,
+  Copy,
   Database,
   Pencil,
   Play,
@@ -10,7 +12,7 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 
-import { deleteTask, startRun } from "./api";
+import { copyTaskCurl, deleteTask, startRun } from "./api";
 import type { Datasource, RunHistory, Task } from "./api";
 import { messageFrom } from "./errors";
 import { formatTimestamp, historyPresentation } from "./history";
@@ -89,6 +91,10 @@ export function JobCenterScreen({
   const [bulkConfirm, setBulkConfirm] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkSummary, setBulkSummary] = useState<BulkSummary | null>(null);
+  const [copyStatus, setCopyStatus] = useState<{
+    taskId: string;
+    error: string | null;
+  } | null>(null);
 
   const filtered = useMemo(
     () =>
@@ -205,6 +211,15 @@ export function JobCenterScreen({
     onChanged();
   }
 
+  async function copyCurl(task: Task) {
+    try {
+      await copyTaskCurl(task.task_id);
+      setCopyStatus({ taskId: task.task_id, error: null });
+    } catch (error) {
+      setCopyStatus({ taskId: task.task_id, error: messageFrom(error) });
+    }
+  }
+
   const hasTasks = tasks !== null && tasks.length > 0;
   const pageIds = slice.rows.map((task) => task.task_id);
   const allOnPageSelected =
@@ -319,6 +334,19 @@ export function JobCenterScreen({
         </div>
       )}
 
+      {copyStatus !== null && copyStatus.error !== null && (
+        <div className="bulk-summary is-failed" role="alert">
+          <span>复制 cURL 失败：{copyStatus.error}</span>
+          <button
+            className="text-button"
+            type="button"
+            onClick={() => setCopyStatus(null)}
+          >
+            知道了
+          </button>
+        </div>
+      )}
+
       <section className="card table-card" id="jobs" aria-labelledby="jobs-title">
         <div className="table-title-row">
           <h1 className="table-title" id="jobs-title">
@@ -386,6 +414,8 @@ export function JobCenterScreen({
           startingTaskId={startingTaskId}
           onStart={onStart}
           onOpen={setOpenTaskId}
+          copiedTaskId={copyStatus?.error === null ? copyStatus.taskId : null}
+          onCopyCurl={(task) => void copyCurl(task)}
         />
 
         {hasTasks && (
@@ -498,6 +528,8 @@ function JobResults({
   startingTaskId,
   onStart,
   onOpen,
+  copiedTaskId,
+  onCopyCurl,
 }: {
   tasks: Task[] | null;
   filtered: Task[];
@@ -516,6 +548,8 @@ function JobResults({
   startingTaskId: string | null;
   onStart: (task: Task) => void;
   onOpen: (taskId: string) => void;
+  copiedTaskId: string | null;
+  onCopyCurl: (task: Task) => void;
 }) {
   if (tasks === null) {
     return (
@@ -669,6 +703,17 @@ function JobResults({
                       icon={<Play size={16} />}
                       disabled={startingTaskId === task.task_id}
                       onClick={() => onStart(task)}
+                    />
+                    <ActionButton
+                      label={copiedTaskId === task.task_id ? "cURL 已复制" : "复制 cURL"}
+                      icon={
+                        copiedTaskId === task.task_id ? (
+                          <Check size={16} />
+                        ) : (
+                          <Copy size={16} />
+                        )
+                      }
+                      onClick={() => onCopyCurl(task)}
                     />
                     <span className="divider" />
                     {run === undefined ? (

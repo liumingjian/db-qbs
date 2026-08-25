@@ -27,6 +27,7 @@ use signal_hook::consts::SIGTERM;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use url::Url;
 
 use crate::{
     embedded_web_asset, fetch_agent_info, generate_target_ddl, validate_builder_dblink,
@@ -178,6 +179,7 @@ pub struct Request {
     method: Method,
     path: String,
     query: Option<String>,
+    headers: Vec<(String, String)>,
     body: Result<Vec<u8>, String>,
 }
 
@@ -192,8 +194,15 @@ impl Request {
             method,
             path,
             query,
+            headers: Vec::new(),
             body: Ok(body),
         }
+    }
+
+    /// 测试与桥接层共用：header 名大小写不敏感，与 HTTP 语义一致。
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
     }
 
     pub fn method(&self) -> Method {
@@ -206,6 +215,13 @@ impl Request {
 
     pub fn query(&self) -> Option<&str> {
         self.query.as_deref()
+    }
+
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
     }
 
     /// 请求体的字节。读失败时是 `Err`，超长时是一段比上限多一个字节的 `Ok`——
@@ -368,6 +384,9 @@ pub fn routes() -> &'static [Route] {
             }),
             Route::new(Get, "/api/tasks/{}", |state, _request, id| {
                 handle_get_task(state.tasks, id)
+            }),
+            Route::new(Get, "/api/tasks/{}/curl", |state, request, id| {
+                handle_task_curl(request, state, id)
             }),
             Route::new(Put, "/api/tasks/{}", |state, request, id| {
                 handle_update_task(request, state.tasks, id)
@@ -895,6 +914,45 @@ fn handle_get_task(store: &TaskStore, task_id: &str) -> HttpResponse {
         Ok(None) => not_found(),
         Err(error) => internal_error(error),
     }
+}
+
+fn handle_task_curl(request: &Request, state: &Api<'_>, task_id: &str) -> HttpResponse {
+    match state.tasks.get(task_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => return not_found(),
+        Err(error) => return internal_error(error),
+    }
+
+    let origin = match request_origin(request, &state.config.listen) {
+        Ok(origin) => origin,
+        Err(error) => return bad_request(error),
+    };
+    let body = serde_json::to_string(&json!({ "task_id": task_id }))
+        .expect("serializing a task identity must succeed");
+    let command = format!(
+        "curl --request POST '{origin}/api/runs' --header 'Content-Type: application/json' --data '{body}'"
+    );
+    json_response(200, &json!({ "command": command }))
+}
+
+fn request_origin(request: &Request, fallback_listen: &str) -> Result<String, String> {
+    let scheme = request.header("X-Forwarded-Proto").unwrap_or("http");
+    if !matches!(scheme, "http" | "https") {
+        return Err("X-Forwarded-Proto 只允许 http 或 https".to_owned());
+    }
+    let authority = request.header("Host").unwrap_or(fallback_listen);
+    let origin = Url::parse(&format!("{scheme}://{authority}"))
+        .map_err(|_| "请求 Host 不是有效的 HTTP 地址".to_owned())?;
+    if origin.host_str().is_none()
+        || origin.path() != "/"
+        || origin.query().is_some()
+        || origin.fragment().is_some()
+        || !origin.username().is_empty()
+        || origin.password().is_some()
+    {
+        return Err("请求 Host 不是有效的 HTTP 地址".to_owned());
+    }
+    Ok(origin.as_str().trim_end_matches('/').to_owned())
 }
 
 fn handle_update_task(request: &Request, store: &TaskStore, task_id: &str) -> HttpResponse {
@@ -1680,6 +1738,16 @@ mod bridge {
         pub fn from_tiny_http(request: &mut tiny_http::Request) -> Self {
             let method = Method::from(request.method());
             let url = request.url().to_owned();
+            let headers = request
+                .headers()
+                .iter()
+                .map(|header| {
+                    (
+                        header.field.as_str().as_str().to_owned(),
+                        header.value.as_str().to_owned(),
+                    )
+                })
+                .collect();
             let mut body = Vec::new();
             let read = request
                 .as_reader()
@@ -1688,6 +1756,7 @@ mod bridge {
                 .map(|_| body)
                 .map_err(|error| error.to_string());
             let mut parsed = Request::new(method, &url, Vec::new());
+            parsed.headers = headers;
             parsed.body = read;
             parsed
         }

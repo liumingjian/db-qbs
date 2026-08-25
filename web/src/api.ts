@@ -497,6 +497,19 @@ export async function listTasks(): Promise<Task[]> {
   return readJson<Task[]>(response, "加载任务失败");
 }
 
+/** 服务端给出完整命令；前端不重建请求形状，只把返回值原样写进剪贴板。 */
+export async function copyTaskCurl(
+  taskId: string,
+  writeText: (command: string) => Promise<void> = (command) =>
+    navigator.clipboard.writeText(command),
+): Promise<void> {
+  const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/curl`, {
+    headers: { Accept: "application/json" },
+  });
+  const result = await readJson<{ command: string }>(response, "读取 cURL 命令失败");
+  await writeText(result.command);
+}
+
 export async function listRunHistory(
   filters: RunHistoryFilters = {},
 ): Promise<RunHistory[]> {
