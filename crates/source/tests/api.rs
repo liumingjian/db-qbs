@@ -5,7 +5,7 @@
 //! 对外真的在服务」；判断怎么回，归这里。
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -1357,13 +1357,24 @@ fn target_check_agent(check_body: Value) -> String {
     thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            let mut head = [0_u8; 4096];
-            let read = stream.read(&mut head).unwrap_or(0);
-            let request_line = String::from_utf8_lossy(&head[..read])
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .to_owned();
+            let mut reader = BufReader::new(&mut stream);
+            let mut request_line = String::new();
+            let _ = reader.read_line(&mut request_line);
+            let mut content_length = 0;
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = header.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        content_length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+            }
+            let mut request_body = vec![0; content_length];
+            let _ = reader.read_exact(&mut request_body);
+            drop(reader);
             let body = if request_line.contains("/v1/agent/info") {
                 r#"{"agent_id":"check-agent","name":"检查桩","version":"0.0.0-test"}"#.to_owned()
             } else if request_line.contains("/v1/target/check") {
