@@ -1,4 +1,5 @@
 import type { RunHistory } from "./api";
+import { stageLabel } from "./runStage";
 
 export interface HistoryPresentation {
   kind: "live" | "succeeded" | "failed" | "unknown";
@@ -97,10 +98,22 @@ export function historyPresentation(history: RunHistory): HistoryPresentation {
   const terminalEffect = sinkTerminalEffect(history);
 
   if (history.outcome === null) {
+    // 记下了结束时间却没折出结局，说明父进程漏了一笔。**这种行不算在跑**：
+    // 「进行中」是一个会自己变的承诺，屏幕上转着圈就是在说「等一下就有答案」，
+    // 而它永远不会有答案——那样它会被每秒轮询到天荒地老。「结局不明」本来
+    // 就是为「我不知道」准备的那一格，这行正是它。
+    if (history.finished_at !== null) {
+      return {
+        kind: "unknown",
+        conclusion: "记录不完整，结局未知",
+        terminalEffect: null,
+        error: null,
+      };
+    }
+    const label = stageLabel(history.stage);
     return {
       kind: "live",
-      conclusion:
-        history.stage === null ? "已受理，正在拉起" : `进行中 ${history.stage}`,
+      conclusion: label === null ? "已受理，正在拉起" : `进行中 · ${label}`,
       terminalEffect,
       error,
     };

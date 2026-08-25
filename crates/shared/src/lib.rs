@@ -7,6 +7,7 @@ use regex::Regex;
 use serde::{Serialize, Serializer};
 
 mod protocol;
+mod run_stage;
 mod target_shape;
 
 pub use protocol::{
@@ -14,6 +15,7 @@ pub use protocol::{
     CommitResponse, ErrorBody, ErrorEnvelope, OpenRunRequest, OpenRunResponse, PrecheckIssue,
     RangeCheckColumn, RangeCheckResult, RunResponse, SourceColumn, TargetConnection, Terminal,
 };
+pub use run_stage::RunStage;
 pub use target_shape::{
     classify_column, column_support, derive_number_shape, is_business_date_column,
     is_supported_decimal_shape, ColumnShape, ShapeRejection, TargetShape,

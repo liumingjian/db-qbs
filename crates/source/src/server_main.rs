@@ -12,7 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 use chrono::Utc;
-use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
+use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel, RunStage};
 use db_qbs_source::{
     embedded_web_asset, fetch_agent_info, generate_target_ddl, load_source_config,
     validate_builder_dblink, validate_source_sql, Agent, AgentEndpoint, AgentInput, AgentStore,
@@ -43,7 +43,11 @@ struct ActiveRun {
     /// 运行参数链退役之后，「同任务 + 同参数集」这个复合键退化成了任务本身。
     task_id: String,
     child_pid: Option<u32>,
-    stage: Option<String>,
+    /// 判定用的那一份，**是枚举不是字符串**：能不能取消这次运行由它一个人说了算
+    /// （`RunStage::abort_allowed`）。子进程报来一个认不出的拼写时它是 `None`，
+    /// 与「还没报过」同待——两端版本对不上时，唯一安全的回答是「我不知道它在做什么」。
+    /// 原样的文本另有去处：运行历史那一份仍是字符串，见 `RunHistory::stage`。
+    stage: Option<RunStage>,
 }
 
 enum StartRunError {
@@ -623,24 +627,30 @@ fn handle_cancel_run(runs: &RunRegistry, run_record_id: &str) -> HttpResponse {
     let Some(run) = runs.active_runs.get(run_record_id) else {
         return not_found();
     };
-    match run.stage.as_deref() {
-        Some("COMMITTING") => json_response(
-            409,
-            &json!({ "error": { "message": "已过封口点，停不了" } }),
-        ),
-        Some("PREPARING" | "STREAMING") => {
-            let Some(pid) = run.child_pid else {
-                return internal_error("run 子进程尚未登记".to_owned());
-            };
-            match send_sigterm(pid) {
-                Ok(()) => json_response(202, &json!({ "message": "已发送 SIGTERM" })),
-                Err(error) => internal_error(error),
-            }
-        }
-        _ => json_response(
-            409,
-            &json!({ "error": { "message": "run 尚未进入可取消阶段" } }),
-        ),
+    let refused = |message: &str| json_response(409, &json!({ "error": { "message": message } }));
+    // 停不停得了只由 `RunStage::abort_allowed` 一个人说了算——它就是 CONTEXT.md
+    // 那条封口点不变量。**理由**另说：拒绝的原因分三种，所以按变体挑话，
+    // 而不是对 `abort_allowed` 取反。这里不写通配分支，于是将来往闭集里加一格
+    // 会在这儿变成编译错误，而不是悄悄落进「说不清为什么」的那一句。
+    let Some(stage) = run.stage else {
+        return refused("run 尚未进入可取消阶段");
+    };
+    if !stage.abort_allowed() {
+        return refused(match stage {
+            // 权限没了：暂存表的处置权已整个交给 sink。
+            RunStage::Committing => "已过封口点，停不了",
+            // 对象没了：进程早已退出。
+            RunStage::Succeeded | RunStage::Failed => "run 已经结束，没有可停的进程",
+            // `abort_allowed` 对这两格为真，走不到这里；写全只为不留通配。
+            RunStage::Preparing | RunStage::Streaming => "run 尚未进入可取消阶段",
+        });
+    }
+    let Some(pid) = run.child_pid else {
+        return internal_error("run 子进程尚未登记".to_owned());
+    };
+    match send_sigterm(pid) {
+        Ok(()) => json_response(202, &json!({ "message": "已发送 SIGTERM" })),
+        Err(error) => internal_error(error),
     }
 }
 
@@ -965,7 +975,8 @@ fn apply_log_line(
         (change, record.clone())
     };
     if change == HistoryChange::StageChanged {
-        registry.active_runs.get_mut(run_record_id)?.stage = history.stage.clone();
+        registry.active_runs.get_mut(run_record_id)?.stage =
+            history.stage.as_deref().and_then(RunStage::parse);
     }
     Some((change, history))
 }

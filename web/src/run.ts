@@ -1,6 +1,7 @@
 import type { RunDetail } from "./api";
-import type { RunPhase } from "./components/DesignSystem";
 import { historyPresentation } from "./history";
+import type { RunPhase } from "./runStage";
+import { runPhase, stageLabel } from "./runStage";
 
 export type RunPresentationKind =
   | "accepted"
@@ -87,15 +88,4 @@ export function runPresentation(detail: RunDetail): RunPresentation {
     error: presentation.error,
     metrics,
   };
-}
-
-function runPhase(stage: string | null): RunPhase | null {
-  switch (stage) {
-    case "PREPARING":
-    case "STREAMING":
-    case "COMMITTING":
-      return stage;
-    default:
-      return null;
-  }
 }

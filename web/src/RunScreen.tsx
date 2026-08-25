@@ -15,6 +15,7 @@ import { mappingSuggestion } from "./m3";
 import { progressOfLiveRun } from "./progress";
 import { runPresentation } from "./run";
 import type { RunPresentation } from "./run";
+import { abortRefusal } from "./runStage";
 
 const RUN_POLL_INTERVAL_MS = 1000;
 const countFormatter = new Intl.NumberFormat("zh-CN");
@@ -106,6 +107,9 @@ export function RunScreen({
   }, [runRecordId]);
 
   const presentation = detail === null ? null : runPresentation(detail);
+  // 停不停得了和服务端读同一条规则，所以按钮在点下去之前就知道答案——
+  // 过去它一直亮着，人只有吃一个 409 才发现封口点已经过了。
+  const cancelRefusal = detail === null ? null : abortRefusal(detail.stage);
 
   async function handleCancel() {
     setCancelMessage(null);
@@ -129,14 +133,21 @@ export function RunScreen({
           <span className="card-subtitle mono">运行记录 · {runRecordId}</span>
         </div>
         {detail?.live === true ? (
-          <button
-            className="button is-ghost"
-            type="button"
-            onClick={() => void handleCancel()}
-          >
-            <Ban size={15} aria-hidden="true" />
-            取消运行
-          </button>
+          // 灰掉而不是隐藏：理由挂得住，消失挂不住。
+          <span className="run-cancel">
+            <button
+              className="button is-ghost"
+              type="button"
+              disabled={cancelRefusal !== null}
+              onClick={() => void handleCancel()}
+            >
+              <Ban size={15} aria-hidden="true" />
+              取消运行
+            </button>
+            {cancelRefusal !== null && (
+              <span className="run-cancel-reason">{cancelRefusal}</span>
+            )}
+          </span>
         ) : (
           <button className="button is-primary" type="button" onClick={onRelaunch}>
             <Play size={15} aria-hidden="true" />

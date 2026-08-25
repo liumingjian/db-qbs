@@ -1,13 +1,12 @@
 import { Eye, EyeOff } from "lucide-react";
 import { useState } from "react";
 
-export type RunPhase = "PREPARING" | "STREAMING" | "COMMITTING";
+import type { RunPhase } from "../runStage";
+import { RUN_PHASES, stageLabel } from "../runStage";
 
-const phases: Array<{ code: RunPhase; label: string }> = [
-  { code: "PREPARING", label: "准备中" },
-  { code: "STREAMING", label: "传输中" },
-  { code: "COMMITTING", label: "提交中" },
-];
+const phases: Array<{ code: RunPhase; label: string }> = RUN_PHASES.map(
+  (code) => ({ code, label: stageLabel(code) }),
+);
 
 export function PhaseLine({ current }: { current: RunPhase | null }) {
   const currentIndex = current === null ? -1 : phases.findIndex(({ code }) => code === current);

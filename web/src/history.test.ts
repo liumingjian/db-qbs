@@ -185,6 +185,59 @@ describe("run history presentation", () => {
     ).toBe("目标端：门禁计数不一致");
   });
 
+  it("names the stage in the live conclusion instead of echoing the wire spelling", () => {
+    expect(
+      historyPresentation(
+        history({ outcome: null, finished_at: null, stage: "STREAMING" }),
+      ).conclusion,
+    ).toBe("进行中 · 传输中");
+  });
+
+  it("says a run is only accepted while no stage has been reported", () => {
+    expect(
+      historyPresentation(
+        history({ outcome: null, finished_at: null, stage: null }),
+      ).conclusion,
+    ).toBe("已受理，正在拉起");
+  });
+
+  it("shows an unknown stage as-is instead of swallowing it", () => {
+    // Same rule as the failure category above: an unrecognised spelling means
+    // the two ends are on different versions, and that belongs on screen.
+    expect(
+      historyPresentation(
+        history({ outcome: null, finished_at: null, stage: "RESUMING" }),
+      ).conclusion,
+    ).toBe("进行中 · RESUMING");
+  });
+
+  it("stops calling a row live once it has a finish time but no outcome", () => {
+    // The parent recorded a finish and never folded a verdict. 「进行中」 is a
+    // promise that the row will change; this one never will, and calling it
+    // live also keeps it under a one-second poll forever.
+    const presentation = historyPresentation(
+      history({
+        outcome: null,
+        finished_at: "2026-08-15T10:01:00.000Z",
+        stage: "STREAMING",
+      }),
+    );
+    expect(presentation.kind).toBe("unknown");
+    expect(presentation.conclusion).toBe("记录不完整，结局未知");
+  });
+
+  it("still lets a named unknown reason speak first", () => {
+    expect(
+      historyPresentation(
+        history({
+          outcome: null,
+          finished_at: null,
+          unknown_reason: "SERVICE_RESTARTED",
+        }),
+      ).conclusion,
+    ).toBe("服务重启，结局未知");
+  });
+
   it("explains a missing run id", () => {
     expect(runIdPresentation(history({ run_id: null }))).toBe(
       "未发起，目标端不知道这次运行",

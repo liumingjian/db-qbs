@@ -415,6 +415,8 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .run-card { overflow: hidden; }
 .run-header > div { min-width: 0; }
 .back-button { display: inline-flex; align-items: center; gap: 5px; margin: 0 0 5px; padding: 0; border: 0; background: transparent; color: var(--brand); cursor: pointer; font-size: var(--size-meta); }
+.run-cancel { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.run-cancel-reason { max-width: 260px; color: var(--mute); font-size: var(--size-cap); text-align: right; }
 .run-notice { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px var(--pad); border-bottom: 1px solid var(--info-bd); background: var(--info-bg); color: var(--info); font-size: var(--size-meta); }
 .run-notice.is-error { border-color: var(--crit-bd); background: var(--crit-bg); color: var(--crit); }
 .run-content { display: flex; flex-direction: column; gap: 18px; padding: var(--pad); }

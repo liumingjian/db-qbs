@@ -8,7 +8,7 @@ use rusqlite::{named_params, params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::FailureKind;
+use crate::{FailureKind, RunStage};
 
 const DATABASE_FILE: &str = "db-qbs.sqlite3";
 
@@ -105,6 +105,10 @@ pub struct RunHistory {
     pub finished_at: Option<String>,
     pub outcome: Option<String>,
     pub target_table_effect: Option<String>,
+    /// 展示用的那一份，**是字符串不是枚举**，而且是故意的：运行历史按定义是
+    /// 「日志的尽力投影」，它必须能原样搬运一个自己不认识的拼写。吞掉它，
+    /// 「前端/父进程的版本落后于跑数的子进程」这件事就在屏幕上彻底消失了，
+    /// 而那正是最该被看见的时候。判定不走这一份，走 `RunStage::parse`。
     pub stage: Option<String>,
     pub source_rows: Option<u64>,
     pub staged_rows: Option<u64>,
@@ -313,17 +317,15 @@ impl RunHistory {
         self.stage = owned_text(log, "stage");
         self.finished_at = owned_text(log, "ts");
         if self.target_table_effect.is_none() {
-            self.target_table_effect = match (
-                self.outcome.as_deref(),
-                self.stage.as_deref(),
-                text(log, "sink_code"),
-            ) {
-                (Some("SUCCEEDED"), _, _) => Some("SWAPPED".to_owned()),
-                (Some("FAILED"), _, Some("VERIFY_FAILED")) => Some("DISCARDED".to_owned()),
-                (Some("FAILED"), Some("COMMITTING"), _) => Some("UNKNOWN".to_owned()),
-                (Some("FAILED"), _, _) => Some("DISCARDED".to_owned()),
-                _ => None,
-            };
+            let stage = self.stage.as_deref().and_then(RunStage::parse);
+            self.target_table_effect =
+                match (self.outcome.as_deref(), stage, text(log, "sink_code")) {
+                    (Some("SUCCEEDED"), _, _) => Some("SWAPPED".to_owned()),
+                    (Some("FAILED"), _, Some("VERIFY_FAILED")) => Some("DISCARDED".to_owned()),
+                    (Some("FAILED"), Some(RunStage::Committing), _) => Some("UNKNOWN".to_owned()),
+                    (Some("FAILED"), _, _) => Some("DISCARDED".to_owned()),
+                    _ => None,
+                };
         }
         self.source_rows = number(log, "source_rows");
         self.staged_rows = number(log, "staged_rows");

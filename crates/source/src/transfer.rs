@@ -6,33 +6,12 @@ use rand::RngCore;
 
 use crate::{
     BatchPayload, FailureKind, OpenRunRequest, RangeCheckColumn, RangeCheckResult, RunResponse,
-    SinkClient, SinkError, SinkErrorKind, SourceColumn, TargetConnection, Terminal,
+    RunStage, SinkClient, SinkError, SinkErrorKind, SourceColumn, TargetConnection, Terminal,
 };
 
 pub const FETCH_ARRAY_SIZE: u32 = 100;
 pub const BATCH_ROW_LIMIT: usize = 5_000;
 pub const BATCH_BYTE_BUDGET: usize = 16 * 1024 * 1024;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunStage {
-    Preparing,
-    Streaming,
-    Committing,
-    Succeeded,
-    Failed,
-}
-
-impl RunStage {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Preparing => "PREPARING",
-            Self::Streaming => "STREAMING",
-            Self::Committing => "COMMITTING",
-            Self::Succeeded => "SUCCEEDED",
-            Self::Failed => "FAILED",
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceReadError {

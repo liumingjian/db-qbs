@@ -127,10 +127,28 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    no input beyond the task's identity** — clicking start runs it; there is no dialog and there are no
    parameters. A re-run produces a new `run_id` and never reuses the old one. The mutual-exclusion key
    is the task: **one task may not have two runs in flight**, and the 409 says exactly that.
-   **The state lives only in `source`, and only in process memory** — five values, `PREPARING` /
-   `STREAMING` / `COMMITTING` / `SUCCEEDED` / `FAILED`, named after what the process is doing. `sink`
+   **The state lives only in `source`, and only in process memory** — see **Run Stage**. `sink`
    holds no run state, only the resource lifetime of the staging table. When the source process dies,
    the run ceases to exist.
+
+**Run Stage**
+   What the run process is doing right now: five values, `PREPARING` / `STREAMING` / `COMMITTING` /
+   `SUCCEEDED` / `FAILED`, named after the work rather than after a verdict. **It is a closed set with
+   one definition** (`crates/shared/src/run_stage.rs`), spelled once and pinned by a test, because the
+   name crosses a process line: the child writes it into a `stage_changed` Run Log line and the parent
+   reads it back. Those spellings are the wire contract and never change.
+
+   **Abort permission hangs off it and has no second implementation**: `PREPARING` and `STREAMING` may
+   still be stopped, the other three may not. Both ends evaluate that one rule, so the screen greys the
+   stop button rather than learning of the refusal from a 409. **Liveness does not hang off it** — a
+   run history row is in flight by its own outcome, not by its stage, and a row carrying a finish time
+   without a verdict is not in flight but of unknown outcome.
+
+   The two terminal values share their spelling with a Run History row's `outcome`, which is the
+   *verdict* over the same two words. They are separate vocabularies that happen to agree; nothing
+   converts between them. A spelling the reader cannot place is **shown as it arrived, never
+   swallowed** — it means the two ends are on different versions, which is exactly what you want on
+   screen — but nothing is ever decided from it: unrecognised reads the same as absent.
 
 **Batch**
    The smallest unit pushed within a run: **5000 rows or 16 MiB, whichever comes first**.
@@ -157,9 +175,11 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
 **Abort**
    The cleanup action by which `source`, on hitting an error, tells `sink` to discard the staging
    table. It is idempotent and **promises nothing about reliability** — a failed abort is logged and
-   not retried. It exists to clear the most common leftover: "the process is still alive, this run
-   just failed." **It is only ever sent before commit**: once `COMMITTING` is entered, the staging
-   table's disposition has passed wholly to `sink` and source permanently forfeits the right to abort.
+   not retried. Whether it is still permitted is a property of the **Run Stage**, with one
+   implementation both ends read. It exists to clear the most common leftover: "the process is
+   still alive, this run just failed." **It is only ever sent before commit**: once `COMMITTING`
+   is entered, the staging table's disposition has passed wholly to `sink` and source permanently
+   forfeits the right to abort.
    Abort is not a state; it is an action on the `FAILED` path.
 
 **Swap**

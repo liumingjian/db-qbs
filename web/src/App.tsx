@@ -51,7 +51,7 @@ import type {
 import { messageFrom } from "./errors";
 import { AgentScreen } from "./AgentScreen";
 import { JobCenterScreen } from "./JobCenterScreen";
-import { latestRunByTask } from "./listing";
+import { latestRunByTask, runStatus } from "./listing";
 import { RunScreen } from "./RunScreen";
 import { SettingsScreen } from "./SettingsScreen";
 import { HighlightedSqlInput, SqlEditor } from "./SqlEditor";
@@ -220,7 +220,7 @@ export function App() {
   }, [loadList]);
 
   const hasLiveRun = useMemo(
-    () => runHistory.some((run) => isLiveRunHistory(run)),
+    () => runHistory.some((run) => runStatus(run) === "live"),
     [runHistory],
   );
 
@@ -2173,14 +2173,6 @@ function targetTreeLabel(datasource: Datasource | undefined): string {
     return datasource.database;
   }
   return datasource.name;
-}
-
-function isLiveRunHistory(run: RunHistory): boolean {
-  return (
-    run.finished_at === null &&
-    run.outcome === null &&
-    run.unknown_reason === null
-  );
 }
 
 /** 覆盖这一列的唯一性约束，`PRIMARY` 原样、其余写成 `UNIQUE <名字>`。 */
