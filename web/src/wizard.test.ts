@@ -183,6 +183,21 @@ describe("when a change is worth asking about", () => {
     expect(leaving(draft)).toBeNull();
   });
 
+  it("does not ask or clear when a destructive selector keeps its current value", () => {
+    const draft = workedDraft();
+    const source = apply(draft, { type: "source-datasource", datasource: draft.source });
+    const target = apply(draft, {
+      type: "target-datasource",
+      datasource: draft.target,
+      online: draft.targetAgentOnline,
+    });
+    const mode = apply(draft, { type: "fetch-mode", fetchMode: draft.fetchMode });
+
+    expect(source).toEqual({ kind: "done", draft });
+    expect(target).toEqual({ kind: "done", draft });
+    expect(mode).toEqual({ kind: "done", draft });
+  });
+
   it("does not ask about values the machine put there", () => {
     // 自动全选的列、同名匹配出的映射、预填的目标表名都不算「手改过」。
     let draft = done(apply(openNew(SOURCE, TARGET), { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
