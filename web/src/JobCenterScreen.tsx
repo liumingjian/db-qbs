@@ -479,6 +479,10 @@ export function JobCenterScreen({
             setOpenTaskId(null);
             onRerun(task);
           }}
+          onCleaned={() => {
+            setOpenTaskId(null);
+            onChanged();
+          }}
         />
       )}
 

@@ -8,9 +8,9 @@ use url::Url;
 // 报文形状的唯一定义在 `db-qbs-shared`（#124）。本文件只留 source 侧自己的
 // 客户端错误模型（`SinkError` 一族）与 HTTP 客户端实现。
 use db_qbs_shared::{
-    AbortResponse, BatchPayload, BatchResponse, CommitRequest, CommitResponse, ErrorEnvelope,
-    OpenOutcome, OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn,
-    RangeCheckResult, RunResponse,
+    AbortResponse, BatchPayload, BatchResponse, CleanupRunRequest, CleanupRunResponse,
+    CommitRequest, CommitResponse, ErrorEnvelope, OpenOutcome, OpenRunRequest, OpenRunResponse,
+    PrecheckIssue, RangeCheckColumn, RangeCheckResult, RunResponse,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -192,6 +192,14 @@ impl HttpSinkClient {
 
     fn endpoint(&self, suffix: &str) -> String {
         format!("{}{suffix}", self.base_url)
+    }
+
+    pub fn cleanup(&self, request: &CleanupRunRequest) -> Result<CleanupRunResponse, SinkError> {
+        self.post(
+            "/v1/runs/cleanup",
+            serde_json::to_value(request).expect("cleanup request must serialize"),
+            Some(COMMIT_TIMEOUT),
+        )
     }
 
     // Pooled keep-alive is safe for these POSTs despite ADR-0010 §5's retry=0: ureq 2.10.1

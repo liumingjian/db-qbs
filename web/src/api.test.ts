@@ -15,6 +15,7 @@ import {
   fetchTargetTables,
   generateBuilderSql,
   cancelRun,
+  cleanupRun,
   fetchRun,
   listRunHistory,
   listTasks,
@@ -218,16 +219,19 @@ describe("run history API", () => {
       live: true,
     };
     const canceled = { message: "已发送 SIGTERM" };
+    const cleaned = { deleted_rows: 3 };
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(accepted), { status: 202 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(live), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify(canceled), { status: 202 }));
+      .mockResolvedValueOnce(new Response(JSON.stringify(canceled), { status: 202 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(cleaned), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(startRun("task-01")).resolves.toEqual(accepted);
     await expect(fetchRun(accepted.run_record_id)).resolves.toEqual(live);
     await expect(cancelRun(accepted.run_record_id)).resolves.toEqual(canceled);
+    await expect(cleanupRun(accepted.run_record_id)).resolves.toEqual(cleaned);
 
     expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/runs", expect.objectContaining({
       method: "POST",
@@ -238,6 +242,9 @@ describe("run history API", () => {
       headers: { Accept: "application/json" },
     });
     expect(fetchMock).toHaveBeenNthCalledWith(3, "/api/runs/record%2F01/cancel", expect.objectContaining({
+      method: "POST",
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(4, "/api/runs/record%2F01/cleanup", expect.objectContaining({
       method: "POST",
     }));
   });
