@@ -46,6 +46,7 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
   const [targetFilter, setTargetFilter] = useState("");
   const [expandedOwners, setExpandedOwners] = useState<ReadonlySet<string>>(new Set());
   const [busy, setBusy] = useState<"tables" | "columns" | "target" | "submit" | null>(null);
+  const targetColumnRequest = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [sql, setSql] = useState<BuilderSql | null>(null);
   const [sqlError, setSqlError] = useState<string | null>(null);
@@ -136,17 +137,38 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
     }
   }
 
-  async function loadTarget(table = draft.spec.target_table) {
+  async function loadTarget() {
+    const request = ++targetColumnRequest.current;
+    const current = draftRef.current;
+    const datasourceId = current.target.datasource_id;
+    const table = current.spec.target_table;
     if (table.trim() === "") return;
     setBusy("target");
     setError(null);
     try {
-      const metadata = await fetchTargetColumns(draft.target.datasource_id, table);
+      const metadata = await fetchTargetColumns(datasourceId, table);
+      const latest = draftRef.current;
+      if (
+        request !== targetColumnRequest.current ||
+        latest.target.datasource_id !== datasourceId ||
+        latest.spec.target_table !== table
+      ) {
+        return;
+      }
       change({ type: "target-columns-arrived", columns: metadata.columns, keys: metadata.keys });
     } catch (loadError) {
-      setError(messageFrom(loadError));
+      const latest = draftRef.current;
+      if (
+        request === targetColumnRequest.current &&
+        latest.target.datasource_id === datasourceId &&
+        latest.spec.target_table === table
+      ) {
+        setError(messageFrom(loadError));
+      }
     } finally {
-      setBusy(null);
+      if (request === targetColumnRequest.current) {
+        setBusy((currentBusy) => currentBusy === "target" ? null : currentBusy);
+      }
     }
   }
 
@@ -219,6 +241,12 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
     const query = targetFilter.trim().toLocaleLowerCase();
     return targetTables.filter((table) => table.toLocaleLowerCase().includes(query));
   }, [targetFilter, targetTables]);
+
+  function selectTargetTable(table: string) {
+    const alreadySelected = draftRef.current.spec.target_table === table;
+    change({ type: "target-table", table });
+    if (alreadySelected) void loadTarget();
+  }
 
   function advance() {
     if (draft.step === 3) {
@@ -334,7 +362,7 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
                   className={`table-node ${draft.spec.target_table === table ? "is-selected" : ""}`}
                   key={table}
                   type="button"
-                  onClick={() => change({ type: "target-table", table })}
+                  onClick={() => selectTargetTable(table)}
                 >{table}</button>
               ))}
             </div>
