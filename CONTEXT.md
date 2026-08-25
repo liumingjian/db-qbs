@@ -86,6 +86,19 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    — it is recomputed on demand, and only pinned as a snapshot of what actually ran on each
    run-history row. **Only `source` reads it; `sink` is unaware it exists.**
 
+**Task Draft**
+   A Task Definition **while it is being built**, plus everything the interface needs to judge it:
+   which fields the person typed or ticked by hand, which were derived for them (same-name mapping,
+   inferred primary key, prefilled target table name, generated task name), and the results fetched
+   along the way (the ten-row preview, the target-table check).
+
+   It is **never persisted** — leaving the wizard discards it, and re-entry is through the saved task,
+   not through a draft. Its rules live in one module (`web/src/wizard.ts`), never in the screens:
+   what a change clears, whether that clearing is worth a confirmation, when a fetched result goes
+   stale, and whether the next step may be entered. A **hand-made** value is one the person typed or
+   ticked, or one loaded from a saved task when editing; a derived value is not. Only hand-made values
+   are worth a confirmation before they are cleared.
+
 **Filter Clause**
    One field, `where_clause`: **a free-form fragment spliced verbatim after `WHERE`**, not including
    the word `WHERE` itself. Blank means no `WHERE` at all, i.e. read the whole table. It is **not
