@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import type { BuilderColumn, TargetColumn } from "./api";
 import { TaskEntryDialog } from "./TaskEntryDialog";
-import { TaskWizardScreen } from "./TaskWizardScreen";
+import { TaskWizardScreen, WizardConfirmDialog } from "./TaskWizardScreen";
 import { apply, openNew } from "./wizard";
 import type { Applied, Draft } from "./wizard";
 
@@ -60,6 +60,18 @@ function renderWizard(draft: Draft): string {
 }
 
 describe("the mapping step UI", () => {
+  it("uses one confirmation shape for the wizard module's exact loss description", () => {
+    const html = renderToStaticMarkup(createElement(WizardConfirmDialog, {
+      loss: { headline: "这个改动会清掉：", lines: ["手写的过滤条件", "已勾的 1 个主键列"] },
+      onCancel: () => undefined,
+      onConfirm: () => undefined,
+    }));
+    expect(html).toContain("这个改动会清掉：");
+    expect(html).toContain("手写的过滤条件");
+    expect(html).toContain("已勾的 1 个主键列");
+    expect(html).toContain("确认并继续");
+  });
+
   it("puts the fetch mode first in the persistent context and orients every step", () => {
     const first = renderWizard(openNew(SOURCE, TARGET));
     expect(first.indexOf('class="wizard-mode"')).toBeLessThan(
@@ -92,6 +104,21 @@ describe("the mapping step UI", () => {
     expect(html).toContain(">保存</button>");
     expect(html).not.toContain("只保存");
     expect(html).not.toMatch(/>开始导入<\/button>/);
+  });
+
+  it("offers described datasource changes only while editing", () => {
+    const edit = renderToStaticMarkup(createElement(TaskWizardScreen, {
+      initial: { ...mappingDraft(), mode: "edit", taskId: "task-1" },
+      onCancel: () => undefined,
+      onSubmit: async () => undefined,
+      sourceOptions: [{ ...SOURCE, connection: "prod/orcl", agentName: "", agentStatus: null }],
+      targetOptions: [{ ...TARGET, connection: "report/mysql", agentName: "sink-1", agentStatus: "online" }],
+    }));
+    expect(edit).toContain("源端数据源");
+    expect(edit).toContain("生产 Oracle · prod/orcl");
+    expect(edit).toContain("目标端数据源");
+    expect(edit).toContain("报表 MySQL · report/mysql");
+    expect(renderWizard(mappingDraft())).not.toContain("源端数据源");
   });
 
   it("distinguishes settled rows, exposes deletion, and explains disabled controls", () => {

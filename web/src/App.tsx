@@ -12,7 +12,7 @@ import {
   Settings,
   TableProperties,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
 import {
@@ -65,6 +65,7 @@ import { evaluateEdit, evaluateEntry, gateFix, gateReason } from "./entry";
 import type { EntryFix, EntryGuard } from "./entry";
 import { TaskEntryDialog } from "./TaskEntryDialog";
 import { TaskWizardScreen } from "./TaskWizardScreen";
+import type { TaskWizardScreenHandle } from "./TaskWizardScreen";
 import { FormField, Modal, ModalFooter } from "./ui";
 import { openExisting, openNew, taskName, toSpec } from "./wizard";
 import type { Draft, Step } from "./wizard";
@@ -177,6 +178,12 @@ export function App() {
   const [runHistory, setRunHistory] = useState<RunHistory[]>([]);
   const [dialog, setDialog] = useState<DialogState>(null);
   const [wizardDraft, setWizardDraft] = useState<Draft | null>(null);
+  const wizardScreenRef = useRef<TaskWizardScreenHandle>(null);
+  const pageRef = useRef(page);
+  const wizardDraftRef = useRef(wizardDraft);
+  const navigationBypass = useRef(false);
+  pageRef.current = page;
+  wizardDraftRef.current = wizardDraft;
   const [focusTaskId, setFocusTaskId] = useState<string | null>(null);
   const [activeRun, setActiveRun] = useState<{
     task: Task;
@@ -295,12 +302,22 @@ export function App() {
 
   useEffect(() => {
     function handleHashChange() {
+      if (navigationBypass.current) {
+        navigationBypass.current = false;
+        return;
+      }
       // 旧的 `#history` 打进来就地换成作业中心的地址：**不留一个还能回去的空屏**。
       if (RETIRED_HISTORY_HASHES.includes(window.location.hash)) {
         window.location.replace("#jobs");
         return;
       }
-      setPage(pageFromHash(window.location.hash));
+      const requested = pageFromHash(window.location.hash);
+      if (pageRef.current === "wizard" && wizardDraftRef.current !== null && requested !== "wizard") {
+        window.history.replaceState(null, "", "#wizard");
+        wizardScreenRef.current?.requestLeave(() => commitNavigation(requested));
+        return;
+      }
+      setPage(requested);
     }
     handleHashChange();
     window.addEventListener("hashchange", handleHashChange);
@@ -338,6 +355,19 @@ export function App() {
   }, [agents, datasources, datasourcesLoading, dialog]);
 
   const latestRuns = useMemo(() => latestRunByTask(runHistory), [runHistory]);
+  const editDatasourceOptions = useMemo(() => {
+    if (wizardDraft === null) return { sources: [], targets: [] };
+    const guard = evaluateEdit(
+      {
+        source_datasource_id: wizardDraft.source.datasource_id,
+        target_datasource_id: wizardDraft.target.datasource_id,
+      },
+      datasources,
+      agents,
+      datasourcesLoading,
+    );
+    return guard.kind === "open" ? guard : { sources: [], targets: [] };
+  }, [agents, datasources, datasourcesLoading, wizardDraft]);
 
   function toggleSider() {
     setCollapsed((current) => {
@@ -355,10 +385,21 @@ export function App() {
   }
 
   function navigate(nextPage: Page) {
+    if (pageRef.current === "wizard" && wizardDraftRef.current !== null && nextPage !== "wizard") {
+      wizardScreenRef.current?.requestLeave(() => commitNavigation(nextPage));
+      return;
+    }
+    commitNavigation(nextPage);
+  }
+
+  function commitNavigation(nextPage: Page) {
     setActiveRun(null);
     if (nextPage !== "wizard") setWizardDraft(null);
     setPage(nextPage);
-    window.location.hash = nextPage;
+    if (window.location.hash !== `#${nextPage}`) {
+      navigationBypass.current = true;
+      window.location.hash = nextPage;
+    }
   }
 
   async function handleWizardSubmit(draft: Draft, action: "start" | "save-only") {
@@ -374,7 +415,7 @@ export function App() {
         currentTasks?.map((task) => task.task_id === updated.task_id ? updated : task) ?? [updated],
       );
       setFocusTaskId(updated.task_id);
-      navigate("jobs");
+      commitNavigation("jobs");
       void loadList();
       return;
     }
@@ -388,7 +429,7 @@ export function App() {
       }
     }
     setFocusTaskId(created.task_id);
-    navigate("jobs");
+    commitNavigation("jobs");
     void loadList();
   }
 
@@ -580,9 +621,12 @@ export function App() {
 
           {activeRun === null && page === "wizard" && wizardDraft !== null && (
             <TaskWizardScreen
+              ref={wizardScreenRef}
               initial={wizardDraft}
-              onCancel={() => navigate("jobs")}
+              onCancel={() => commitNavigation("jobs")}
               onSubmit={handleWizardSubmit}
+              sourceOptions={editDatasourceOptions.sources}
+              targetOptions={editDatasourceOptions.targets}
             />
           )}
 

@@ -5,8 +5,9 @@ import {
   RefreshCw,
   Search,
   Trash2,
+  X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 
 import {
   fetchBuilderColumns,
@@ -19,7 +20,9 @@ import {
 } from "./api";
 import type { BuilderSql, BuilderTable } from "./api";
 import { messageFrom } from "./errors";
+import type { DatasourceOption } from "./entry";
 import { HighlightedSqlInput, SqlEditor } from "./SqlEditor";
+import { Modal } from "./ui";
 import {
   apply,
   canAdvance,
@@ -29,17 +32,31 @@ import {
   toSpec,
   view,
 } from "./wizard";
-import type { Change, Draft } from "./wizard";
+import type { Change, Draft, Loss } from "./wizard";
 
 export interface TaskWizardScreenProps {
   initial: Draft;
   onCancel: () => void;
   onSubmit: (draft: Draft, action: "start" | "save-only") => Promise<void>;
+  sourceOptions?: readonly DatasourceOption[];
+  targetOptions?: readonly DatasourceOption[];
 }
 
-export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScreenProps) {
+export interface TaskWizardScreenHandle {
+  requestLeave: (proceed: () => void) => void;
+}
+
+type PendingConfirmation =
+  | { kind: "change"; intent: Change; loses: Loss }
+  | { kind: "leave"; intent: Change; loses: Loss; proceed: () => void };
+
+export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScreenProps>(function TaskWizardScreen(
+  { initial, onCancel, onSubmit, sourceOptions = [], targetOptions = [] },
+  ref,
+) {
   const [draft, setDraft] = useState(initial);
   const draftRef = useRef(initial);
+  const [pending, setPending] = useState<PendingConfirmation | null>(null);
   const [tables, setTables] = useState<BuilderTable[]>([]);
   const [dblinks, setDblinks] = useState<string[]>([]);
   const [targetTables, setTargetTables] = useState<string[]>([]);
@@ -56,31 +73,57 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
   const model = view(draft);
   const advanceBlocked = model.step.blockers.length > 0;
 
-  function change(intent: Change) {
-    const current = draftRef.current;
-    const result = apply(current, intent);
-    const next =
-      result.kind === "done"
-        ? result.draft
-        : window.confirm(
-              `${result.loses.headline}\n\n${result.loses.lines.map((line) => `- ${line}`).join("\n")}`,
-            )
-          ? confirm(current, result.intent)
-          : current;
+  function commit(next: Draft) {
     draftRef.current = next;
     setDraft(next);
   }
 
-  function cancel() {
-    const loss = leaving(draft);
-    if (
-      loss !== null &&
-      !window.confirm(`${loss.headline}\n\n${loss.lines.map((line) => `- ${line}`).join("\n")}`)
-    ) {
+  function requestChange(intent: Change) {
+    const current = draftRef.current;
+    const result = apply(current, intent);
+    if (result.kind === "done") {
+      commit(result.draft);
       return;
     }
-    onCancel();
+    setPending({ kind: "change", intent: result.intent, loses: result.loses });
   }
+
+  function requestLeave(proceed: () => void) {
+    const current = draftRef.current;
+    const loses = leaving(current);
+    if (loses === null) {
+      proceed();
+      return;
+    }
+    setPending({ kind: "leave", intent: { type: "leave" }, loses, proceed });
+  }
+
+  function acceptPending() {
+    if (pending === null) return;
+    commit(confirm(draftRef.current, pending.intent));
+    setPending(null);
+    if (pending.kind === "leave") pending.proceed();
+  }
+
+  useImperativeHandle(ref, () => ({ requestLeave }), []);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && pending === null) requestLeave(onCancel);
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onCancel, pending]);
+
+  useEffect(() => {
+    if (leaving(draft) === null) return;
+    function handleBeforeUnload(event: BeforeUnloadEvent) {
+      event.preventDefault();
+      event.returnValue = "";
+    }
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [draft]);
 
   async function loadTables() {
     const request = ++tableRequest.current;
@@ -162,7 +205,7 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
           : (latest.spec.dblink?.trim() ?? "") === dblink &&
             latest.spec.owner === owner && latest.spec.table === table);
       if (stillCurrent) {
-        change({ type: "source-columns-arrived", columns });
+        requestChange({ type: "source-columns-arrived", columns });
       }
     } catch (loadError) {
       const latest = draftRef.current;
@@ -200,7 +243,7 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
       ) {
         return;
       }
-      change({ type: "target-columns-arrived", columns: metadata.columns, keys: metadata.keys });
+      requestChange({ type: "target-columns-arrived", columns: metadata.columns, keys: metadata.keys });
     } catch (loadError) {
       const latest = draftRef.current;
       if (
@@ -218,7 +261,7 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
   }
 
   function refreshTarget() {
-    change({ type: "refresh-target-columns" });
+    requestChange({ type: "refresh-target-columns" });
     void loadTarget();
   }
 
@@ -319,7 +362,7 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
 
   function selectTargetTable(table: string) {
     const alreadySelected = draftRef.current.spec.target_table === table;
-    change({ type: "target-table", table });
+    requestChange({ type: "target-table", table });
     if (alreadySelected) void loadTarget();
   }
 
@@ -331,7 +374,7 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
       setDraft(next);
       return;
     }
-    change({ type: "advance" });
+    requestChange({ type: "advance" });
   }
 
   async function submit(action: "start" | "save-only") {
@@ -350,19 +393,19 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
       <aside className="wizard-context">
         <header>
           <strong>导入上下文</strong>
-          <button className="text-button" type="button" onClick={cancel}>退出</button>
+          <button className="icon-button" type="button" title="退出向导" aria-label="退出向导" onClick={() => requestLeave(onCancel)}><X size={16} /></button>
         </header>
 
         <div className="wizard-mode" role="group" aria-label="取数方式">
           <button
             type="button"
             className={draft.fetchMode === "table" ? "is-active" : ""}
-            onClick={() => change({ type: "fetch-mode", fetchMode: "table" })}
+            onClick={() => requestChange({ type: "fetch-mode", fetchMode: "table" })}
           >按表选择</button>
           <button
             type="button"
             className={draft.fetchMode === "sql" ? "is-active" : ""}
-            onClick={() => change({ type: "fetch-mode", fetchMode: "sql" })}
+            onClick={() => requestChange({ type: "fetch-mode", fetchMode: "sql" })}
           >自定义 SQL</button>
         </div>
 
@@ -376,18 +419,28 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
                 </button>
               )}
             </div>
+            {draft.mode === "edit" && (
+              <label className="wizard-select-label">源端数据源
+                <select value={draft.source.datasource_id} onChange={(event) => {
+                  const option = sourceOptions.find((candidate) => candidate.datasource_id === event.target.value);
+                  if (option !== undefined) requestChange({ type: "source-datasource", datasource: option });
+                }}>
+                  {sourceOptions.map((option) => <option key={option.datasource_id} value={option.datasource_id}>{option.name} · {option.connection}</option>)}
+                </select>
+              </label>
+            )}
             {draft.fetchMode === "sql" ? (
               <SqlEditor
                 value={draft.spec.source_sql ?? ""}
                 placeholder="SELECT ID, NAME FROM APP.T_CUSTOMER"
-                onChange={(value) => change({ type: "source-sql", sql: value })}
-                onFormat={(value) => change({ type: "format-sql", sql: value })}
+                onChange={(value) => requestChange({ type: "source-sql", sql: value })}
+                onFormat={(value) => requestChange({ type: "format-sql", sql: value })}
               />
             ) : (
               <>
                 {dblinks.length > 0 && (
                   <label className="wizard-select-label">DBLINK
-                    <select value={draft.spec.dblink ?? ""} onChange={(event) => change({ type: "dblink", dblink: event.target.value })}>
+                    <select value={draft.spec.dblink ?? ""} onChange={(event) => requestChange({ type: "dblink", dblink: event.target.value })}>
                       <option value="">本地库</option>
                       {dblinks.map((dblink) => <option key={dblink}>{dblink}</option>)}
                     </select>
@@ -414,7 +467,7 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
                           className={`table-node ${draft.spec.owner === owner && draft.spec.table === table.name ? "is-selected" : ""}`}
                           key={`${owner}.${table.name}`}
                           type="button"
-                          onClick={() => change({ type: "source-table", owner, table: table.name })}
+                          onClick={() => requestChange({ type: "source-table", owner, table: table.name })}
                         >{table.name}</button>
                       ))}</div>}
                     </div>;
@@ -431,6 +484,20 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
                 <RefreshCw className={busy === "target" ? "is-spinning" : ""} size={15} />
               </button>
             </div>
+            {draft.mode === "edit" && (
+              <label className="wizard-select-label">目标端数据源
+                <select value={draft.target.datasource_id} onChange={(event) => {
+                  const option = targetOptions.find((candidate) => candidate.datasource_id === event.target.value);
+                  if (option !== undefined) requestChange({
+                    type: "target-datasource",
+                    datasource: option,
+                    online: option.agentStatus === "online",
+                  });
+                }}>
+                  {targetOptions.map((option) => <option key={option.datasource_id} value={option.datasource_id}>{option.name} · {option.connection}</option>)}
+                </select>
+              </label>
+            )}
             <label className="tree-search">
               <Search size={14} aria-hidden="true" />
               <input value={targetFilter} placeholder="筛选目标表" onChange={(event) => setTargetFilter(event.target.value)} />
@@ -472,7 +539,7 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
             sql={sql}
             sqlError={sqlError}
             busy={busy}
-            change={change}
+            change={requestChange}
             loadSourceColumns={() => void loadSourceColumns()}
             loadTarget={refreshTarget}
           />
@@ -480,7 +547,7 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
         </div>
 
         <footer className="wizard-footer">
-          <button className="button" type="button" onClick={draft.step === 1 ? cancel : () => change({ type: "back" })}>
+          <button className="button" type="button" onClick={draft.step === 1 ? () => requestLeave(onCancel) : () => requestChange({ type: "back" })}>
             {draft.step === 1 ? "取消" : "上一步"}
           </button>
           <span className="wizard-footer-actions">
@@ -507,8 +574,29 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
           </span>
         </footer>
       </div>
+      {pending !== null && (
+        <WizardConfirmDialog
+          loss={pending.loses}
+          onCancel={() => setPending(null)}
+          onConfirm={acceptPending}
+        />
+      )}
     </section>
   );
+});
+
+export function WizardConfirmDialog({ loss, onCancel, onConfirm }: {
+  loss: Loss;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return <Modal title={loss.headline} onClose={onCancel} busy={false} narrow>
+    <div className="modal-body wizard-loss"><ul>{loss.lines.map((line) => <li key={line}>{line}</li>)}</ul></div>
+    <footer className="modal-footer">
+      <button className="button is-ghost" type="button" onClick={onCancel}>取消</button>
+      <button className="button is-primary" type="button" onClick={onConfirm}>确认并继续</button>
+    </footer>
+  </Modal>;
 }
 
 function StepBody({
