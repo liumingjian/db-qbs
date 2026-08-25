@@ -656,6 +656,7 @@ impl SinkClient for RejectingOpenSink {
             target: "decimal(7,0)".to_owned(),
             rule: "precision differs".to_owned(),
             suggestion: Some("改为 DECIMAL(8,0)".to_owned()),
+            check: None,
         }]);
         Err(error)
     }

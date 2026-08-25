@@ -24,6 +24,8 @@ import type {
   PreviewResult,
   Task,
   TargetColumn,
+  CheckFinding,
+  TargetCheckResult,
   TargetKey,
   TaskSpec,
 } from "./api";
@@ -37,21 +39,6 @@ export type FetchMode = "table" | "sql";
 export interface DraftBinding {
   datasource_id: string;
   name: string;
-}
-
-/** The target-table check moves to `api.ts` when its endpoint lands. */
-export interface CheckFinding {
-  column: string | null;
-  kind: string;
-  expected: string;
-  actual: string;
-  message: string;
-}
-
-export interface TargetCheckResult {
-  ok: boolean;
-  findings: CheckFinding[];
-  suggested_ddl: string | null;
 }
 
 /** A fetched result, pinned to the inputs it was fetched for. */

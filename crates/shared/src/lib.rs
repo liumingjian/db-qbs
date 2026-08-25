@@ -17,7 +17,8 @@ pub use protocol::{
     AbortResponse, AgentInfo, BatchPayload, BatchResponse, CleanupRunRequest, CleanupRunResponse,
     ColumnSupport, CommitRequest, CommitResponse, ErrorBody, ErrorEnvelope, OpenRunRequest,
     OpenRunResponse, PrecheckIssue, RangeCheckColumn, RangeCheckResult, RunResponse, SourceColumn,
-    TargetConnection, Terminal,
+    TargetCheckKind, TargetCheckRequest, TargetCheckResult, TargetConnection, Terminal,
+    TargetCheckFinding,
 };
 pub use run_stage::RunStage;
 pub use target_shape::{

@@ -28,8 +28,8 @@ pub use agent::{fetch_agent_info, normalize_base_url, Agent, AgentInput, AgentSt
 pub use db_qbs_shared::{
     AbortResponse, BatchPayload, BatchResponse, ColumnSupport, CommitRequest, CommitResponse,
     ErrorBody, ErrorEnvelope, OpenOutcome, OpenRunRequest, OpenRunResponse, PrecheckIssue,
-    RangeCheckColumn, RangeCheckResult, RunResponse, RunStage, SourceColumn, TargetConnection,
-    Terminal,
+    RangeCheckColumn, RangeCheckResult, RunResponse, RunStage, SourceColumn, TargetCheckFinding,
+    TargetCheckKind, TargetCheckRequest, TargetCheckResult, TargetConnection, Terminal,
 };
 // 九行形态的推导也只有一份定义（#125）——判定式仍两端各一份。
 pub use datasource::{

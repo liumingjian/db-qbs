@@ -5,14 +5,16 @@ use db_qbs_shared::{OpenOutcome, RowCounts, Verdict};
 use regex::Regex;
 use serde_json::json;
 
-use crate::precheck::{precheck_with_primary_key, range_check_columns, range_check_issue};
+use crate::precheck::{
+    precheck_with_primary_key, range_check_columns, range_check_issue, target_check_findings,
+};
 use crate::{
     AbortResponse, ActiveRun, ApiError, AtomicSwapError, AtomicSwapRequest, BatchPayload,
     BatchResponse, CleanupRunError, CleanupRunRequest, CleanupRunResponse, CommitResponse,
     CreateStagingError, Destination, DestinationFactory, DropStagingError, FixedDestination,
     OpenRunRequest, PrecheckIssue, RangeCheckColumn, RangeCheckResult, RunResponse, SinkService,
-    SourceColumn, TargetColumn, Terminal, WriteBatchError, MAX_PREPARED_STATEMENT_PLACEHOLDERS,
-    TOMBSTONE_LIMIT,
+    SourceColumn, TargetCheckRequest, TargetCheckResult, TargetColumn, Terminal, WriteBatchError,
+    MAX_PREPARED_STATEMENT_PLACEHOLDERS, TOMBSTONE_LIMIT,
 };
 
 static RUN_ID_RE: LazyLock<Regex> =
@@ -74,6 +76,42 @@ impl<F: DestinationFactory> SinkService<F> {
             tombstones: Mutex::new(VecDeque::new()),
             precheck,
         }
+    }
+
+    pub fn check_target(&self, request: TargetCheckRequest) -> Result<TargetCheckResult, ApiError> {
+        if request.target_table.trim().is_empty() {
+            return Err(ApiError {
+                status: 400,
+                code: "BAD_REQUEST",
+                message: "target_table 不能为空".to_owned(),
+                run_id: None,
+                details: json!({}),
+            });
+        }
+        let connected = self
+            .factory
+            .connect(&request.target)
+            .map_err(target_check_environment)?;
+        let columns = connected
+            .destination
+            .target_columns(&request.target_table)
+            .map_err(target_check_environment)?;
+        let keys = connected
+            .destination
+            .target_keys(&request.target_table)
+            .map_err(target_check_environment)?;
+        let findings = target_check_findings(
+            &request.target_table,
+            &request.primary_key,
+            &request.source_columns,
+            &columns,
+            &keys,
+        );
+        Ok(TargetCheckResult {
+            ok: findings.is_empty(),
+            findings,
+            suggested_ddl: None,
+        })
     }
 
     /// 开一个 run。**回 [`OpenOutcome::RangeCheckNeeded`] 时什么都没建、什么都没存**——
@@ -687,6 +725,16 @@ fn target_connect_error(run_id: &str, message: String) -> ApiError {
             "连接目标端失败：{message}。这是目标端环境或数据源配置错误，目标表未被改动"
         ),
         run_id: Some(run_id.to_owned()),
+        details: json!({ "kind": "OTHER" }),
+    }
+}
+
+fn target_check_environment(message: String) -> ApiError {
+    ApiError {
+        status: 500,
+        code: "SINK_ENVIRONMENT",
+        message: format!("读取目标端元数据失败：{message}"),
+        run_id: None,
         details: json!({ "kind": "OTHER" }),
     }
 }

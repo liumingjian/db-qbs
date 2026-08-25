@@ -1,6 +1,7 @@
 import {
   ChevronDown,
   ChevronRight,
+  Copy,
   LoaderCircle,
   RefreshCw,
   Search,
@@ -9,6 +10,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  checkTargetTable,
   fetchBuilderColumns,
   fetchBuilderDblinks,
   fetchBuilderSqlColumns,
@@ -45,17 +47,20 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
   const [tables, setTables] = useState<BuilderTable[]>([]);
   const [dblinks, setDblinks] = useState<string[]>([]);
   const [targetTables, setTargetTables] = useState<string[]>([]);
+  const [targetMetadataKey, setTargetMetadataKey] = useState<string | null>(null);
   const [sourceFilter, setSourceFilter] = useState("");
   const [targetFilter, setTargetFilter] = useState("");
   const [expandedOwners, setExpandedOwners] = useState<ReadonlySet<string>>(new Set());
-  const [busy, setBusy] = useState<"tables" | "columns" | "target" | "preview" | "submit" | null>(null);
+  const [busy, setBusy] = useState<"tables" | "columns" | "target" | "preview" | "check" | "submit" | null>(null);
   const tableRequest = useRef(0);
   const sourceColumnRequest = useRef(0);
   const targetColumnRequest = useRef(0);
   const previewRequest = useRef(0);
+  const targetCheckRequest = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [sql, setSql] = useState<BuilderSql | null>(null);
   const [sqlError, setSqlError] = useState<string | null>(null);
+  const [checkError, setCheckError] = useState<string | null>(null);
   const model = view(draft);
   const advanceBlocked = model.step.blockers.length > 0;
   const sqlIdentity = JSON.stringify(toSpec(draft));
@@ -204,6 +209,7 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
       ) {
         return;
       }
+      setTargetMetadataKey(JSON.stringify([datasourceId, table]));
       change({ type: "target-columns-arrived", columns: metadata.columns, keys: metadata.keys });
     } catch (loadError) {
       const latest = draftRef.current;
@@ -249,6 +255,46 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
     } finally {
       if (request === previewRequest.current) {
         setBusy((currentBusy) => currentBusy === "preview" ? null : currentBusy);
+      }
+    }
+  }
+
+  async function loadCheck() {
+    const request = ++targetCheckRequest.current;
+    const current = draftRef.current;
+    if (canAdvance(current, 1).length > 0) return;
+    const inputs = JSON.stringify([
+      current.source.datasource_id,
+      current.target.datasource_id,
+      current.spec.target_table,
+      current.spec.columns,
+      current.spec.primary_key,
+    ]);
+    setBusy("check");
+    setCheckError(null);
+    try {
+      const result = await checkTargetTable(
+        current.source.datasource_id,
+        current.target.datasource_id,
+        current.spec.target_table,
+        toSpec(current),
+      );
+      const latest = draftRef.current;
+      const latestInputs = JSON.stringify([
+        latest.source.datasource_id,
+        latest.target.datasource_id,
+        latest.spec.target_table,
+        latest.spec.columns,
+        latest.spec.primary_key,
+      ]);
+      if (request === targetCheckRequest.current && inputs === latestInputs) {
+        change({ type: "check-arrived", check: result });
+      }
+    } catch (loadError) {
+      if (request === targetCheckRequest.current) setCheckError(messageFrom(loadError));
+    } finally {
+      if (request === targetCheckRequest.current) {
+        setBusy((currentBusy) => currentBusy === "check" ? null : currentBusy);
       }
     }
   }
@@ -306,6 +352,20 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
   }, [draft.step, draft.target.datasource_id, draft.spec.target_table]);
 
   useEffect(() => {
+    const expectedMetadata = JSON.stringify([
+      draft.target.datasource_id,
+      draft.spec.target_table,
+    ]);
+    if (
+      draft.check === null &&
+      targetMetadataKey === expectedMetadata &&
+      canAdvance(draft, 1).length === 0
+    ) {
+      void loadCheck();
+    }
+  }, [draft, targetMetadataKey]);
+
+  useEffect(() => {
     if (draft.step !== 2) {
       setSql(null);
       setSqlError(null);
@@ -353,13 +413,6 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
   }
 
   function advance() {
-    if (draft.step === 3) {
-      // #187 replaces this bridge with the real check result and normal `advance` gate.
-      const next = { ...draftRef.current, step: 4 as const };
-      draftRef.current = next;
-      setDraft(next);
-      return;
-    }
     change({ type: "advance" });
   }
 
@@ -500,11 +553,12 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
             draft={draft}
             sql={sql}
             sqlError={sqlError}
+            checkError={checkError}
             busy={busy}
             change={change}
             loadSourceColumns={() => void loadSourceColumns()}
-            loadTarget={refreshTarget}
             loadPreview={() => void loadPreview()}
+            loadCheck={() => void loadCheck()}
           />
           {error !== null && <div className="form-error" role="alert">{error}</div>}
         </div>
@@ -518,8 +572,8 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
               <button
                 className="button is-primary"
                 type="button"
-                disabled={draft.step !== 3 && advanceBlocked}
-                title={draft.step !== 3 && advanceBlocked ? "请先处理当前步骤中的问题" : undefined}
+                disabled={advanceBlocked}
+                title={advanceBlocked ? "请先处理当前步骤中的问题" : undefined}
                 onClick={advance}
               >{draft.step === 3 ? "查看确认页" : "下一步"}</button>
             ) : draft.mode === "edit" ? (
@@ -545,20 +599,22 @@ function StepBody({
   draft,
   sql,
   sqlError,
+  checkError,
   busy,
   change,
   loadSourceColumns,
-  loadTarget,
   loadPreview,
+  loadCheck,
 }: {
   draft: Draft;
   sql: BuilderSql | null;
   sqlError: string | null;
+  checkError: string | null;
   busy: string | null;
   change: (intent: Change) => void;
   loadSourceColumns: () => void;
-  loadTarget: () => void;
   loadPreview: () => void;
+  loadCheck: () => void;
 }) {
   const model = view(draft).step;
   if (model.step === 1) {
@@ -597,9 +653,31 @@ function StepBody({
     </section>;
   }
   if (model.step === 3) {
+    const result = model.check.value;
     return <section className="wizard-step">
       <header><h1>目标表检查</h1><p>系统会核对列、类型、长度与主键，请根据检查结果判断是否需要调整目标表。</p></header>
-      <div className="wizard-placeholder is-prominent"><strong>目标表检查接口正在接入</strong><span>当前页面保留完整步骤位置；#187 会在这里展示逐列结论与完整建表语句。</span><button className="button" type="button" disabled={busy === "target"} onClick={loadTarget}><RefreshCw className={busy === "target" ? "is-spinning" : ""} size={15} />刷新目标表元数据</button></div>
+      <div className="target-check-toolbar">
+        <strong>{busy === "check" ? "正在检查目标表" : result?.ok ? "目标表检查通过" : "目标表需要处理"}</strong>
+        <button className="button" type="button" disabled={busy === "check" || busy === "target"} onClick={loadCheck}>
+          <RefreshCw className={busy === "check" ? "is-spinning" : ""} size={15} />重新检查
+        </button>
+      </div>
+      {checkError !== null && <div className="form-error" role="alert">{checkError}</div>}
+      {model.check.state === "stale" && <div className="form-error" role="alert">映射或主键已变化，请重新检查目标表。</div>}
+      {model.check.state === "none" && busy !== "check" && checkError === null && <p className="wizard-empty">等待目标表元数据与字段映射就绪。</p>}
+      {result !== null && !result.ok && <>
+        <div className="target-check-findings">
+          {result.findings.map((finding, index) => <article key={`${finding.kind}-${finding.column ?? "table"}-${index}`}>
+            <header><strong>{finding.column ?? "目标表"}</strong><span>{finding.message}</span></header>
+            <dl><div><dt>需要</dt><dd>{finding.expected}</dd></div><div><dt>当前</dt><dd>{finding.actual}</dd></div></dl>
+          </article>)}
+        </div>
+        {result.suggested_ddl !== null && <section className="generated-sql target-check-ddl">
+          <header><div><strong>建议建表语句</strong><span>完整 CREATE TABLE</span></div><button className="icon-button" type="button" title="复制建表语句" aria-label="复制建表语句" onClick={() => void navigator.clipboard.writeText(result.suggested_ddl ?? "")}><Copy size={15} /></button></header>
+          <pre className="ddl-output">{result.suggested_ddl}</pre>
+        </section>}
+      </>}
+      <Blockers blockers={model.blockers} />
     </section>;
   }
   const confirmView = model.confirm;
@@ -612,7 +690,7 @@ function StepBody({
       <div><dt>WHERE</dt><dd>{confirmView.where}</dd></div>
       <div><dt>主键</dt><dd>{confirmView.primaryKey.join(", ")}</dd></div>
       <div className="is-wide"><dt>字段映射</dt><dd>{confirmView.mappings.map((mapping) => <span className="mapping-chip" key={mapping.source}>{mapping.source} → {mapping.target}</span>)}</dd></div>
-      <div className="is-wide"><dt>目标表检查</dt><dd>{confirmView.findings.length === 0 ? "检查功能待 #187 接入" : `${confirmView.findings.length} 项结论`}</dd></div>
+      <div className="is-wide"><dt>目标表检查</dt><dd>{confirmView.findings.length === 0 ? "已通过" : `${confirmView.findings.length} 项问题`}</dd></div>
     </dl>
     <Blockers blockers={model.blockers} />
   </section>;
