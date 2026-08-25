@@ -14,6 +14,8 @@ import {
   fetchTargetColumns,
   fetchTargetTables,
   generateBuilderSql,
+  previewBuilderRows,
+  previewErrorMessage,
   cancelRun,
   cleanupRun,
   fetchRun,
@@ -436,6 +438,36 @@ describe("SQL builder API", () => {
       method: "POST",
       body: JSON.stringify(input),
     }));
+  });
+
+  it("requests an explicit ten-row preview with source binding and spec", async () => {
+    const output = {
+      columns: ["ID", "D_BIZ"],
+      rows: [["1", "2026-08-14"], ["2", null]],
+      truncated: true,
+      elapsed_ms: 18,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(output), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const input = spec({ source_sql: "SELECT ID, D_BIZ FROM APP.HOLDINGS" });
+
+    await expect(previewBuilderRows("ds-oracle", input)).resolves.toEqual(output);
+    expect(fetchMock).toHaveBeenCalledWith("/api/builder/preview", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ source_datasource_id: "ds-oracle", spec: input, limit: 10 }),
+    }));
+  });
+
+  it("labels preview validation, source, and timeout failures distinctly", () => {
+    expect(previewErrorMessage(new ApiError("owner 不能为空", 400, {})))
+      .toBe("预览请求无效：owner 不能为空");
+    expect(previewErrorMessage(new ApiError("源端：ORA-00942", 502, {
+      failure_kind: "SOURCE_QUERY",
+    }))).toBe("源数据库预览失败（SOURCE_QUERY）：源端：ORA-00942");
+    expect(previewErrorMessage(new ApiError("源端数据预览超时", 504, {})))
+      .toBe("数据预览超时：源端数据预览超时");
   });
 
   it("fetches columns from the spec, with column precision kept off the task definition", async () => {

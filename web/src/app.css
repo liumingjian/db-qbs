@@ -430,6 +430,14 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .generated-sql header span { color: var(--mute); font-size: var(--size-meta); }
 .generated-sql .ddl-output { margin: 12px; }
 .generated-sql > .form-error { margin: 12px; }
+.preview-panel { overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); }
+.preview-panel > header { min-height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.preview-panel > header > div { display: flex; flex-direction: column; gap: 2px; }
+.preview-panel header span, .preview-panel > footer { color: var(--mute); font-size: var(--size-meta); }
+.preview-panel .table-wrap { max-height: 320px; overflow: auto; }
+.preview-table { min-width: 100%; }
+.preview-table td { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview-panel > footer { display: flex; justify-content: space-between; gap: 12px; padding: 8px 12px; border-top: 1px solid var(--line); }
 .column-fetch-hint { margin: 0; padding: 14px 12px; color: var(--mute); font-size: var(--size-meta); }
 .ddl-output { max-height: 280px; overflow: auto; margin: 0; padding: 12px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--mute-bg); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 

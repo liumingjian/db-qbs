@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use db_qbs_shared::{write_log_line_with_fields, CleanupRunRequest, LogEvent, LogLevel, RunStage};
@@ -33,11 +33,14 @@ use crate::{
     embedded_web_asset, fetch_agent_info, generate_target_ddl, validate_builder_dblink,
     validate_source_sql, Agent, AgentEndpoint, AgentInput, AgentStore, ColumnPrecision,
     DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess, OracleRowSource,
-    RunHistory, SourceConfig, TargetConnection, Task, TaskConfig, TaskInput, TaskSpec, TaskStore,
-    UnknownReason,
+    RowSource, RunHistory, SourceConfig, SourceReadError, TargetConnection, Task, TaskConfig,
+    TaskInput, TaskSpec, TaskStore, UnknownReason,
 };
 
 const MAX_REQUEST_BODY_BYTES: u64 = 1024 * 1024;
+const DEFAULT_PREVIEW_LIMIT: usize = 10;
+const MAX_PREVIEW_LIMIT: usize = 100;
+const PREVIEW_CALL_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const RUN_TASKS_DIRECTORY: &str = "run-tasks";
 
 pub type RunRegistry = Arc<Mutex<RunState>>;
@@ -97,6 +100,22 @@ struct BuilderDatasourceInput {
 struct BuilderSqlInput {
     datasource_id: String,
     source_sql: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuilderPreviewInput {
+    source_datasource_id: String,
+    spec: TaskSpec,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct PreviewResult {
+    columns: Vec<String>,
+    rows: Vec<Vec<Option<String>>>,
+    truncated: bool,
+    elapsed_ms: u64,
 }
 
 /// 草稿测连的请求体（ADR-0039 §3）：吃的是**表单里当前填的那组值**，不是库里存的那条。
@@ -319,6 +338,9 @@ pub fn routes() -> &'static [Route] {
             }),
             Route::new(Post, "/api/builder/sql", |_state, request, _id| {
                 handle_builder_sql(request)
+            }),
+            Route::new(Post, "/api/builder/preview", |state, request, _id| {
+                handle_builder_preview(request, state)
             }),
             Route::new(Get, "/api/agents", |state, _request, _id| {
                 handle_list_agents(state)
@@ -1751,6 +1773,82 @@ fn handle_builder_sql(request: &Request) -> HttpResponse {
     json_response(200, &json!({ "source_sql": spec.source_sql() }))
 }
 
+fn handle_builder_preview(request: &Request, state: &Api<'_>) -> HttpResponse {
+    let input: BuilderPreviewInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    if let Err(error) = input.spec.validate() {
+        return bad_request(error);
+    }
+    let limit = match preview_limit(input.limit) {
+        Ok(limit) => limit,
+        Err(error) => return bad_request(error),
+    };
+    let access = match oracle_access(state, &input.source_datasource_id) {
+        Ok(access) => access,
+        Err(error) => return bad_request(error),
+    };
+    preview_response(collect_preview(&input.spec, limit, |source_sql| {
+        OracleRowSource::preview(&access, source_sql, PREVIEW_CALL_TIMEOUT)
+    }))
+}
+
+fn preview_response(result: Result<PreviewResult, SourceReadError>) -> HttpResponse {
+    match result {
+        Ok(preview) => json_response(200, &preview),
+        Err(error) if error.timed_out => {
+            json_response(504, &json!({ "error": { "message": "源端数据预览超时" } }))
+        }
+        Err(error) => oracle_failure(error),
+    }
+}
+
+fn preview_limit(requested: Option<usize>) -> Result<usize, String> {
+    match requested {
+        Some(0) => Err("limit 必须大于 0".to_owned()),
+        Some(limit) => Ok(limit.min(MAX_PREVIEW_LIMIT)),
+        None => Ok(DEFAULT_PREVIEW_LIMIT),
+    }
+}
+
+/// Generate once through `TaskSpec`, then feed that exact SQL to the reader.
+/// The extra read is only a truncation probe and is never returned.
+fn collect_preview<S, F>(
+    spec: &TaskSpec,
+    limit: usize,
+    open: F,
+) -> Result<PreviewResult, SourceReadError>
+where
+    S: RowSource,
+    F: FnOnce(&str) -> Result<S, SourceReadError>,
+{
+    let source_sql = spec.source_sql();
+    let started = Instant::now();
+    let mut source = open(&source_sql)?;
+    let columns = source
+        .columns()
+        .iter()
+        .map(|column| column.name.clone())
+        .collect();
+    let mut rows = Vec::with_capacity(limit);
+    let mut truncated = false;
+    for index in 0..=limit {
+        let Some(row) = source.next_row()? else { break };
+        if index == limit {
+            truncated = true;
+            break;
+        }
+        rows.push(row);
+    }
+    Ok(PreviewResult {
+        columns,
+        rows,
+        truncated,
+        elapsed_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+    })
+}
+
 fn oracle_failure(error: crate::SourceReadError) -> HttpResponse {
     json_response(
         502,
@@ -1890,5 +1988,114 @@ mod bridge {
             }
             response
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ColumnMapping, FailureKind, SourceColumn};
+
+    struct FakeSource {
+        columns: Vec<SourceColumn>,
+        rows: std::vec::IntoIter<Vec<Option<String>>>,
+    }
+
+    impl RowSource for FakeSource {
+        fn columns(&self) -> &[SourceColumn] {
+            &self.columns
+        }
+
+        fn next_row(&mut self) -> Result<Option<Vec<Option<String>>>, SourceReadError> {
+            Ok(self.rows.next())
+        }
+    }
+
+    fn source(rows: usize) -> FakeSource {
+        FakeSource {
+            columns: vec![SourceColumn {
+                name: "BIZ_ID".to_owned(),
+                data_type: "NUMBER".to_owned(),
+                precision: Some(10),
+                scale: Some(0),
+                length: None,
+                fsp: None,
+                support: None,
+            }],
+            rows: (0..rows)
+                .map(|value| vec![Some(value.to_string())])
+                .collect::<Vec<_>>()
+                .into_iter(),
+        }
+    }
+
+    fn spec(source_sql: Option<&str>, where_clause: &str) -> TaskSpec {
+        TaskSpec {
+            source_sql: source_sql.map(str::to_owned),
+            dblink: None,
+            owner: if source_sql.is_some() { "" } else { "APP" }.to_owned(),
+            table: if source_sql.is_some() { "" } else { "ORDERS" }.to_owned(),
+            target_table: "orders".to_owned(),
+            where_clause: Some(where_clause.to_owned()),
+            primary_key: vec!["BIZ_ID".to_owned()],
+            columns: vec![ColumnMapping {
+                source: "ID".to_owned(),
+                target: "BIZ_ID".to_owned(),
+            }],
+        }
+    }
+
+    #[test]
+    fn preview_defaults_caps_and_uses_one_extra_row_for_truncation() {
+        assert_eq!(preview_limit(None), Ok(10));
+        assert_eq!(preview_limit(Some(500)), Ok(100));
+        assert!(preview_limit(Some(0)).is_err());
+
+        let preview = collect_preview(&spec(None, ""), 2, |_| Ok(source(3))).unwrap();
+        assert_eq!(preview.columns, vec!["BIZ_ID"]);
+        assert_eq!(
+            preview.rows,
+            vec![vec![Some("0".to_owned())], vec![Some("1".to_owned())]]
+        );
+        assert!(preview.truncated);
+
+        let complete = collect_preview(&spec(None, ""), 2, |_| Ok(source(2))).unwrap();
+        assert!(!complete.truncated);
+    }
+
+    #[test]
+    fn preview_reader_receives_task_specs_exact_generated_sql() {
+        let table = spec(None, "STATUS = 1");
+        let expected_table = table.source_sql();
+        collect_preview(&table, 1, |actual| {
+            assert_eq!(actual, expected_table);
+            Ok(source(0))
+        })
+        .unwrap();
+
+        let custom = spec(Some("SELECT ID FROM APP.ORDERS;"), "");
+        let expected_custom = custom.source_sql();
+        assert!(expected_custom.contains("FROM ("));
+        collect_preview(&custom, 1, |actual| {
+            assert_eq!(actual, expected_custom);
+            Ok(source(0))
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn preview_timeout_is_504_and_other_source_errors_keep_failure_classification() {
+        let mut timeout = SourceReadError::new("call timed out", Some(1067));
+        timeout.timed_out = true;
+        assert_eq!(preview_response(Err(timeout)).status, 504);
+
+        let source_error = SourceReadError::with_kind(
+            "table does not exist",
+            Some(942),
+            FailureKind::SourceQuery,
+        );
+        let response = preview_response(Err(source_error));
+        assert_eq!(response.status, 502);
+        assert!(response.body_text().contains("SOURCE_QUERY"));
     }
 }

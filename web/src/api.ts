@@ -176,6 +176,13 @@ export interface BuilderSql {
   source_sql: string;
 }
 
+export interface PreviewResult {
+  columns: string[];
+  rows: (string | null)[][];
+  truncated: boolean;
+  elapsed_ms: number;
+}
+
 export interface MappingIssue {
   column: string | null;
   source: string | null;
@@ -669,6 +676,30 @@ export async function fetchTargetColumns(
 
 export async function generateBuilderSql(spec: TaskSpec): Promise<BuilderSql> {
   return postJson<BuilderSql>("/api/builder/sql", spec, "生成 SQL 失败");
+}
+
+export async function previewBuilderRows(
+  sourceDatasourceId: string,
+  spec: TaskSpec,
+  limit = 10,
+): Promise<PreviewResult> {
+  return postJson<PreviewResult>(
+    "/api/builder/preview",
+    { source_datasource_id: sourceDatasourceId, spec, limit },
+    "预览源端数据失败",
+  );
+}
+
+export function previewErrorMessage(error: unknown): string {
+  if (!(error instanceof ApiError)) return "数据预览失败，请稍后重试";
+  if (error.status === 400) return `预览请求无效：${error.message}`;
+  if (error.status === 504) return `数据预览超时：${error.message}`;
+  if (error.status === 502) {
+    const body = error.body as { failure_kind?: unknown } | null;
+    const kind = typeof body?.failure_kind === "string" ? `（${body.failure_kind}）` : "";
+    return `源数据库预览失败${kind}：${error.message}`;
+  }
+  return error.message;
 }
 
 /**

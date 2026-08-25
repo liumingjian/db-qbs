@@ -15,7 +15,8 @@ import {
   toSpec,
   view,
 } from "./wizard";
-import type { Applied, Change, Draft, PreviewResult, TargetCheckResult } from "./wizard";
+import type { PreviewResult } from "./api";
+import type { Applied, Change, Draft, TargetCheckResult } from "./wizard";
 
 const SOURCE = { datasource_id: "ds-oracle", name: "生产 Oracle" };
 const TARGET = { datasource_id: "ds-mysql", name: "报表 MySQL" };
@@ -482,7 +483,7 @@ function passingCheck(draft: Draft): Draft {
 }
 
 function preview(): PreviewResult {
-  return { columns: ["ID"], rows: [[1]], truncated: false, elapsed_ms: 12 };
+  return { columns: ["ID"], rows: [["1"]], truncated: false, elapsed_ms: 12 };
 }
 
 function savedTask(): Task {

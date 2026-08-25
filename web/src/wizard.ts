@@ -21,6 +21,7 @@ import { emptySpec } from "./api";
 import type {
   BuilderColumn,
   ColumnMapping,
+  PreviewResult,
   Task,
   TargetColumn,
   TargetKey,
@@ -38,19 +39,7 @@ export interface DraftBinding {
   name: string;
 }
 
-/**
- * The ten-row data preview and the target-table check.
- *
- * Declared here rather than in `api.ts` because neither endpoint exists yet;
- * they move to `api.ts` with the fetch functions when they land.
- */
-export interface PreviewResult {
-  columns: string[];
-  rows: unknown[][];
-  truncated: boolean;
-  elapsed_ms: number;
-}
-
+/** The target-table check moves to `api.ts` when its endpoint lands. */
 export interface CheckFinding {
   column: string | null;
   kind: string;
