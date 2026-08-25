@@ -76,6 +76,7 @@ export function TaskEntryDialog({
   return (
     <Modal title="选择本次任务的数据源" onClose={onClose} busy={false}>
       <form
+        noValidate
         onSubmit={(event) => {
           event.preventDefault();
           if (blockReason === null) {
