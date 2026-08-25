@@ -7,7 +7,7 @@ use db_qbs_source::{oracle_kind, FailureKind};
 
 #[test]
 fn the_six_categories_v1_asks_for_are_each_separately_decidable() {
-    // STRATEGY-V1 M4：Oracle 连接失败 / dblink 不可用 / 类型映射错 / 网络中断 /
+    // M4：Oracle 连接失败 / dblink 不可用 / 类型映射错 / 网络中断 /
     // MySQL 写入失败 / 校验不通过。六类两两不同码。
     let six = [
         oracle_kind(Some(12541), true),

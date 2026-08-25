@@ -30,7 +30,7 @@ const countFormatter = new Intl.NumberFormat("zh-CN");
  * 失败分类的中文短名（ADR-0029 §3）。
  *
  * 它加在结论条最前面，作用是**给这次失败归类**，不是复述人话——所以是方括号里的类目名，
- * 不是一句话。类目词表对齐 STRATEGY-V1 M4「区分 Oracle 连接失败 / dblink 不可用 /
+ * 不是一句话。类目词表对齐 M4「区分 Oracle 连接失败 / dblink 不可用 /
  * 类型映射错 / 网络中断 / MySQL 写入失败 / 校验不通过」那六类。
  * 闭集外的值原样显示，不吞掉——那说明 source 增了分类而这里没跟上。
  */

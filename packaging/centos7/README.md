@@ -2,7 +2,7 @@
 
 客户机是 **CentOS 7（glibc 2.17）**。在更新的 Linux 或 macOS 上编出来的二进制装上去
 **启动即 `GLIBC_2.xx not found`** —— 这个形态必须在这里撞掉，不能留到装机现场
-（[ADR-0041](../../docs/adr/0041-v2-scope-trial-readiness.md) §5）。
+（原 ADR-0041 §5 的裁定，该 ADR 已随 `docs/` 删除，见 git 历史）。
 
 也**不能换 musl 静态链接**绕过去：`source` 要经 Oracle OCI 动态加载 Instant Client 的
 `libclntsh.so`，那是 glibc 动态库，musl 目标上加载不了。产物必须是 **glibc 动态链接**。

@@ -13,13 +13,13 @@ result into a target. Only **MySQL** and **Oracle** need to be supported for now
 
 M1 (a one-shot process completing a single import), M2 (`source` as a resident service plus a web UI)
 and M3 (the nine-row type surface, the mapping precheck, and value-domain checks) are **implemented**;
-acceptance records live in `docs/spikes/fixtures/local-rig/`. M4 has not started, though failure
-classification landed ahead of it. Column-name mapping is explicitly out of scope — renaming uses a
+the rigs that accepted them live in `docs/spikes/fixtures/local-rig/`. M4 has not started, though
+failure classification landed ahead of it. Column-name mapping is explicitly out of scope — renaming uses a
 SQL `AS` alias. **Nothing has been deployed to production yet.**
 
 Both ends are Rust (`crates/`); the web UI is React + Vite (`web/`), bundled at build time by
 `crates/source/build.rs` calling `npm run build` and embedded into the `db-qbs-source` binary.
-See `CONTEXT.md` for the architecture and `docs/adr/` for the decisions still in force.
+See `CONTEXT.md` for the architecture; the decision record lives in GitHub issues and git history.
 
 ## Quick start
 
@@ -94,20 +94,14 @@ npm test                 # vitest run
 npm run dev              # front-end only (vite dev server)
 ```
 
-Rig acceptance (M1's 9 cases, M2's A1–A14, M3's B1–B6) and the M2/M3 visual walkthroughs are
-**manual gates with trigger conditions, deliberately kept out of CI**: the scripts live in
-`docs/spikes/fixtures/local-rig/scripts/` and the checklists in
-`docs/spikes/fixtures/local-rig/m2-visual-walkthrough.md` and
-`docs/spikes/fixtures/local-rig/m3-visual-walkthrough.md`. Changing `docs/design-system/` requires
-re-running the M2 walkthrough; changing the M3 failure-state layout or the diagnostic table's column
-structure requires re-running the M3 walkthrough — and recording the actual observations. See
-`CLAUDE.md` for the full gate table.
+Rig acceptance (M1's 9 cases, M2's A1–A14, M3's B1–B6, v1's C1–C6) is a **manual gate deliberately
+kept out of CI**; the scripts live in `docs/spikes/fixtures/local-rig/scripts/` and the
+visual-walkthrough runners in `docs/spikes/fixtures/local-rig/walkthrough/`. The checklists those
+runners were judged against have been deleted — see `CLAUDE.md` under **Visual gates** for what that
+leaves standing.
 
 ## Agent configuration
 
-This repository follows the `mattpocock/skills` conventions:
-
-- `CLAUDE.md` — the agent instruction entry point, containing the `## Agent skills` block
-- `docs/agents/issue-tracker.md` — issues go through GitHub Issues (`gh` CLI)
-- `docs/agents/triage-labels.md` — the triage label vocabulary
-- `docs/agents/domain.md` — domain doc layout (single-context: `CONTEXT.md` at the root plus `docs/adr/`)
+`CLAUDE.md` is the single agent instruction entry point: it carries the issue-tracker convention,
+the triage label vocabulary, the language rule and the commit trailer. `CONTEXT.md` beside it is
+the one domain document.

@@ -9,7 +9,7 @@ import { PAGE_SIZE_OPTIONS } from "./listing";
  *
  * 它们原来长在 `App.tsx` 里，数据源屏（ADR-0039 §1~§4）要用同一套对话框与表单行，
  * 于是搬到这里——**一个字都没改形态**，只换了住处。这不是新组件：
- * `docs/design-system/README.md` §7 的组件清单不因此增减（ADR-0039 §9「零设计系统改动」）。
+ * 设计系统的组件清单不因此增减（ADR-0039 §9「零设计系统改动」）。
  */
 export function Modal({
   title,
