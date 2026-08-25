@@ -154,12 +154,15 @@ describe("the clearing rules", () => {
     expect(next.targetColumns).toEqual([]);
   });
 
-  it("changing the target table clears nothing at all", () => {
+  it("changing the target table preserves decisions and invalidates only old metadata", () => {
     // #173 的缺陷：目标表输入框每次按键都清空全部映射与主键。
-    const draft = withTargetColumns(workedDraft());
+    const draft = passingCheck(withTargetColumns(workedDraft()));
     const next = done(apply(draft, { type: "target-table", table: "t_customer_v2" }));
     expect(next.spec.columns).toEqual(draft.spec.columns);
     expect(next.spec.primary_key).toEqual(draft.spec.primary_key);
+    expect(next.targetColumns).toEqual([]);
+    expect(next.targetKeys).toEqual([]);
+    expect(next.check).toBeNull();
   });
 
   it("going back keeps everything on the step just left", () => {
