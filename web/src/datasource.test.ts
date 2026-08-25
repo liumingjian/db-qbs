@@ -61,8 +61,7 @@ function taskWith(sourceId: string, targetId: string, name = "t"): Task {
       target_table: "T",
       primary_key: ["ID"],
       columns: [{ source: "ID", target: "ID" }],
-      conditions: [],
-      order_by: [],
+      where_clause: "",
     },
   };
 }

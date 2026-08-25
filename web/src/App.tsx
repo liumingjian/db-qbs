@@ -5,16 +5,14 @@ import {
   LoaderCircle,
   Menu,
   PanelLeftClose,
-  Plus,
   Radio,
   RefreshCw,
   Search,
   Server,
   Settings,
   TableProperties,
-  Trash2,
 } from "lucide-react";
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 
 import {
@@ -32,6 +30,7 @@ import {
   generateBuilderSql,
   listRunHistory,
   listTasks,
+  startRun,
   taskInputFrom,
   updateTask,
 } from "./api";
@@ -41,9 +40,7 @@ import type {
   ColumnMapping,
   BuilderSql,
   BuilderTable,
-  Condition,
   RunHistory,
-  RunParams,
   Task,
   Datasource,
   TargetColumn,
@@ -57,19 +54,13 @@ import { JobCenterScreen } from "./JobCenterScreen";
 import { latestRunByTask } from "./listing";
 import { RunScreen } from "./RunScreen";
 import { SettingsScreen } from "./SettingsScreen";
-import { SqlEditor } from "./SqlEditor";
+import { HighlightedSqlInput, SqlEditor } from "./SqlEditor";
 import type { TargetColumnName } from "./spec";
 import {
-  COMPARISONS,
-  comparisonSymbol,
-  defaultParameterName,
-  defaultValueType,
   matchSameNameTargets,
   renameTargetField,
   targetFieldOf,
-  VALUE_TYPE_LABELS,
 } from "./spec";
-import { StartRunDialog } from "./StartRunDialog";
 import { DatasourceScreen } from "./DatasourceScreen";
 import { FormField, Modal, ModalFooter } from "./ui";
 
@@ -78,11 +69,6 @@ type DialogState =
   | { kind: "edit"; task: Task }
   | { kind: "rename"; task: Task }
   | { kind: "delete"; task: Task }
-  /**
-   * `rerun` 非空 = 从运行历史点「重跑」进来的：同一个发起对话框，只是按那次的运行参数
-   * 预填（ADR-0041 增补 2）。重跑本身不是一种新的发起，所以这里不另开一个 kind。
-   */
-  | { kind: "start"; task: Task; rerun?: { runRecordId: string; runParams: RunParams } }
   | null;
 
 /**
@@ -192,6 +178,17 @@ export function App() {
     task: Task;
     runRecordId: string;
   } | null>(null);
+  /**
+   * 发起失败的那句话。发起不再有对话框可以把错误挂在里面，所以它挂在屏顶——
+   * 「同一任务已有一次运行进行中」这类 409 就是从这里读到的。
+   */
+  const [startError, setStartError] = useState<string | null>(null);
+  /**
+   * 正在发起的那个任务。挡的是**同一行连点两下**：第二下会撞回一个 409，
+   * 而那不是用户做错了什么。别的行照常按得动——发起是逐条串行打后端的，
+   * 一条在飞不构成拦住其余每一行的理由。
+   */
+  const [startingTaskId, setStartingTaskId] = useState<string | null>(null);
 
   const loadList = useCallback(async () => {
     setRefreshing(true);
@@ -342,6 +339,29 @@ export function App() {
     );
   }
 
+  /**
+   * 发起一次运行：**点了就跑**。
+   *
+   * 没有对话框、没有参数表单——任务定义里已经写全了要跑什么。跑起来之后直接落到
+   * 运行详情，那是唯一还有事可看的地方；失败时把话留在屏顶，人还站在原来的列表上。
+   */
+  async function handleStart(task: Task) {
+    if (startingTaskId === task.task_id) {
+      return;
+    }
+    setStartingTaskId(task.task_id);
+    setStartError(null);
+    try {
+      const accepted = await startRun(task.task_id);
+      setActiveRun({ task, runRecordId: accepted.run_record_id });
+    } catch (error) {
+      setStartError(`${task.name}：${messageFrom(error)}`);
+    } finally {
+      setStartingTaskId(null);
+    }
+    void loadList();
+  }
+
   async function handleDelete(task: Task) {
     await deleteTask(task.task_id);
     setTasks(
@@ -439,6 +459,19 @@ export function App() {
             </div>
           )}
 
+          {startError !== null && (
+            <div className="notice is-error" role="alert">
+              <span>{startError}</span>
+              <button
+                className="text-button"
+                type="button"
+                onClick={() => setStartError(null)}
+              >
+                知道了
+              </button>
+            </div>
+          )}
+
           {activeRun !== null && (
             <RunScreen
               task={activeRun.task}
@@ -447,7 +480,7 @@ export function App() {
                 setActiveRun(null);
                 void loadList();
               }}
-              onRelaunch={() => setDialog({ kind: "start", task: activeRun.task })}
+              onRelaunch={() => void handleStart(activeRun.task)}
               onEditTask={() => setDialog({ kind: "edit", task: activeRun.task })}
             />
           )}
@@ -463,17 +496,11 @@ export function App() {
               onEdit={(task) => setDialog({ kind: "edit", task })}
               onRename={(task) => setDialog({ kind: "rename", task })}
               onDelete={(task) => setDialog({ kind: "delete", task })}
-              onStart={(task) => setDialog({ kind: "start", task })}
-              onRerun={(task, row) =>
-                setDialog({
-                  kind: "start",
-                  task,
-                  rerun: {
-                    runRecordId: row.run_record_id,
-                    runParams: row.run_params,
-                  },
-                })
-              }
+              startingTaskId={startingTaskId}
+              onStart={(task) => void handleStart(task)}
+              /* 重跑与发起现在是**同一件事**：按任务当前的定义再跑一次。
+                 上一次没有留下任何需要预填的取值，所以也没有第二条代码路径。 */
+              onRerun={handleStart}
               onChanged={() => void loadList()}
             />
           )}
@@ -535,17 +562,6 @@ export function App() {
             onDelete={() => handleDelete(dialog.task)}
           />
         )}
-        {dialog?.kind === "start" && (
-          <StartRunDialog
-            task={dialog.task}
-            rerun={dialog.rerun}
-            onClose={closeDialog}
-            onStarted={(runRecordId) => {
-              setActiveRun({ task: dialog.task, runRecordId });
-              closeDialog();
-            }}
-          />
-        )}
       </main>
     </div>
   );
@@ -572,26 +588,21 @@ type TargetMetaState =
 
 type SourceQueryMode = "table" | "sql";
 
+/**
+ * 自定义 SQL 模式下过滤条件必须是空的——那条路上的过滤只能写在 SQL 自己里。
+ * 编辑一条老任务时顺手抹掉，免得一个看不见的字段把保存卡在服务端的校验上。
+ */
 function normalizeTaskSpecForEditor(spec: TaskSpec): TaskSpec {
   const isSql = Boolean(spec.source_sql?.trim());
-  return {
-    ...spec,
-    conditions: isSql
-      ? []
-      : spec.conditions.map((condition) => ({
-          ...condition,
-          value_source: "constant",
-        })),
-    order_by: [],
-  };
+  return { ...spec, where_clause: isSql ? "" : (spec.where_clause ?? "") };
 }
 
 /**
- * 任务定义编辑器 —— 构建器本身就是任务定义（ADR-0036 §1）。
+ * 任务定义编辑器 —— 构建器本身就是任务定义。
  *
  * 它不再是「一次性生成四个字段、选择态丢弃」的向导：结构化规格是唯一真相源，
- * 选表、勾列、勾主键、条件**全部原样存进任务定义**，再次打开还在（所有者裁定 6）。
- * SQL 是规格的派生面，只读展示，v1 没有编辑入口。
+ * 选表、勾列、勾主键、过滤条件**全部原样存进任务定义**，再次打开还在。
+ * SQL 是规格的派生面，只读展示，没有编辑入口。
  */
 function TaskFormDialog({
   title,
@@ -841,7 +852,7 @@ function TaskFormDialog({
     spec.owner !== "" ||
     (spec.source_sql?.trim() ?? "") !== "" ||
     spec.columns.length > 0 ||
-    spec.conditions.length > 0;
+    (spec.where_clause ?? "").trim() !== "";
 
   function switchSourceQueryMode(nextMode: SourceQueryMode) {
     if (nextMode === sourceQueryMode) {
@@ -871,8 +882,7 @@ function TaskFormDialog({
       table: "",
       columns: [],
       primary_key: [],
-      conditions: [],
-      order_by: [],
+      where_clause: "",
     });
   }
 
@@ -953,8 +963,7 @@ function TaskFormDialog({
           primary_key: seeded.primary_key.filter((name) =>
             survivingAfterMatch.has(name),
           ),
-          conditions: [],
-          order_by: [],
+          where_clause: "",
         });
       } catch (loadError) {
         setBuilderError(messageFrom(loadError));
@@ -994,8 +1003,7 @@ function TaskFormDialog({
       table: table?.name ?? "",
       columns: [],
       primary_key: [],
-      conditions: [],
-      order_by: [],
+      where_clause: "",
     });
     if (table !== undefined) {
       setSourceExpandedOwners((current) => new Set(current).add(table.owner));
@@ -1021,7 +1029,9 @@ function TaskFormDialog({
 
   function toggleAllColumns() {
     if (allSourceColumnsSelected) {
-      updateSpec({ columns: [], primary_key: [], conditions: [], order_by: [] });
+      // 取消全选只是不搬这些列了，**表还是那张表**——过滤条件照旧成立，不清。
+      // （换表 / 换取数方式 / 换数据源才清：那时列名整套都不是同一批了。）
+      updateSpec({ columns: [], primary_key: [] });
       return;
     }
     const current = new Map(spec.columns.map((mapping) => [mapping.source, mapping]));
@@ -1101,45 +1111,6 @@ function TaskFormDialog({
     });
   }
 
-  function addCondition() {
-    const column = columnNames[0];
-    if (column === undefined) {
-      return;
-    }
-    updateSpec({
-      conditions: [
-        ...spec.conditions,
-        {
-          column,
-          operator: "eq",
-          value_type: defaultValueType(dictionary.get(column)?.data_type),
-          parameter: defaultParameterName(
-            column,
-            spec.conditions.map((condition) => condition.parameter),
-          ),
-          value_source: "constant",
-          constant: "",
-        },
-      ],
-    });
-  }
-
-  function updateCondition(index: number, change: Partial<Condition>) {
-    updateSpec({
-      conditions: spec.conditions.map((condition, position) =>
-        position === index
-          ? { ...condition, ...change, value_source: "constant" }
-          : condition,
-      ),
-    });
-  }
-
-  function removeCondition(index: number) {
-    updateSpec({
-      conditions: spec.conditions.filter((_, position) => position !== index),
-    });
-  }
-
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     setSubmitting(true);
@@ -1201,8 +1172,7 @@ function TaskFormDialog({
                       table: "",
                       columns: [],
                       primary_key: [],
-                      conditions: [],
-                      order_by: [],
+                      where_clause: "",
                     });
                   }}
                 >
@@ -1258,8 +1228,7 @@ function TaskFormDialog({
                           table: "",
                           columns: [],
                           primary_key: [],
-                          conditions: [],
-                          order_by: [],
+                          where_clause: "",
                         });
                       }}
                     />
@@ -1392,8 +1361,7 @@ function TaskFormDialog({
                     source_sql: next,
                     columns: [],
                     primary_key: [],
-                    conditions: [],
-                    order_by: [],
+                    where_clause: "",
                   });
                 }}
                 /* 格式化只动空白（`formatSql` 的不变式），结果列还是同一批——
@@ -1699,13 +1667,10 @@ function TaskFormDialog({
           </section>
 
           {sourceQueryMode === "table" ? (
-            <ConditionEditor
-              conditions={spec.conditions}
+            <WhereClauseEditor
+              value={spec.where_clause ?? ""}
               columnNames={columnNames}
-              dictionary={dictionary}
-              onAdd={addCondition}
-              onChange={updateCondition}
-              onRemove={removeCondition}
+              onChange={(where_clause) => updateSpec({ where_clause })}
             />
           ) : (
             /* 这张卡原来在 SQL 模式下整个消失，不留一句话——上一屏还有的东西
@@ -1718,7 +1683,7 @@ function TaskFormDialog({
                 </div>
               </header>
               <p className="spec-empty">
-                自定义 SQL 模式：过滤与排序请直接写进上面的 SQL。
+                自定义 SQL 模式：过滤请直接写进上面的 SQL。
               </p>
             </section>
           )}
@@ -1752,144 +1717,56 @@ function TaskFormDialog({
   );
 }
 
+/** 占位符里那条示例是**能直接改的真句子**，不是「请输入条件」这种废话。 */
+const WHERE_PLACEHOLDER = "D_BIZ >= DATE '2026-08-01'\n  AND STATUS IN ('OK', 'WARN')";
+
 /**
- * 过滤条件控件：字段 + 比较符 + 值，可有若干条（ADR-0035 §3）。
+ * 过滤条件：**一个自由 WHERE 文本框**，写什么就原样拼进 `WHERE` 后面。
  *
- * 一条都没有时整表取数——**这是允许的**，量级风险归台架（#122）去证，不在这里挡。
- * 控件目前只给 `>` `<` `=` 三种比较符。**这不是 ADR-0035 §3 的原话**——它排除的是形态
- * （`IN` / `BETWEEN` / `LIKE` / 表达式），`>=` 保持同一个「字段 + 比较符 + 值」三段式，
- * 并不在排除清单里。加不加是独立的产品决定（ADR-0045 后果），不是被决议挡住的。
+ * 取代的是「字段 + 三个比较符（`>` `<` `=`，连 `>=` 都没有）+ 值」那张四格表单。
+ * 用这门平台的人本来就写 SQL；那张表单表达不了他们真正要的条件（`>=`、`IN`、
+ * `BETWEEN`、`LIKE`、`OR`、子查询），只会把人逼去绕道自定义 SQL——而自定义 SQL
+ * 连表都得自己写。文本框反而是**更小**的东西：只需要写条件，表还是选出来的。
+ *
+ * 高亮与自定义 SQL 那格共用同一份词法（`tokenize`），不引第三方编辑器。
+ * 列清单摆在下面作参考——**不做补全**：补全要接管键盘，而这一格短到不值当。
  */
-function ConditionEditor({
-  conditions,
+function WhereClauseEditor({
+  value,
   columnNames,
-  dictionary,
-  onAdd,
   onChange,
-  onRemove,
 }: {
-  conditions: Condition[];
+  value: string;
   columnNames: string[];
-  dictionary: ReadonlyMap<string, BuilderColumn>;
-  onAdd: () => void;
-  onChange: (index: number, change: Partial<Condition>) => void;
-  onRemove: (index: number) => void;
+  onChange: (next: string) => void;
 }) {
   return (
     <section className="spec-editor" aria-labelledby="conditions-title">
       <header>
         <div>
           <strong id="conditions-title">过滤条件</strong>
-          <span>一条都没有就是整表取数；多条按 AND 连接</span>
+          <span>留空就是整表取数；写什么就原样拼进 WHERE 后面</span>
         </div>
-        <button
-          className="button is-ghost"
-          type="button"
-          onClick={onAdd}
-          disabled={columnNames.length === 0}
-        >
-          <Plus size={15} aria-hidden="true" />
-          添加条件
-        </button>
       </header>
-      {conditions.length === 0 ? (
-        <p className="spec-empty">没有条件：本任务每次取整张表。</p>
-      ) : (
-        <ul className="condition-list">
-          {conditions.map((condition, index) => (
-            <Fragment key={index}>
-            {/* 多条条件怎么拼原来没人说过。写在两行之间，而不是藏进底部说明。 */}
-            {index > 0 && (
-              <li className="condition-join" aria-hidden="true">
-                且
-              </li>
-            )}
-            <li className="condition-row">
-              <label>
-                <span>字段</span>
-                <select
-                  value={condition.column}
-                  onChange={(event) => {
-                    const column = event.target.value;
-                    onChange(index, {
-                      column,
-                      value_type: defaultValueType(dictionary.get(column)?.data_type),
-                    });
-                  }}
-                >
-                  {columnOptions(columnNames, condition.column)}
-                </select>
-              </label>
-              <label>
-                <span>比较</span>
-                <select
-                  value={condition.operator}
-                  onChange={(event) =>
-                    onChange(index, {
-                      operator: event.target.value as Condition["operator"],
-                    })
-                  }
-                >
-                  {COMPARISONS.map((operator) => (
-                    <option key={operator} value={operator}>
-                      {comparisonSymbol(operator)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                <span>值</span>
-                <input
-                  value={condition.constant}
-                  required
-                  onChange={(event) => onChange(index, { constant: event.target.value })}
-                />
-              </label>
-              {/* 值类型排在值后面、格子也更窄：它按字典预填、多数时候不用动。
-                  但字段**必须留着**——ADR-0036 §6 不许 describe 的类型进任务定义，
-                  所以这是用户的声明，不是元数据的回显。 */}
-              <label>
-                <span>值类型</span>
-                <select
-                  value={condition.value_type}
-                  onChange={(event) =>
-                    onChange(index, {
-                      value_type: event.target.value as Condition["value_type"],
-                    })
-                  }
-                >
-                  {Object.entries(VALUE_TYPE_LABELS).map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button
-                className="icon-button is-danger"
-                type="button"
-                title="删除这条条件"
-                aria-label={`删除条件 ${condition.parameter}`}
-                onClick={() => onRemove(index)}
-              >
-                <Trash2 size={15} aria-hidden="true" />
-              </button>
-            </li>
-            </Fragment>
-          ))}
-        </ul>
-      )}
-      <small className="spec-note">
-        过滤值为固定配置，保存后随任务执行。这里目前只有
-        <span className="mono"> &gt; </span>
-        <span className="mono"> &lt; </span>
-        <span className="mono"> = </span>
-        三种比较符；需要
-        <span className="mono"> &gt;= </span>、
-        <span className="mono">IN</span>、
-        <span className="mono">BETWEEN</span>{" "}
-        这类条件，请改用「自定义 SQL」。
-      </small>
+      <div className="where-clause-editor">
+        <HighlightedSqlInput
+          value={value}
+          placeholder={WHERE_PLACEHOLDER}
+          label="过滤条件（WHERE 之后的部分）"
+          rows={4}
+          onChange={onChange}
+        />
+        <small className="spec-note">
+          只写 <span className="mono">WHERE</span> 之后的部分，不用写{" "}
+          <span className="mono">WHERE</span> 这个词，也不要写分号。
+          {columnNames.length > 0 && (
+            <>
+              {" "}本表可用的列：
+              <span className="mono">{columnNames.join(", ")}</span>
+            </>
+          )}
+        </small>
+      </div>
     </section>
   );
 }
@@ -1897,7 +1774,7 @@ function ConditionEditor({
 /**
  * 构建 SQL 的只读展示。
  *
- * v1 **没有编辑入口**（ADR-0036 §1）：SQL 是规格的派生面，现算现看，不存进任务定义，
+ * **没有编辑入口**：SQL 是规格的派生面，现算现看，不存进任务定义，
  * 也没有把它传回后端的路。这里连 `textarea` 都不给——给了就是在暗示可以改。
  */
 function GeneratedSql({
@@ -1936,38 +1813,10 @@ function GeneratedSql({
               : "先选源表和源列，再读取目标列完成映射与主键。"}
         </p>
       ) : (
-        <>
-          <pre className="ddl-output">{sql.source_sql}</pre>
-          {/* 值来源一律是常量，所以「无——发起运行时不需要填任何值」对每一个新任务
-              都恒为真。恒真的提示不承载信息，只占高度：没有参数就不渲染这一块。 */}
-          {sql.run_parameters.length > 0 && (
-            <div className="run-parameter-list">
-              <strong>运行参数</strong>
-              <ul>
-                {sql.run_parameters.map((parameter) => (
-                  <li key={parameter.parameter}>
-                    <span className="mono">{parameter.parameter}</span>
-                    <span>
-                      {parameter.column} · {VALUE_TYPE_LABELS[parameter.value_type]}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </>
+        <pre className="ddl-output">{sql.source_sql}</pre>
       )}
     </section>
   );
-}
-
-function columnOptions(columnNames: string[], current: string) {
-  const names = columnNames.includes(current) ? columnNames : [current, ...columnNames];
-  return names.map((name) => (
-    <option key={name} value={name}>
-      {name}
-    </option>
-  ));
 }
 
 /**

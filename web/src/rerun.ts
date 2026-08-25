@@ -1,15 +1,14 @@
-// 失败运行的一键重跑：**该不该给这个入口、按什么预填**（ADR-0041 增补 2、规格 #149 A 段）。
+// 失败运行的一键重跑：**该不该给这个入口**。
 //
-// 重跑不是新语义，是把「回任务屏、找到那个任务、重新填一遍参数」这三步折成一步：
-// 它打开的是**现成的**发起对话框，确认键仍是「发起」，并发提示、后端互斥、映射预检
-// 一个都不绕过。零后端改动——历史行里已经存着当时的运行参数集，发起入口也早就在。
+// 重跑不是新语义，是把「回任务屏、找到那个任务、再点一次发起」这几步折成一步：
+// 它走的就是**现成的**发起路径，后端互斥、映射预检一个都不绕过。
+// 运行参数链退役之后连预填也没了——上一次没留下任何需要带过来的取值，
+// 「重跑」与「发起」跑的是同一个函数。
 //
-// 判定与预填在这里各自成一个纯函数，是为了能在不渲染任何组件的前提下把
-// 「什么样的行给什么入口、推导出什么值」测干净（规格 #149 Testing Decisions）。
+// 判定是个纯函数，为的是能在不渲染任何组件的前提下把「什么样的行给什么入口」测干净。
 
-import type { RunHistory, RunParams, Task, TaskSpec } from "./api";
+import type { RunHistory, Task } from "./api";
 import { historyPresentation } from "./history";
-import { runtimeConditions } from "./spec";
 
 export type RerunAction =
   /** 这一行压根没有重跑这回事：进行中、或者已经成功了。 */
@@ -55,24 +54,4 @@ export function rerunAction(
     };
   }
   return { kind: "enabled", task };
-}
-
-/**
- * 发起对话框的初值：**按任务当前规格的「运行时填」条件对齐**上一次的运行参数集。
- *
- * 三条规则（规格 #149 A4）：行里有的取行值、行里没有的留空、行里多出的丢弃。
- * 「多出的」是规格改过之后的常态——那个参数已经不存在了，把它带进新的一次发起
- * 只会被后端按未知参数拒掉。反过来，新增的参数留空由人来填，不替他猜。
- *
- * 空字符串是**有值**，不是缺值：`??` 而不是 `||`，否则「这次就是要跑空串」会被悄悄改写。
- *
- * 没有上一次时传空对象即可——出来的正好是一张空表单，所以普通发起与重跑走的是同一条路。
- */
-export function rerunPrefill(spec: TaskSpec, previous: RunParams): RunParams {
-  return Object.fromEntries(
-    runtimeConditions(spec).map((condition) => [
-      condition.parameter,
-      previous[condition.parameter] ?? "",
-    ]),
-  );
 }

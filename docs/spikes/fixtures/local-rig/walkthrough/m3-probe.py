@@ -19,10 +19,8 @@ def observe_run_screen(page, width, label):
     page.set_viewport_size({"width": width, "height": 1000})
     page.goto(BASE, wait_until="networkidle")
     page.wait_for_selector("#jobs tbody tr")
+    # 发起没有对话框了：点了就跑，直接落到运行详情。
     page.click('button[aria-label="发起运行"]')
-    page.wait_for_selector(".run-params input")
-    page.fill(".run-params input", "2026-08-18")
-    page.click('button[type="submit"]')
     page.wait_for_selector(".precheck-reports")
 
     reports = page.query_selector(".precheck-reports")
@@ -189,12 +187,14 @@ def observe_builder_surface(page):
             }
             for select in datasource_selects
         ],
+        # 过滤条件已改成一个自由 WHERE 文本框（ADR-0047 §1）——原来那套四格表单的
+        # `.condition-row` 恒为 0，量的是「旧控件真的一个不剩」。
         "condition_rows": len(page.query_selector_all(".condition-row")),
+        "where_clause": text_or_absent(page, ".where-clause-editor textarea"),
         "sql_is_readonly": page.query_selector(".generated-sql textarea") is None,
         "sql_text": page.query_selector(".generated-sql pre").inner_text(),
-        # 这两格都可能**合法地缺席**，缺席时不许抛：探针只观察不断言（ADR-0028 §1）。
-        # `.run-parameter-list` 只在真有运行参数时渲染——值来源全是常量时那句
-        # 「无——发起运行时不需要填任何值」恒为真，恒真的提示不承载信息，已被撤掉。
+        # 这一格可能**合法地缺席**，缺席时不许抛：探针只观察不断言（ADR-0028 §1）。
+        # `.run-parameter-list` 整块已随运行参数链退役（ADR-0047 §3），恒为缺席。
         # 抛出去的话，整份 W1–W6 会以一个 AttributeError 收场，而判据一条都没跑。
         "run_parameters": text_or_absent(page, ".run-parameter-list"),
         "primary_key_boxes": len(page.query_selector_all('.builder-columns input[aria-label*="主键"]')),

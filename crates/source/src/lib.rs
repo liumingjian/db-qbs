@@ -49,10 +49,7 @@ pub use sql_builder::{
     BuilderColumn, BuilderTable,
 };
 pub use target_ddl::{generate_target_ddl, TargetDdlColumnError, TargetDdlError};
-pub use task_spec::{
-    validate_source_sql, ColumnMapping, Comparison, Condition, Direction, OrderTerm, RunParams,
-    TaskSpec, ValueSource, ValueType,
-};
+pub use task_spec::{validate_source_sql, ColumnMapping, TaskSpec};
 pub use task_store::{Task, TaskInput, TaskStore};
 pub use transfer::{
     generate_run_id, run_transfer, RowSource, RunStage, SourceReadError, TransferEvent,
@@ -132,13 +129,13 @@ impl fmt::Debug for OracleAccess {
     }
 }
 
-/// 一次运行要用到的全部任务面事实：规格 + 两端连接 + 本次运行参数取值。
+/// 一次运行要用到的全部任务面事实：规格 + 两端连接。
 ///
 /// 编排进程把它落成临时 TOML（0600，跑完即删）交给 run 子进程。**规格是真相源，SQL 不在里面**
-/// （ADR-0036 §2）——两端都从同一份规格现算，不存在「存下来的那份与规格对不上」这个面。
+/// ——两端都从同一份规格现算，不存在「存下来的那份与规格对不上」这个面。
 ///
-/// 两端连接在这里已经是**解出来的明文**：编排进程按任务上的数据源绑定去库里解一次
-/// （ADR-0037 §8），子进程不碰数据源库、也不碰密钥。
+/// 两端连接在这里已经是**解出来的明文**：编排进程按任务上的数据源绑定去库里解一次，
+/// 子进程不碰数据源库、也不碰密钥。
 ///
 /// **字段顺序即 TOML 里的表顺序**：全是表，没有裸标量，所以不受
 /// 「值必须排在 array-of-tables 之前」那条约束——但也别往前面加标量字段。
@@ -151,8 +148,6 @@ pub struct TaskConfig {
     /// 这次运行经哪台目标端 agent 落地（ADR-0044 §4）。**它不是可选的**：
     /// 没有它，run 子进程就得回头去读进程级的全局地址，那正是本票判废的东西。
     pub agent: AgentEndpoint,
-    #[serde(default)]
-    pub run_params: RunParams,
 }
 
 /// 一次运行钉死的 agent 端点。编排进程从注册表里解出来写进临时任务文件，
@@ -171,10 +166,6 @@ pub struct AgentEndpoint {
 impl TaskConfig {
     pub fn source_sql(&self) -> String {
         self.spec.source_sql()
-    }
-
-    pub fn bindings(&self) -> Result<Vec<(String, String)>, String> {
-        self.spec.bindings(&self.run_params)
     }
 }
 

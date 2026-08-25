@@ -8,7 +8,6 @@ function terminal(overrides: Partial<RunDetail> = {}): RunDetail {
     run_record_id: "record-01",
     run_id: "run-01",
     task_id: "task-01",
-    run_params: { d_biz: "2026-08-14" },
     source_sql: "SELECT a.ID AS ID\n  FROM APP.ORDERS a",
     staging_table: "ORDERS__stg_run_01",
     started_at: "2026-08-15T10:00:00.000Z",
@@ -50,7 +49,6 @@ describe("run detail presentation", () => {
     const presentation = runPresentation({
       run_record_id: "record-01",
       run_id: null,
-      run_params: {},
       source_sql: "SELECT a.ID AS ID\n  FROM APP.ORDERS a",
       staging_table: null,
       stage: null,
@@ -76,7 +74,6 @@ describe("run detail presentation", () => {
     const detail: RunDetail = {
       run_record_id: "record-01",
       run_id: "run-01",
-      run_params: { d_biz: "2026-08-14" },
       source_sql: "SELECT a.ID AS ID\n  FROM APP.ORDERS a",
       staging_table: "ORDERS__stg_run_01",
       stage: "STREAMING",

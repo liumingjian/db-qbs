@@ -1,13 +1,14 @@
-//! 构建器两件事：元数据查询，与「结构化规格 → 源端 SQL」的生成（ADR-0036 §1）。
+//! 构建器两件事：元数据查询，与「结构化规格 → 源端 SQL」的生成。
 //!
-//! SQL 形状预检的六条规则已随 ADR-0036 §5 整段取消，原来那个「生成的 SQL 必须过六条」的
-//! 断言随之失去对象。顶上来的判据是**生成即合法**：投影恒是 `a.<源列> AS <目标字段>`，值恒是绑定变量，
-//! 标识符恒过白名单——这些由生成器结构性保证，下面逐条钉住。
+//! 判据是**生成即合法**：投影恒是 `a.<源列> AS <目标字段>`，标识符恒过白名单——
+//! 这些由生成器结构性保证，下面逐条钉住。
+//!
+//! **过滤是个例外，而且是刻意的**：WHERE 片段是用户写的一段自由文本，原样拼进去，
+//! 不解析也不改写。所以这里钉的不是「它合法」，而是「它一个字符不差地到了生成的 SQL 里」。
 
 use db_qbs_source::{
     builder_column_query, builder_dblink_query, builder_table_query, validate_builder_dblink,
-    validate_source_sql, ColumnMapping, Comparison, Condition, Direction, OrderTerm, RunParams,
-    TaskSpec, ValueSource, ValueType,
+    validate_source_sql, ColumnMapping, TaskSpec,
 };
 
 /// 恒等映射：目标字段预填成源列名（ADR-0038 §2）。改形状之前的规格就是这一份。
@@ -27,28 +28,16 @@ fn spec() -> TaskSpec {
         target_table: "T_POSITION".to_owned(),
         columns: vec![identity("N_VA_PRICE"), identity("D_BIZ")],
         primary_key: vec!["D_BIZ".to_owned()],
-        conditions: Vec::new(),
-        order_by: Vec::new(),
-    }
-}
-
-fn condition(column: &str, parameter: &str, value_type: ValueType) -> Condition {
-    Condition {
-        column: column.to_owned(),
-        operator: Comparison::Eq,
-        value_type,
-        parameter: parameter.to_owned(),
-        value_source: ValueSource::Runtime,
-        constant: String::new(),
+        where_clause: None,
     }
 }
 
 #[test]
-fn a_spec_without_conditions_reads_the_whole_table() {
+fn a_spec_without_a_where_clause_reads_the_whole_table() {
     let spec = spec();
     spec.validate().unwrap();
 
-    // 一条条件都没有就是整表取数（ADR-0035 §3 明许）。量级风险归台架去证，不在这里挡。
+    // 过滤留空就是整表取数。量级风险归台架去证，不在这里挡。
     assert_eq!(
         spec.source_sql(),
         concat!(
@@ -57,25 +46,108 @@ fn a_spec_without_conditions_reads_the_whole_table() {
             "  FROM HTBR45.T_R_FR_ASTSTAT@FA a"
         )
     );
-    assert!(spec.runtime_parameters().is_empty());
-    assert!(spec.bindings(&RunParams::new()).unwrap().is_empty());
+}
+
+/// 本票的核心断言：**文本框里那段字，一个字符不差地到了 `WHERE` 后面**。
+#[test]
+fn the_where_text_reaches_the_generated_sql_verbatim() {
+    let mut spec = spec();
+    spec.where_clause = Some("D_BIZ >= DATE '2026-08-01' AND STATUS IN ('OK','WARN')".to_owned());
+    spec.validate().unwrap();
+
+    assert_eq!(
+        spec.source_sql(),
+        concat!(
+            "SELECT a.N_VA_PRICE AS N_VA_PRICE,\n",
+            "       a.D_BIZ AS D_BIZ\n",
+            "  FROM HTBR45.T_R_FR_ASTSTAT@FA a\n",
+            " WHERE D_BIZ >= DATE '2026-08-01' AND STATUS IN ('OK','WARN')"
+        )
+    );
+}
+
+/// 那些四格表单永远表达不出来的形态——`>=`、`IN`、`BETWEEN`、`LIKE`、子查询、
+/// 函数调用——现在**没有一条需要特殊照顾**：它们只是文本。
+#[test]
+fn the_shapes_the_four_slot_form_could_never_express_are_just_text_now() {
+    for clause in [
+        "N_VA_PRICE BETWEEN 1 AND 100",
+        "C_CODE LIKE 'SH%'",
+        "TRUNC(D_BIZ) = TRUNC(SYSDATE) - 1",
+        "ID IN (SELECT ID FROM APP.WHITELIST)",
+        "(A = 1 OR B = 2) AND C IS NOT NULL",
+    ] {
+        let mut spec = spec();
+        spec.where_clause = Some(clause.to_owned());
+        spec.validate().unwrap();
+        assert!(
+            spec.source_sql().ends_with(&format!(" WHERE {clause}")),
+            "{clause} 没有原样落到 WHERE 后面：\n{}",
+            spec.source_sql()
+        );
+    }
+}
+
+/// 多行片段：**一个字符不加不改**，续行的缩进也不重排。
+///
+/// 重排看着更齐，但要做对就得知道哪个换行落在字符串字面量里面——往 `'a\nb'` 中间
+/// 插进去的空格会改掉那个字面量的值，也就改掉了搬的数据。认那件事需要一个词法器，
+/// 而「不解析这段文本」正是这个字段的立身之本。首尾空白仍然只是 `trim` 掉。
+#[test]
+fn a_multiline_where_clause_is_spliced_character_for_character() {
+    let mut spec = spec();
+    spec.where_clause = Some("  D_BIZ >= DATE '2026-08-01'\nAND STATUS = 'OK'  ".to_owned());
+    spec.validate().unwrap();
+
+    assert_eq!(
+        spec.source_sql(),
+        concat!(
+            "SELECT a.N_VA_PRICE AS N_VA_PRICE,\n",
+            "       a.D_BIZ AS D_BIZ\n",
+            "  FROM HTBR45.T_R_FR_ASTSTAT@FA a\n",
+            " WHERE D_BIZ >= DATE '2026-08-01'\n",
+            "AND STATUS = 'OK'"
+        )
+    );
+}
+
+/// 换行落在字符串字面量里的那一条：值里的空白**一个都不许多出来**。
+/// 这是上一条不重排缩进的全部理由，所以单独钉住。
+#[test]
+fn a_newline_inside_a_string_literal_is_left_exactly_as_written() {
+    let mut spec = spec();
+    spec.where_clause = Some("C_NOTE = 'first\nsecond'".to_owned());
+    spec.validate().unwrap();
+
+    assert!(
+        spec.source_sql()
+            .ends_with(" WHERE C_NOTE = 'first\nsecond'"),
+        "字面量里的换行被动过：\n{}",
+        spec.source_sql()
+    );
+}
+
+/// 只有空白的片段等同于没写：不生成一个空的 `WHERE`。
+#[test]
+fn a_blank_where_clause_is_the_same_as_none() {
+    let mut spec = spec();
+    spec.where_clause = Some("   \n  ".to_owned());
+    spec.validate().unwrap();
+    assert!(!spec.source_sql().contains("WHERE"));
 }
 
 /// 自定义 SQL 外面要再套一层投影，**不是**原样执行。
 ///
 /// 理由在搬运链路那头：`transfer.rs` 把 `source.columns()`——执行语句的结果列——原样交给
 /// sink，所以结果列名就是目标列名。少了这一层，勾选与目标字段改名两件事都落不了地。
-/// 内层照旧不许被追加条件或排序（那两样只能由用户写进 SQL）。
+/// 内层照旧不许被追加过滤（过滤只能由用户写进那段 SQL 自己）。
 #[test]
 fn custom_select_is_wrapped_in_a_projection_and_gets_no_table_conditions() {
     let mut spec = spec();
     spec.source_sql = Some(
-        "SELECT a.N_VA_PRICE, a.D_BIZ\n  FROM APP.T_CUSTOMER@FA a\n WHERE a.ACTIVE = 1;"
-            .to_owned(),
+        "SELECT a.N_VA_PRICE, a.D_BIZ\n  FROM APP.T_CUSTOMER@FA a\n WHERE a.ACTIVE = 1;".to_owned(),
     );
     spec.dblink = None;
-    spec.conditions.clear();
-    spec.order_by.clear();
 
     spec.validate().unwrap();
     assert_eq!(
@@ -99,8 +171,6 @@ fn unselected_columns_are_dropped_from_the_custom_sql_projection() {
     let mut spec = spec();
     spec.source_sql = Some("SELECT * FROM APP.T_CUSTOMER@FA".to_owned());
     spec.dblink = None;
-    spec.conditions.clear();
-    spec.order_by.clear();
     spec.columns = vec![identity("D_BIZ")];
     spec.primary_key = vec!["D_BIZ".to_owned()];
 
@@ -124,8 +194,6 @@ fn a_lowercase_result_column_is_referenced_with_quotes() {
     let mut spec = spec();
     spec.source_sql = Some("SELECT ID AS \"id\" FROM APP.T_CUSTOMER@FA".to_owned());
     spec.dblink = None;
-    spec.conditions.clear();
-    spec.order_by.clear();
     spec.columns = vec![ColumnMapping {
         source: "id".to_owned(),
         target: "BIZ_ID".to_owned(),
@@ -147,8 +215,6 @@ fn an_uppercase_result_column_is_referenced_without_quotes() {
     let mut spec = spec();
     spec.source_sql = Some("SELECT * FROM APP.T_CUSTOMER@FA".to_owned());
     spec.dblink = None;
-    spec.conditions.clear();
-    spec.order_by.clear();
 
     spec.validate().unwrap();
     let sql = spec.source_sql();
@@ -171,8 +237,6 @@ fn a_renamed_target_field_reaches_the_custom_sql_projection() {
     let mut spec = spec();
     spec.source_sql = Some("SELECT * FROM APP.T_CUSTOMER@FA".to_owned());
     spec.dblink = None;
-    spec.conditions.clear();
-    spec.order_by.clear();
     spec.columns = vec![ColumnMapping {
         source: "D_BIZ".to_owned(),
         target: "BIZ_DATE".to_owned(),
@@ -193,9 +257,9 @@ fn custom_source_sql_only_accepts_one_select_statement() {
 
 #[test]
 fn a_renamed_column_shows_up_as_the_alias_and_nothing_else_moves() {
-    // ADR-0038 §1：映射就是投影的别名，搬运语义一个字节不变。所以「改了目标字段」
-    // 在 SQL 上的全部痕迹就是 `AS` 右边那个词——WHERE / ORDER BY 仍然按**源列名**走
-    // （条件挑的是源表的列，改目标字段名不该动它们）。
+    // 映射就是投影的别名，搬运语义一个字节不变。所以「改了目标字段」在 SQL 上的
+    // 全部痕迹就是 `AS` 右边那个词——WHERE 片段是用户自己写的，生成器不碰它一个字符，
+    // 于是里面写的仍然是**源列名**（片段筛的是源表的列）。
     let mut renamed = spec();
     renamed.columns = vec![
         ColumnMapping {
@@ -205,7 +269,7 @@ fn a_renamed_column_shows_up_as_the_alias_and_nothing_else_moves() {
         identity("D_BIZ"),
     ];
     renamed.primary_key = vec!["CUST_NAME".to_owned()];
-    renamed.conditions = vec![condition("D_BIZ", "d_biz", ValueType::Date)];
+    renamed.where_clause = Some("D_BIZ = DATE '2026-08-14'".to_owned());
     renamed.validate().unwrap();
 
     assert_eq!(
@@ -214,125 +278,13 @@ fn a_renamed_column_shows_up_as_the_alias_and_nothing_else_moves() {
             "SELECT a.C_NAME AS CUST_NAME,\n",
             "       a.D_BIZ AS D_BIZ\n",
             "  FROM HTBR45.T_R_FR_ASTSTAT@FA a\n",
-            " WHERE a.D_BIZ = TO_DATE(:d_biz,'YYYY-MM-DD')"
+            " WHERE D_BIZ = DATE '2026-08-14'"
         )
     );
 }
 
 #[test]
-fn each_value_type_renders_its_own_binding_form() {
-    // DATE 列拿字符串裸比会走 Oracle 隐式转换、吃 NLS_DATE_FORMAT，换个会话换个语义，
-    // 所以每条条件自带 value_type，三种类型各有各的写法。
-    let mut spec = spec();
-    spec.conditions = vec![
-        Condition {
-            operator: Comparison::Gt,
-            ..condition("D_BIZ", "from_date", ValueType::Date)
-        },
-        Condition {
-            operator: Comparison::Lt,
-            ..condition("N_VA_PRICE", "cap", ValueType::Number)
-        },
-        condition("C_CODE", "code", ValueType::Text),
-    ];
-    spec.validate().unwrap();
-
-    assert_eq!(
-        spec.source_sql(),
-        concat!(
-            "SELECT a.N_VA_PRICE AS N_VA_PRICE,\n",
-            "       a.D_BIZ AS D_BIZ\n",
-            "  FROM HTBR45.T_R_FR_ASTSTAT@FA a\n",
-            " WHERE a.D_BIZ > TO_DATE(:from_date,'YYYY-MM-DD')\n",
-            "   AND a.N_VA_PRICE < TO_NUMBER(:cap)\n",
-            "   AND a.C_CODE = :code"
-        )
-    );
-}
-
-#[test]
-fn order_terms_land_after_the_predicates() {
-    let mut spec = spec();
-    spec.conditions = vec![condition("D_BIZ", "d_biz", ValueType::Date)];
-    spec.order_by = vec![
-        OrderTerm {
-            column: "D_BIZ".to_owned(),
-            direction: Direction::Desc,
-        },
-        OrderTerm {
-            column: "N_VA_PRICE".to_owned(),
-            direction: Direction::Asc,
-        },
-    ];
-    spec.validate().unwrap();
-
-    assert!(spec
-        .source_sql()
-        .ends_with(" ORDER BY a.D_BIZ DESC, a.N_VA_PRICE ASC"));
-}
-
-#[test]
-fn constants_bind_too_and_stay_out_of_the_run_parameter_set() {
-    // 常量也走绑定变量：理由不是防注入，是转义正确性（ADR-0011 §2「不发明第二套转义」）。
-    // 但常量每次都一样，进「运行参数集」不增加任何区分度，所以互斥键里没有它。
-    let mut spec = spec();
-    spec.conditions = vec![
-        Condition {
-            value_source: ValueSource::Constant,
-            constant: "CNY".to_owned(),
-            ..condition("C_CURRENCY", "currency", ValueType::Text)
-        },
-        condition("D_BIZ", "d_biz", ValueType::Date),
-    ];
-    spec.validate().unwrap();
-
-    assert!(spec.source_sql().contains("a.C_CURRENCY = :currency"));
-    assert_eq!(
-        spec.runtime_parameters()
-            .iter()
-            .map(|condition| condition.parameter.as_str())
-            .collect::<Vec<_>>(),
-        vec!["d_biz"]
-    );
-
-    let mut run_params = RunParams::new();
-    run_params.insert("d_biz".to_owned(), "2026-08-18".to_owned());
-    assert_eq!(
-        spec.bindings(&run_params).unwrap(),
-        vec![
-            ("currency".to_owned(), "CNY".to_owned()),
-            ("d_biz".to_owned(), "2026-08-18".to_owned()),
-        ]
-    );
-
-    // 少填一个运行参数就不许开跑——报的是参数名，不是「参数不全」。
-    assert_eq!(
-        spec.bindings(&RunParams::new()).unwrap_err(),
-        "运行参数 d_biz 未取值"
-    );
-}
-
-#[test]
-fn describe_bindings_cover_every_parameter_with_a_typed_dummy() {
-    let mut spec = spec();
-    spec.conditions = vec![
-        condition("D_BIZ", "d_biz", ValueType::Date),
-        condition("N_VA_PRICE", "cap", ValueType::Number),
-        condition("C_CODE", "code", ValueType::Text),
-    ];
-
-    assert_eq!(
-        spec.describe_bindings(),
-        vec![
-            ("d_biz".to_owned(), "1970-01-01".to_owned()),
-            ("cap".to_owned(), "0".to_owned()),
-            ("code".to_owned(), String::new()),
-        ]
-    );
-}
-
-#[test]
-fn validation_refuses_the_six_ways_a_spec_can_be_unusable() {
+fn validation_refuses_the_ways_a_spec_can_be_unusable() {
     let mut no_key = spec();
     no_key.primary_key.clear();
     assert_eq!(
@@ -375,44 +327,57 @@ fn validation_refuses_the_six_ways_a_spec_can_be_unusable() {
         "目标字段 N_VA_PRICE 重复"
     );
 
-    let mut duplicate_parameter = spec();
-    duplicate_parameter.conditions = vec![
-        condition("D_BIZ", "d_biz", ValueType::Date),
-        condition("N_VA_PRICE", "D_BIZ", ValueType::Number),
-    ];
+    // 自定义 SQL 已经自带过滤，再挂一段 WHERE 就有两个说了算的地方。
+    let mut both_filters = spec();
+    both_filters.source_sql = Some("SELECT * FROM APP.T_CUSTOMER".to_owned());
+    both_filters.dblink = None;
+    both_filters.where_clause = Some("STATUS = 'OK'".to_owned());
     assert_eq!(
-        duplicate_parameter.validate().unwrap_err(),
-        "参数名 D_BIZ 重复"
-    );
-
-    let mut runtime_with_constant = spec();
-    runtime_with_constant.conditions = vec![Condition {
-        constant: "2026-08-18".to_owned(),
-        ..condition("D_BIZ", "d_biz", ValueType::Date)
-    }];
-    assert_eq!(
-        runtime_with_constant.validate().unwrap_err(),
-        "条件 d_biz 标了运行时填，不能同时写死常量值"
+        both_filters.validate().unwrap_err(),
+        "自定义 SQL 模式不能再单独配置过滤条件，请直接写进 SQL"
     );
 }
 
+/// WHERE 片段上**唯一**的一条禁令：不许有分号。
+///
+/// 它挡的不是注入——这段文本本来就是用户写的 SQL——而是**语句拼接**：分号之后那一段
+/// 会被缝进一条本该只有一个 `SELECT` 的语句，于是预览的和执行的不是同一条。
 #[test]
-fn identifiers_are_the_only_thing_not_bound_so_they_are_whitelisted() {
-    // 值走绑定变量，标识符不能——标识符这一侧只能靠白名单式校验挡住拼串。
+fn a_where_clause_may_not_smuggle_in_a_second_statement() {
+    let mut injected = spec();
+    injected.where_clause = Some("1=1; DROP TABLE T_R_FR_ASTSTAT".to_owned());
+    assert_eq!(
+        injected.validate().unwrap_err(),
+        "过滤条件里不能出现分号：它只是拼进 WHERE 的一段条件，不是一条语句"
+    );
+
+    // 除此之外一律放行：注释、引号、括号、函数——合不合法由 Oracle 当场说了算。
+    let mut quirky = spec();
+    quirky.where_clause = Some("C_CODE = 'a''b' -- 尾注释\nAND (1=1)".to_owned());
+    quirky.validate().unwrap();
+}
+
+#[test]
+fn table_and_column_names_are_whitelisted_because_they_are_spliced() {
+    // 表名、列名由界面上的选择产生，不该出现任何用户手写的字符——白名单式校验。
+    // 过滤片段是另一回事：它按设计就是手写 SQL，只挡分号（见上一条）。
     let mut injected = spec();
     injected.table = "T_R_FR_ASTSTAT WHERE 1=1 --".to_owned();
     assert!(injected.validate().is_err());
 
-    let mut injected_condition = spec();
-    injected_condition.conditions = vec![condition("D_BIZ) OR (1=1", "d_biz", ValueType::Date)];
-    assert!(injected_condition.validate().is_err());
-
-    let mut injected_order = spec();
-    injected_order.order_by = vec![OrderTerm {
-        column: "D_BIZ; DROP TABLE T".to_owned(),
-        direction: Direction::Asc,
+    let mut injected_column = spec();
+    injected_column.columns = vec![ColumnMapping {
+        source: "D_BIZ) OR (1=1".to_owned(),
+        target: "D_BIZ".to_owned(),
     }];
-    assert!(injected_order.validate().is_err());
+    assert!(injected_column.validate().is_err());
+
+    let mut injected_target = spec();
+    injected_target.columns = vec![ColumnMapping {
+        source: "D_BIZ".to_owned(),
+        target: "D_BIZ; DROP TABLE T".to_owned(),
+    }];
+    assert!(injected_target.validate().is_err());
 }
 
 #[test]

@@ -3,7 +3,7 @@
 #
 # 判据依据：**ADR-0040 §5.3**（M3 的 B1–B6，编号不动）。
 # 调用面整体改到新报文：任务创建带两个 datasource_id 与一份结构化 `TaskSpec`（ADR-0036 §1、
-# ADR-0037 §1/§8），发起运行带 `run_params` 而不是 `biz_date`，目标端连接随 run 报文过线。
+# ADR-0037 §1/§8），发起运行只带任务身份，目标端连接随 run 报文过线。
 #
 # 判据面：
 #
@@ -313,10 +313,10 @@ create_task() {
   jq -r '.task_id' <<<"$API_BODY"
 }
 
+# 发起的**全部**输入就是任务身份：业务日期写在任务定义的 `where_clause` 里。
 start_task_run() {
   local task_id=$1 payload
-  payload=$(jq -nc --arg task "$task_id" --arg date "$BIZ_DATE" \
-    '{task_id:$task, run_params:{load_date:$date}}') || return 1
+  payload=$(jq -nc --arg task "$task_id" '{task_id:$task}') || return 1
   api POST /api/runs "$payload" || return 1
   [[ "$API_STATUS" == 202 ]] || fail "start run status=$API_STATUS body=$API_BODY" || return 1
   jq -r '.run_record_id' <<<"$API_BODY"
@@ -353,7 +353,7 @@ assert_column_values() {
 # **B1 的 N_EXPR 与 B2 的 C_EXPR 不在下面**：那两列是 SQL 表达式，v1 的生成器产不出来
 # （ADR-0040 增补 2026-08-19 / #134），判据随之失去对象。
 b1_spec() {
-  jq -nc '{
+  jq -nc --arg date "$BIZ_DATE" '{
     owner:"SPIKE", table:"T_M3_B1", target_table:"M3_B1",
     primary_key:["ROW_ID"],
     columns:[
@@ -372,15 +372,12 @@ b1_spec() {
       {source:"TS6", target:"TS6"},
       {source:"LOAD_DATE", target:"LOAD_DATE"}
     ],
-    conditions:[{
-      column:"LOAD_DATE", operator:"eq", value_type:"date",
-      parameter:"load_date", value_source:"runtime", constant:""
-    }]
+    where_clause:("LOAD_DATE = DATE \u0027" + $date + "\u0027")
   }'
 }
 
 b2_spec() {
-  jq -nc '{
+  jq -nc --arg date "$BIZ_DATE" '{
     owner:"SPIKE", table:"T_M3_B2", target_table:"M3_B2",
     primary_key:["ROW_ID"],
     columns:[
@@ -395,15 +392,12 @@ b2_spec() {
       {source:"D_WRONG", target:"D_WRONG"},
       {source:"LOAD_DATE", target:"LOAD_DATE"}
     ],
-    conditions:[{
-      column:"LOAD_DATE", operator:"eq", value_type:"date",
-      parameter:"load_date", value_source:"runtime", constant:""
-    }]
+    where_clause:("LOAD_DATE = DATE \u0027" + $date + "\u0027")
   }'
 }
 
 b3_spec() {
-  jq -nc '{
+  jq -nc --arg date "$BIZ_DATE" '{
     owner:"SPIKE", table:"T_M3_B3", target_table:"M3_B3",
     primary_key:["ROW_ID"],
     columns:[
@@ -411,15 +405,12 @@ b3_spec() {
       {source:"TS_TOO_PRECISE", target:"TS_TOO_PRECISE"},
       {source:"LOAD_DATE", target:"LOAD_DATE"}
     ],
-    conditions:[{
-      column:"LOAD_DATE", operator:"eq", value_type:"date",
-      parameter:"load_date", value_source:"runtime", constant:""
-    }]
+    where_clause:("LOAD_DATE = DATE \u0027" + $date + "\u0027")
   }'
 }
 
 b4_spec() {
-  jq -nc '{
+  jq -nc --arg date "$BIZ_DATE" '{
     owner:"SPIKE", table:"T_M3_B4", target_table:"M3_B4",
     primary_key:["ROW_ID"],
     columns:[
@@ -427,15 +418,12 @@ b4_spec() {
       {source:"N_BARE", target:"N_BARE"},
       {source:"LOAD_DATE", target:"LOAD_DATE"}
     ],
-    conditions:[{
-      column:"LOAD_DATE", operator:"eq", value_type:"date",
-      parameter:"load_date", value_source:"runtime", constant:""
-    }]
+    where_clause:("LOAD_DATE = DATE \u0027" + $date + "\u0027")
   }'
 }
 
 b5_spec() {
-  jq -nc '{
+  jq -nc --arg date "$BIZ_DATE" '{
     owner:"SPIKE", table:"T_M3_B5", target_table:"M3_B5",
     primary_key:["ROW_ID"],
     columns:[
@@ -446,15 +434,12 @@ b5_spec() {
       {source:"TS_VALUE", target:"TS_VALUE"},
       {source:"LOAD_DATE", target:"LOAD_DATE"}
     ],
-    conditions:[{
-      column:"LOAD_DATE", operator:"eq", value_type:"date",
-      parameter:"load_date", value_source:"runtime", constant:""
-    }]
+    where_clause:("LOAD_DATE = DATE \u0027" + $date + "\u0027")
   }'
 }
 
 b6_spec() {
-  jq -nc '{
+  jq -nc --arg date "$BIZ_DATE" '{
     owner:"SPIKE", table:"T_M3_B6", target_table:"M3_B6",
     primary_key:["ROW_ID"],
     columns:[
@@ -462,10 +447,7 @@ b6_spec() {
       {source:"D_BC", target:"D_BC"},
       {source:"LOAD_DATE", target:"LOAD_DATE"}
     ],
-    conditions:[{
-      column:"LOAD_DATE", operator:"eq", value_type:"date",
-      parameter:"load_date", value_source:"runtime", constant:""
-    }]
+    where_clause:("LOAD_DATE = DATE \u0027" + $date + "\u0027")
   }'
 }
 

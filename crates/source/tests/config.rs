@@ -77,7 +77,7 @@ fn the_task_file_carries_a_spec_and_this_run_parameters_and_nothing_else() {
     let loaded = load_task_config(&path).unwrap();
     assert_eq!(loaded.spec.owner, "APP");
     assert_eq!(loaded.spec.primary_key, vec!["ID".to_owned()]);
-    // 映射逐条读进来：目标字段是规格里的一等字段，不是从源列名推出来的（ADR-0038 §2）。
+    // 映射逐条读进来：目标字段是规格里的一等字段，不是从源列名推出来的。
     assert_eq!(
         loaded
             .spec
@@ -87,27 +87,29 @@ fn the_task_file_carries_a_spec_and_this_run_parameters_and_nothing_else() {
             .collect::<Vec<_>>(),
         vec![("ID", "ID"), ("D_BIZ", "D_BIZ")]
     );
-    assert_eq!(loaded.run_params["d_biz"], "2026-08-14");
-    // 两端连接由编排进程解好写进来（ADR-0037 §1/§8）——子进程不碰数据源库、也不碰密钥。
+    assert_eq!(
+        loaded.spec.where_clause.as_deref(),
+        Some("D_BIZ = DATE '2026-08-14'")
+    );
+    // 两端连接由编排进程解好写进来——子进程不碰数据源库、也不碰密钥。
     assert_eq!(loaded.oracle.username, "source");
     assert_eq!(loaded.target.database, "qbs");
     // 目标端 agent 同样由编排进程解好写进来（ADR-0044 §4）：子进程不读进程级的全局地址，
     // 也因此不存在「任务文件说 A、进程配置说 B」这种两个真相源。
     assert_eq!(loaded.agent.base_url, "http://127.0.0.1:8080");
     assert_eq!(loaded.agent.instance_id, "6f1a9c2d");
-    // SQL 由规格现算（ADR-0036 §2）——两端算的是同一份，不存在「存下来的那份对不上」。
-    assert!(loaded.source_sql().contains("TO_DATE(:d_biz,'YYYY-MM-DD')"));
-    assert_eq!(
-        loaded.bindings().unwrap(),
-        vec![("d_biz".to_owned(), "2026-08-14".to_owned())]
-    );
+    // SQL 由规格现算——两端算的是同一份，不存在「存下来的那份对不上」。
+    // 过滤片段原样落在 `WHERE` 后面，不再有第二半（取值）需要对照着读。
+    assert!(loaded
+        .source_sql()
+        .ends_with(" WHERE D_BIZ = DATE '2026-08-14'"));
 
     fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
 fn column_precision_is_not_a_task_definition_field_any_more() {
-    // 它随取列请求走、用完即弃（ADR-0036 §6）。任务文件里再出现就是配置错，要点名。
+    // 它随取列请求走、用完即弃。任务文件里再出现就是配置错，要点名。
     let directory = temp_directory();
     let path = write(
         &directory,
@@ -126,10 +128,9 @@ fn column_precision_is_not_a_task_definition_field_any_more() {
 
 #[test]
 fn a_materialized_task_file_survives_a_serialize_reload_round_trip() {
-    // 临时任务定义是父进程写、子进程读的。`columns` / `conditions` / `order_by` 是
-    // array-of-tables，必须排在所有标量之后，否则 `toml::to_string` 直接失败——这条用例就是那道闸。
-    // `columns` 自 ADR-0038 §2 换成 `ColumnMapping` 之后也归这一类，所以它在结构体里排到了
-    // `primary_key` 之后；把它挪回去这条用例就会红。
+    // 临时任务定义是父进程写、子进程读的。`columns` 是 array-of-tables，必须排在所有标量
+    // 之后，否则 `toml::to_string` 直接失败——这条用例就是那道闸。`where_clause` 是标量，
+    // 所以它在结构体里排在 `columns` 之前；挪到后面这条用例就会红。
     let directory = temp_directory();
     let path = write(&directory, "task.toml", valid_task());
     let loaded = load_task_config(&path).unwrap();
@@ -161,14 +162,7 @@ fn valid_task() -> &'static str {
      { source = \"D_BIZ\", target = \"D_BIZ\" },\n\
      ]\n\
      primary_key = [\"ID\"]\n\
-     \n\
-     [[spec.conditions]]\n\
-     column = \"D_BIZ\"\n\
-     operator = \"eq\"\n\
-     value_type = \"date\"\n\
-     parameter = \"d_biz\"\n\
-     value_source = \"runtime\"\n\
-     constant = \"\"\n\
+     where_clause = \"D_BIZ = DATE '2026-08-14'\"\n\
      \n\
      [oracle]\n\
      connect_string = \"//oracle:1521/XE\"\n\
@@ -187,10 +181,7 @@ fn valid_task() -> &'static str {
      agent_id = \"a1\"\n\
      name = \"目标端 A\"\n\
      base_url = \"http://127.0.0.1:8080\"\n\
-     instance_id = \"6f1a9c2d\"\n\
-     \n\
-     [run_params]\n\
-     d_biz = \"2026-08-14\"\n"
+     instance_id = \"6f1a9c2d\"\n"
 }
 
 fn write(directory: &Path, name: &str, contents: &str) -> PathBuf {

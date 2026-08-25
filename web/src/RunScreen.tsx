@@ -15,7 +15,6 @@ import { mappingSuggestion } from "./m3";
 import { progressOfLiveRun } from "./progress";
 import { runPresentation } from "./run";
 import type { RunPresentation } from "./run";
-import { runParamsSummary } from "./spec";
 
 const RUN_POLL_INTERVAL_MS = 1000;
 const countFormatter = new Intl.NumberFormat("zh-CN");
@@ -188,7 +187,6 @@ function RunIdentity({ task, detail }: { task: Task; detail: RunDetail }) {
         value={runIdPresentation(detail)}
       />
       <DetailValue label="所属任务" value={task.task_id} />
-      <DetailValue label="运行参数" value={runParamsSummary(detail.run_params)} />
       <DetailValue label="暂存表" value={detail.staging_table ?? "—"} />
     </dl>
   );

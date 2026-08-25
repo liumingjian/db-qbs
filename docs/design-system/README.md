@@ -1,199 +1,248 @@
-# db-qbs 设计系统 · 方向 D「调度台」
+# db-qbs Design System · A Copy of the x2doris Admin Shell
 
-> **定调票**：[#55](https://github.com/liumingjian/db-qbs/issues/55)（地图 [#47](https://github.com/liumingjian/db-qbs/issues/47)）
-> **决策**：[ADR-0025](../adr/0025-m2-visual-language-and-design-system.md)
-> **令牌文件**：[`tokens.css`](tokens.css) —— 机器可读的唯一来源
-> **变体对照原型**：[`../prototypes/0055-m2-visual-language-variants.html`](../prototypes/0055-m2-visual-language-variants.html)
-> **全流程参考实现**：[`../prototypes/0058-m2-full-flow-prototype.html`](../prototypes/0058-m2-full-flow-prototype.html)
-> （[#58](https://github.com/liumingjian/db-qbs/issues/58)）—— 本文件所有组件在真实六段流程里的用法，
-> 4 屏 18 态。它把 `tokens.css` **逐字内联**（CSP 下无法 `@import`）：那是副本不是第二套令牌，
-> **改令牌先改 `tokens.css`，再同步回原型**，顺序不能反。
+> **Token file**: [`tokens.css`](tokens.css) — the single machine-readable source; every token
+> records the measured x2doris value it came from.
+> **Full-flow reference implementation**:
+> [`../prototypes/0058-m2-full-flow-prototype.html`](../prototypes/0058-m2-full-flow-prototype.html)
+> ([#58](https://github.com/liumingjian/db-qbs/issues/58)) — every component in this file used across
+> the real six-stage flow, 4 screens and 18 states. It **inlines `tokens.css` verbatim** (CSP forbids
+> `@import`): that is a copy, not a second set of tokens. **Change `tokens.css` first, then sync the
+> prototype** — never the other way round.
 >
-> **这是一次决策。** 本图之后所有 UI 产物（原型与生产前端）一律复用本文件，
-> **不得另起一套**；要改先改这里，不在单张票里就地发明。
+> **This is a decision.** Every UI artifact from here on (prototypes and the production front end)
+> reuses this file and **must not start a second system**. To change something, change it here rather
+> than inventing it inside a single ticket.
 
-## 0. 一句话
+## 0. In one sentence
 
-按 **Apache DolphinScheduler** 那套中后台范式定调：**左侧固定导航 + 顶栏面包屑 + 灰底内容区 + 白卡片包表格**。
-受众是**运维与开发**，他们每天已经在这套范式里工作——界面不该要求他们重新学一套。
+**Copy the x2doris 1.2.0 job center** (the StreamPark lineage: vue-vben-admin + Ant Design 4):
+**dark left nav + top-bar breadcrumb + grey content area + white cards wrapping tables**. Layout,
+typography, UX, column contents, and inline icon actions all defer to it; token values come from
+**measured computed styles**, not from numbers we made up.
+**The one thing not copied is the font stack** — it is an English interface with no CJK fonts in it.
+What is copied is the design, not the bugs: **you may skip a detail only if you can say exactly how
+it is broken and your fix introduces no new shape.**
 
-三条不可动摇的取舍：
+Three trade-offs that do not move:
 
-1. **蓝色只标「可点」**（主按钮、选中导航、操作链接），不参与状态语义；状态色只出现在圆点、标签、告警框上。
-2. **灰底衬白卡是唯一的分层手法**，不叠阴影、不做渐变、不用胶囊圆角。
-3. **表格与数字是主体**，这是搬数据的工具，不是营销页。
+1. **Blue means "clickable" only** (primary buttons, the selected nav item, action links) and carries
+   no state semantics; state colour appears only on dots, tags, and alert boxes.
+2. **A white card on a grey ground is the only layering device** — no stacked shadows, no gradients,
+   no pill radii.
+3. **Tables and numbers are the subject.** This is a tool for moving data, not a marketing page.
 
-## 1. 令牌
+## 1. Tokens
 
-值以 [`tokens.css`](tokens.css) 为准，此处只解释用途。
+[`tokens.css`](tokens.css) holds the values; this table only explains what each is for.
 
-| 组 | 令牌 | 用途 |
+| Group | Tokens | Purpose |
 |---|---|---|
-| 层次 | `--bg` `--panel` `--line` `--line-strong` | 灰底 / 白卡 / 分隔线 / 控件边框 |
-| 文字 | `--text` `--dim` `--mute` | 正文与数据 / 次要说明 / 标签与单位 |
-| 主色 | `--brand` `--brand-dim` | **只标可点**；`--brand-dim` 是选中项底色 |
-| 语义 | `--ok` `--crit` `--warn` `--info`（各带 `-bg` / `-bd`） | 成功 / 拒绝 4xx / 内部错 5xx / 进行中 |
-| 形状 | `--radius` 4px `--badge-radius` 3px | 卡片控件 / 标签 |
-| 密度 | `--row-h` 44px `--ctl-h` 30px `--pad` 20px `--gap` 16px | 中等偏松，一屏放得下十几行 |
-| 排版 | `--font-cn` `--font-num` `--size-*` `--lh-*` `--weight-em` | 见 §2 |
+| Layers | `--bg` `--panel` `--line` `--line-strong` | Grey ground / white card / divider / control border |
+| Text | `--text` `--dim` `--mute` | Body and data / secondary notes / labels and units |
+| Brand | `--brand` `--brand-dim` | **Clickable only**; `--brand-dim` is the selected-item background |
+| Semantic | `--ok` `--crit` `--warn` `--info` (each with `-bg` / `-bd`) | Success / 4xx rejection / 5xx internal error / in progress |
+| Shape | `--radius` 4px, `--badge-radius` 3px | Cards and controls / tags |
+| Density | `--row-h` 44px, `--ctl-h` 30px, `--pad` 20px, `--gap` 16px | Moderately loose; a dozen-odd rows fit on one screen |
+| Typography | `--font-cn` `--font-num` `--size-*` `--lh-*` `--weight-em` | See §2 |
 
-## 2. 中文优先排版（#55 第 4 问的答案）
+## 2. CJK-first typography
 
-**离线与 CSP 约束下中文 webfont 无法内联，系统字体栈是唯一诚实解**——不假装能发字体。
+**Under offline and CSP constraints a CJK webfont cannot be inlined, so a system font stack is the
+only honest answer** — we do not pretend to ship a font.
 
-- **正文栈**：`PingFang SC → HarmonyOS Sans SC → Source Han Sans SC → Noto Sans CJK SC → Microsoft YaHei → Hiragino Sans GB → sans-serif`。
-  覆盖 macOS / 鸿蒙 / 装了思源的 Linux / Windows 四类机器，最后落到系统无衬线。
-- **数字与标识符走独立等宽栈**并开 `font-variant-numeric: tabular-nums`：
-  `run_id`、行数、字节数、耗时、错误码、列名、SQL —— 一律等宽定宽，**列对齐才成立**。
-  中文与数字混排时不要让数字继承中文栈的比例数字。
-- **行高**：界面正文 `1.55`；成段中文（错误解释、说明段落）放到 `1.7`。中文行高比西文要高。
-- **字重**：强调一律 **600，不用 700**。中文在 13–14px 下 700 会糊成一团。
-- **不用斜体**：中文没有真斜体，浏览器合成的伪斜体是坏字形。要强调用字重或颜色。
-- **字号阶**：14 正文 / 13.5 表格 / 13 数字 / 12 次要 / 11 字段名。不再细分。
+- **Body stack**: `PingFang SC → HarmonyOS Sans SC → Source Han Sans SC → Noto Sans CJK SC →
+  Microsoft YaHei → Hiragino Sans GB → sans-serif`. That covers macOS, HarmonyOS, Linux with Source
+  Han installed, and Windows, falling back to the system sans-serif.
+- **Numbers and identifiers use a separate monospace stack** with `font-variant-numeric: tabular-nums`:
+  `run_id`, row counts, byte counts, durations, error codes, column names, SQL — all fixed-width,
+  because **column alignment depends on it**. When CJK and digits are mixed, do not let the digits
+  inherit the proportional figures of the CJK stack.
+- **Line height**: `1.55` for interface body text; `1.7` for CJK paragraphs (error explanations,
+  prose sections). CJK needs more leading than Latin.
+- **Weight**: emphasis is always **600, never 700**. At 13–14px, CJK at 700 turns into mush.
+- **No italics**: CJK has no true italic, and the browser's synthesised oblique is a broken glyph.
+  Emphasise with weight or colour instead.
+- **Size scale**: 14 body / 13.5 table / 13 numeric / 12 secondary / 11 field name. No finer.
 
-## 3. 状态与错误的视觉语言（#55 第 3 问第二条的答案）
+## 3. The visual language of state and error
 
-**三条互不重用的形状轴。**「红黄绿三色」不够——同屏并列时必须一眼分清「跑到哪了」「目标表动没动」「为什么失败」。
+**Three shape axes that never borrow from one another.** Red/amber/green is not enough — when they
+sit side by side on one screen you must be able to tell "how far did it get", "did the target table
+move", and "why did it fail" apart at a glance.
 
-| 轴 | 语义来源 | 形状 | 说明 |
+| Axis | Semantic source | Shape | Notes |
 |---|---|---|---|
-| **轴一 · 进程阶段** | ADR-0012 五态中的进行中部分 | **圆点** + 中文短语，串成 `PREPARING ─▶ STREAMING ─▶ COMMITTING` | 只在进行中出现；当前阶段圆点用 `--info` 并带一圈 `--info-bg` 光晕，已过用 `--ok`，未到用 `--mute` |
-| **轴二 · 资源终态** | ADR-0012 墓碑两值 | **块**：`SWAPPED` 实心（`--ok-fill` 底 + `--ok-ink` 字 + `--ok-bd` 边）、`DISCARDED` 描边中性（**无底色** + 1px `--line-strong` 边） | 回答的是**目标表动没动**，与「为什么」无关。终态块永远带一句中文旁白（`DISCARDED　目标表未被触碰`）。`DISCARDED` 不给底色是硬要求：两个都有底色时，灰度下它们都只是「带边框的填充块」，§8 承诺的「实心块 vs 描边块」就落空了。**`SWAPPED` 的底用 `--ok-fill` 而不是 `--ok-bg`**（2026-08-16 增补，[#89](https://github.com/liumingjian/db-qbs/issues/89)）：后者灰度下只比白底深 3.1%，「实心」那半边等于没画，承诺是两边各守一半、缺一边就不成立。`--ok-bd` 落在 `--ok-fill` 上亮度几乎相同、边看不见了——**那是对的**，实心块本来就不该靠边框立住，别把它当缺陷报回来 |
-| **轴三 · 错误码** | ADR-0010 闭集 **12 码** | **标签**，等宽码名 + 小号 HTTP 码，**4xx 虚线边框、5xx 实线边框** | 4xx = 「**你能改**」（`--crit` 系）；5xx = 「**找人**」（`--warn` 系）。边框形态不同，色觉障碍与黑白打印下仍可分 |
+| **Axis 1 · process phase** | The in-progress part of the run's five states | **Dot** + a short CJK phrase, strung as `PREPARING ─▶ STREAMING ─▶ COMMITTING` | Appears only while in progress; the current dot uses `--info` with an `--info-bg` halo, past phases use `--ok`, future ones `--mute` |
+| **Axis 2 · resource final state** | The tombstone's two values | **Block**: `SWAPPED` solid (`--ok-fill` ground + `--ok-ink` text + `--ok-bd` border); `DISCARDED` neutral outline (**no fill** + 1px `--line-strong` border) | It answers **whether the target table moved**, and says nothing about why. A final-state block always carries a CJK gloss (`DISCARDED　目标表未被触碰`). Leaving `DISCARDED` unfilled is a hard requirement: give both a fill and, in greyscale, both become "a filled block with a border", and the "solid vs outline" promise of §8 collapses. **`SWAPPED` uses `--ok-fill`, not `--ok-bg`**: the latter is only 3.1% darker than white in greyscale, so the "solid" half would effectively be unpainted, and the promise needs both halves. `--ok-bd` sits at almost the same luminance as `--ok-fill`, making the border invisible — **that is correct**; a solid block should not need a border to stand up, so do not report it as a defect |
+| **Axis 3 · error code** | The closed set of **12 codes** | **Tag**, monospace code name + small HTTP status, **dashed border for 4xx, solid for 5xx** | 4xx means "**you can fix this**" (the `--crit` family); 5xx means "**get help**" (the `--warn` family). The border shapes differ so they stay distinguishable under colour blindness and black-and-white printing |
 
-**硬规则**：
+**Hard rules**:
 
-- 三轴的形状（圆点 / 块 / 标签）**不得互换、不得复用**。新加状态先问它属于哪条轴；不属于任何一条，先回 ADR 里定语义再画。
-- **错误码是闭集**，UI 不得自造码、不得只显示 HTTP 码而吞掉码名；未知码按 `INTERNAL_*` 那档呈现并原样回显字符串。
-- 码名右边永远跟一句**中文人话结论**（ADR-0013 §6 的两类分法：校验数不符 / 校验没跑成），
-  人话在前、码在后；码是给能查文档的人的锚点，不是解释。
-- **进行中不用轴二**，**终态不用轴一**。同一行里两轴并列是允许的（终态块 + 错误码标签），三轴同时出现不允许。
-- **轴二只在墓碑真的存在时出现**（2026-08-15 增补，[#58](https://github.com/liumingjian/db-qbs/issues/58)）。
-  轴二画的是 ADR-0012 的**墓碑**，而墓碑在 `sink` 手里。三类情形 `sink` 上根本没有这条 run、
-  因而没有墓碑：**SQL 形状预检未过**（请求都没发出去）、**映射预检未过**（`POST /runs` 被 422 拒，无 run 资源）、
-  **「结局不明」族三种**（父进程没看见结局，不知道有没有墓碑）。
-  这些屏**一律不出终态块**——画一个 `DISCARDED` 等于**捏造一条不存在的记录**。
-  「目标表未被触碰」这句话降级写进**人话结论条**；列表里的「结局」列用**中性灰字文本**
-  （`未发起` / `未建暂存表` / `结局不明`），不是块。
-  代价认下：同一列里既有块又有灰字，视觉上不齐——**但那正是事实，齐了就是假的**。
-  轴一同理（见下一条）：形状不对就别画，不要为了版面完整去补一个形状。
-- **阶段串画三个点，不是五个**（2026-08-15 增补，[#58](https://github.com/liumingjian/db-qbs/issues/58)）。
-  ADR-0012 的五态含 `SUCCEEDED` / `FAILED`，**把终态画成圆点会当场撞上本节第一条硬规则**
-  （形状不得互换：终态是轴二的块）。故阶段串固定为
-  `PREPARING ─▶ STREAMING ─▶ COMMITTING`，**尾部跟一句文字「→ 终态待定」**，
-  终态由轴二在 run 结束后接管。ADR-0026 §4「五个阶段圆点全灰」据此订正为三个。
+- The three shapes (dot / block / tag) **must never be swapped or reused**. A new state starts with
+  "which axis is it on?" — if it is on none, settle its semantics in an ADR before drawing it.
+- **Error codes are a closed set.** The UI must not invent codes, and must not show the HTTP status
+  while swallowing the code name. Unknown codes render in the `INTERNAL_*` band with the string
+  echoed verbatim.
+- A **plain-language CJK conclusion** always follows the code name (the two-way split being: the
+  verification numbers disagreed / verification never ran). Prose first, code second; the code is an
+  anchor for someone who can look up the docs, not an explanation.
+- **Axis 2 never appears in progress, axis 1 never appears at a final state.** Two axes on one row is
+  allowed (final-state block + error tag); all three at once is not.
+- **Axis 2 appears only when a tombstone genuinely exists.** Axis 2 draws the tombstone, and the
+  tombstone is held by `sink`. In three situations `sink` has no such run at all and therefore no
+  tombstone: **the SQL shape precheck failed** (no request was ever sent), **the mapping precheck
+  failed** (`POST /runs` was rejected with 422, so no run resource exists), and the three
+  **"outcome unknown"** cases (the parent process never saw an outcome and cannot know whether a
+  tombstone exists). Those screens **never show a final-state block** — drawing a `DISCARDED` there
+  would be **fabricating a record that does not exist**. The sentence "the target table was not
+  touched" is demoted into the **plain-language conclusion bar**; the list's "outcome" column uses
+  **neutral grey text** (`未发起` / `未建暂存表` / `结局不明`) rather than a block.
+  The cost is accepted: one column then mixes blocks and grey text and looks uneven — **but that is
+  the truth, and making it even would make it a lie.** Axis 1 works the same way (see the next rule):
+  if the shape is wrong, do not draw it; never fill in a shape for the sake of a tidy layout.
+- **The phase string draws three dots, not five.** The run's five states include `SUCCEEDED` and
+  `FAILED`, and **drawing a final state as a dot collides head-on with the first hard rule above**
+  (shapes must not be swapped: a final state is an axis-2 block). So the string is fixed at
+  `PREPARING ─▶ STREAMING ─▶ COMMITTING` with **the trailing text "→ 终态待定"**, and axis 2 takes
+  over once the run ends.
 
-## 4. 数据密度（#55 第 3 问第一条的答案）
+## 4. Data density
 
-- 表格行高 **41px**、表头行 39px、单元格 14px、表头 `--mute-bg` 底 + **500 字重**、悬停行底 `#FAFAFA`。
-  **2026-08-21 改判（[ADR-0043](../adr/0043-p2-job-center.md) §3）**：这一行原本写的是 44 / 13.5 / 600，
-  那三个数是自拟的；现值来自对 x2doris 1.2.0 作业中心的计算样式实测，令牌在 `tokens.css` 里逐条标了出处。
-  强调字重 500 这一条同时是 V25 的判据（原判「600 不是 700」）。
-- 数字列**右对齐 + 等宽**，单位用 `--mute` 小字跟在后面，不进数字本身。
-- 表格一律裹在 `.table-wrap` 里，**横向溢出自己滚**，页面不横滚。
-  **2026-08-21 改判**：外面那圈 1px 边框随卡片去边一起取消（ADR-0043 §3），分层只靠灰底衬白卡；
-  列多到放不下时**操作列吸附右侧**（`.action-column`，参照物的 `ant-table-cell-fix-right`）。
-- 关键测量数走**键值网格**（`auto-fit, minmax(150px, 1fr)`，1px 缝隙露底色成网格），
-  字段名 11px `--mute`，值等宽；单个最重要的数可放大到 17px。
-- **不做仪表盘卡片、不做大圆环、不做装饰性图标**。M2 买的是可操作性，不是观感。
+- Table row height **41px**, header row 39px, cell padding 14px, header on `--mute-bg` at **weight
+  500**, hover row `#FAFAFA`. These four numbers are measured from x2doris, not invented. The
+  emphasis weight **500** is also the criterion for V25.
+- Numeric columns are **right-aligned and monospaced**; units follow in small `--mute` text and never
+  enter the number itself.
+- Tables always sit inside `.table-wrap` and **scroll horizontally on their own**; the page never
+  scrolls sideways. **No outer border** — layering is the white card on grey ground alone. When there
+  are too many columns to fit, **the action column pins to the right** (`.action-column`, matching the
+  reference's `ant-table-cell-fix-right`).
+- Key measurements go in a **key-value grid** (`auto-fit, minmax(150px, 1fr)`, with 1px gaps letting
+  the ground show through as gridlines); field names at 11px `--mute`, values monospaced. The single
+  most important number may go up to 17px.
+- **No dashboard cards, no large donuts, no decorative icons.** What is being bought here is
+  operability, not looks.
 
-## 5. 业务值容器（#55 第 3 问第三条的答案）
+## 5. Business-value container
 
-失败详情里的 `column` / `value`（ADR-0017 §4）是**源库真实业务值**。UI 上它只有一个落点：
+The `column` / `value` in failure details are **real business values from the source database**. They
+have exactly one home in the UI:
 
-- **独立告警框**（`--warn` 系边框与底色），与普通字段视觉上完全分开，绝不混进键值网格或表格单元格。
-- **默认打码**（`filter: blur`＋禁选），点「显示」才出。
-- 框上写明一句：**「显示即把源库真实值送进这台浏览器」**。
+- **A standalone alert box** (`--warn` border and ground), visually separate from ordinary fields,
+  never mixed into a key-value grid or a table cell.
+- **Masked by default** (`filter: blur` plus non-selectable); revealed only on clicking "显示".
+- The box states plainly: **"显示即把源库真实值送进这台浏览器"**.
 
-这是**设计上的落点**，不是安全机制。暴露面的定价归 [ADR-0024](../adr/0024-m2-unauthenticated-inbound-exposure.md)（端口即凭据），本文件不重开。
-ADR-0024 §2 那条负面条款（「没有连接配置管理页，不是还没画，是不画」）**自 2026-08-19 起不再是现行裁定**：
-[ADR-0037](../adr/0037-datasource-model-and-credential-boundary.md) §5 把它判废了一半——数据源（连接串、用户、口令）
-成为一等实体并进导航第三项，见 [ADR-0039](../adr/0039-v1-ui-increments.md) §1。**被判废的只是「不给管理页」这一条，
-口令的呈现边界原样收紧**：界面永远不回读口令（连密文都不回），编辑态口令栏恒为空，旁边挂中性徽标标「已设置 · 留空 = 不改」。
-仍然不画的是**鉴权**（ADR-0037 §5 的「明知故犯」那笔账），不是连接配置本身。
+This is a **design placement, not a security mechanism**. The exposure is priced in `CONTEXT.md`
+under **Known gaps**, item 1 (reachability equals credential privilege); this file does not reopen it.
 
-## 6. 暗色主题：**不发**（#55 第 5 问的答案）
+**Datasources** (connection string, user, password) are first-class entities occupying a nav item with
+a full management screen. **The password's presentation boundary is tight**: the interface never reads
+a password back (not even the ciphertext), the password field is always empty in edit mode, and a
+neutral badge beside it reads "已设置 · 留空 = 不改". **What is not drawn is authentication**, not the
+connection configuration itself.
 
-V1 **只发浅色**，不提供暗色主题，也不留主题切换开关。理由三条：
+## 6. Dark theme: **not shipping**
 
-1. 受众在办公环境，DolphinScheduler 范式本身就是浅色，暗色不是这批人的默认预期；
-2. 两套主题是**持续维护成本**，每张新原型都要双份检查；
-3. M2 买的是可操作性，不是外观选项。
+V1 **ships light only**, with no dark theme and no theme switch. Three reasons:
 
-**这是正面回答，不留给实现期默认。** 变体原型里那套暗色 token 只是当时的对照材料，
-**不进** `tokens.css`、不作为交付项。要发暗色需重开一票并改本节。
+1. The audience is ops and developers in an office; the reference itself is a light layout, and dark
+   is not this group's default expectation.
+2. Two themes are an **ongoing maintenance cost** — every new prototype needs checking twice.
+3. What is being bought here is operability, not an appearance option.
 
-## 7. 组件清单
+**This is a positive answer, not something left to an implementation-time default.** Shipping dark
+requires reopening a ticket and editing this section.
+Note that "light only" does not conflict with the **dark left nav** — the reference's light layout has
+a dark `#001529` sider.
 
-已在原型里成形、可直接复用的：
+## 7. Component inventory
 
-| 组件 | 要点 |
+Already formed in the prototype and directly reusable:
+
+| Component | Key points |
 |---|---|
-| **应用外壳** | 左导航 `--sider-w` **256px、深色 `--sider-bg` `#001529`**（选中项填 `--brand`、10px 圆角块）+ 顶栏 `--topbar-h` **50px**（最左折叠触发器 + 面包屑 + 右侧环境 pill）+ 灰底内容区。**2026-08-21 改写**（[ADR-0043](../adr/0043-p2-job-center.md) §8）：原判的「188px 白底左导航 + 52px 顶栏」已作废 |
-| **侧栏折叠态 `.app-shell.is-collapsed`** | 2026-08-21 新增。256px ⇄ **48px**，触发器在顶栏最左（`menu-fold ⇄ menu-unfold`），折叠后**只剩图标且图标居中**——参照物在这里没改 `padding-left`，选中的蓝块被切成一条竖边，那是它的渲染瑕疵，**明确不照抄**（ADR-0043 文末自决 2）。语义靠 `title`；折叠状态记进 `localStorage` |
-| **导航占位项** | **已退役**（2026-08-21 补记）。P0 撤掉了非 v1 的导航占位项，`M3+` 灰标从此没有对象；ADR-0042 §背景是那次静默退役的出处，本行留着是为了让旧走查记录对得上 |
-| **卡片 `.card`** | 白底 + 4px 圆角 + `--card-pad` 内边距。**2026-08-21 改写**：**去掉那圈 1px 边**（x2doris 实测 `border: none / box-shadow: none`），分层只靠灰底衬白卡 |
-| **卡内标题块 + 工具条 `.table-title-row`** | 2026-08-21 新增。左边是 `--title-bg` 灰底的标题块（`--weight-em` 500）+ 计数小字，右边是工具图标（刷新 / 行高密度 / 列设置）+ 主按钮 + 批量按钮；**批量按钮未选中时禁用** |
-| **筛选条 `.filter-card`** | **改写**：控件高 `--ctl-h` **32px**（原判 30px 作废）+ 主按钮 + 幽灵按钮，**独立成一张白卡**摆在表格卡上方，不再是贴在卡片头下方的一条 |
-| **勾选列 `.check-column`** | 2026-08-21 新增。表头是全选，**只全选当前页**——跨页全选会让人在看不见的行上执行动作（ADR-0043 §6） |
-| **进度单元 `.progress`** | 2026-08-21 新增。一条细进度条 + **一个整数百分比**，向下取整、不带小数、不附行数。三种空态一律 `—`：尚未运行、开跑前计数失败（`title` 自陈「未取到总行数」）、分母缺席（ADR-0043 §7） |
-| **分页条 `.list-pagination`** | **改写**：`共 N 条` + **页码按钮**（当前页填 `--brand`）+ 上一页 / 下一页 + **每页条数下拉**（20 / 50 / 100），摆在表格卡内右下。仍是**客户端分页且不装成服务端分页**（ADR-0042 §2）；总数不超过一页时整条不出 |
-| **详情抽屉 `.drawer`** | 2026-08-21 新增。右侧 760px，顶替整个「运行历史」屏。装一个任务**最近一次**运行的全部信息：人话结论条 + 轴二块 + 轴三标签、行数核对、分段耗时（含「开跑前计数」单独一栏）、任务定义、运行参数与两个 id、源端 SQL；底部是**重跑**入口（ADR-0043 文末自决 1） |
-| **按钮** | 主（实心 `--brand`）/ 幽灵（白底 `--line-strong` 边）/ 链接（`--brand` 文字）三档，焦点环 2px `--brand` |
-| **键值网格 `.kv`** | 见 §4 |
-| **数据表 `.data-grid`** | 见 §4。行内动作**全用图标**、靠 `title` 认，两道分隔线把「跑」｜「看 / 改 / 改名」｜「删」分成三组，删除单独染红——2026-08-21 起 ADR-0042 §6「行内主动作给文字」已作废（ADR-0043 §5） |
-| **阶段串 `.phaseline`** | 轴一 |
-| **终态块 `.term`** | 轴二 |
-| **错误码标签 `.code`** | 轴三 |
-| **人话结论条 `.plain`** | 左侧 3px `--crit` 竖条 + `--crit-bg` 底，最宽 68ch，放在失败页最前 |
-| **业务值告警框 `.sensitive`** | 见 §5 |
-| **SQL 占位符 `.sql .ph`** | 2026-08-15 增补（[#58](https://github.com/liumingjian/db-qbs/issues/58)）。代码块里**待人填写的空**：`--warn` 系虚线边框 + `--warn-bg` 底，如建表 SQL 里的 `<目标表名>`。它是**提示不是错误**——用 `--warn` 是取「这里还没定」的语气，不进三轴，也不得用来标错误。用它的前提是**不拦着人先看**（ADR-0027 §4）：有占位符照样把整段 SQL 给出去 |
-| **自定义 SQL 输入框 `.source-sql-editor`** | 2026-08-24 新增（[ADR-0046](../adr/0046-qa-round-editor-nav-and-dead-column.md) §1）。**唯一一处语法高亮**：透明字 `textarea` 压在着色 `<pre>` 上，两层同框；配一个「格式化」按钮，**只动空白、一个字符不改**。用的是 `--sql-keyword` / `--sql-string` / `--sql-number` / `--sql-quoted` 四个令牌——**它们不承担状态语义**，与三轴无关，也**不得**用到别处；注释与标点落回 `--mute` / `--dim`。连字两层都关（`>=` 不得画成 `≥`） |
+| **App shell** | Left nav `--sider-w` **256px, dark `--sider-bg` `#001529`** (selected item filled `--brand`, 10px rounded block) + top bar `--topbar-h` **50px** (collapse trigger at far left + breadcrumb + environment pill at right) + grey content area |
+| **Collapsed sider `.app-shell.is-collapsed`** | 256px ⇄ **48px**, trigger at the far left of the top bar (`menu-fold ⇄ menu-unfold`); collapsed shows **icons only, centred** — the reference does not adjust `padding-left` here, so its selected blue block is sliced into a vertical strip, which is its rendering defect and is **explicitly not copied**. Semantics carried by `title`; the collapsed state is stored in `localStorage` |
+| **Card `.card`** | White ground + 4px radius + `--card-pad` padding, **no border and no shadow** (x2doris measures `border: none / box-shadow: none`); layering is the white card on grey ground alone |
+| **In-card title block + toolbar `.table-title-row`** | On the left, a `--title-bg` grey title block (`--weight-em` 500) plus a small count; on the right, tool icons (refresh / row density / column settings) + primary button + bulk button. **The bulk button is disabled when nothing is selected** |
+| **Filter strip `.filter-card`** | Controls at `--ctl-h` **32px** + primary button + ghost button, **standing as its own white card** above the table card |
+| **Checkbox column `.check-column`** | The header is select-all, and it **selects the current page only** — selecting across pages would let someone act on rows they cannot see |
+| **Progress cell `.progress`** | A thin bar + **one integer percentage**, floored, no decimals, no row counts appended. Three empty states all render `—`: never run, the pre-run count failed (`title` says so), and no denominator |
+| **Pagination `.list-pagination`** | `共 N 条` + **page buttons** (current page filled `--brand`) + previous / next + **page-size dropdown** (20 / 50 / 100), at the bottom right inside the table card. Still **client-side paging that does not pretend to be server-side**; the whole strip is hidden when the total fits on one page |
+| **Detail drawer `.drawer`** | 760px on the right, holding everything about a task's **most recent** run: plain-language conclusion bar + axis-2 block + axis-3 tag, row-count reconciliation, per-stage timings (with "pre-run count" as its own entry), the task definition, both ids, and the source SQL. **Re-run** sits at the bottom |
+| **Buttons** | Three tiers — primary (solid `--brand`) / ghost (white with a `--line-strong` border) / link (`--brand` text) — with a 2px `--brand` focus ring |
+| **Key-value grid `.kv`** | See §4 |
+| **Data table `.data-grid`** | See §4. Inline actions are **all icons**, identified by `title`; two dividers split them into "run" ｜ "view / edit / rename" ｜ "delete", with delete alone tinted red |
+| **Phase string `.phaseline`** | Axis 1 |
+| **Final-state block `.term`** | Axis 2 |
+| **Error code tag `.code`** | Axis 3 |
+| **Plain-language conclusion bar `.plain`** | A 3px `--crit` rule on the left + `--crit-bg` ground, max 68ch, placed first on a failure page |
+| **Business-value alert box `.sensitive`** | See §5 |
+| **SQL placeholder `.sql .ph`** | **A blank for a person to fill in** inside a code block: `--warn` dashed border + `--warn-bg` ground, such as `<目标表名>` in the target DDL. It is **a hint, not an error** — `--warn` is chosen for the "not settled yet" tone; it is outside the three axes and **must not** be used to mark errors. Its premise is **never blocking someone from looking first**: a statement with placeholders is still handed over whole |
+| **Highlighted SQL input `.sql-text-input` + `.sql-highlight`** | **The only widget with syntax highlighting**, used in exactly two places: the custom SQL editor (`.source-sql-editor`, which also carries a "format" button that **touches whitespace only and changes not one character**) and the filter clause's WHERE textbox (`.where-clause-editor`, which has no format button — a bare predicate has no clauses to lay out). Both are a transparent-text `textarea` over a coloured `<pre>`, **the two layers sharing a box**; only the starting height differs. It uses four tokens — `--sql-keyword` / `--sql-string` / `--sql-number` / `--sql-quoted` — which **carry no state semantics**, are unrelated to the three axes, and **must not** be used elsewhere; comments and punctuation fall back to `--mute` / `--dim`. Ligatures are off in both layers (`>=` must never render as `≥`) |
 
-**预留位置（信息架构不在本票，视觉语言要能覆盖）**：
+**Reserved placements** (the information architecture is decided elsewhere; the visual language must
+cover it):
 
-- **历史列表**（归 [#49](https://github.com/liumingjian/db-qbs/issues/49) / ADR-0020）：**已退役**（2026-08-21，ADR-0043 §2）。
-  运行历史独立屏并进作业中心，列表只展示最近一次运行；轴二整体搬进详情抽屉，列表的「运行状态」列是**一维索引**，不是轴二。
-- **实时进度**（归 [#56](https://github.com/liumingjian/db-qbs/issues/56) / [ADR-0026](../adr/0026-m2-in-flight-observation.md)）：运行详情页仍是阶段串 + 键值网格 + 不确定进度条，**不新造组件**。
-  **2026-08-21 订正**：「不显示百分比」这一条在**列表的迁移进度列上已被推翻**（ADR-0043 §7 买下了分母——开跑前跑一次 `COUNT(*)`），
-  组件是上表的「进度单元」。运行详情页里那条不确定进度条**原样保留**，它答的是「这一段还在动」，不是「跑到几成」。
-  「结局不明」三种情形只出人话结论条、不出错误码标签（§4）**原样有效**。
-- **SQL 构建器**（归 [#51](https://github.com/liumingjian/db-qbs/issues/51) / ADR-0023）：交互不在本票，但它的两段预检报告要**分开呈现不合并**，两段都用人话结论条 + 数据表。
-  **2026-08-19 订正**：[ADR-0036](../adr/0036-task-spec-structured.md) §5 取消了 SQL 形状预检，预检报告**从此只剩映射预检一段**，
-  「两段分开不合并」这句已无对象；剩下的那一段仍是人话结论条 + 数据表，视觉语言不变。
-- **数据源屏**（归 [ADR-0037](../adr/0037-datasource-model-and-credential-boundary.md) §5 / [ADR-0039](../adr/0039-v1-ui-increments.md) §1–§4）：
-  **应用外壳 + 卡片 + 数据表 + 对话框，不新造组件**，本节的组件清单不因它增减。列表不给筛选条、不给「连接状态」列；
-  口令用既有 `.field-badge` 的中性变体，测连结果成功走一行纯文字、失败复用表单错误区且**原样回显驱动报错、不出错误码标签**
-  （错误码标签是 ADR-0010 闭集的东西，元数据面不属于它）。
-  **2026-08-24 增补**（[ADR-0044](../adr/0044-target-agent-registry.md) §6）：多一列「目标端 Agent」——
-  MySQL 行显示 agent 名字，绑的那台不在线 / 身份不符时跟一个既有的 `.state` 标签；Oracle 行那一格是空的。
-  「不给连接状态列」这条**一字未改**，它管的是**业务库**。
-- **目标端 Agent 屏**（归 [ADR-0044](../adr/0044-target-agent-registry.md) §6，2026-08-24 新增）：
-  **同样是应用外壳 + 卡片 + 数据表 + 对话框，一个新组件都没有**，本节的组件清单不因它增减；
-  状态列复用既有的 `.state` 实心标签（在线 `is-succeeded` / 不在线 `is-unknown` / 身份不符 `is-failed`）。
-  **它有状态列，这是对上一条那句「不给连接状态列」的明确例外**：那一条挡的是「后台轮询所有**业务库**」的代价
-  与「一个过期的绿点」的谎；探 agent 只是打自己进程的一个 `GET /v1/agent/info`，不碰任何业务库、不占任何数据库连接，
-  而「它现在活着吗」正是这一屏存在的全部意义。
+- **Run history**: no screen of its own — it is folded into the job center. The task list shows only
+  the **most recent** run, with everything else in the detail drawer. The list's "run status" column
+  is a **one-dimensional index**, not axis 2; axis 2 lives entirely in the drawer.
+- **Two readings of progress**: the list's migration-progress column gives **an integer percentage**
+  (the denominator being one `COUNT(*)` run before the transfer starts), using the "progress cell"
+  above; the **run detail page uses an indeterminate bar**, which answers "is this stage still
+  moving", not "how far along". **No new component for either.** The three "outcome unknown" cases
+  produce a plain-language conclusion bar only, never an error code tag (§4).
+- **SQL builder**: the precheck report has **only the mapping-precheck section** (the source performs
+  no SQL shape precheck), rendered as a conclusion bar + data table.
+- **Datasource screen** (see [ADR-0039](../adr/0039-v1-ui-increments.md) §1–§4):
+  **app shell + card + data table + dialog, with no new components**; this section's inventory does
+  not grow or shrink for it. The list gets no filter strip and no "connection status" column.
+  Passwords use the neutral variant of the existing `.field-badge`; a successful connection test is
+  one line of plain text, a failed one reuses the form error area and **echoes the driver's error
+  verbatim without an error code tag** (error code tags belong to the protocol's closed set, and the
+  metadata surface is not part of it).
+  There is also a **"Target Agent"** column: MySQL rows show the agent name, followed by an existing
+  `.state` tag when the bound agent is offline or its identity does not match; the cell is empty on
+  Oracle rows. The "no connection status column" rule is **unchanged** — it governs **business
+  databases**.
+- **Target Agent screen** (see [ADR-0044](../adr/0044-target-agent-registry.md) §6):
+  again **app shell + card + data table + dialog, with not one new component**; this section's
+  inventory does not change for it. The status column reuses the existing solid `.state` tag
+  (online `is-succeeded` / offline `is-unknown` / identity mismatch `is-failed`).
+  **It has a status column, and that is an explicit exception to the rule above.** That rule guards
+  against the cost of "background-polling every **business database**" and against the lie of a stale
+  green dot. Probing an agent is one `GET /v1/agent/info` against our own process — it touches no
+  business database and consumes no database connection — and "is it alive right now?" is the entire
+  reason this screen exists.
 
-## 8. 无障碍与降级
+## 8. Accessibility and degradation
 
-- 语义**从不只靠颜色**：三轴各有形状，终态与错误码永远带文字。
-- 焦点可见：所有可交互元素 `:focus-visible` 出 2px `--brand` 环。
-- 尊重 `prefers-reduced-motion`。
-- 黑白打印/复印下三轴仍可分（实心块 vs 描边块 vs 虚线标签 vs 实线标签）。
-  **这条从定性改成可量的**（2026-08-16 增补，[#89](https://github.com/liumingjian/db-qbs/issues/89)）：
-  轴二两个块整页 `filter: grayscale(1)` 后，**块内中位亮度差须 ≥ 25/255（≈10%）**。
-  改成数字的理由是它当初真的以定性形态失守过——`--ok-bg` 底只差 8/255（3.1%），
-  走查两轮都判「部分符合」而不是 FAIL，因为「靠形状仍分得开」这句话永远为真
-  （边框和文字在，块当然分得开）。**定性判据在这里挡不住退化**：
-  它问的是「分不分得开」，而承诺说的是「靠实心 vs 描边分得开」。
-  现值 `--ok-fill` **实测 227** vs 白底 255，差 **28（11.0%）**——浏览器的
-  `filter: grayscale(1)` 按 Rec.709 系数折算，比离线用 ITU-601 估的 224 高 3；
-  **以走查实测为准**，判据量的就是屏幕上那几个像素。
-  走查这条**必须贴实测数字**，不接受「目视可分」——取样口径见
-  `m2-visual-walkthrough.md` V5（整页灰度截图后取块内中位亮度）。
+- Semantics **never rest on colour alone**: each axis has its own shape, and final states and error
+  codes always carry text.
+- Focus is visible: every interactive element gets a 2px `--brand` ring on `:focus-visible`.
+- Respect `prefers-reduced-motion`.
+- The three axes stay distinguishable in black-and-white print or photocopy (solid block vs outline
+  block vs dashed tag vs solid tag).
+  **This rule is measurable rather than qualitative**: with the whole page under
+  `filter: grayscale(1)`, the two axis-2 blocks must differ by **≥ 25/255 (≈10%) in median luminance
+  inside the block**.
+  It became a number because it genuinely failed in its qualitative form: an `--ok-bg` ground differed
+  by only 8/255 (3.1%), and two walkthroughs in a row scored it "partially met" rather than FAIL,
+  because "they are still distinguishable by shape" is always true (the border and text are there, so
+  of course the blocks are distinguishable). **A qualitative criterion cannot catch this regression**:
+  it asks "are they distinguishable", while the promise says "distinguishable by solid vs outline".
+  The current `--ok-fill` **measures 227** against a white 255, a difference of **28 (11.0%)** — the
+  browser's `filter: grayscale(1)` uses Rec.709 coefficients, 3 higher than the 224 estimated offline
+  with ITU-601. **The walkthrough measurement governs**; the criterion measures the pixels actually on
+  screen.
+  The walkthrough **must record the measured number** and does not accept "looks distinguishable";
+  the sampling method is in `m2-visual-walkthrough.md` V5 (full-page greyscale screenshot, then median
+  luminance inside the block).
 
-## 9. 已知代价（选 D 时一并接受的）
+## 9. Known costs (accepted along with this choice)
 
-- **范式眼熟 = 不容易出彩**：这套界面不会让人眼前一亮，它换来的是零学习成本。
-- **密度中等偏松**：一屏比极高密度方案（原型里的方向 A）少放约 40% 的行；看长历史要多滚。
+- **A familiar paradigm is hard to make striking**: this interface will not turn heads. What it buys
+  is zero learning cost.
+- **Moderately loose density**: about 40% fewer rows per screen than a very high-density alternative,
+  so reading long histories takes more scrolling.

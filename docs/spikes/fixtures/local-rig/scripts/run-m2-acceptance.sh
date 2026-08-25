@@ -4,7 +4,7 @@
 # 判据依据：**ADR-0040 §5.2**（M2 十四个 A 场景，编号不动、不重编）。
 # 调用面已从退役的 `source_sql` / `biz_date` 报文改到 **`TaskSpec` + 数据源 id 绑定**
 # （ADR-0036 §1、ADR-0037 §1/§8）：任务创建带两个 datasource_id 与一份结构化规格，
-# 发起运行带 `run_params` 而不是 `biz_date`，目标端连接由编排进程解出来随 run 报文过线
+# 发起运行只带任务身份（运行参数链已退役），目标端连接由编排进程解出来随 run 报文过线
 # （`sink.toml` 的 mysql_dsn / database 已退役）。
 #
 # 判据面只有一处翻转：**A3 与 A6 失去对象**——ADR-0036 §5 整段取消了 SQL 形状预检。
@@ -355,11 +355,11 @@ ensure_datasources() {
 # 结构化规格取代退役的 `source_sql`（ADR-0036 §1/§2）：SQL 由它现算，任务定义里不存 SQL。
 #
 # 原来的 `d_biz >= :biz_date AND d_biz < :biz_date + 1` 半开区间在 v1 表达不出来——比较符只有
-# `>` `<` `=`（ADR-0035 §3 字面）。台架里 d_biz 是纯日期（时分秒为零），单点等值与原半开区间
-# 同集合，所以用 `= :d_biz` 顶上。这条表达力缺口挂在 ADR-0035 的时效 2 上，不要自作主张加 `>=`。
+# 过滤是一段自由 WHERE 文本：台架里 D_BIZ 是纯日期（时分秒为零），单点等值与原半开区间
+# 同集合。表达力缺口已随文本框消失——要写 `>=` / `BETWEEN` 现在直接写进这段字。
 narrow_spec() {
-  local target=${1:-M1_NARROW}
-  jq -nc --arg target "$target" '{
+  local target=${1:-M1_NARROW} date=${2:-$BIZ_DATE}
+  jq -nc --arg target "$target" --arg date "$date" '{
     owner:"SPIKE", table:"T_M1_NARROW", target_table:$target,
     primary_key:["ROW_ID"],
     columns:[
@@ -367,10 +367,7 @@ narrow_spec() {
       {source:"V_TEXT", target:"V_TEXT"},
       {source:"D_BIZ",  target:"D_BIZ"}
     ],
-    conditions:[{
-      column:"D_BIZ", operator:"eq", value_type:"date",
-      parameter:"d_biz", value_source:"runtime", constant:""
-    }]
+    where_clause:("D_BIZ = DATE \u0027" + $date + "\u0027")
   }'
 }
 
@@ -385,15 +382,16 @@ create_task() {
   jq -r '.task_id' <<<"$API_BODY"
 }
 
-# `biz_date` 那个一等概念已随 ADR-0035 §3 退役：发起时逐条填规格声明的运行参数。
-run_params_payload() {
-  local task_id=$1 date=${2:-$BIZ_DATE}
-  jq -nc --arg task "$task_id" --arg date "$date" '{task_id:$task, run_params:{d_biz:$date}}'
+# 发起的**全部**输入就是任务身份：没有对话框、没有参数，业务日期写在任务定义的
+# `where_clause` 里（`narrow_spec` 的第二个参数）。
+start_run_payload() {
+  local task_id=$1
+  jq -nc --arg task "$task_id" '{task_id:$task}'
 }
 
 start_task_run() {
-  local task_id=$1 date=${2:-$BIZ_DATE} payload
-  payload=$(run_params_payload "$task_id" "$date") || return 1
+  local task_id=$1 payload
+  payload=$(start_run_payload "$task_id") || return 1
   api POST /api/runs "$payload" || return 1
   [[ "$API_STATUS" == 202 ]] || fail "start run status=$API_STATUS body=$API_BODY" || return 1
   jq -r '.run_record_id' <<<"$API_BODY"
@@ -455,9 +453,7 @@ scenario_a4() {
   missing_table_spec=$(jq -nc '{
     owner:"SPIKE", table:"TABLE_THAT_DOES_NOT_EXIST", target_table:"M1_NARROW",
     primary_key:["D_BIZ"],
-    columns:[{source:"D_BIZ", target:"D_BIZ"}],
-    conditions:[{column:"D_BIZ", operator:"eq", value_type:"date",
-                 parameter:"d_biz", value_source:"runtime", constant:""}]
+    columns:[{source:"D_BIZ", target:"D_BIZ"}]
   }') || return 1
   payload=$(jq -nc --arg datasource "$ORACLE_DATASOURCE_ID" --argjson spec "$missing_table_spec" \
     '{datasource_id:$datasource, spec:$spec}') || return 1
@@ -554,8 +550,8 @@ scenario_a10() {
   task_id=$(create_task "A10 并发" "$(narrow_spec)") || return 1
   record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == true and .stage == "STREAMING"' || return 1
-  # 并发互斥键是「任务 + 本次运行参数集」（ADR-0036 §7），所以第二次必须用同一组参数发。
-  payload=$(run_params_payload "$task_id") || return 1
+  # 并发互斥键退化成了任务本身：同一个任务不许有第二次运行在飞。
+  payload=$(start_run_payload "$task_id") || return 1
   api POST /api/runs "$payload" || return 1
   assert_eq "concurrent start status" 409 "$API_STATUS" || return 1
   echo "actual rejection: $API_BODY"

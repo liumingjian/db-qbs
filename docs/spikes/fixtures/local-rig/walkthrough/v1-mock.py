@@ -73,20 +73,15 @@ SPEC = {
     "target_table": "HOLDING",
     "primary_key": ["ID"],
     "columns": [{"source": c, "target": c} for c in ("ID", "C_NAME", "LOAD_DATE")],
-    "conditions": [
-        {"column": "LOAD_DATE", "operator": "eq", "value_type": "date",
-         "parameter": "load_date", "value_source": "runtime", "constant": ""},
-    ],
-    "order_by": [],
+    "where_clause": "LOAD_DATE = DATE '2026-08-19'",
 }
 
-# 财务凭证多一条「运行时填」的 `region`——X9 的预填三规则要它：
-# 失败那行里有 `load_date`（取行值）、没有 `region`（留空）、多出一个 `legacy_region`（丢弃）。
+# 财务凭证的 WHERE 片段写得**长一点、形态也更凶**：`>=`、`IN`、多行——
+# 这些正是四格表单永远表达不出来、因而逼人绕道自定义 SQL 的那批条件。
 FA_SPEC = copy.deepcopy(SPEC)
-FA_SPEC["conditions"] = FA_SPEC["conditions"] + [
-    {"column": "C_NAME", "operator": "eq", "value_type": "text",
-     "parameter": "region", "value_source": "runtime", "constant": ""},
-]
+FA_SPEC["where_clause"] = (
+    "LOAD_DATE >= DATE '2026-08-01'\n  AND C_NAME IN ('SH', 'HZ')"
+)
 
 # 自定义 SQL 取数的规格：`owner` / `table` **都是空串**，取数靠 `source_sql`。
 # 作业中心「源表」那一格原来直接拼 `owner.table`，于是这类任务渲染成一个孤零零的
@@ -98,8 +93,7 @@ SQL_SPEC = {
     "target_table": "HOLDING",
     "primary_key": ["ID"],
     "columns": [{"source": c, "target": c} for c in ("ID", "C_NAME", "LOAD_DATE")],
-    "conditions": [],
-    "order_by": [],
+    "where_clause": "",
 }
 
 # 作业中心一行 = 一个任务 + 它最近一次运行（ADR-0043 §2），所以**五种运行状态要靠五个任务摆出来**，
@@ -136,7 +130,7 @@ def run_row(**overrides):
     """一条运行历史行。字段照 `web/src/api.ts` 的 `RunHistory` 给全，缺一个前端就渲染不出来。"""
     row = {
         "run_record_id": "rec", "run_id": "run", "task_id": "task-holding",
-        "run_params": {}, "source_sql": "SELECT a.ID AS ID\n  FROM APP.T_HOLDING a",
+        "source_sql": "SELECT a.ID AS ID\n  FROM APP.T_HOLDING a",
         "staging_table": "STG_1", "started_at": "2026-08-19T02:00:00Z",
         "finished_at": "2026-08-19T02:03:00Z", "outcome": "FAILED",
         "target_table_effect": "DISCARDED", "stage": "FAILED",
@@ -159,8 +153,8 @@ def run_row(**overrides):
 
 
 # 五个任务各一条最近运行，凑齐作业中心的五个状态词；外加进度那三种空态。
-# `rec-live-fa` 与 `rec-failed-fa` 同任务、参数只差一个 `region`——重跑时把 `region` 补成 `HZ`，
-# 就撞上「同一组参数可能已有 run 进行中」那条既有提示（X9 后半，判据一字未改）。
+# `rec-live-fa` 与 `rec-failed-fa` 同任务：前者至今在飞，于是再点一次这一行的「发起运行」
+# 就撞上 409「该任务已有一次运行进行中」——那句话落在屏顶的横幅里（X9 后半）。
 #
 # 进度分母（`total_rows`）故意摆成四种：
 #   task-verify  11998 / 12000 = 99.983% → **必须显示 99%**，向下取整这条就靠它（X16）
@@ -172,45 +166,32 @@ def run_row(**overrides):
 # 上一次不上列表（ADR-0043 §2 只展示最近一次），它留在库里是给 X9 的重跑用的。
 # 因此 99% 那一格必须挂在**另一个任务**（`task-verify`）上，否则这一态在屏上根本不出现。
 HISTORY = [
-    run_row(run_record_id="rec-failed-fa", run_id="run-fa-7", task_id="task-fa",
-            run_params={"load_date": "2026-08-18", "legacy_region": "SH"}),
+    run_row(run_record_id="rec-failed-fa", run_id="run-fa-7", task_id="task-fa"),
     # 99.983% —— 这一格必须显示 99%，四舍五入成 100% 等于拿显示撒谎（ADR-0043 §7 边界 1）。
     run_row(run_record_id="rec-verify", run_id="run-vf-1", task_id="task-verify",
-            run_params={"load_date": "2026-08-19"},
             started_at="2026-08-19T02:20:00Z", finished_at="2026-08-19T02:20:15Z", ms=15000,
             total_rows=12000, rows_pushed=11998, source_rows=11998, staged_rows=11998,
             sink_reported_rows=11975, precount_ms=1806),
-    # X9 后半的「同一组参数可能已有 run 进行中」那条提示要有对象。
-    # ADR-0043 §2 之后列表只展示最近一次运行，`task-fa` 的最近一次是**进行中**那条，
-    # 它的上一次（失败）从此点不开抽屉——原来靠那一对造出来的提示没了对象。
-    # 改由 `task-verify` 承担：一条**更早**发起、至今仍挂在进行中的陈旧 run，
-    # 参数与 `rec-verify` 完全相同。这正是那条提示要警告的情形本身。
-    run_row(run_record_id="rec-live-verify", run_id="run-vf-0", task_id="task-verify",
-            run_params={"load_date": "2026-08-19"},
-            outcome=None, stage="STREAMING", finished_at=None, sink_code=None,
-            target_table_effect=None, sink_reported_rows=None, staged_rows=None,
-            started_at="2026-08-19T01:00:00Z", ms=3600000,
-            total_rows=12000, rows_pushed=120, source_rows=120),
+    # 并跑拦截那一态挂在 `task-fa` 上：它名下的 `rec-live-fa` 至今在飞，
+    # 于是第二次点它的「发起运行」当场换回 409（X9 后半）。
+    # `task-verify` 名下**只留失败那一条**——它是「重跑」那一态的对象，
+    # 名下再挂一条在飞的 run，重跑就会被 409 挡住，那条判据也就没了对象。
     run_row(run_record_id="rec-live-fa", run_id="run-fa-8", task_id="task-fa",
-            run_params={"load_date": "2026-08-18", "region": "HZ"},
             outcome=None, stage="STREAMING", finished_at=None, sink_code=None,
             target_table_effect=None, sink_reported_rows=None, staged_rows=None,
             started_at="2026-08-19T02:10:00Z", ms=42000,
             total_rows=1200, rows_pushed=430, source_rows=430),
     run_row(run_record_id="rec-unknown", run_id="run-h-5", task_id="task-unknown",
-            run_params={"load_date": "2026-08-17"},
             outcome=None, stage=None, sink_code=None, target_table_effect=None,
             unknown_reason="PROCESS_DISAPPEARED", message=None, failure_kind="UNKNOWN",
             finished_at=None, total_rows=1200, rows_pushed=900, source_rows=900),
     run_row(run_record_id="rec-succeeded", run_id="run-h-4", task_id="task-holding",
-            run_params={"load_date": "2026-08-16"},
             outcome="SUCCEEDED", target_table_effect="SWAPPED", stage="COMMITTING",
             sink_code=None, sink_reported_rows=120, message="run completed successfully",
             failure_kind=None, total_rows=120, rows_pushed=120),
     # 开跑前那次 COUNT(*) 没成功：分母缺席，但这次运行**照样跑完并成功**——
     # 「为了一个进度条把整次搬运判死」正是 ADR-0043 §7 边界 3 要挡的事。
     run_row(run_record_id="rec-nocount", run_id="run-nc-1", task_id="task-nocount",
-            run_params={"load_date": "2026-08-19"},
             outcome="SUCCEEDED", target_table_effect="SWAPPED", stage="COMMITTING",
             sink_code=None, sink_reported_rows=120, message="run completed successfully",
             failure_kind=None, total_rows=120, rows_pushed=120, precount_ms=None),
@@ -221,10 +202,9 @@ HISTORY = [
     # 五种运行状态的取样对象一个不动：这一条是**第二个**成功态，
     # `task-never` 仍然是唯一的「尚未运行」。
     #
-    # `source_sql` 存的是**包裹之后的完整语句**——运行历史钉的是当时真执行的那一份
-    # （ADR-0036 §2），而自定义 SQL 从不原样执行（ADR-0045 §1）。
+    # `source_sql` 存的是**包裹之后的完整语句**——运行历史钉的是当时真执行的那一份，
+    # 而自定义 SQL 从不原样执行（ADR-0045 §1）。
     run_row(run_record_id="rec-sqlmode", run_id="run-sq-1", task_id="task-sqlmode",
-            run_params={},
             source_sql=(
                 "SELECT q.ID AS ID,\n"
                 "       q.C_NAME AS C_NAME,\n"
@@ -255,7 +235,7 @@ if os.environ.get("X_BULK") == "1":
         })
         HISTORY.append(run_row(
             run_record_id=f"rec-bulk-{index:02d}", run_id=f"run-bulk-{index:02d}",
-            task_id=task_id, run_params={"load_date": "2026-08-19"},
+            task_id=task_id,
             outcome="SUCCEEDED", target_table_effect="SWAPPED", stage="COMMITTING",
             sink_code=None, sink_reported_rows=120, failure_kind=None,
             message="run completed successfully", total_rows=120, rows_pushed=120,
@@ -444,20 +424,26 @@ class Handler(BaseHTTPRequestHandler):
                     f"a.{c['source']} AS {c['target']}" for c in columns
                 )
                 built = f"SELECT {projection}\n  FROM {spec.get('owner')}.{spec.get('table')} a"
-            return self._send(200, {
-                "source_sql": built,
-                "run_parameters": [
-                    {"parameter": c["parameter"], "column": c["column"], "value_type": c["value_type"]}
-                    for c in spec.get("conditions", []) if c["value_source"] == "runtime"
-                ],
-            })
+                # 过滤片段原样拼进 WHERE 后面，一个字符不加不改——与 `TaskSpec::source_sql` 同形。
+                clause = (spec.get("where_clause") or "").strip()
+                if clause:
+                    built += "\n WHERE " + clause
+            return self._send(200, {"source_sql": built})
         if path == "/api/runs":
             # 重跑落地成的**新**记录：旧那条原样留在清单里，这里只往前插一条进行中的。
             body = self._read()
+            task_id = body.get("task_id", "")
+            # 互斥键退化成了任务本身：这个任务名下还有一条在飞，就当场 409。
+            # 发起面上没有对话框可以预警了，那句话只剩屏顶的横幅一个落点（X9）。
+            if any(row["task_id"] == task_id and row["finished_at"] is None
+                   and row["outcome"] is None and row.get("unknown_reason") is None
+                   for row in HISTORY):
+                return self._send(409, {
+                    "error": {"message": "该任务已有一次运行进行中"}})
             new_id = f"rec-new-{len(HISTORY) + 1}"
             HISTORY.insert(0, run_row(
-                run_record_id=new_id, run_id=None, task_id=body.get("task_id", ""),
-                run_params=body.get("run_params", {}), outcome=None, stage=None,
+                run_record_id=new_id, run_id=None, task_id=task_id,
+                outcome=None, stage=None,
                 finished_at=None, sink_code=None, target_table_effect=None,
                 staging_table=None, started_at="2026-08-19T02:20:00Z", ms=0,
                 source_rows=None, staged_rows=None, sink_reported_rows=None,

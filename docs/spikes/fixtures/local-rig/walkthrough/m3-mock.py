@@ -37,25 +37,7 @@ SPEC = {
     "columns": [{"source": c, "target": c}
                 for c in ("ROW_ID", "N_BARE", "V_TEXT", "PAYLOAD", "LOAD_DATE")],
     "primary_key": ["ROW_ID"],
-    "conditions": [
-        {
-            "column": "LOAD_DATE",
-            "operator": "eq",
-            "value_type": "date",
-            "parameter": "load_date",
-            "value_source": "runtime",
-            "constant": "",
-        },
-        {
-            "column": "V_TEXT",
-            "operator": "gt",
-            "value_type": "text",
-            "parameter": "text_floor",
-            "value_source": "constant",
-            "constant": "M3-",
-        },
-    ],
-    "order_by": [{"column": "ROW_ID", "direction": "desc"}],
+    "where_clause": "LOAD_DATE = DATE '2026-08-18' AND V_TEXT > 'M3-'",
 }
 
 # 数据源（ADR-0037）：口令一个字都不回，只回 has_password。
@@ -157,7 +139,6 @@ RUN_HISTORY = {
     "run_record_id": "record-m3",
     "run_id": "20260818120000_a1b2c3",
     "task_id": "task-m3",
-    "run_params": {"load_date": "2026-08-18"},
     "source_sql": "SELECT a.ROW_ID AS ROW_ID,\n       a.N_BARE AS N_BARE\n  FROM SPIKE.T_M3_B1 a\n WHERE a.LOAD_DATE = TO_DATE(:load_date,'YYYY-MM-DD')",
     "staging_table": None,
     "started_at": "2026-08-18T12:00:00.000Z",
@@ -229,14 +210,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, BUILDER_COLUMNS)
         if path == "/api/builder/sql":
             spec = json.loads(raw)
-            return self._send(200, {
-                "source_sql": derive_sql(spec),
-                "run_parameters": [
-                    {"parameter": c["parameter"], "column": c["column"], "value_type": c["value_type"]}
-                    for c in sorted(spec.get("conditions", []), key=lambda c: c["parameter"])
-                    if c["value_source"] == "runtime"
-                ],
-            })
+            return self._send(200, {"source_sql": derive_sql(spec)})
         if path == "/api/columns":
             # 用目标表名切换 W3/W4 与 W5 两态，免得再开一个端口。
             spec = json.loads(raw).get("spec", {})
@@ -267,15 +241,9 @@ def derive_sql(spec):
         f"a.{c['source']} AS {c['target']}" for c in spec.get("columns", []))
     link = f"@{spec['dblink']}" if spec.get("dblink") else ""
     sql = f"SELECT {projection}\n  FROM {spec.get('owner')}.{spec.get('table')}{link} a"
-    render = {"text": "{}", "number": "TO_NUMBER({})", "date": "TO_DATE({},'YYYY-MM-DD')"}
-    for index, condition in enumerate(spec.get("conditions", [])):
-        keyword = " WHERE" if index == 0 else "   AND"
-        operator = {"gt": ">", "lt": "<", "eq": "="}[condition["operator"]]
-        value = render[condition["value_type"]].format(":" + condition["parameter"])
-        sql += f"\n{keyword} a.{condition['column']} {operator} {value}"
-    if spec.get("order_by"):
-        terms = ", ".join(f"a.{t['column']} {t['direction'].upper()}" for t in spec["order_by"])
-        sql += f"\n ORDER BY {terms}"
+    clause = (spec.get("where_clause") or "").strip()
+    if clause:
+        sql += "\n WHERE " + clause
     return sql
 
 

@@ -1,370 +1,311 @@
 # CONTEXT — db-qbs
 
-数据查询导入服务。用户在**源端**查询 Oracle，把结果批量导入**目标端** MySQL。
-两端网络隔离，数据库端口都不暴露公网；源端可主动发起到目标端的 HTTPS 请求。
+A data query-and-import service. The user queries Oracle on the **source** side and bulk-loads
+the result into MySQL on the **target** side. The two sides are network-isolated and neither
+database port faces the public internet; the source side may open outbound HTTPS to the target.
 
-> **定位：长期目标是通用的离线数据库导入方案；第一版的范围由客户实际需求定**
-> （2026-08-18 改判，[ADR-0034](docs/adr/0034-v1-scope-from-customer-needs.md)）。
-> 形态上面向「任意两个网络隔离的 Oracle / MySQL 之间搬数据」，但**第一版做什么、先做什么，
-> 由客户点名的需求定**；客户没有的形态允许不做，通用化留到第一版之后扩展。
-> **按需求收窄能力边界必须显式落 ADR**，不能靠「客户没有这种数据」在票里悄悄生效——
-> 尤其当被撤掉的防线挡的是**静默改值**（不报错、写得进去、数据已错）时（ADR-0034 §1）。
->
-> **范围的划线改了，证据的划线没改**：能力边界一旦要判，仍按「类型面 + 目标端往返实测」判，
-> 不按某个生产库的命中分布判；本地 Docker 台架（ADR-0005）是这些判据的**正当验证环境，不是退路**。
-> 已定的判定式（ADR-0030 九行形态、ADR-0031 下界式）不因改判而重开。
-> **被推翻的旧表述**（2026-08-16 定，留档勿引为现行）：「任何客户环境都只是一个部署，
-> 其数据分布只是优先级输入，不能决定做什么」。
+**This file states the present only.** Every sentence describes the current shape of the code.
+It does not record what something used to be or when it changed — that history lives in git and
+in the decision tickets. Do not write it back in here.
 
-> **「离线」的作用域（由 [ADR-0019](docs/adr/0019-m2-source-process-topology.md) §9 澄清）**：
-> 离线只约束**数据库主机**。`source` 与 `sink` 两个**服务进程所在的机器可以出网**，
-> 彼此也通过互联网通信。因此「源端装不了工具链」不是一条可用的论据。
+> **Positioning**: the long-term goal is a general offline database import tool, but **the first
+> release's scope is set by what the customer actually needs**. Shapes the customer does not have
+> may be left out; **narrowing a capability boundary must land as an explicit ADR** rather than
+> taking effect quietly inside a ticket — especially when the defence being removed guards against
+> **silent value corruption** (no error raised, the write succeeds, the data is already wrong).
+> Once a capability boundary is in question, judge it by "type surface + a real round-trip against
+> the target", never by how often a given production database happens to hit it. The local Docker
+> rig is a **legitimate verification environment for those judgements, not a fallback**.
 
-## 部署形态
+> **"Offline" constrains the database hosts only.** The machines running the `source` and `sink`
+> **service processes may reach the internet**, and they talk to each other over it. "The source
+> side cannot install a toolchain" is therefore not a usable argument.
+
+## Deployment shape
 
 ```
-[源端内网]                                      [目标端内网]
+[source network]                                [target network]
 ┌──────────────────────────┐                  ┌──────────────────────┐
-│ source (BS 服务)          │   HTTPS 单向出站  │ sink ＝ 目标端 agent   │
-│  ├─ Web UI               │  ───────────────▶│  ├─ 批量写 MySQL      │
-│  ├─ SQL 构建器            │                  │  ├─ 目标端元数据       │
-│  ├─ agent 注册表          │                  │  └─ /v1/agent/info    │
-│  ├─ 直连 Oracle 流式拉取   │                  │  listen（M1 既有）     │
-│  └─ 任务编排 / 进度 / 校验  │                  └──────────┬───────────┘
-│  listen（入站面，M2 新增） │                             ▼
+│ source (web service)      │  outbound HTTPS  │ sink ＝ target agent  │
+│  ├─ web UI               │  ───────────────▶│  ├─ bulk write MySQL  │
+│  ├─ SQL builder          │                  │  ├─ target metadata   │
+│  ├─ agent registry       │                  │  └─ /v1/agent/info    │
+│  ├─ streaming Oracle read│                  │  listen               │
+│  └─ orchestration/verify │                  └──────────┬───────────┘
+│  listen (inbound face)    │                            ▼
 └──────────┬───────────────┘                          [MySQL]
            ▼
-       [Oracle]  ← 部分表经 dblink 指向更远端的库
+       [Oracle]  ← some tables reach further databases via dblink
 ```
 
-**两处 `listen` 都无鉴权 → 可达范围即权限暴露范围**（ADR-0024 §1）：能连上 `source` 端口的人
-等价于持有该 source 的 Oracle 凭据与目标端写权限；能连上 `sink` 端口的人可清空并重写
-任意暂存表与目标表。**部署前提**：`listen` 默认只绑回环、本机访问；需要多人访问时，
-由部署者在前面放反向代理并在那里做鉴权与 TLS——**产品对此零感知、零校验，
-不因其存在而放宽任何内部约束**（ADR-0024 §4），因此它不画进上面这张图。
+**Neither `listen` is authenticated, so reachability equals privilege.** Anyone who can connect
+to the `source` port holds, in effect, the credentials and write access of **every configured
+datasource**; anyone who can connect to the `sink` port can truncate and rewrite any staging or
+target table. **Deployment premise**: `listen` binds loopback only by default. When several people
+need access, the deployer puts a reverse proxy in front and terminates auth and TLS there —
+**the product is unaware of it, validates nothing about it, and relaxes no internal constraint
+because of it**, which is why it is absent from the diagram above.
 
-`source` 和 `sink` 是两个独立部署的进程，只通过 HTTP 通信。`sink` 不感知 Oracle，
-`source` 不持有 MySQL 连接。
+`source` and `sink` are separately deployed processes that communicate only over HTTP. `sink` knows
+nothing about Oracle. **`source` opens no MySQL connection at all**, but it does **hold and forward
+target credentials**: both kinds of datasource live in a SQLite database on the source side, and the
+target connection details cross the wire with `POST /v1/runs`. **The MySQL password crosses that
+channel in cleartext**, so **the channel an agent address points at must be trusted** (same host, a
+trusted internal network, or TLS/tunnelling the deployer builds) — otherwise the password is being
+published to the internet.
 
-> **2026-08-24 改判（[ADR-0044](docs/adr/0044-target-agent-registry.md)，POC 实地反馈）**：
-> `sink` 升格为一等概念 **「目标端 agent」**，并且**每条 MySQL 数据源逐条绑定一台**。
-> `source.toml` 的 `sink_base_url`（一个进程级的全局地址）**退役**，首次启动迁成一条名为
-> 「默认」的 agent（§5）。agent 在 `GET /v1/agent/info` 上自报一个**跨重启稳定**的身份，
-> source 在注册那一刻把它钉住，之后每次探测与每次开跑都比一次。
->
-> **触发它的现象**：现场把目标端 agent 停掉，同步照样成功——因为「哪条数据源」与「哪台 sink」
-> 之间从来没有绑定，那个全局地址后面只要还站着任何一个能连上目标库的 sink 就照跑不误。
-> 现在四条目标端链路（测连 / 取表 / 取列 / 发起运行）**全部**按数据源绑定的 agent 走，
-> 且**没有任何回退路径**：agent 不在线或身份不符，一律当场失败。
+Both sides are written in **Rust** with synchronous blocking IO. `source` reaches Oracle **11g**
+through the `oracle` crate (ODPI-C), so the source machine must carry a full **Oracle Instant
+Client 19c Basic** bundle (brought in offline, no root required). The target is **MySQL 8.0**,
+`utf8mb4` throughout.
 
-> **2026-08-19 改判（[ADR-0037](docs/adr/0037-datasource-model-and-credential-boundary.md) §1/§2，#118 已落地）**：
-> 「`source` 不持有 MySQL 连接」**仍然成立**——source 一条 MySQL 连接都不建。
-> 但它**持有并转发目标端凭据**：两类数据源统一存在 source 侧 SQLite（口令加密落盘，§3），
-> 目标端连接信息随 `POST /v1/runs` 过线交给 sink，`sink.toml` 的 `mysql_dsn` / `database` 已退役。
-> **代价**：MySQL 口令以**明文**穿过 source → sink 的 HTTP 通道（§4）。部署前提随之加一条：
-> **agent 地址指向的通道必须可信**（同主机、可信内网，或部署者自建的 TLS / 隧道；
-> 2026-08-24 前这里写的是已退役的 `sink_base_url`，ADR-0044 §5），
-> 否则等于把口令发到公网上。产品对此零感知、零校验。图里的 **Web UI 与 SQL 构建器属 M2**——**M1 的 `source` 是一次性
-进程**（任务与业务日期是启动参数，跑完即退出、没有入站接口），只有 `sink` 长驻。
-这条不对称是故意的（见 ADR-0016 §3）。
+## Glossary
 
-两端都用 **Rust** 实现，同步阻塞 IO（ADR-0001）。`source` 通过 `oracle` crate（ODPI-C）
-连 Oracle **11g**，因此源端机器必须部署 **Oracle Instant Client 19c 完整 Basic 包**
-（离线带入，免 root）；目标端是 **MySQL 8.0**，统一 `utf8mb4`。
-选型依据见 [`docs/spikes/0001-oracle-driver.md`](docs/spikes/0001-oracle-driver.md)。
+**Target Agent**
+   The `sink` process on the target host, a **first-class concept** in the product. It has a name,
+   an address, and an identity that is **stable across restarts** (the `agent_id` it reports from
+   `GET /v1/agent/info`, persisted in an `agent-id` file next to `sink.toml`).
 
-## 术语表
+   **The target database is reachable only through it**: connection test, table listing, column
+   fetch, and the writes of a run — all four paths, no exceptions and **no fallback**. If the agent
+   is offline or its identity does not match, the operation fails on the spot. Every MySQL datasource
+   **must** select an agent. Registration is source-initiated (it is stored only once a probe
+   succeeds); liveness is maintained by a background probe every 15 seconds plus an immediate probe
+   before each use. **An identity mismatch does not count as online** — "a different agent is
+   answering at this address" and "nothing is running" are two distinct incidents, reported separately.
 
-**目标端 Agent (Target Agent)**
-　目标端主机上那个 `sink` 进程，从 2026-08-24 起是产品里的**一等概念**
-　（[ADR-0044](docs/adr/0044-target-agent-registry.md)）。它有名字、有地址、有一个**跨重启稳定**
-　的身份（`GET /v1/agent/info` 自报的 `agent_id`，落在 `sink.toml` 隔壁的 `agent-id` 文件里）。
+**Import Task**
+   One complete job: query a batch of data from Oracle, move it into one MySQL table. A task is
+   re-runnable — running **the same task definition** twice must leave the target table in an
+   identical state. Consistency comes from **upserting on the primary key**; idempotence rests on the
+   target table's unique constraint.
 
-　**目标库只能经它访问**：测连、取表清单、取列、发起运行的写入，四条链路一条不漏。
-　每条 MySQL 数据源**必选**一台 agent；`source.toml` 那个进程级的 `sink_base_url` 已退役。
-　注册是 source 主动去连（探通才落库），在线状态由后台 15 秒一轮的探测 + 每次用它之前的
-　当场探测共同维护。**身份对不上不算在线**——「同一个地址上换了一台 agent 应答」
-　与「没起来」是两种事故，界面上分开报。
+**Task Definition**
+   A **structured spec** (table, columns, filter clause, primary key). **It is the single source of
+   truth, and the source SQL is generated from it.** **The SQL is not stored in the task definition**
+   — it is recomputed on demand, and only pinned as a snapshot of what actually ran on each
+   run-history row. **Only `source` reads it; `sink` is unaware it exists.**
 
-**导入任务 (Import Task)**
-　一次「从 Oracle 查一批数据、搬到 MySQL 一张表」的完整作业。任务是可重跑的：
-　同样的任务定义 + 同样的业务日期，重跑后目标表状态应当完全一致。
+**Filter Clause**
+   One field, `where_clause`: **a free-form fragment spliced verbatim after `WHERE`**, not including
+   the word `WHERE` itself. Blank means no `WHERE` at all, i.e. read the whole table. It is **not
+   parsed, not rewritten, not reversed** — whether it runs is Oracle's call, reported when it runs.
+   The single rule it must pass is **no semicolon**: that is not injection defence (the text is the
+   user's own SQL) but a ban on **statement splicing**, which would make the previewed query and the
+   executed query two different queries. Table and column names are still whitelisted as unquoted
+   Oracle identifiers — they come from the interface's own selections; the filter clause is the
+   deliberate exception, because it is authored rather than generated.
 
-　**2026-08-18 改判（[ADR-0035](docs/adr/0035-upsert-write-model.md)，[#121](https://github.com/liumingjian/db-qbs/issues/121) 已落地）**：
-　「同样的业务日期」改为「同样的**一组运行参数**」——业务日期不再是一等概念。
-　重跑一致性的机制也换了：不再是「按业务日期 DELETE 再 INSERT」，而是**按主键 upsert**，
-　幂等由目标表上的唯一约束保证（§1/§2）。
+**Custom SQL**
+   An optional hand-written SELECT inside a task definition — the second data-retrieval path beside
+   "pick a table". **It is an input field of the spec, not an authority**: at execution it is wrapped
+   as an **opaque subquery** inside the generated projection
+   (`SELECT q.<source column> AS <target field> FROM ( it ) q`), so column selection, field mapping,
+   and the primary key are still the spec's call, and **it is never executed verbatim**. The system
+   neither parses it nor reverses it back into a structured model.
+   Three constraints: no separate filter clause may be attached (write the filtering into the SQL
+   itself), no dblink may be set at the same time, and every result column must carry an unquoted
+   identifier name (expression columns need their own alias).
+   **Do not call it "editable SQL"** — what is hand-written is the inner subquery; the generated
+   statement itself is always read-only and always recomputed.
 
-**任务定义 (Task Definition)**
-　可复用的配置。**M1 里它只有四个字段**：源端 SQL、`source_date_col`、`target_table`、
-　`target_date_col`（见 ADR-0016）。**不含业务日期**——业务日期是运行时参数；
-　也**不含字段映射**（ADR-0009 §3 要求两边列名集合完全相等，映射恒等、无物可配）、
-　不含清除条件（系统生成）、不含 database（归 sink 连接配置）、不含粒度（DAY 不可配，是常量）。
-　落地为一个 TOML 文件，**只有 `source` 读它，`sink` 对它的存在一无所知**。
+**Run**
+   One actual execution of a task definition, with a unique `run_id` and a state. **Starting one takes
+   no input beyond the task's identity** — clicking start runs it; there is no dialog and there are no
+   parameters. A re-run produces a new `run_id` and never reuses the old one. The mutual-exclusion key
+   is the task: **one task may not have two runs in flight**, and the 409 says exactly that.
+   **The state lives only in `source`, and only in process memory** — five values, `PREPARING` /
+   `STREAMING` / `COMMITTING` / `SUCCEEDED` / `FAILED`, named after what the process is doing. `sink`
+   holds no run state, only the resource lifetime of the staging table. When the source process dies,
+   the run ceases to exist.
 
-　**2026-08-18 改判（[ADR-0036](docs/adr/0036-task-spec-structured.md)，
-　[#121](https://github.com/liumingjian/db-qbs/issues/121) 已落地；以上四字段描述是历史）**：
-　任务定义改为一份**结构化规格**（表、列、过滤条件、排序、主键），
-　**它是唯一真相源，源端 SQL 由它生成**。**SQL 不存进任务定义**——要看就现算，
-　只在每条运行历史里钉一份当次实际执行的 SQL 快照（§2）。
-　**v1 不提供任何手改 SQL 的入口**（§1，一次显式的能力收窄：现成的生产 SQL 粘不进来）。
+**Batch**
+   The smallest unit pushed within a run: **5000 rows or 16 MiB, whichever comes first**.
+   It is **purely a push-side split** — beyond "which run, which segment" it carries no data
+   identity, and the protocol conveys no boundary information. The sequence number increases
+   monotonically from 1 and is used only for **ordering assertions and diagnostics**.
 
-　**2026-08-24 再改判（[ADR-0045](docs/adr/0045-custom-sql-as-wrapped-subquery.md)；以上「不提供任何
-　手改入口」是历史）**：多出**第二条取数路径**——用户可以写一段**自定义 SQL**。
-　但它**不是**权威：那段 SELECT 作为**不透明子查询**嵌在里面，外层投影仍由规格生成
-　（`SELECT q.源列 AS 目标字段 FROM ( 用户的 SQL ) q`），**用户写的 SQL 从不原样执行**。
-　系统从不读它的内容去推断任何东西，因此不存在第二个真相源。
-　代价：这条路径上**没有过滤条件、没有排序、因而没有运行参数**（`validate` 硬拒），
-　做不到「每天导昨天的」。
-　四字段形态与「只有 `source` 读它」之外的其余描述随 ADR-0016 §2 退役；
-　**已存在的旧任务定义直接丢弃、换新数据结构**（§4）。
-
-**自定义 SQL (Custom SQL)**
-　任务定义里可选的一段**用户手写的 SELECT**，是「按表选择」之外的第二条取数路径
-　（[ADR-0045](docs/adr/0045-custom-sql-as-wrapped-subquery.md)）。
-　**它是规格的一个输入字段，不是权威**：执行时它作为**不透明子查询**被包在外层投影里
-　（`SELECT q.源列 AS 目标字段 FROM ( 它 ) q`），所以勾选、字段映射、主键仍然由规格说了算，
-　**它从不原样执行**。系统不解析它、不反解析回结构化模型（形态 C 仍然否，见 ADR-0023 §2）。
-　三条约束：不能再配过滤条件或排序（**因此没有运行参数**）、不能同时设 dblink、
-　每个结果列必须有未加引号的标识符名（表达式列要自己起别名）。
-　**不要叫它「手改 SQL」**——被手写的是内层子查询，生成的语句本身始终只读、始终现算。
-
-**运行 (Run)**
-　任务定义的一次实际执行，有唯一 `run_id`、一个钉死的业务日期、和一份状态。
-　重跑产生一个新的 `run_id`，不复用旧的。
-
-　**2026-08-18 改判（[ADR-0035](docs/adr/0035-upsert-write-model.md) §3 /
-　[ADR-0036](docs/adr/0036-task-spec-structured.md) §7，[#121](https://github.com/liumingjian/db-qbs/issues/121) 已落地）**：
-　「一个钉死的业务日期」改为**一组钉死的运行参数**（参数名 → 值，参数名由用户在条件里自己定）。
-　并发互斥键随之是「任务 + 运行参数集」；任务没有运行时参数时退化成「同任务不许并跑」。
-　**M1 的那份状态只在 `source`，且只在进程内存里**——五个值 `PREPARING` / `STREAMING` /
-　`COMMITTING` / `SUCCEEDED` / `FAILED`，按「进程正在做什么」命名。`sink` 不持有 run 状态，
-　只持有暂存表的资源生命周期。source 进程一死，run 即不存在（见 ADR-0012）。
-　M4 启用延迟批次重推后才增加可恢复、可持久化的 `INCOMPLETE` / `RETRYING`（见 ADR-0018）。
-
-**业务日期 (Business Date)**
-　运行时参数，**无时区的日历日**，线上表示统一为 `YYYY-MM-DD` 字符串，绑定到 SQL 的
-　`:biz_date`。**源端 WHERE 和目标端清除条件必须由同一个业务日期推导**——这是两端最终
-　一致性的前提。禁止在 SQL 里写 `SYSDATE`、`TRUNC(SYSDATE-1)` 这类相对时间表达式
-　（见 ADR-0004）。两端都不做时区换算、都不读会话时区（见 ADR-0008）。
-
-　**2026-08-18 改判（[ADR-0035](docs/adr/0035-upsert-write-model.md) §3，
-　[#121](https://github.com/liumingjian/db-qbs/issues/121) 已落地；以上描述是历史）**：
-　业务日期**不再是一等公民**，它降级为普通过滤条件之一
-　（「字段 + 比较符 + 值」）。「源端 WHERE 与目标端清除条件由同一业务日期推导」这条前提
-　**随清除条件一起消失**。保留下来的是**运行期传参**能力：每条条件的值可标记为「常量」或
-　「运行时填」。**禁止相对时间表达式的禁令维持不变。**
-
-**批次 (Batch)**
-　一次运行内推送的最小单位，**5000 行或 16 MiB 先到先切**（见 ADR-0011）。
-　**纯粹的推送切分单位**——除「属于哪个 run、是第几段」外不携带任何数据身份，协议里不带边界信息（见 ADR-0007）。序号从 1 单调递增，
-　M1 只用于**顺序断言与诊断**。M4 的延迟重推不把序号解释成 Oracle 分页边界，
-　而是用它定位本地物化的原始载荷，并通过目标暂存表 `__batch_no` 做幂等替换（见 ADR-0018）。
-
-**失败批次暂存区 (Failed Batch Spool)**
-　source 本地为延迟重推持久化失败批次原始 JSON body 的目录，不是 MySQL 的「暂存表」。
-　某批首次命中瞬时错误时就先落盘；后续尝试确认后删除，三次均未确认才作为失败批次保留。
-　不重新查询 Oracle，不保存 checkpoint。
-　run 进入 `INCOMPLETE` 后 TTL 为 24 小时；失败面超过断路器则整 run 作废（见 ADR-0018）。
-
-**未完成 (Incomplete)**
-　Oracle 游标已正常读到 EOF、总行数与总批数已经确定，但仍有失败批次等待人工重推的 run 状态。
-　它不是 `FAILED`，也不是「从中间继续读 Oracle」；只有持久化 manifest 与全部失败批次载荷齐全时
-　才能进入。source 在 `STREAMING` 中退出仍是整 run 失败（见 ADR-0018）。
-
-**暂存表 (Staging Table)**
-　目标端为每次运行临时创建的表 `<target>__stg_<run_id>`。所有批次先落暂存表，
-　校验通过后才原子切换进目标表（见 ADR-0002）。**结构由映射预检的结果生成**——
-　逐列照目标表的类型写，全列可空、无索引、无主键（见 ADR-0009 §7）。
-　建表失败一律整 run 失败，**「表已存在」绝不自动 DROP 重建**；崩溃遗留的孤儿表
-　M1 不自动回收，靠表名里的 `__stg_` 与时间戳手工清（见 ADR-0002 增补）。
-　M4 启用延迟重推后会额外加入内部列与索引 `__batch_no`；切换显式排除该列（见 ADR-0018）。
+**Staging Table**
+   `<target>__stg_<run_id>`, created on the target for each run. Every batch lands in the staging
+   table first and is atomically swapped into the target table only after verification passes.
+   **Its structure is generated from the mapping precheck's result** — each column typed after the
+   target table, all nullable, no indexes, no primary key. A failure to create it fails the whole
+   run, and **"table already exists" is never resolved by dropping and recreating**. Orphan tables
+   left by a crash are cleaned by hand, found via the `__stg_` marker and the timestamp in the name.
 
 **`run_id`**
-　一次运行的唯一标识，形态是 `<UTC 时间戳 14 位>_<6 位随机 hex>`（如 `20260813091530_a3f19c`，
-　21 字符）。**全链路只有这一个形态**，协议、日志、暂存表名里是同一个字符串。
-　它决定了目标表名的预算：MySQL 标识符上限 64 字符，减去 `__stg_` 与 `run_id`，
-　**目标表名超过 37 字符即预检拒绝**（见 ADR-0002 增补）。
+   The unique identifier of a run, shaped `<14-digit UTC timestamp>_<6 hex chars>`
+   (e.g. `20260813091530_a3f19c`, 21 characters). **There is exactly one such form across the whole
+   chain** — the protocol, the logs, and the staging table name all carry the same string.
+   It sets the budget for the target table name: MySQL caps identifiers at 64 characters, and after
+   subtracting `__stg_` and the `run_id`, **a target table name longer than 37 characters is rejected
+   by the precheck**.
 
-**放弃 (Abort)**
-　`source` 侧出错时主动告诉 `sink` 丢弃暂存表的清理动作，幂等。**不承诺可靠性**——
-　abort 本身失败只记日志，不重试。M1 不做孤儿回收（见 ADR-0002 增补），
-　abort 负责消掉「进程还活着、只是这个 run 失败了」这一最常见形态的遗留表（见 ADR-0010）。
-　**只在 commit 发出之前发**：进入 `COMMITTING` 之后暂存表的处置权已整体移交 `sink`，
-　source 永久放弃 abort 权（见 ADR-0012）。abort 不是状态，是 `FAILED` 路径上的一个动作。
+**Abort**
+   The cleanup action by which `source`, on hitting an error, tells `sink` to discard the staging
+   table. It is idempotent and **promises nothing about reliability** — a failed abort is logged and
+   not retried. It exists to clear the most common leftover: "the process is still alive, this run
+   just failed." **It is only ever sent before commit**: once `COMMITTING` is entered, the staging
+   table's disposition has passed wholly to `sink` and source permanently forfeits the right to abort.
+   Abort is not a state; it is an action on the `FAILED` path.
 
-**切换 (Swap)**
-　目标端单事务内完成：按清除条件 DELETE 目标表 → 从暂存表 INSERT → DROP 暂存表。
-　（**2026-08-18 改判**：ADR-0035 §1 去掉 DELETE，改为
-　`INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`；事务边界不变。）
-　目标表要么全是旧数据、要么全是新数据，没有中间态。
+**Swap**
+   Completed inside a single transaction on the target: `INSERT ... SELECT ... ON DUPLICATE KEY
+   UPDATE` from the staging table into the target table, then `DROP` the staging table. The target
+   table holds either all old data or all new data, never an intermediate state.
+   **Rows deleted at the source do not disappear at the target** — an upsert only writes, never
+   deletes. That is a deliberate debt.
 
-**清除条件 (Purge Predicate)**
-　切换时作用在目标表上的 DELETE 条件，由业务日期推导，语义上必须等价于源端 WHERE
-　所圈定的数据范围。范围对不上就会产生数据重复或丢失，**且校验抓不到**。
-　**它不由人书写，由系统按 `target_date_col` 生成**：`>= :biz_date AND < :biz_date + 1`
-　的半开区间；源端日期谓词被预检强制成同一形状，等价性靠结构保证（见 ADR-0008）。
+**Tombstone**
+   An in-memory record `sink` keeps for a finished run so that "what happened?" still has an answer
+   after the swap. It records the **resource's final state**, not the run's, and has only two values:
+   `SWAPPED` (the target table now holds the new data) and `DISCARDED` (the target table was never
+   touched). **It is a diagnostic cache, not a state store** — only the most recent 32 are kept, and
+   losing them costs no correctness, only diagnosability. **Run history does not absorb it**: a
+   tombstone answers "did the target table move?", a question `source` asks and only `sink` can answer.
 
-　**2026-08-18 退役（[ADR-0035](docs/adr/0035-upsert-write-model.md) §1，
-　[#121](https://github.com/liumingjian/db-qbs/issues/121) 已落地）**：
-　写入模型改为按主键 upsert 后**没有清除条件**，本词条随 ADR-0008 一并退役。
-　幂等改由目标表的主键 / 唯一约束保证，其存在性由预检核对目标端 `INFORMATION_SCHEMA`。
-　**代价**：源端删掉的行不会在目标端消失（旧模型会）。
+**Run Log**
+   **JSON Lines** written to stdout by `source` and `sink` — one JSON object per line. Its main
+   consumers are troubleshooting agents and the long-running parent process, not a human at a
+   terminal: the prose still sits in the `message` field, but **the structure is in the fields, not
+   in the formatting**. Six common fields — `ts` / `level` / `event` / `run_id` / `task` /
+   `component` (the producing end: `source-orchestrator` / `source-run` / `sink`) — and `run_id`
+   **may be `null`**. **The contract is "the field set is stable, the formatting is not"**; fields are
+   only ever added, never removed and never redefined.
+   Failure lines carry `column` and `value`, **so the logs contain business data**: business values
+   can exist in three places on the source host (the child process's stdout, a file the deployer
+   redirected it into, and the run-history SQLite database), all held to 0600, and **moving them off
+   that host counts as exfiltration, which the product never does**. Logs go to stdout only; the
+   program creates no files and rotates nothing.
 
-**墓碑 (Tombstone)**
-　`sink` 为已终结的运行保留的一条内存记录，让「查状态」在切换完成后仍答得出话。
-　记的是**资源终态**而非 run 状态，只有两个值：`SWAPPED`（目标表已是新数据）与
-　`DISCARDED`（目标表未被触碰）。**是诊断缓存，不是状态存储**——只保留最近 32 条，
-　丢了不影响任何正确性，只影响可诊断性（见 ADR-0012）。**运行历史不吸收它**：
-　墓碑回答的是「目标表动没动」，提问者是 `source`、回答者只能是 `sink`（见 ADR-0020 §10）。
+**Run History**
+   A row the long-running `source` parent process writes for **every submission**, and the only basis
+   on which the UI can answer "did the month-end run go through?". The parent builds it by parsing
+   and aggregating the child process's run log; it shares a database with the task definitions.
+   **It is a historical record, not a state store** — authoritative run state still lives only in the
+   child's memory, and a history row is a **best-effort projection of the log**. Losing it costs no
+   correctness, only traceability.
+   Its identity is the **`run_record_id`** minted when the parent accepts the submission; `run_id` is
+   a **nullable field** on the row, and `null` means the submission **never reached sink** (the
+   precheck rejected it). Retention is by age, defaulting to 90 days.
+   **Because it carries the `column` and `value` of failures, this SQLite file holds real business
+   values sampled from the source database for 90 days. It ranks alongside the credential files and
+   is held to 0600.**
 
-**运行日志 (Run Log)**
-　`source` 与 `sink` 打到 stdout 的 **JSON Lines**——每行一个 JSON 对象。ADR-0012 定下状态不落盘、
-　ADR-0016 定下 source 是一次性进程之后，**它是 M1 唯一的事后取证手段**，主消费者是排障 Agent
-　与 M2 的长驻父进程，不是终端前的人（**M2 不存在一个待建的「采集侧」组件**——采集收缩成
-　父进程读子进程 stdout 那一段，见 ADR-0021 §5）：人话仍在 `message` 字段里，但**结构在字段上，不在排版上**。
-　公共字段六个 `ts`/`level`/`event`/`run_id`/`task`/`component`（`component` 是产生端，
-　`source-orchestrator`/`source-run`/`sink`，M2 新增；M1 旧行缺席时按 `source-run` 解释），
-　其中 `run_id` **可以是 `null`**
-　（SQL 形状预检失败时 run 根本没发起）。**契约是「字段集合稳定、排版不保证」**，字段只增不删不改义。
-　失败行带 `column` 与 `value`，**因此日志含业务数据值**。M2 起图后兜底不再只是文件权限：
-　**业务值可存在于 source 主机上的三个载体**（子进程 stdout、部署者重定向出的文件、运行历史 SQLite），
-　三者权限口径仍是 0600，但**送出该主机即为外采，M2 一律不做**；不做鉴权，
-　**服务的可达范围就是业务值的暴露范围**（见 ADR-0021）。日志只写 stdout，程序不建文件、不轮转；
-　`event` 闭集与逐事件必带字段已在 ADR-0017 §6 定稿。
+**`run_record_id`**
+   The identifier minted the moment the parent process accepts a submission; it is the primary key of
+   run history. Its **extension differs from `run_id`'s**: `run_record_id` identifies "one submission
+   the parent accepted", `run_id` identifies "one run `sink` knows about". When a submission fails the
+   precheck, the former exists and the latter does not. **The two are always displayed together** and
+   never substituted for one another.
 
-**运行历史 (Run History)**
-　`source` 长驻父进程为**每一次发起**留下的一条记录，是 M2 的 UI 能回答「上个月末那次跑了吗」的
-　唯一依据。它由父进程解析子进程运行日志聚合而成，与任务定义同库（见 ADR-0020）。
-　**它是历史留存，不是状态存储**——权威 run 状态仍然只在子进程内存里（ADR-0012 §2 逐字成立），
-　历史行是**尽力而为的日志投影**，丢了不影响任何正确性，只影响可回溯性。
-　身份是父进程受理时生成的 **`run_record_id`**；`run_id` 是历史行上的一个**可空字段**，
-　为 `null` 表示这次发起**从未到达 sink**（预检就失败了）。保留期按时间计，不按条数（默认 90 天）。
-　**它含失败定位的 `column` / `value`，因此这个 SQLite 文件在 90 天内持有源库真实业务值样本，
-　敏感级别与凭据文件同档、权限 0600**（见 ADR-0021 §7）。
+**Connection Ritual**
+   Four assertions every MySQL connection in `sink` must pass before it is handed to business code:
+   all three connection-layer charset variables are `utf8mb4`, `sql_mode` is explicitly set to
+   `STRICT_ALL_TABLES` and reads back equal, and `max_allowed_packet >= 64 MiB`. Any failure renders
+   **the entire sink unusable** — not merely one run.
+   **It hangs off the pool's connection-creation hook, not the top of the business code** — otherwise
+   the second connection in the pool comes up bare. It concerns no particular column and happens
+   before the mapping precheck, so it never appears in the precheck's per-column report.
 
-**运行记录号 (`run_record_id`)**
-　父进程受理一次发起的那一刻生成的标识，是运行历史的主键。它与 `run_id` **外延不同**：
-　`run_record_id` 标识「父进程受理的一次发起」，`run_id` 标识「`sink` 认识的一次 run」——
-　发起了但没通过预检时，前者存在、后者不存在。二者一律**同时展示**，不互相替代（见 ADR-0020 §3）。
+**Verification**
+   A mandatory gate before the swap, not an optional step. **It compares the row count the source
+   read against the row count actually landed in the staging table**; on failure the staging table is
+   discarded and the target table is left alone. The source's commit seals the staging table, after
+   which any batch write for that `run_id` is refused. Fidelity at the value level is guaranteed by
+   the **mapping precheck**, not by verification.
+   **Both numbers are pinned to one definition**: the source number is the **fetch-loop accumulator**
+   (not a second `COUNT(*)`, which would be a different read-consistency snapshot), and the staging
+   number is **`SELECT COUNT(*) FROM stg`** (not the sum of per-batch `rows_written` — the point of
+   verification is to distrust the intermediate links). Batch counts take part in the gate at the same
+   level, and the comparison happens **inside sink's swap transaction**, so that "the thing counted"
+   and "the thing swapped" are the same snapshot.
+   **Its real span is from "how much source claims it read" to "how much actually landed in staging"**
+   — `source_rows` is self-reported and sink cannot audit it, so **the leg from the source database to
+   the source accumulator falls outside the gate's coverage**.
 
-**开连接仪式 (Connection Ritual)**
-　`sink` 的每一条 MySQL 连接在交付给业务代码之前必须跑完的四条断言：连接层字符集三个变量
-　全为 `utf8mb4`、`sql_mode` 显式设为 `STRICT_ALL_TABLES` 并回读相等、
-　`max_allowed_packet >= 64 MiB`，任一不符即**整个 sink 不可用**（不是某个 run 失败）。
-　**挂在连接池的连接创建钩子上，不是业务代码开头**——否则池子里第 2 条连接就是裸的。
-　它跟列无关、发生时点早于映射预检，所以不进预检的逐列报告（见 ADR-0015 §5）。
+**Canonical Form**
+   The one determinate string representation a value taken from Oracle is normalised into before it
+   is written to MySQL: numerics stripped of trailing zeros, dates in a fixed format, NULL with its
+   own marker. It is the storage rule of the transfer chain.
+   **Its on-the-wire representation is a separate matter**: every value in a payload is either a JSON
+   string or `null`, `NULL` is JSON `null`, a `NUMBER` may never be transmitted as a JSON number, and
+   everything is UTF-8.
 
-**校验 (Verification)**
-　切换的前置门禁，不是可选步骤。**V1 比对源端读出的行数与暂存表实际落盘的行数**，
-　不通过则丢弃暂存表、目标表不动。源端 commit 是暂存表的封口点，此后拒绝该 `run_id`
-　的任何批次写入（见 ADR-0002）。值层面的保真由**映射预检**保证，不由校验保证。
-　**两个数的口径定死**（见 ADR-0013）：源端是 **fetch 循环累加器**（不是第二条 `COUNT(*)`——
-　那是另一个读一致性视图），暂存表是 **`SELECT COUNT(*) FROM stg`**（不是逐批 `rows_written`
-　之和——校验的意义在于不信任中间环节）；批数同级参与门禁；比对**在 sink 的切换事务之内**做，
-　让「被数的那份」与「被切换的那份」是同一个快照。**它真正的跨度是「source 自称读出多少」到
-　「暂存表实际落多少」**——`source_rows` 是自报的，sink 无从核对，所以
-　**「源库 → source 累加器」这一段不在门禁覆盖范围内**。
+**Mapping Precheck**
+   The per-column check of "source column type → target column type" performed before a run is
+   submitted. **It is a hard gate**: fail it and the run may not start. It rejects types outside the
+   whitelist, `DECIMAL`s with insufficient precision, `NUMBER`s declared without precision, and
+   `TIMESTAMP` scales beyond 6 digits, and it **hard-rejects a target table lacking a primary key or
+   unique constraint** (without one, `ON DUPLICATE KEY UPDATE` silently degrades into a plain INSERT).
+   It is the **only defence** against values being silently altered.
+   **It is split in half by HTTP**: describing the source SQL happens in `source`, while reading target
+   metadata, comparing column by column, and creating the staging table happen in `sink`. **`source`
+   makes no per-column type judgement whatsoever** and reports the describe result verbatim, so that
+   **all type judgement is concentrated in `sink`** — which is what makes "report every column at
+   once" actually hold.
 
-**行 checksum**
-　**V1 不做，推迟到 V2**（见 ADR-0006）。V1 里「值没有被悄悄改掉」由映射预检与映射规则
-　在运行开始前保证，而不是由每次运行的 checksum 事后发现。
+**Column Fetch**
+   A **read-only, side-effect-free** action during task authoring: open a cursor against **the SQL the
+   spec computes right now**, describe it, and bring back the columns the query will actually emit.
+   A hint of `(p,s)` for a bare `NUMBER` arrives with the fetch request and is discarded after use —
+   **it does not enter the task definition**. It **creates no run, mints no `run_id`, never touches
+   `sink`, and writes to no store**; the result is purely transient and lost on refresh.
+   It exists for one reason: the **target DDL** must be generated from authoritative metadata, and the
+   data dictionary's copy is not authoritative.
 
-**规范形式 (Canonical Form)**
-　Oracle 取到的值写进 MySQL 之前统一成的那个确定的字符串表示：数值去尾零、日期定格式、
-　NULL 有专门标记（见 ADR-0003）。它是搬运链路的落库规则，**不因 V1 不做 checksum 而消失**。
-　**它的线上表示是另一件事**：报文里每个值只能是 JSON string 或 `null`，`NULL` 即 JSON `null`，
-　`NUMBER` 不得以 JSON number 传输，全程 UTF-8（见 ADR-0011）。
+**Target DDL**
+   A `CREATE TABLE` statement handed to a person to run themselves. **The product does not create the
+   target table**; it only generates this statement. `source` derives it **forward** from the source
+   column metadata obtained by **column fetch** — inverting the mapping precheck's three rules
+   determines it uniquely, and **no input from the target side is needed** (the table does not exist
+   yet). **Primary key columns are `NOT NULL` with a `PRIMARY KEY (...)`, every other column
+   nullable**, and `utf8mb4` is explicit.
+   **It grants no clearance of any kind**: after a person creates the table from it, the mapping
+   precheck still runs from scratch and may still reject. There is exactly one interception point, and
+   it is the mapping precheck. The **staging table**'s DDL is a different thing: that one is *copied*
+   from the target table and generated by `sink`.
 
-**SQL 形状预检 (SQL Shape Precheck)**
-　`source` 在发出任何 HTTP 请求**之前**对手写 SQL 做的那段硬门禁：日期谓词恰好一处
-　`:biz_date` 的半开区间、WHERE 里没有别的谓词、无相对时间函数、每列显式命名且精度确定。
-　它与**映射预检**是两段、不是一段——**SQL 文本不跨 HTTP，`sink` 结构性地判不了**。
-　不过则根本不发请求：`sink` 不知道存在这个运行，无暂存表、无 `run_id`（见 ADR-0016 §4）。
-　**SQL 构建器生成的 SQL 对其中五条是冗余断言**（形状由生成器结构性保证），
-　但预检**每次发起仍无条件跑**——SQL 可手改，发起时那份文本与「是否由构建器生成」
-　结构性不可区分（见 ADR-0023 §5/§8）。
+## V1 scope
 
-　**2026-08-18 改判（[ADR-0036](docs/adr/0036-task-spec-structured.md) §5，
-　[#121](https://github.com/liumingjian/db-qbs/issues/121) 已落地；以上描述是历史）：整段退役。** SQL 不再可手改、改由规格生成之后，六条里三条随业务日期
-　一并失效、两条由生成器结构性保证；剩下「精度确定」这唯一一条有真实判定力的规则，
-　按既有的**精度判定降级**裁定一并取消。**代价明写：精度不确定的列在发起前不再被拦截**，
-　问题只会在真跑时暴露，或者静默丢精度。**判定并未全部消失**——下面的**映射预检**不受影响，
-　它在 sink 侧走游标 describe，仍是硬门禁。ADR-0023 §8「每次发起无条件重跑」随之退役。
+**In**: Oracle → MySQL, one direction; the SQL builder (pick table / columns / filter clause /
+primary key → generate SQL, with **the spec as the single source of truth**); **plus one custom-SQL
+path**; batched push; staging table + atomic swap + a mandatory **row-count** verification; the
+mapping precheck as a hard gate.
 
-**映射预检 (Mapping Precheck)**
-　运行发起前对「源列类型 → 目标列类型」逐列做的检查，**是硬门禁**：不通过不许发起运行。
-　拦下类型白名单之外的类型、精度不足的 `DECIMAL`、无精度声明的 `NUMBER`、超出 6 位的
-　`TIMESTAMP` 标度。V1 去掉行 checksum 之后，它是「值没有被悄悄改掉」的**唯一防线**
-　（见 ADR-0006）。**它被 HTTP 劈成两半**：describe 源端 SQL 在 `source`，查目标端元数据、
-　逐列比对、建暂存表在 `sink`；`source` **一条逐列类型判定都不做**、原样上报 describe 结果，
-　**类型判定全部集中在 `sink`**，这样「一次报全部列」才真的成立（见 ADR-0010）。
-　它管的只是「列的类型对不对」；「SQL 长得对不对」是上一条的事，两段各自「一次报全部」。
+**Out**: MySQL → Oracle; creating the target table automatically (only the DDL is generated, for a
+person to run); authentication; scheduling (runs are triggered by hand); multi-table coordination or
+transaction-level consistency; **per-row checksums** (deferred to V2 — "values were not silently
+altered" is guaranteed by the mapping precheck before the run starts, rather than discovered after
+the fact by a checksum on every run); centralised logging or integration with an external log
+collector (it crosses the host boundary).
 
-**取列 (Column Fetch)**
-　建任务阶段的一个**只读、无副作用**的动作：对当前这条源端 SQL 跑一遍 SQL 形状预检 + describe，
-　把这条查询实际会吐出来的列拿回来。
+**Known gaps** (deliberate debts, not oversights; each has its own condition for reopening):
 
-　**2026-08-18 改判（[ADR-0036](docs/adr/0036-task-spec-structured.md) §5/§6，
-　[#121](https://github.com/liumingjian/db-qbs/issues/121) 已落地）**：形状预检那一步没了，
-　取列 = 对**规格现算出来的 SQL** 开游标 describe。裸 `NUMBER` 的 `(p,s)` 提示随取列请求一起来、
-　用完即弃，**不进任务定义**（§6）。其余（无副作用、纯瞬态、刷新即丢）一个字不变。**不产生运行、不产生 `run_id`、不触碰 `sink`、不写任何存储**，
-　结果纯瞬态、刷新即丢。它存在的唯一理由是**目标表建表 SQL** 必须由权威元数据生成——
-　数据字典那份是非权威的（见 ADR-0027 §2）。
-
-**目标表建表 SQL (Target DDL)**
-　交给人拿去自己执行的一段 `CREATE TABLE`。V1 **不自动建目标表**，产品只生成这段 SQL。
-　它由 `source` 从**取列**拿到的源列元数据**正向推导**——映射预检那三条判定式反用即唯一确定，
-　**不需要目标端的任何输入**（表还不存在）。全列可空、带业务日期列索引、显式 `utf8mb4`。
-
-　**2026-08-18 改判（[ADR-0035](docs/adr/0035-upsert-write-model.md) §2，
-　[#121](https://github.com/liumingjian/db-qbs/issues/121) 已落地）**：「全列可空、带业务日期列索引」
-　改为**主键列 `NOT NULL` + `PRIMARY KEY (主键列)`、其余列可空**。索引不再是为了 DELETE 的锁范围，
-　而是 upsert 的去重键本身；目标表没有它时 `ON DUPLICATE KEY UPDATE` 会静默退化成纯 INSERT，
-　sink 侧预检因此**硬拒**。
-　**它不构成任何形式的放行**：人按它建完表，映射预检照样从头跑一遍、照样可能拒——
-　拦截层只有映射预检一处（见 ADR-0027）。
-　与**暂存表**的 DDL 是两件事：那一份是照目标表**复制**、由 `sink` 生成。
-
-## V1 范围
-
-**做**：Oracle → MySQL 单向；SQL 构建器（选表 / 选字段 / **选条件** / 排序 / 选主键 → 生成 SQL，
-**规格是唯一真相源**，见 ADR-0036；条件形态与运行期传参见 ADR-0035 §3）；
-**外加一条自定义 SQL 路径**（[ADR-0045](docs/adr/0045-custom-sql-as-wrapped-subquery.md)：
-用户的 SELECT 作为不透明子查询，外层投影仍由规格生成，**生成的语句本身始终只读**）；
-分批推送（M1 失败即整 run 失败；M4 按 ADR-0018 做失败批次延迟重推）；
-暂存表 + 原子切换 + 强制**行数**校验；映射预检（硬门禁）。
-
-**不做**：MySQL → Oracle；自动建目标表（只生成建表 SQL 给人执行，落点见 ADR-0027）；鉴权；
-定时调度（V1 手动触发）；多表联动 / 事务级一致性；**行 checksum**（推迟到 V2，见 ADR-0006）；
-集中式日志 / 外部日志收集器接入（ADR-0021 §1 判其越过主机边界）。
-
-**明知的缺口**（不是疏漏，是有意识付的账，各自有重开条件）：
-
-1. **凭据明文**——两个连接配置文件里的口令是明文，靠 0600 兜底（ADR-0016 §8）。
-   **理由在 M2 已改写（ADR-0024 §2/§7）**：不是「无鉴权时加一层零收益」，而是
-   **端口本身已等价于凭据的权限，给文件再加一层不改变暴露面**。
-   配套负面条款：`/api/*` 不得回传口令、UI 不提供连接配置的读写面。与第 5 条一并重开。
-   **2026-08-19 改判（ADR-0037 §3/§5，#118 已落地）**：凭据的真相源从配置文件搬到了
-   source 侧 SQLite，**库里的口令不再明文**（ChaCha20-Poly1305 + `data_dir/datasource.key`）。
-   这一层**只防库文件离开本机后的裸读**（备份、快照），**不防**拿到 `data_dir` 读权限的人——
-   密钥就在同一目录、同样 0600。负面条款「`/api/*` 不回传口令」**保留并加强为连密文都不回**；
-   「UI 不提供连接配置读写面」**判废**（数据源管理正是本版要做的事）。
-   **新增一条明文面**：目标端口令过线时是明文（ADR-0037 §4），兜底是部署前提，见部署形态段。
-2. **日志含业务值**——失败行带 `column` / `value`（ADR-0017 §4）。M2 起图后兜底从文件权限换成
-   **主机边界 + `listen` 可达范围**（ADR-0021 §1/§2），与第 1 条一并在引入鉴权时重开。
-3. **stdout 无界增长**——source 长驻后 stdout 不轮转且无上限，程序不管（ADR-0021 §6）。
-   有「撑爆磁盘」的实际反馈时，「程序自建文件并自轮转」重开。
-4. **历史 SQLite 持有业务值 90 天**——M1 的值随进程退出蒸发，M2 落盘留存（ADR-0021 §7）。
-   出现「业务值样本不得留存」的硬口径时，`value` 的独立擦除窗口重开。
-5. **无鉴权入站面 = 凭据权限等价暴露**（ADR-0024）——**`source` 侧是 M2 新增**（M1 根本没有
-   入站接口）：能连上端口者可对源库（含 dblink 指向的更远端库）跑任意 SQL、可清空并重写
-   任意已配置的目标表。**`sink` 侧是 M1 既有、此处首次成文**：无鉴权且握着 `DELETE`。
-   兜底是**部署形态**（回环 / 反向代理），不是产品。**重开条件三条，任一成立即须真的引入鉴权**
-   （ADR-0024 §6）：① 出现「source 需被多个不在同一信任域的人访问」的实际部署；
-   ② 同一进程内出现第二套目标端凭据或第二个租户；③ 任何一票要求 `/api/*` 承载凭据流转。
-   重开时与第 1、2 条一并处理。
-   **2026-08-19 改判（ADR-0037 §5，#118 已落地）**：**② 与 ③ 已经触发**（数据源表按定义可有
-   N 套目标端凭据；数据源增删改必然经 `/api/datasources` 写入口令），第一版**明知故犯**仍不做鉴权。
-   暴露面随之从「该 source 的凭据」放大到**全部已配置数据源**的凭据与写权限——量的放大，
-   两处启动横幅的措辞已跟着改。**有效的重开信号退回 ①**：那一条一旦成立就没有便宜路可走。
+1. **An unauthenticated inbound face means reachability equals credential privilege.** Whoever can
+   reach the `source` port can run arbitrary SQL against the source database (including the further
+   databases dblink points at) and can truncate and rewrite any configured target table; the `sink`
+   side is unauthenticated and holds `DELETE`. The exposure covers **every configured datasource**'s
+   credentials and write access. The mitigation is the **deployment shape** (loopback / reverse
+   proxy), not the product.
+   **Reopen when**: a real deployment appears in which source must be reached by several people who
+   are not in the same trust domain.
+2. **The target password crosses the wire in cleartext** (source → sink). The mitigation is a
+   deployment premise; see the deployment-shape section.
+3. **Datasource passwords are encrypted at rest** (ChaCha20-Poly1305 with `data_dir/datasource.key`),
+   which **only defends against a bare read of the database file once it leaves the host** (backups,
+   snapshots). It does **not** defend against anyone holding read access to `data_dir` — the key sits
+   in the same directory under the same 0600. Accompanying negative clause: **`/api/*` never returns a
+   password, not even the ciphertext.**
+4. **Logs contain business values** — failure lines carry `column` and `value`. The mitigation is the
+   host boundary plus the reachability of `listen`; it reopens together with gap 1 when authentication
+   arrives.
+5. **stdout grows without bound** — once source is long-running its stdout neither rotates nor caps,
+   and the program does not manage it. Reopen "the program creates and rotates its own file" when
+   there is real feedback about filling a disk.
+6. **The history SQLite database holds business values for 90 days.** Reopen an independent erasure
+   window for `value` when a hard requirement against retaining business-value samples appears.
+7. **Columns of indeterminate precision are not intercepted before submission** — the source performs
+   no SQL shape precheck, so the problem surfaces only during a real run, or silently loses precision.
+   **The mapping precheck is unaffected**: it describes through a cursor on the sink side and remains
+   a hard gate.

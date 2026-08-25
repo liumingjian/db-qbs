@@ -12,8 +12,8 @@ const DATABASE_FILE: &str = "db-qbs.sqlite3";
 
 /// 一条任务定义：**规格**（搬什么）+ **绑定**（从哪搬到哪）。
 ///
-/// SQL 不存（ADR-0036 §2），现算。两个数据源 id 是**绑定，不是规格**（ADR-0037 §8）——
-/// 它们一个都不参与规格那三个派生面，所以不进 [`TaskSpec`]；
+/// SQL 不存，现算。两个数据源 id 是**绑定，不是规格**——
+/// 它们一个都不参与规格的派生面，所以不进 [`TaskSpec`]；
 /// 好处是同一份规格可以换绑定指到测试库或生产库，而不必改规格本身。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Task {
@@ -211,19 +211,19 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
     })
 }
 
-/// 形态对不上的任务表整表丢弃、换新数据结构——ADR-0036 §4 的原判，
-/// 前提是第一版尚无真实用户数据。**不做就地翻译**（反解析任意 Oracle SQL 正是 ADR-0023 §2
-/// 否掉的那件事），**不做 legacy 并存**（会把「两种任务形态」永久焊进发起链路）。
+/// 形态对不上的任务表整表丢弃、换新数据结构，前提是第一版尚无真实用户数据。
+/// **不做就地翻译**（反解析任意 Oracle SQL 正是本仓一贯否掉的那件事），
+/// **不做 legacy 并存**（会把「两种任务形态」永久焊进发起链路）。
 ///
 /// 判据三条，缺任一即丢：
-/// - 没有 `spec` 列 —— 旧的四字段形态（ADR-0016 §2）。
+/// - 没有 `spec` 列 —— 旧的四字段形态。
 /// - 没有 `source_datasource_id` 列 —— 数据源绑定之前的形态。**旧行没有可推导的取值**：
-///   目标端数据源的凭据在对端的 `sink.toml` 里，source 拿不到，任何自动填都是编造
-///   （ADR-0037 §7）。
-/// - `spec` 列里有一行反序列化不出当前的 [`TaskSpec`] —— ADR-0038 §2 把 `columns` 从
-///   `Vec<String>` 换成了 `Vec<ColumnMapping>`，表的列名没变、JSON 的形状变了，所以前两条查不出它。
-///   **这不是兼容层**：不翻译、不加 serde 容错，与前两条走同一条「整表丢弃」的路
-///   （ADR-0036 §4）。不加这一条的话旧行会让 `list()` 直接报错——那既不是「丢弃」，
+///   目标端数据源的凭据在对端的 `sink.toml` 里，source 拿不到，任何自动填都是编造。
+/// - `spec` 列里有一行反序列化不出当前的 [`TaskSpec`] —— 表的列名没变、JSON 的形状变了，
+///   所以前两条查不出它。`TaskSpec` 是 `deny_unknown_fields` 的，凡是带着已退役字段
+///   （`columns` 的老字符串形态、`conditions` / `order_by`）的规格都栽在这一条上。
+///   **这不是兼容层**：不翻译、不加 serde 容错，与前两条走同一条「整表丢弃」的路。
+///   不加这一条的话旧行会让 `list()` 直接报错——那既不是「丢弃」，
 ///   也没有从界面上恢复的办法。
 fn drop_incompatible_task_table(connection: &Connection) -> Result<(), String> {
     let table_exists: bool = connection
@@ -300,7 +300,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
-    use crate::task_spec::{ColumnMapping, Comparison, Condition, ValueSource, ValueType};
+    use crate::task_spec::ColumnMapping;
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -319,15 +319,7 @@ mod tests {
             table: "T_R_FR_ASTSTAT".to_owned(),
             columns: vec![mapping("ID"), mapping("D_BIZ")],
             primary_key: vec!["ID".to_owned()],
-            conditions: vec![Condition {
-                column: "D_BIZ".to_owned(),
-                operator: Comparison::Eq,
-                value_type: ValueType::Date,
-                parameter: "biz_date".to_owned(),
-                value_source: ValueSource::Runtime,
-                constant: String::new(),
-            }],
-            order_by: Vec::new(),
+            where_clause: Some("D_BIZ = DATE '2026-08-14'".to_owned()),
             target_table: "T_POSITION".to_owned(),
         }
     }
@@ -407,8 +399,8 @@ mod tests {
 
     #[test]
     fn a_task_row_whose_spec_predates_column_mapping_is_dropped_whole() {
-        // ADR-0038 §2 换了 `columns` 的形状，表的列名一个没变——所以按列名查形态查不出它。
-        // 判据是「spec 反序列化不出来」，处置与前两条一样：整表丢弃（ADR-0036 §4）。
+        // 换了 `columns` 的形状，表的列名一个没变——所以按列名查形态查不出它。
+        // 判据是「spec 反序列化不出来」，处置与前两条一样：整表丢弃。
         let directory = temp_directory();
         let database = directory.join(DATABASE_FILE);
         let connection = Connection::open(&database).unwrap();
@@ -433,6 +425,50 @@ mod tests {
         // 报错就说明没丢干净：那既不是「丢弃」，也没有从界面上恢复的办法。
         assert!(store.list().unwrap().is_empty());
         assert_eq!(store.get("stale").unwrap(), None);
+
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// WHERE 文本框取代结构化条件之后，带 `conditions` / `order_by` 的老规格
+    /// 撞在 `deny_unknown_fields` 上——与 `columns` 换形状那次走**同一条**路：整表丢弃。
+    /// 这里钉的是「丢完还能用」：`list()` 不报错、新任务照样建得出来。
+    #[test]
+    fn a_task_row_with_structured_conditions_is_dropped_whole() {
+        let directory = temp_directory();
+        let database = directory.join(DATABASE_FILE);
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE tasks (
+                    task_id              TEXT PRIMARY KEY NOT NULL,
+                    name                 TEXT NOT NULL,
+                    source_datasource_id TEXT NOT NULL,
+                    target_datasource_id TEXT NOT NULL,
+                    spec                 TEXT NOT NULL
+                );
+                INSERT INTO tasks VALUES (
+                    'structured', 'structured task', 'src1', 'tgt1',
+                    '{\"owner\":\"HTBR45\",\"table\":\"T\",\"target_table\":\"M\",\"columns\":[{\"source\":\"ID\",\"target\":\"ID\"}],\"primary_key\":[\"ID\"],\"conditions\":[{\"column\":\"D_BIZ\",\"operator\":\"eq\",\"value_type\":\"date\",\"parameter\":\"d_biz\",\"value_source\":\"runtime\",\"constant\":\"\"}],\"order_by\":[]}'
+                );",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = TaskStore::open(&directory).unwrap();
+        assert!(store.list().unwrap().is_empty());
+        assert_eq!(store.get("structured").unwrap(), None);
+
+        // 丢完之后这台机器仍然是一台能用的机器：新形态的任务照样建得出来、读得回来。
+        let created = store
+            .create(TaskInput {
+                name: "after the drop".to_owned(),
+                source_datasource_id: "src1".to_owned(),
+                target_datasource_id: "tgt1".to_owned(),
+                spec: sample_spec(),
+            })
+            .unwrap();
+        assert_eq!(store.list().unwrap(), vec![created]);
 
         drop(store);
         std::fs::remove_dir_all(directory).unwrap();

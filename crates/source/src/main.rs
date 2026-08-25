@@ -139,7 +139,10 @@ fn run() -> bool {
             Some(&task_path),
             [
                 ("total_rows", json!(total_rows)),
-                ("precount_ms", json!(precount_started.elapsed().as_millis() as u64)),
+                (
+                    "precount_ms",
+                    json!(precount_started.elapsed().as_millis() as u64),
+                ),
                 ("message", Value::Null),
             ],
         ),
@@ -150,7 +153,10 @@ fn run() -> bool {
             Some(&task_path),
             [
                 ("total_rows", Value::Null),
-                ("precount_ms", json!(precount_started.elapsed().as_millis() as u64)),
+                (
+                    "precount_ms",
+                    json!(precount_started.elapsed().as_millis() as u64),
+                ),
                 ("message", json!(error.user_message())),
             ],
         ),
@@ -508,8 +514,8 @@ mod tests {
 
     #[test]
     fn only_the_two_documented_options_are_accepted() {
-        // `--biz-date` 随 ADR-0035 §3 取消：业务日期不再是一等概念，本次运行的取值
-        // 由任务文件的 `[run_params]` 带进来，不再走命令行。
+        // `--biz-date` 早已取消：业务日期不是一等概念。过滤条件是任务定义里那段
+        // WHERE 文本，跟着任务文件走，一次运行不再从命令行接任何取值。
         let arguments = vec![
             "--config".to_owned(),
             "source.toml".to_owned(),

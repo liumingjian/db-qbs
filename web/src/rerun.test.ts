@@ -1,13 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import type { Condition, RunHistory, Task, TaskSpec } from "./api";
-import { rerunAction, rerunPrefill } from "./rerun";
+import type { RunHistory, Task, TaskSpec } from "./api";
+import { rerunAction } from "./rerun";
 
 const baseHistory: RunHistory = {
   run_record_id: "record-1",
   run_id: "run-1",
   task_id: "task-1",
-  run_params: { d_biz: "2026-08-14", region: "SH" },
   source_sql: "SELECT a.ID AS ID\n  FROM APP.ORDERS a",
   staging_table: "STG_1",
   started_at: "2026-08-15T10:00:00.000Z",
@@ -47,50 +46,28 @@ function history(overrides: Partial<RunHistory>): RunHistory {
   return { ...baseHistory, ...overrides };
 }
 
-function runtimeCondition(parameter: string): Condition {
-  return {
-    column: parameter.toUpperCase(),
-    operator: "eq",
-    value_type: "text",
-    parameter,
-    value_source: "runtime",
-    constant: "",
-  };
-}
-
-function spec(parameters: string[]): TaskSpec {
+function spec(): TaskSpec {
   return {
     owner: "APP",
     table: "T_ORDERS",
     target_table: "ORDERS",
     columns: [{ source: "ID", target: "ID" }],
     primary_key: ["ID"],
-    conditions: [
-      {
-        column: "STATUS",
-        operator: "eq",
-        value_type: "text",
-        parameter: "status",
-        value_source: "constant",
-        constant: "OK",
-      },
-      ...parameters.map(runtimeCondition),
-    ],
-    order_by: [],
+    where_clause: "STATUS = 'OK'",
   };
 }
 
-function task(parameters: string[]): Task {
+function task(): Task {
   return {
     task_id: "task-1",
     name: "订单日增量",
     source_datasource_id: "ds-ora",
     target_datasource_id: "ds-my",
-    spec: spec(parameters),
+    spec: spec(),
   };
 }
 
-const tasks = [task(["d_biz", "region"])];
+const tasks = [task()];
 
 describe("rerun eligibility", () => {
   it("offers a rerun on a FAILED run", () => {
@@ -149,44 +126,5 @@ describe("rerun eligibility", () => {
     expect(
       rerunAction(history({ outcome: "SUCCEEDED", task_id: "task-gone" }), tasks),
     ).toEqual({ kind: "hidden" });
-  });
-});
-
-describe("rerun prefill", () => {
-  it("takes the value from the row when the parameter still exists", () => {
-    expect(rerunPrefill(spec(["d_biz", "region"]), baseHistory.run_params)).toEqual({
-      d_biz: "2026-08-14",
-      region: "SH",
-    });
-  });
-
-  it("leaves a parameter empty when the row has no value for it", () => {
-    expect(rerunPrefill(spec(["d_biz", "channel"]), baseHistory.run_params)).toEqual({
-      d_biz: "2026-08-14",
-      channel: "",
-    });
-  });
-
-  it("drops row values whose parameter the spec no longer declares", () => {
-    expect(rerunPrefill(spec(["d_biz"]), baseHistory.run_params)).toEqual({
-      d_biz: "2026-08-14",
-    });
-  });
-
-  it("ignores constant conditions — only 运行时填 gets prefilled", () => {
-    expect(rerunPrefill(spec([]), { status: "BAD", d_biz: "2026-08-14" })).toEqual(
-      {},
-    );
-  });
-
-  it("keeps the empty string as a real value, not a missing one", () => {
-    expect(rerunPrefill(spec(["d_biz"]), { d_biz: "" })).toEqual({ d_biz: "" });
-  });
-
-  it("prefills nothing but the empty form when there is no previous run", () => {
-    expect(rerunPrefill(spec(["d_biz", "region"]), {})).toEqual({
-      d_biz: "",
-      region: "",
-    });
   });
 });

@@ -17,8 +17,8 @@ use db_qbs_source::{
     embedded_web_asset, fetch_agent_info, generate_target_ddl, load_source_config,
     validate_builder_dblink, validate_source_sql, Agent, AgentEndpoint, AgentInput, AgentStore,
     ColumnPrecision, DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess,
-    OracleRowSource, RunHistory, RunParams, SourceConfig, TargetConnection, Task, TaskConfig,
-    TaskInput, TaskSpec, TaskStore, UnknownReason,
+    OracleRowSource, RunHistory, SourceConfig, TargetConnection, Task, TaskConfig, TaskInput,
+    TaskSpec, TaskStore, UnknownReason,
 };
 use rand::RngCore;
 use serde::de::DeserializeOwned;
@@ -39,10 +39,9 @@ struct RunState {
 }
 
 struct ActiveRun {
+    /// 互斥键的**全部**：一个任务同时只许有一次运行在飞。
+    /// 运行参数链退役之后，「同任务 + 同参数集」这个复合键退化成了任务本身。
     task_id: String,
-    /// 互斥键的后半段：本次运行参数集（ADR-0036 §7）。`RunParams` 是 `BTreeMap`，
-    /// 相等比较天然按参数名排序、值原样比，正是那份规范形式。
-    run_params: RunParams,
     child_pid: Option<u32>,
     stage: Option<String>,
 }
@@ -66,12 +65,14 @@ struct ServerState<'a> {
 /// 底下是一条 SQLite 连接，`rusqlite::Connection` 不是 `Sync`。
 type AgentRegistry = Arc<Mutex<AgentStore>>;
 
+/// 发起一次运行需要的**全部**输入：跑哪个任务。
+///
+/// `deny_unknown_fields` 在这里是有牙齿的：老界面（或老脚本）送来的 `run_params`
+/// 会被当场拒掉，而不是被静默忽略、让人以为参数生效了。
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StartRunInput {
     task_id: String,
-    #[serde(default)]
-    run_params: RunParams,
 }
 
 #[derive(Deserialize)]
@@ -575,11 +576,6 @@ fn handle_start_run(request: &mut Request, state: &ServerState<'_>) -> HttpRespo
         Ok(None) => return not_found(),
         Err(error) => return internal_error(error),
     };
-    // 发起时逐条取值：规格声明了哪些参数要运行时填，这里就必须恰好填哪些。
-    if let Err(error) = check_run_params(&task.spec, &input.run_params) {
-        return bad_request(error);
-    }
-
     // 两端连接在发起时解一次（ADR-0037 §8）：解不开就当场拒，不要等到子进程起来了才炸。
     let access = match oracle_access(state, &task.source_datasource_id) {
         Ok(access) => access,
@@ -607,36 +603,16 @@ fn handle_start_run(request: &mut Request, state: &ServerState<'_>) -> HttpRespo
         access,
         target,
         agent_endpoint(&agent),
-        input.run_params,
         state.history,
         state.runs,
     ) {
         Ok(run_record_id) => json_response(202, &json!({ "run_record_id": run_record_id })),
         Err(StartRunError::AlreadyRunning) => json_response(
             409,
-            &json!({ "error": { "message": "该任务以同一组运行参数已有 run 进行中" } }),
+            &json!({ "error": { "message": "该任务已有一次运行进行中" } }),
         ),
         Err(StartRunError::Internal(error)) => internal_error(error),
     }
-}
-
-fn check_run_params(spec: &TaskSpec, run_params: &RunParams) -> Result<(), String> {
-    let declared: Vec<&str> = spec
-        .runtime_parameters()
-        .into_iter()
-        .map(|condition| condition.parameter.as_str())
-        .collect();
-    for parameter in &declared {
-        if !run_params.contains_key(*parameter) {
-            return Err(format!("运行参数 {parameter} 未取值"));
-        }
-    }
-    for parameter in run_params.keys() {
-        if !declared.iter().any(|declared| declared == parameter) {
-            return Err(format!("运行参数 {parameter} 不在任务定义里"));
-        }
-    }
-    Ok(())
 }
 
 fn handle_cancel_run(runs: &RunRegistry, run_record_id: &str) -> HttpResponse {
@@ -696,7 +672,6 @@ fn handle_get_run(
             &json!({
                 "run_record_id": run_record_id,
                 "run_id": record.run_id,
-                "run_params": record.run_params,
                 "source_sql": record.source_sql,
                 "staging_table": record.staging_table,
                 "stage": record.stage,
@@ -798,20 +773,18 @@ fn start_run(
     access: OracleAccess,
     target: TargetConnection,
     agent: AgentEndpoint,
-    run_params: RunParams,
     history_store: &HistoryStore,
     runs: &RunRegistry,
 ) -> Result<String, StartRunError> {
     let run_record_id = generate_run_record_id();
-    // 历史里钉的是**当次实际执行**的语句文本（ADR-0036 §2）：规格以后改了它也不跟着变。
+    // 历史里钉的是**当次实际执行**的语句文本：规格以后改了它也不跟着变。
     let mut history = RunHistory::accepted(
         &run_record_id,
         &task.task_id,
-        run_params.clone(),
         &task.spec.source_sql(),
         Utc::now(),
     );
-    register_active_run(runs, &run_record_id, &task.task_id, &run_params)?;
+    register_active_run(runs, &run_record_id, &task.task_id)?;
     if let Err(error) = history_store.insert(&history, Utc::now(), config.history_retention_days) {
         remove_active_run(runs, &run_record_id);
         return Err(StartRunError::Internal(error));
@@ -821,17 +794,16 @@ fn start_run(
         .live_histories
         .insert(run_record_id.clone(), history.clone());
 
-    let task_path =
-        match materialize_task(config, task, access, target, agent, &run_params, &run_record_id) {
-            Ok(path) => path,
-            Err(error) => {
-                history.mark_parent_failure(error.clone(), Utc::now());
-                let _ = history_store.save(&history, Utc::now(), config.history_retention_days);
-                remove_live_history(runs, &run_record_id);
-                remove_active_run(runs, &run_record_id);
-                return Err(StartRunError::Internal(error));
-            }
-        };
+    let task_path = match materialize_task(config, task, access, target, agent, &run_record_id) {
+        Ok(path) => path,
+        Err(error) => {
+            history.mark_parent_failure(error.clone(), Utc::now());
+            let _ = history_store.save(&history, Utc::now(), config.history_retention_days);
+            remove_live_history(runs, &run_record_id);
+            remove_active_run(runs, &run_record_id);
+            return Err(StartRunError::Internal(error));
+        }
+    };
     let mut child = match Command::new(&config.run_executable)
         .arg("--config")
         .arg(config_path)
@@ -887,13 +859,12 @@ fn materialize_task(
     access: OracleAccess,
     target: TargetConnection,
     agent: AgentEndpoint,
-    run_params: &RunParams,
     run_record_id: &str,
 ) -> Result<PathBuf, String> {
     let directory = config.data_dir.join(RUN_TASKS_DIRECTORY);
     fs::create_dir_all(&directory).map_err(|error| format!("创建临时任务目录失败：{error}"))?;
     let path = directory.join(format!("task-{run_record_id}.toml"));
-    let task_config = task_config_from_task(task, access, target, agent, run_params);
+    let task_config = task_config_from_task(task, access, target, agent);
     let contents = toml::to_string(&task_config)
         .map_err(|error| format!("序列化临时任务定义失败：{error}"))?;
     let mut file = OpenOptions::new()
@@ -916,14 +887,12 @@ fn task_config_from_task(
     access: OracleAccess,
     target: TargetConnection,
     agent: AgentEndpoint,
-    run_params: &RunParams,
 ) -> TaskConfig {
     TaskConfig {
         spec: task.spec.clone(),
         oracle: access,
         target,
         agent,
-        run_params: run_params.clone(),
     }
 }
 
@@ -1005,23 +974,17 @@ fn register_active_run(
     runs: &RunRegistry,
     run_record_id: &str,
     task_id: &str,
-    run_params: &RunParams,
 ) -> Result<(), StartRunError> {
     let mut runs = runs
         .lock()
         .map_err(|_| StartRunError::Internal("run 控制锁已损坏".to_owned()))?;
-    if runs
-        .active_runs
-        .values()
-        .any(|run| run.task_id == task_id && &run.run_params == run_params)
-    {
+    if runs.active_runs.values().any(|run| run.task_id == task_id) {
         return Err(StartRunError::AlreadyRunning);
     }
     runs.active_runs.insert(
         run_record_id.to_owned(),
         ActiveRun {
             task_id: task_id.to_owned(),
-            run_params: run_params.clone(),
             child_pid: None,
             stage: None,
         },
@@ -1313,7 +1276,9 @@ fn with_agents<T>(
     agents: &AgentRegistry,
     action: impl FnOnce(&AgentStore) -> Result<T, String>,
 ) -> Result<T, String> {
-    let store = agents.lock().map_err(|_| "agent 注册表锁已损坏".to_owned())?;
+    let store = agents
+        .lock()
+        .map_err(|_| "agent 注册表锁已损坏".to_owned())?;
     action(&store)
 }
 
@@ -1325,9 +1290,7 @@ fn probe_and_record(agents: &AgentRegistry, agent_id: &str) -> Result<Option<Age
     };
     let probed = fetch_agent_info(&agent.base_url);
     let now = now_rfc3339();
-    with_agents(agents, |store| {
-        store.record_probe(agent_id, &probed, &now)
-    })
+    with_agents(agents, |store| store.record_probe(agent_id, &probed, &now))
 }
 
 /// 「这条 MySQL 数据源该走哪台 agent，而且它现在能用吗」——**每一条目标端链路的入口**
@@ -1744,9 +1707,9 @@ fn handle_builder_columns(request: &mut Request, state: &ServerState<'_>) -> Htt
     }
 }
 
-/// 规格的派生面之一（ADR-0036 §6）：源端 SQL 与运行参数清单。
+/// 规格的派生面：源端 SQL。
 ///
-/// **只读**——v1 界面上没有编辑入口，所以这里只出不进：web 拿规格来换一份现算的 SQL 展示，
+/// **只读**——界面上没有编辑入口，所以这里只出不进：web 拿规格来换一份现算的 SQL 展示，
 /// 不存在「web 改了 SQL 再传回来」这条路。
 fn handle_builder_sql(request: &mut Request) -> HttpResponse {
     let spec: TaskSpec = match read_json_body(request) {
@@ -1756,21 +1719,7 @@ fn handle_builder_sql(request: &mut Request) -> HttpResponse {
     if let Err(error) = spec.validate() {
         return bad_request(error);
     }
-    let parameters = spec
-        .runtime_parameters()
-        .into_iter()
-        .map(|condition| {
-            json!({
-                "parameter": condition.parameter,
-                "column": condition.column,
-                "value_type": condition.value_type,
-            })
-        })
-        .collect::<Vec<_>>();
-    json_response(
-        200,
-        &json!({ "source_sql": spec.source_sql(), "run_parameters": parameters }),
-    )
+    json_response(200, &json!({ "source_sql": spec.source_sql() }))
 }
 
 fn oracle_failure(error: db_qbs_source::SourceReadError) -> HttpResponse {

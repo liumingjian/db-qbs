@@ -9,7 +9,7 @@ import {
 } from "./components/DesignSystem";
 import { formatTimestamp, historyPresentation, runIdPresentation } from "./history";
 import { rerunAction } from "./rerun";
-import { conditionSummary, runParamsSummary, sourceSummary } from "./spec";
+import { sourceSummary, whereSummary } from "./spec";
 
 /**
  * 运行详情抽屉——**顶替整个「运行历史」屏**（ADR-0043 §2 §4）。
@@ -39,7 +39,7 @@ export function RunDrawer({
   /** 传给 `rerunAction` 判「任务还在不在」；`null` = 任务清单没读到。 */
   tasks: Task[] | null;
   onClose: () => void;
-  onRerun: (task: Task, row: RunHistory) => void;
+  onRerun: (task: Task) => void;
 }) {
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -179,19 +179,18 @@ export function RunDrawer({
                 label="主键"
                 value={task.spec.primary_key.join(", ") || "—"}
               />
-              <Value label="条件" value={conditionSummary(task.spec)} />
+              <Value label="条件" value={whereSummary(task.spec)} />
             </div>
           </section>
 
           <section className="panel">
-            <h3>运行参数与标识</h3>
+            <h3>运行标识</h3>
             <div className="panel-body kv is-pairs">
               <Value label="运行记录" value={run.run_record_id} />
               {/* V15：没有 `run_id` 时写一句话，不是空白也不是横杠；两个 id 谁也不替代谁。 */}
               <Value label="目标端运行号" value={runIdPresentation(run)} />
               <Value label="发起于" value={formatTimestamp(run.started_at, true)} />
               <Value label="结束于" value={formatTimestamp(run.finished_at, true)} />
-              <Value label="运行参数" value={runParamsSummary(run.run_params)} />
               <Value label="暂存表" value={run.staging_table ?? "—"} />
             </div>
           </section>
@@ -222,8 +221,8 @@ export function RunDrawer({
             <button
               className="button is-primary"
               type="button"
-              title="重跑：按这次的运行参数预填发起对话框"
-              onClick={() => onRerun(rerun.task, run)}
+              title="重跑：按这个任务当前的定义再跑一次"
+              onClick={() => onRerun(rerun.task)}
             >
               <Play size={14} aria-hidden="true" />
               重跑

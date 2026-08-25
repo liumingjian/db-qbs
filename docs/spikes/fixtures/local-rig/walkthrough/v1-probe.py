@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""第一版渲染面走查 X1–X20 的机器观察。
+"""第一版渲染面走查 X1–X21 的机器观察。
 
 ## 已跟进 ADR-0043（2026-08-21）
 
@@ -19,6 +19,8 @@
   `observe_progress`（X16）、`observe_state_tags`（X17）、`observe_drawer`（X18）。
 * 2026-08-24（ADR-0044）：`observe_nav`（X1）改判成**四项、目标端 Agent 第一项**，
   `observe_list`（X2）多量一列「目标端 Agent」，新增 `observe_agents`（X19）。
+* 2026-08-25（ADR-0047）：新增 `observe_where_clause`（X21）——过滤条件改成自由 WHERE
+  文本框；`observe_rerun`（X9）后半改判：重跑不再开对话框，并跑拦截改看屏顶的 409 横幅。
 * 2026-08-24（ADR-0045）：新增 `observe_custom_sql_mode`（X20）——**自定义 SQL 模式
   此前从未被探针走到过**，那半边的所有实录都是无观察支撑的。`observe_drawer`（X18）
   多量一格「任务定义 · 源表」，自定义 SQL 的任务在那里曾经是个裸点。
@@ -522,6 +524,86 @@ def observe_builder(page, width):
     return {"X5": x5, "X6": x6, "X7": x7}
 
 
+def observe_where_clause(page):
+    """X21（新增）：过滤条件从四格表单改成**一个自由 WHERE 文本框**。
+
+    要看四件事：
+      1. 那张卡还在原位，标题仍是「过滤条件」，副标题说清「留空即整表」；
+      2. 文本框有**可直接编辑的真示例**占位符，不是「请输入条件」这类废话；
+      3. 高亮真的上色，且**两层逐像素同框**——字体 / 字号 / 行高 / 内边距 / 边框 /
+         `white-space` 六项但凡差一项，光标就会飘。这是这个实现最容易坏的地方；
+      4. 旧控件**一个不剩**：没有比较符下拉、没有「添加条件」、没有值类型下拉。
+    """
+    open_builder(page, 1440)
+    page.click('.modal .builder-guide button:has-text("读取列")')
+    page.wait_for_selector(".modal .builder-columns tbody tr")
+
+    card = page.query_selector(
+        '.modal section.spec-editor[aria-labelledby="conditions-title"]')
+    textarea = page.query_selector(".modal .where-clause-editor textarea")
+    observed = {
+        "card_title": page.eval_on_selector("#conditions-title", "el => el.innerText"),
+        "card_subtitle": card.eval_on_selector("header span", "el => el.innerText"),
+        "textarea_present": textarea is not None,
+        "aria_label": textarea.get_attribute("aria-label"),
+        "placeholder": textarea.get_attribute("placeholder"),
+        "value_from_task": textarea.input_value(),
+        "note": card.eval_on_selector(".spec-note", "el => el.innerText"),
+        # 旧的四格表单一个控件都不该剩下。
+        "leftover_selects": len(card.query_selector_all("select")),
+        "leftover_add_button": card.query_selector('button:has-text("添加条件")') is not None,
+        "rows_of_old_form": len(card.query_selector_all(".condition-row")),
+    }
+
+    # 记号四类都要在场，高亮的分类才有得量：关键字 / 字符串字面量 / 数字 / 标点。
+    typed = "LOAD_DATE >= DATE '2026-08-01'\n  AND C_NAME IN ('SH', 'HZ') AND N_AMT > 100"
+    textarea.fill(typed)
+    page.wait_for_timeout(600)
+    observed["typed"] = typed
+    observed["value_after_typing"] = textarea.input_value()
+    observed["highlight"] = page.evaluate(
+        """() => {
+            const pre = document.querySelector('.modal .where-clause-editor .sql-highlight');
+            const ta = document.querySelector('.modal .where-clause-editor textarea');
+            if (!pre || !ta) { return {present: false}; }
+            const colorOf = (cls) => {
+                const el = pre.querySelector('.' + cls);
+                return el ? getComputedStyle(el).color : null;
+            };
+            const six = (el) => {
+                const cs = getComputedStyle(el);
+                return {font: cs.fontFamily, size: cs.fontSize, line: cs.lineHeight,
+                        pad: cs.padding, border: cs.borderWidth, ws: cs.whiteSpace};
+            };
+            const box = (el) => { const r = el.getBoundingClientRect();
+                return {x: Math.round(r.x), y: Math.round(r.y),
+                        w: Math.round(r.width), h: Math.round(r.height)}; };
+            return {
+                present: true,
+                text_round_trips: pre.innerText.replace(/\\n+$/, '') === ta.value,
+                keyword: colorOf('sql-t-keyword'),
+                string: colorOf('sql-t-string'),
+                number: colorOf('sql-t-number'),
+                punct: colorOf('sql-t-punct'),
+                pre_metrics: six(pre), textarea_metrics: six(ta),
+                metrics_match: JSON.stringify(six(pre)) === JSON.stringify(six(ta)),
+                pre_box: box(pre), textarea_box: box(ta),
+                textarea_color: getComputedStyle(ta).color,
+                ligatures: getComputedStyle(ta).fontVariantLigatures,
+            };
+        }"""
+    )
+    # 生成的 SQL 必须把那段字**原样**接在 WHERE 后面——这是本票在屏上的落点。
+    page.wait_for_timeout(900)
+    generated = page.query_selector(".modal .generated-sql .ddl-output")
+    observed["generated_sql"] = generated.inner_text() if generated else None
+    observed["run_parameter_block"] = (
+        page.query_selector(".modal .run-parameter-list") is not None)
+    page.screenshot(path=f"{SHOTS}/x21-where-clause.png", full_page=True)
+    page.click('.modal .modal-footer button.is-ghost')
+    return observed
+
+
 def open_jobs(page, width=1440, height=1200):
     page.set_viewport_size({"width": width, "height": height})
     page.goto(BASE, wait_until="networkidle")
@@ -575,12 +657,6 @@ def observe_task_screen(page):
             "(el) => el.children.length",
         ),
     }
-
-
-def fill_value(field):
-    """给一个**没被预填**的参数编一个值——只为把表单填满，不主张值本身有意义。"""
-    kind = field.get_attribute("type")
-    return {"date": "2026-08-18", "number": "1"}.get(kind, "HZ")
 
 
 def row_of(page, key, needle):
@@ -668,83 +744,55 @@ def observe_rerun(page):
         return {"rows": per_state, "drawers": drawers,
                 "skipped": "这一屏没有失败的任务——X9 后半的对象不存在"}
 
-    # 后半：点抽屉底部的「重跑」，开出来的必须是**既有的**发起对话框。
+    # 后半：点抽屉底部的「重跑」。**没有对话框了**——重跑与发起是同一件事，
+    # 点下去当场就跑，落到运行详情。原来那段「按上次参数预填」的判据随参数链一起退役。
     open_drawer(page, failed_task)
     page.click('.drawer-footer button.is-primary')
-    page.wait_for_selector(".modal")
-    dialog = {
+    page.wait_for_timeout(1200)
+    rerun = {
         "source_task": failed_task,
-        "title": page.query_selector(".modal h2").inner_text(),
-        "context": page.query_selector(".modal .modal-context").inner_text(),
-        "submit_label": page.query_selector('.modal button[type="submit"]').inner_text(),
+        "dialog_opened": page.query_selector(".modal") is not None,
         "drawer_closed": page.query_selector(".drawer") is None,
-        "prefilled": [
-            {
-                "parameter": label.query_selector(".field-label").inner_text().split("\n")[0],
-                "value": label.query_selector("input").input_value(),
-                "editable": not label.query_selector("input").is_disabled(),
-            }
-            for label in page.query_selector_all(".modal .run-params label.form-field")
-        ],
+        "landed_on_run_detail": page.query_selector(".run-card") is not None,
+        "breadcrumb": page.eval_on_selector(
+            ".breadcrumb", "el => el.innerText.replace(/\\n+/g, ' ')")
+        if page.query_selector(".breadcrumb") else None,
+        "start_error": (
+            page.query_selector(".notice.is-error").inner_text()
+            if page.query_selector(".notice.is-error") else None
+        ),
     }
-    page.screenshot(path=f"{SHOTS}/x9-prefilled-dialog.png", full_page=True)
+    page.screenshot(path=f"{SHOTS}/x9-rerun-no-dialog.png", full_page=True)
 
-    edited = None
-    for label in page.query_selector_all(".modal .run-params label.form-field"):
-        field = label.query_selector("input")
-        if field.input_value() == "":
-            field.fill(fill_value(field))
-            edited = label.query_selector(".field-label").inner_text().split("\n")[0]
-    dialog["edited_empty_field"] = edited
-    dialog["values_after_edit"] = [
-        field.input_value()
-        for field in page.query_selector_all(".modal .run-params input")
-    ]
-    try:
-        page.wait_for_selector(".modal .stale-run-hint", timeout=5000)
-        dialog["stale_run_hint"] = page.query_selector(".modal .stale-run-hint").inner_text()
-    except Exception:
-        dialog["stale_run_hint"] = None
-    page.screenshot(path=f"{SHOTS}/x9-concurrent-hint.png", full_page=True)
-
-    page.click('.modal button[type="submit"]')
-    try:
-        page.wait_for_selector(".modal .form-error", timeout=8000)
-        dialog["submit_result"] = {"rejected": page.query_selector(".modal .form-error").inner_text()}
-    except Exception:
-        dialog["submit_result"] = {"accepted": True}
-
-    # 结局不明那条单独再走一遍：它的 `outcome` 也是 null，并跑提示如果按 `outcome` 认
-    # 「进行中」，就会指着你刚点的这条早已死掉的记录说它还在跑（#150 审查所见）。
-    # 这里要看到的是**没有**提示条。
-    unknown = None
-    unknown_task = per_state.get("结局不明", {}).get("task")
-    if unknown_task is not None:
-        open_jobs(page)
-        open_drawer(page, unknown_task)
-        page.click('.drawer-footer button.is-primary')
-        page.wait_for_selector(".modal")
-        for label in page.query_selector_all(".modal .run-params label.form-field"):
-            field = label.query_selector("input")
-            if field.input_value() == "":
-                field.fill(fill_value(field))
-        page.wait_for_timeout(1500)
-        hint = page.query_selector(".modal .stale-run-hint")
-        unknown = {
-            "task": unknown_task,
-            "values": [f.input_value()
-                       for f in page.query_selector_all(".modal .run-params input")],
-            "stale_run_hint": None if hint is None else hint.inner_text(),
+    # 再点一次同一个任务的「发起运行」：桩这时回 409，那句话落在屏顶的横幅里——
+    # 并跑拦截原来长在对话框里（`.stale-run-hint`），现在只剩这一个落点。
+    open_jobs(page)
+    concurrent = None
+    live_task = per_state.get("进行中", {}).get("task")
+    if live_task is not None:
+        selector = row_of(page, "task", live_task)
+        page.click(f'{selector} button[aria-label="发起运行"]')
+        page.wait_for_timeout(1200)
+        notice = page.query_selector(".notice.is-error")
+        concurrent = {
+            "task": live_task,
+            "dialog_opened": page.query_selector(".modal") is not None,
+            "notice": None if notice is None else notice.inner_text().replace("\n", " | "),
+            "notice_colors": page.eval_on_selector(
+                ".notice.is-error",
+                "el => { const cs = getComputedStyle(el); return {color: cs.color,"
+                " bg: cs.backgroundColor}; }") if notice is not None else None,
         }
-        page.screenshot(path=f"{SHOTS}/x9-unknown-rerun.png", full_page=True)
-        page.click('.modal .modal-footer button.is-ghost')
+        page.screenshot(path=f"{SHOTS}/x9-concurrent-notice.png", full_page=True)
+        if notice is not None:
+            page.click(".notice.is-error .text-button")
 
     open_jobs(page)
     return {
         "rows": per_state,
         "drawers": drawers,
-        "dialog": dialog,
-        "unknown_row_rerun": unknown,
+        "rerun": rerun,
+        "concurrent_start": concurrent,
         "states_after": cells_of(page, "state"),
     }
 
@@ -1811,6 +1859,7 @@ def main():
             "X5_X6_X7_at_1440": observe_builder(page, 1440),
             "X6_at_1024": observe_builder(page, 1024),
             "X8_job_tables": observe_task_screen(page),
+            "X21_where_clause": observe_where_clause(page),
             "X10_job_filters": observe_task_filters(page),
             "X12_datasource_row_test": observe_row_test(page),
             "X13_sider_collapse": observe_sider_collapse(page),

@@ -3,15 +3,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{TimeDelta, TimeZone, Utc};
 use db_qbs_source::{
-    expired_history_indices, fold_history_lines, HistoryStore, RunHistory, RunParams, UnknownReason,
+    expired_history_indices, fold_history_lines, HistoryStore, RunHistory, UnknownReason,
 };
 
-const SOURCE_SQL: &str = "SELECT a.ID AS ID\n  FROM APP.ORDERS a";
-
-/// 一组典型的运行参数：参数名由用户定，值原样是字符串（ADR-0036 §7）。
-fn run_params() -> RunParams {
-    RunParams::from([("d_biz".to_owned(), "2026-08-14".to_owned())])
-}
+const SOURCE_SQL: &str = "SELECT a.ID AS ID\n  FROM APP.ORDERS a\n WHERE D_BIZ = DATE '2026-08-14'";
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -41,20 +36,12 @@ fn json_lines_fold_into_one_history_row_with_event_scoped_terminals() {
         r#"{"ts":"2026-08-15T10:00:07.000Z","event":"run_finished","run_id":"run-7","terminal":"FAILED","stage":"COMMITTING","source_code":null,"sink_code":"VERIFY_FAILED","column":"AMOUNT","value":"secret","message":"counts differ","failure_kind":"VERIFY_FAILED","source_rows":3,"source_batches":1,"staged_rows":3,"received_batches":1,"sink_reported_rows":2,"purged_rows":0,"fetch_ms":4,"push_ms":10,"commit_ms":6,"count_ms":2,"cursor_ms":1}"#,
     ];
 
-    let history = fold_history_lines(
-        "record-1",
-        "task-1",
-        run_params(),
-        SOURCE_SQL,
-        accepted_at,
-        &lines,
-    )
-    .unwrap();
+    let history =
+        fold_history_lines("record-1", "task-1", SOURCE_SQL, accepted_at, &lines).unwrap();
 
     assert_eq!(history.run_record_id, "record-1");
     assert_eq!(history.task_id, "task-1");
     assert_eq!(history.run_id.as_deref(), Some("run-7"));
-    assert_eq!(history.run_params, run_params());
     // 当次执行的 SQL 快照原样钉住：它回答「当时执行了什么」，规格之后怎么改都不动它。
     assert_eq!(history.source_sql, SOURCE_SQL);
     assert_eq!(history.staging_table.as_deref(), Some("STG_7"));
@@ -99,15 +86,8 @@ fn mapping_precheck_diagnostics_survive_the_terminal_fold() {
         r#"{"ts":"2026-08-15T10:00:04.000Z","event":"run_finished","run_id":"run-7","terminal":"FAILED","stage":"PREPARING","source_code":null,"sink_code":"PRECHECK_FAILED","column":null,"value":null,"message":"映射预检未通过：一次发现 2 项问题","source_rows":0,"source_batches":0,"staged_rows":null,"received_batches":null,"sink_reported_rows":null,"purged_rows":null,"fetch_ms":0,"push_ms":0,"commit_ms":0,"count_ms":null,"cursor_ms":1}"#,
     ];
 
-    let history = fold_history_lines(
-        "record-1",
-        "task-1",
-        run_params(),
-        SOURCE_SQL,
-        accepted_at,
-        &lines,
-    )
-    .unwrap();
+    let history =
+        fold_history_lines("record-1", "task-1", SOURCE_SQL, accepted_at, &lines).unwrap();
 
     assert_eq!(history.mapping_issues.len(), 2);
     assert_eq!(history.mapping_issues[0]["column"], "V_TEXT");
@@ -126,15 +106,8 @@ fn explicit_verification_failure_is_known_to_be_discarded() {
         r#"{"ts":"2026-08-15T10:00:02.000Z","event":"run_finished","run_id":"run-7","terminal":"FAILED","stage":"COMMITTING","source_code":null,"sink_code":"VERIFY_FAILED","column":null,"value":null,"message":"counts differ","source_rows":3,"source_batches":1,"staged_rows":2,"received_batches":1,"sink_reported_rows":3,"purged_rows":0,"fetch_ms":1,"push_ms":1,"commit_ms":1,"count_ms":1,"cursor_ms":1}"#,
     ];
 
-    let history = fold_history_lines(
-        "record-1",
-        "task-1",
-        run_params(),
-        SOURCE_SQL,
-        accepted_at,
-        &lines,
-    )
-    .unwrap();
+    let history =
+        fold_history_lines("record-1", "task-1", SOURCE_SQL, accepted_at, &lines).unwrap();
 
     assert_eq!(history.target_table_effect.as_deref(), Some("DISCARDED"));
 }
@@ -149,15 +122,8 @@ fn a_retired_early_failure_event_still_folds_without_inventing_a_run_id() {
         r#"{"ts":"2026-08-15T10:00:01.000Z","event":"sql_shape_precheck_failed","run_id":null,"message":"two checks failed","failure_kind":"SHAPE_PRECHECK"}"#,
     ];
 
-    let history = fold_history_lines(
-        "record-2",
-        "task-1",
-        run_params(),
-        SOURCE_SQL,
-        accepted_at,
-        &lines,
-    )
-    .unwrap();
+    let history =
+        fold_history_lines("record-2", "task-1", SOURCE_SQL, accepted_at, &lines).unwrap();
 
     assert_eq!(history.run_record_id, "record-2");
     assert_eq!(history.run_id, None);
@@ -177,15 +143,8 @@ fn a_log_line_without_a_category_leaves_the_history_row_unclassified() {
         r#"{"ts":"2026-08-15T10:00:02.000Z","event":"run_finished","run_id":"run-9","terminal":"FAILED","stage":"COMMITTING","source_code":null,"sink_code":"VERIFY_FAILED","column":null,"value":null,"message":"counts differ","source_rows":3,"source_batches":1,"staged_rows":2,"received_batches":1,"sink_reported_rows":3,"purged_rows":0,"fetch_ms":1,"push_ms":1,"commit_ms":1,"count_ms":1,"cursor_ms":1}"#,
     ];
 
-    let history = fold_history_lines(
-        "record-9",
-        "task-1",
-        run_params(),
-        SOURCE_SQL,
-        accepted_at,
-        &lines,
-    )
-    .unwrap();
+    let history =
+        fold_history_lines("record-9", "task-1", SOURCE_SQL, accepted_at, &lines).unwrap();
 
     assert_eq!(history.failure_kind, None);
 }
@@ -201,11 +160,11 @@ fn sqlite_writes_lazily_remove_expired_rows_and_startup_seals_incomplete_rows() 
     let store = HistoryStore::open(&directory).unwrap();
     let now = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
     let old_at = now - TimeDelta::days(91);
-    let old = RunHistory::accepted("old", "task-1", run_params(), SOURCE_SQL, old_at);
+    let old = RunHistory::accepted("old", "task-1", SOURCE_SQL, old_at);
     store.insert(&old, old_at, 90).unwrap();
     assert!(store.get("old").unwrap().is_some());
 
-    let mut current = RunHistory::accepted("current", "task-1", run_params(), SOURCE_SQL, now);
+    let mut current = RunHistory::accepted("current", "task-1", SOURCE_SQL, now);
     current.mapping_issues = vec![serde_json::json!({
         "column": "V_TEXT",
         "source": "VARCHAR2(200)",
@@ -218,7 +177,6 @@ fn sqlite_writes_lazily_remove_expired_rows_and_startup_seals_incomplete_rows() 
     let stored = store.get("current").unwrap().unwrap();
     assert_eq!(stored.mapping_issues, current.mapping_issues);
     // 运行参数与 SQL 快照都要经得起落盘再读回来——它们是历史行的事实那一半。
-    assert_eq!(stored.run_params, run_params());
     assert_eq!(stored.source_sql, SOURCE_SQL);
 
     store

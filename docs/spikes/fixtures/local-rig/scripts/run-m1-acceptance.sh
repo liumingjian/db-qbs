@@ -222,14 +222,15 @@ prepare_rig() {
   start_sink
 }
 
-# `--biz-date` 随 ADR-0035 §3 取消：本次运行的取值由任务文件的 `[run_params]` 带进来。
-# 造「空结果集」这类态因此只能换取值——每次运行按日期现做一份任务文件塞进容器，
-# 而不是给子进程多传一个已经不存在的开关。仓库里那两份是规格的真相源，只有取值被替掉。
+# `--biz-date` 早已取消：过滤条件是任务定义里那段 `where_clause`，跟着任务文件走。
+# 造「空结果集」这类态因此只能换那段文本——每次运行按日期现做一份任务文件塞进容器，
+# 而不是给子进程多传一个已经不存在的开关。仓库里那两份是规格的真相源，只有日期被替掉。
 materialize_task() {
   local base=$1 date=$2 path=$3
-  sed "s|^d_biz = .*|d_biz = \"$date\"|" "$ACCEPTANCE_ROOT/$(basename "$base")" |
+  sed "s|^where_clause = .*|where_clause = \"D_BIZ = DATE '$date'\"|" \
+    "$ACCEPTANCE_ROOT/$(basename "$base")" |
     compose exec -T client sh -c 'umask 077; cat > "$1"' sh "$path" || return 1
-  compose exec -T client grep -Fq "d_biz = \"$date\"" "$path" ||
+  compose exec -T client grep -Fq "D_BIZ = DATE '$date'" "$path" ||
     fail "任务文件 $path 没写进日期 $date"
 }
 

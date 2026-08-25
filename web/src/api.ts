@@ -1,43 +1,13 @@
 export type ColumnPrecision = Record<string, [number, number]>;
 
-/** 比较符只有这三个（ADR-0035 §3 字面）：`>` / `<` / `=`。 */
-export type Comparison = "gt" | "lt" | "eq";
-
 /**
- * 条件值怎么绑进 SQL。**不是源列的 Oracle 类型**——describe 回来的类型不许进任务定义
- * （ADR-0036 §6），所以这是用户在构建器里就该列做的声明：按字典 `DATA_TYPE` 预填、可改。
- */
-export type ValueType = "text" | "number" | "date";
-
-/** 值来源二选一（ADR-0035 §3）：建任务时写死，或发起运行时逐条填。 */
-export type ValueSource = "constant" | "runtime";
-
-export type Direction = "asc" | "desc";
-
-export interface Condition {
-  column: string;
-  operator: Comparison;
-  value_type: ValueType;
-  /** 绑定变量名，规格内唯一，由用户拥有——运行参数与运行历史都拿它当键。 */
-  parameter: string;
-  value_source: ValueSource;
-  /** 仅 `value_source === "constant"` 时有意义；运行时填的条件必须留空。 */
-  constant: string;
-}
-
-export interface OrderTerm {
-  column: string;
-  direction: Direction;
-}
-
-/**
- * 任务定义的**结构化规格**（ADR-0036 §1），唯一真相源。
+ * 任务定义的**结构化规格**，唯一真相源。
  *
- * SQL 不在里面：它由规格现算，界面上只读，v1 没有编辑入口。
+ * SQL 不在里面：它由规格现算，界面上只读，没有编辑入口。
  */
 export interface ColumnMapping {
   source: string;
-  /** 目标列名，默认预填 = `source`（ADR-0038 §2）。落到 SQL 上就是投影的别名。 */
+  /** 目标列名，默认预填 = `source`。落到 SQL 上就是投影的别名。 */
   target: string;
 }
 
@@ -48,13 +18,20 @@ export interface TaskSpec {
   table: string;
   target_table: string;
   /**
-   * upsert 的去重键，必选（所有者 2026-08-18 裁定）。存的是**目标列名**（ADR-0038 §2/§6），
-   * 与 `columns[].target` 同一个名字空间。
+   * upsert 的去重键，必选。存的是**目标列名**，与 `columns[].target` 同一个名字空间。
    */
   primary_key: string[];
   columns: ColumnMapping[];
-  conditions: Condition[];
-  order_by: OrderTerm[];
+  /**
+   * 过滤条件：**原样拼进 `WHERE` 后面的一段自由文本**，不含 `WHERE` 这个词本身。
+   *
+   * 空串就是不加 `WHERE`，即整表取数。前端始终送字符串（哪怕是空串）。
+   *
+   * **读的时候它可能缺席**：服务端那边是 `Option<String>`，`None` 时整个字段不序列化
+   * （直接调 API 建的任务就会这样）。所以每个读它的地方都得 `?? ""`——
+   * 少一处就是一个 `undefined.trim()`。
+   */
+  where_clause?: string;
 }
 
 /**
@@ -142,9 +119,6 @@ export interface Task extends TaskInput {
   task_id: string;
 }
 
-/** 运行时逐条填的参数：参数名 → 值。顺序无关，服务端按参数名规范化（ADR-0036 §7）。 */
-export type RunParams = Record<string, string>;
-
 export interface BuilderTable {
   owner: string;
   name: string;
@@ -193,21 +167,13 @@ export interface TargetTableMetadata {
   keys: TargetKey[];
 }
 
-/** `POST /api/builder/sql` 回的一条运行参数声明。 */
-export interface RunParameter {
-  parameter: string;
-  column: string;
-  value_type: ValueType;
-}
-
 /**
- * 规格的派生面（ADR-0036 §6）：源端 SQL 与运行参数清单。
+ * 规格的派生面：现算的源端 SQL。
  *
  * **只出不进**——web 拿规格换一份现算的 SQL 来展示，没有把 SQL 传回来的路。
  */
 export interface BuilderSql {
   source_sql: string;
-  run_parameters: RunParameter[];
 }
 
 export interface MappingIssue {
@@ -261,11 +227,9 @@ export interface RunHistory {
   run_record_id: string;
   run_id: string | null;
   task_id: string;
-  /** 本次运行参数集，参数名 → 值（ADR-0036 §7）。无参数的任务是空对象。 */
-  run_params: RunParams;
   /**
-   * 当次**实际执行**的源端 SQL 快照（ADR-0036 §2）。存的是未绑定的语句文本，
-   * 参数值不内联——值由 `run_params` 展示。
+   * 当次**实际执行**的源端 SQL 快照：它回答「当时执行了什么」，规格之后怎么改都不动它。
+   * 过滤条件就在这条语句里，没有另一半取值需要对照着读。
    */
   source_sql: string;
   staging_table: string | null;
@@ -320,7 +284,6 @@ export interface RunHistory {
 export interface LiveRunDetail {
   run_record_id: string;
   run_id: string | null;
-  run_params: RunParams;
   source_sql: string;
   staging_table: string | null;
   stage: string | null;
@@ -339,8 +302,7 @@ export type RunDetail = LiveRunDetail | (RunHistory & { live: false });
 /**
  * 运行历史的筛选面只剩任务一维。
  *
- * 业务日期那一维随 ADR-0035 §3 一起没了：运行参数是任务自己定义的名字，
- * 不同任务的参数名各不相同，筛不出一个跨任务的通用维度。
+ * 业务日期那一维早就没了：它从来不是一个跨任务的通用维度。
  */
 export interface RunHistoryFilters {
   taskId?: string;
@@ -363,8 +325,7 @@ export function emptySpec(): TaskSpec {
     target_table: "",
     columns: [],
     primary_key: [],
-    conditions: [],
-    order_by: [],
+    where_clause: "",
   };
 }
 
@@ -550,13 +511,17 @@ export async function listRunHistory(
   return readJson<RunHistory[]>(response, "加载运行历史失败");
 }
 
+/**
+ * 发起一次运行。**任务身份就是全部输入**——点了就跑，没有对话框、没有参数。
+ *
+ * 同一个任务已有一次在飞时服务端回 409，消息由调用方原样展示。
+ */
 export async function startRun(
   taskId: string,
-  runParams: RunParams,
 ): Promise<{ run_record_id: string }> {
   return postJson<{ run_record_id: string }>(
     "/api/runs",
-    { task_id: taskId, run_params: runParams },
+    { task_id: taskId },
     "发起运行失败",
   );
 }

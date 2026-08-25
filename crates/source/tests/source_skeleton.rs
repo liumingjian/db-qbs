@@ -110,16 +110,16 @@ fn seed_datasources(port: u16) -> (String, String) {
     (source_id, target_id)
 }
 
-/// 一份任务定义的请求体。规格是唯一真相源，条件带一个「运行时填」的日期参数 `d_biz`。
+/// 一份任务定义的请求体。规格是唯一真相源，过滤是一段自由 WHERE 文本。
 fn task_json(name: &str, target_table: &str, datasources: &(String, String)) -> String {
     let (source_datasource_id, target_datasource_id) = datasources;
     format!(
-        r#"{{"name":"{name}","source_datasource_id":"{source_datasource_id}","target_datasource_id":"{target_datasource_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"{target_table}","columns":[{{"source":"ID","target":"ID"}},{{"source":"D_BIZ","target":"D_BIZ"}}],"primary_key":["ID"],"conditions":[{{"column":"D_BIZ","operator":"eq","value_type":"date","parameter":"d_biz","value_source":"runtime","constant":""}}],"order_by":[]}}}}"#
+        r#"{{"name":"{name}","source_datasource_id":"{source_datasource_id}","target_datasource_id":"{target_datasource_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"{target_table}","columns":[{{"source":"ID","target":"ID"}},{{"source":"D_BIZ","target":"D_BIZ"}}],"primary_key":["ID"],"where_clause":"D_BIZ = DATE '2026-08-14'"}}}}"#
     )
 }
 
 /// 上面那份规格现算出来的源端 SQL。父子两端算的是同一份，历史里钉的也是它。
-const EXPECTED_SOURCE_SQL: &str = "SELECT a.ID AS ID,\n       a.D_BIZ AS D_BIZ\n  FROM APP.HOLDINGS a\n WHERE a.D_BIZ = TO_DATE(:d_biz,'YYYY-MM-DD')";
+const EXPECTED_SOURCE_SQL: &str = "SELECT a.ID AS ID,\n       a.D_BIZ AS D_BIZ\n  FROM APP.HOLDINGS a\n WHERE D_BIZ = DATE '2026-08-14'";
 
 #[test]
 fn task_crud_persists_stable_identity_without_exposing_credentials() {
@@ -223,7 +223,7 @@ fn task_writes_reject_client_identity_and_incomplete_definitions() {
         "POST",
         "/api/tasks",
         Some(
-            r#"{"spec":{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{"source":"ID","target":"ID"}],"primary_key":["ID"],"conditions":[],"order_by":[]}}"#,
+            r#"{"spec":{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{"source":"ID","target":"ID"}],"primary_key":["ID"]}}"#,
         ),
     )
     .unwrap();
@@ -283,12 +283,7 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
         .unwrap();
     drop(audit);
 
-    let started = post(
-        port,
-        "/api/runs",
-        &format!(r#"{{"task_id":"{task_id}","run_params":{{"d_biz":"2026-08-14"}}}}"#),
-    )
-    .unwrap();
+    let started = post(port, "/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#)).unwrap();
     assert_eq!(started.status, 202, "{}", started.body);
     let run_record_id = json_body(&started)["run_record_id"]
         .as_str()
@@ -303,7 +298,6 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
         serde_json::json!({
             "run_record_id": run_record_id,
             "run_id": "run-7",
-            "run_params": { "d_biz": "2026-08-14" },
             "source_sql": EXPECTED_SOURCE_SQL,
             "staging_table": "STG_7",
             "stage": "STREAMING",
@@ -335,17 +329,10 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
         0o600
     );
     let task_toml = fs::read_to_string(&task_files[0]).unwrap();
-    for field in [
-        "owner",
-        "table",
-        "columns",
-        "primary_key",
-        "conditions",
-        "run_params",
-    ] {
+    for field in ["owner", "table", "columns", "primary_key", "where_clause"] {
         assert!(task_toml.contains(field), "{task_toml}");
     }
-    // SQL 不落进任务文件（ADR-0036 §2）：子进程从同一份规格现算。
+    // SQL 不落进任务文件：子进程从同一份规格现算。
     assert!(!task_toml.contains("SELECT"), "{task_toml}");
     // 任务身份仍不落进去——子进程按规格干活，不需要知道自己是哪条任务。
     for absent in ["holdings", "task_id"] {
@@ -356,7 +343,13 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
     // 与「启动 / 退出各扫一次 run-tasks」的清扫。
     // 目标端 agent 也落进去（ADR-0044 §4）：子进程照任务文件里这一份打，
     // **不回头读 `source.toml` 的全局地址**——那个字段已经退役。
-    for present in ["[oracle]", "[target]", "client_lib_dir", "[agent]", "instance_id"] {
+    for present in [
+        "[oracle]",
+        "[target]",
+        "client_lib_dir",
+        "[agent]",
+        "instance_id",
+    ] {
         assert!(task_toml.contains(present), "{task_toml}");
     }
 
@@ -378,11 +371,7 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
     assert_eq!(history["run_record_id"], run_record_id);
     assert_eq!(history["run_id"], "run-7");
     assert_eq!(history["task_id"], task_id);
-    assert_eq!(
-        history["run_params"],
-        serde_json::json!({ "d_biz": "2026-08-14" })
-    );
-    // 当次执行的 SQL 快照（ADR-0036 §2）：存的是未绑定的语句文本，参数值不内联。
+    // 当次执行的 SQL 快照：过滤片段就在语句里，没有另一半取值需要对照着读。
     assert_eq!(history["source_sql"], EXPECTED_SOURCE_SQL);
     assert_eq!(history["outcome"], "SUCCEEDED");
     assert_eq!(history["target_table_effect"], "SWAPPED");
@@ -514,10 +503,6 @@ while [ ! -f '{}' ]; do sleep 0.02; done
     let accepted = json_body(&get(port, &format!("/api/runs/{run_record_id}")).unwrap());
     assert_eq!(accepted["stage"], Value::Null);
     assert_eq!(accepted["run_id"], Value::Null);
-    assert_eq!(
-        accepted["run_params"],
-        serde_json::json!({ "d_biz": "2026-08-14" })
-    );
     assert_eq!(accepted["source_sql"], EXPECTED_SOURCE_SQL);
     assert_eq!(accepted["seq"], 0);
     assert_eq!(accepted["rows_pushed"], 0);
@@ -532,10 +517,6 @@ while [ ! -f '{}' ]; do sleep 0.02; done
     });
     assert_eq!(partial["stage"], "PREPARING");
     assert_eq!(partial["run_id"], "run-hanging");
-    assert_eq!(
-        partial["run_params"],
-        serde_json::json!({ "d_biz": "2026-08-14" })
-    );
     assert_eq!(partial["seq"], 1);
     assert_eq!(partial["bytes"], 64);
     assert_eq!(partial["ms"], 9);
@@ -559,7 +540,7 @@ while [ ! -f '{}' ]; do sleep 0.02; done
 }
 
 #[test]
-fn run_launch_rejects_only_the_same_task_and_run_parameters_until_child_reap() {
+fn run_launch_rejects_a_second_run_of_the_same_task_until_child_reap() {
     let directory = temp_directory();
     let release = directory.join("release-children");
     let fake_child = write_fake_child(
@@ -574,31 +555,40 @@ fn run_launch_rejects_only_the_same_task_and_run_parameters_until_child_reap() {
     let first_task_id = create_task(port);
     let second_task_id = create_task(port);
 
-    let first = start_run_for_date(port, &first_task_id, "2026-08-14");
+    let first = start_run(port, &first_task_id);
     let duplicate = post(
         port,
         "/api/runs",
-        &format!(r#"{{"task_id":"{first_task_id}","run_params":{{"d_biz":"2026-08-14"}}}}"#),
+        &format!(r#"{{"task_id":"{first_task_id}"}}"#),
     )
     .unwrap();
     assert_eq!(duplicate.status, 409, "{}", duplicate.body);
     assert!(json_body(&duplicate)["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("已有 run 进行中"));
+        .contains("已有一次运行进行中"));
 
-    let other_date = start_run_for_date(port, &first_task_id, "2026-08-15");
-    let other_task = start_run_for_date(port, &second_task_id, "2026-08-14");
+    // 互斥键退化成了任务本身：别的任务照样起得来，同一个任务起不来第二次。
+    let other_task = start_run(port, &second_task_id);
+
+    // 老界面（或老脚本）送来的运行参数**当场拒**，不是静默忽略。
+    let with_run_params = post(
+        port,
+        "/api/runs",
+        &format!(r#"{{"task_id":"{second_task_id}","run_params":{{"d_biz":"2026-08-14"}}}}"#),
+    )
+    .unwrap();
+    assert_eq!(with_run_params.status, 400, "{}", with_run_params.body);
 
     fs::write(release, "").unwrap();
-    for run_record_id in [&first, &other_date, &other_task] {
+    for run_record_id in [&first, &other_task] {
         wait_for_json(port, &format!("/api/runs/{run_record_id}"), |body| {
             body["live"] == false
         });
     }
     wait_for_empty_directory(&directory.join("run-tasks"));
 
-    let relaunched = start_run_for_date(port, &first_task_id, "2026-08-14");
+    let relaunched = start_run(port, &first_task_id);
     wait_for_json(port, &format!("/api/runs/{relaunched}"), |body| {
         body["live"] == false
     });
@@ -610,25 +600,32 @@ fn run_launch_rejects_only_the_same_task_and_run_parameters_until_child_reap() {
 #[test]
 fn cancel_signals_preparing_and_streaming_but_rejects_committing() {
     let directory = temp_directory();
-    let canceled = directory.join("canceled-dates");
+    let canceled = directory.join("canceled-stages");
+    let counter = directory.join("run-counter");
     let release_committing = directory.join("release-committing");
+    // 三次运行各停在一个阶段。**按第几次运行分派，不按运行参数**——参数链已经没了，
+    // 而互斥键退化成任务本身之后，这三次本来也只能一次接一次地跑。
     let fake_child = write_fake_child(
         &directory,
         &format!(
-            r#"biz_date=$(sed -n 's/^d_biz = "\(.*\)"$/\1/p' "$4")
-case "$biz_date" in
-  2026-08-14) stage=PREPARING ;;
-  2026-08-15) stage=STREAMING ;;
-  2026-08-16) stage=COMMITTING ;;
+            r#"count=$(cat '{}' 2>/dev/null || echo 0)
+count=$((count + 1))
+printf '%s' "$count" > '{}'
+case "$count" in
+  1) stage=PREPARING ;;
+  2) stage=STREAMING ;;
+  *) stage=COMMITTING ;;
 esac
-trap 'printf "%s\n" "$biz_date" >> "{}"; exit 0' TERM
-printf '%s\n' "{{\"ts\":\"2026-08-15T13:00:00.000Z\",\"level\":\"info\",\"event\":\"stage_changed\",\"run_id\":\"run-$biz_date\",\"task\":null,\"stage\":\"$stage\"}}"
+trap 'printf "%s\n" "$stage" >> "{}"; exit 0' TERM
+printf '%s\n' "{{\"ts\":\"2026-08-15T13:00:00.000Z\",\"level\":\"info\",\"event\":\"stage_changed\",\"run_id\":\"run-$count\",\"task\":null,\"stage\":\"$stage\"}}"
 if [ "$stage" = COMMITTING ]; then
   while [ ! -f '{}' ]; do sleep 0.02; done
 else
   while :; do sleep 0.02; done
 fi
 "#,
+            counter.display(),
+            counter.display(),
             canceled.display(),
             release_committing.display(),
         ),
@@ -637,21 +634,21 @@ fi
         start_source_ready(|port| write_run_config(&directory, port, &fake_child));
     let task_id = create_task(port);
 
-    for (biz_date, stage) in [("2026-08-14", "PREPARING"), ("2026-08-15", "STREAMING")] {
-        let run_record_id = start_run_for_date(port, &task_id, biz_date);
+    for stage in ["PREPARING", "STREAMING"] {
+        let run_record_id = start_run(port, &task_id);
         wait_for_json(port, &format!("/api/runs/{run_record_id}"), |body| {
             body["stage"] == stage
         });
         let canceled_response =
             post(port, &format!("/api/runs/{run_record_id}/cancel"), "").unwrap();
         assert_eq!(canceled_response.status, 202, "{}", canceled_response.body);
-        wait_for_file_text(&canceled, |text| text.lines().any(|line| line == biz_date));
+        wait_for_file_text(&canceled, |text| text.lines().any(|line| line == stage));
         wait_for_json(port, &format!("/api/runs/{run_record_id}"), |body| {
             body["live"] == false
         });
     }
 
-    let committing = start_run_for_date(port, &task_id, "2026-08-16");
+    let committing = start_run(port, &task_id);
     wait_for_json(port, &format!("/api/runs/{committing}"), |body| {
         body["stage"] == "COMMITTING"
     });
@@ -664,7 +661,7 @@ fi
     assert!(!fs::read_to_string(&canceled)
         .unwrap()
         .lines()
-        .any(|line| line == "2026-08-16"));
+        .any(|line| line == "COMMITTING"));
 
     fs::write(release_committing, "").unwrap();
     wait_for_json(port, &format!("/api/runs/{committing}"), |body| {
@@ -752,7 +749,7 @@ fn non_loopback_listen_emits_the_required_warning() {
 
 #[test]
 fn column_fetch_rejects_an_invalid_spec_before_reaching_oracle() {
-    // SQL 形状预检整段取消（ADR-0036 §5）后，取列前的本地闸只剩规格自身的合法性：
+    // SQL 形状预检整段取消后，取列前的本地闸只剩规格自身的合法性：
     // 标识符白名单、主键落在选中列里这一类。它仍必须在**连 Oracle 之前**判完。
     let directory = temp_directory();
     let (port, _config, child, _ready) =
@@ -765,8 +762,7 @@ fn column_fetch_rejects_an_invalid_spec_before_reaching_oracle() {
           "datasource_id":"unused-the-spec-gate-runs-first",
           "spec":{
             "owner":"APP","table":"ORDERS","target_table":"ORDERS",
-            "columns":[{"source":"ID","target":"ID"}],"primary_key":["MISSING"],
-            "conditions":[],"order_by":[]
+            "columns":[{"source":"ID","target":"ID"}],"primary_key":["MISSING"]
           }
         }"#,
     )
@@ -799,26 +795,24 @@ fn builder_sql_is_derived_from_the_spec_and_never_travels_back() {
           "target_table":"T_POSITION",
           "columns":[{"source":"N_VA_PRICE","target":"N_VA_PRICE"},{"source":"D_BIZ","target":"D_BIZ"}],
           "primary_key":["D_BIZ"],
-          "conditions":[{"column":"D_BIZ","operator":"eq","value_type":"date","parameter":"d_biz","value_source":"runtime","constant":""}],
-          "order_by":[{"column":"D_BIZ","direction":"desc"}]
+          "where_clause":"D_BIZ >= DATE '2026-08-01' AND STATUS IN ('OK','WARN')"
         }"#,
     )
     .unwrap();
 
     assert_eq!(generated.status, 200, "{}", generated.body);
     let derived: Value = serde_json::from_str(&generated.body).unwrap();
-    // 派生面恰好两样（ADR-0036 §6 的前两样；第三样在报文里）。
-    assert_eq!(derived.as_object().unwrap().len(), 2);
+    // 派生面只剩一样：现算的源端 SQL。运行参数清单随运行参数链一起退役。
+    assert_eq!(derived.as_object().unwrap().len(), 1);
     let sql = derived["source_sql"].as_str().unwrap();
     assert!(sql.contains("T_R_FR_ASTSTAT@FA"), "{sql}");
-    assert!(sql.contains("TO_DATE(:d_biz,'YYYY-MM-DD')"), "{sql}");
-    assert!(sql.ends_with(" ORDER BY a.D_BIZ DESC"), "{sql}");
-    assert_eq!(
-        derived["run_parameters"],
-        serde_json::json!([{ "parameter": "d_biz", "column": "D_BIZ", "value_type": "date" }])
+    // 文本框里那段字原样到了 WHERE 后面——这是本票在 HTTP 面上的落点。
+    assert!(
+        sql.ends_with(" WHERE D_BIZ >= DATE '2026-08-01' AND STATUS IN ('OK','WARN')"),
+        "{sql}"
     );
 
-    // 形状预检那个端点整段没了（ADR-0036 §5），不是改了语义。
+    // 形状预检那个端点整段没了，不是改了语义。
     let retired = post(port, "/api/sql-shape", &generated.body).unwrap();
     assert_eq!(retired.status, 404);
 
@@ -907,8 +901,7 @@ fn column_fetch_oracle_failure_does_not_create_a_run_touch_sink_or_write_storage
           "datasource_id":"{source_datasource_id}",
           "spec":{{
             "owner":"APP","table":"MISSING_ORDERS","target_table":"ORDERS",
-            "columns":[{{"source":"ID","target":"ID"}},{{"source":"BIZ_DAY","target":"BIZ_DAY"}}],"primary_key":["ID"],
-            "conditions":[],"order_by":[]
+            "columns":[{{"source":"ID","target":"ID"}},{{"source":"BIZ_DAY","target":"BIZ_DAY"}}],"primary_key":["ID"]
           }}
         }}"#
         ),
@@ -947,7 +940,8 @@ fn column_fetch_oracle_failure_does_not_create_a_run_touch_sink_or_write_storage
         }
     }
     assert!(
-        seen.iter().all(|line| line.starts_with("GET /v1/agent/info")),
+        seen.iter()
+            .all(|line| line.starts_with("GET /v1/agent/info")),
         "取列失败之后，除了 agent 身份探测不该有任何流量：{seen:?}"
     );
 
@@ -992,7 +986,11 @@ fn the_target_metadata_proxy_resolves_credentials_and_writes_nothing() {
     )
     .unwrap();
     assert_eq!(missing_table.status, 400, "{}", missing_table.body);
-    assert!(missing_table.body.contains("target_table"), "{}", missing_table.body);
+    assert!(
+        missing_table.body.contains("target_table"),
+        "{}",
+        missing_table.body
+    );
 
     for (path, body) in [
         (
@@ -1180,7 +1178,11 @@ fn agent_registration_requires_a_live_agent_and_pins_its_identity() {
     assert_eq!(json_body(&bound)["agent_id"], agent_id);
     let refused_delete = request(port, "DELETE", &format!("/api/agents/{agent_id}"), None).unwrap();
     assert_eq!(refused_delete.status, 409, "{}", refused_delete.body);
-    assert!(refused_delete.body.contains("目标库"), "{}", refused_delete.body);
+    assert!(
+        refused_delete.body.contains("目标库"),
+        "{}",
+        refused_delete.body
+    );
 
     // 绑一台不在注册表里的 agent：写入面当场拒。
     let dangling = post(
@@ -1211,11 +1213,7 @@ fn a_stopped_agent_breaks_every_target_side_link() {
         let path = write_run_config(&directory, port, &fake_child);
         // `write_run_config` 指的是活着的桩；这里改成停掉的那个地址。
         let text = fs::read_to_string(&path).unwrap();
-        fs::write(
-            &path,
-            text.replace(agent_stub_url(), &stopped_url),
-        )
-        .unwrap();
+        fs::write(&path, text.replace(agent_stub_url(), &stopped_url)).unwrap();
         path
     });
     let datasources = seed_datasources(port);
@@ -1243,14 +1241,12 @@ fn a_stopped_agent_breaks_every_target_side_link() {
         (
             "POST",
             "/api/target/columns".to_owned(),
-            format!(
-                r#"{{"datasource_id":"{target_datasource_id}","target_table":"T_POSITION"}}"#
-            ),
+            format!(r#"{{"datasource_id":"{target_datasource_id}","target_table":"T_POSITION"}}"#),
         ),
         (
             "POST",
             "/api/runs".to_owned(),
-            format!(r#"{{"task_id":"{task_id}","run_params":{{"d_biz":"2026-08-14"}}}}"#),
+            format!(r#"{{"task_id":"{task_id}"}}"#),
         ),
     ] {
         let response = request(port, method, &path, Some(&body)).unwrap();
@@ -1269,7 +1265,10 @@ fn a_stopped_agent_breaks_every_target_side_link() {
         json_body(&get(port, "/api/runs").unwrap()),
         serde_json::json!([])
     );
-    assert!(!directory.join("run-tasks").exists() || directory_entries(&directory.join("run-tasks")).is_empty());
+    assert!(
+        !directory.join("run-tasks").exists()
+            || directory_entries(&directory.join("run-tasks")).is_empty()
+    );
 
     // 注册表那一列也如实变红，人不必去猜。
     let agents = json_body(&get(port, "/api/agents").unwrap());
@@ -1426,12 +1425,7 @@ fn request(
 
 /// 超时（以及任何 I/O 失败）的信息里必须点名是哪条 `method path` 的哪一段——
 /// 否则挂死只是换成了一句「某条请求超时」，排障省不下多少。
-fn annotate(
-    method: &str,
-    path: &str,
-    stage: &str,
-    error: std::io::Error,
-) -> std::io::Error {
+fn annotate(method: &str, path: &str, stage: &str, error: std::io::Error) -> std::io::Error {
     std::io::Error::new(
         error.kind(),
         format!("{method} {path} 的{stage}阶段失败（上限 {REQUEST_TIMEOUT:?}）：{error}"),
@@ -1485,18 +1479,9 @@ fn create_task(port: u16) -> String {
     json_body(&response)["task_id"].as_str().unwrap().to_owned()
 }
 
+/// 发起一次运行。**任务身份就是全部输入**——没有对话框，也没有参数。
 fn start_run(port: u16, task_id: &str) -> String {
-    start_run_for_date(port, task_id, "2026-08-14")
-}
-
-/// 发起一次运行。运行参数只有一个 `d_biz`——它是任务自己声明的参数名，不是产品概念。
-fn start_run_for_date(port: u16, task_id: &str, biz_date: &str) -> String {
-    let response = post(
-        port,
-        "/api/runs",
-        &format!(r#"{{"task_id":"{task_id}","run_params":{{"d_biz":"{biz_date}"}}}}"#),
-    )
-    .unwrap();
+    let response = post(port, "/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#)).unwrap();
     assert_eq!(response.status, 202, "{}", response.body);
     json_body(&response)["run_record_id"]
         .as_str()

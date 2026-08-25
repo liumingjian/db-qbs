@@ -144,7 +144,7 @@ pre.drawer-sql,
 .form-field > span,
 .form-field textarea,
 .inline-result,
-.source-sql-editor textarea,
+.sql-text-input,
 .sql-highlight,
 .tree-count,
 .schema-count,
@@ -279,9 +279,6 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 /* 批量删除的二次确认把要删的任务名**逐条列全**，不是「确定删除 3 个任务？」（ADR-0043 §6）。 */
 .delete-copy ul { max-height: 220px; overflow: auto; margin: 6px 0 0; padding-left: 20px; color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-prose); }
 .modal-context { display: block; margin-top: 2px; color: var(--mute); font-size: var(--size-cap); }
-.stale-run-hint { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border-left: 3px solid var(--warn); background: var(--warn-bg); color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-prose); }
-.stale-run-hint strong { color: var(--warn); font-weight: var(--weight-em); }
-.stale-run-hint .mono { color: var(--dim); }
 
 /* ADR-0039 §9 第 1 条：表格内的目标字段输入框，与单元格同高、不撑破行。 */
 .data-grid .cell-input { width: 100%; min-width: 90px; height: 26px; padding: 0 7px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-size: var(--size-cap); }
@@ -322,16 +319,19 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .builder-mode-buttons .button { border-radius: 0; }
 .builder-mode-buttons .button:first-child { border-radius: var(--radius) 0 0 var(--radius); }
 .builder-mode-buttons .button:last-child { margin-left: -1px; border-radius: 0 var(--radius) var(--radius) 0; }
-/* ---------------------------------------------------------------- 自定义 SQL 输入框（ADR-0046 §1）
+/* ---------------------------------------------------------------- 带高亮的 SQL 输入框
+   两处共用：自定义 SQL 那张卡，与过滤条件的 WHERE 文本框。
    高亮是**透明字 textarea 压在着色 `<pre>` 上**：两层必须逐像素同框，否则光标会飘。
-   下面那条 `.sql-highlight, .source-sql-editor textarea` 的合并选择器就是这个约束本身——
+   下面那条 `.sql-highlight, .sql-text-input` 的合并选择器就是这个约束本身——
    字体、字号、行高、内边距、边框宽度、`white-space` 六项只要有一项分开写，迟早分开改。 */
-.source-sql-editor { display: flex; flex-direction: column; gap: 8px; padding: 12px; }
+.source-sql-editor, .where-clause-editor { display: flex; flex-direction: column; gap: 8px; padding: 12px; }
+.where-clause-editor .spec-note { padding: 0; }
+.where-clause-editor .spec-note .mono { color: var(--dim); }
 .sql-editor-toolbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .sql-editor-toolbar .spec-note { margin: 0; }
 .sql-editor-toolbar .button { flex: none; }
 .sql-input-shell { position: relative; }
-.sql-highlight, .source-sql-editor textarea { padding: 9px 10px; border: 1px solid transparent; border-radius: var(--radius); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.55; white-space: pre; tab-size: 2; }
+.sql-highlight, .sql-text-input { padding: 9px 10px; border: 1px solid transparent; border-radius: var(--radius); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.55; white-space: pre; tab-size: 2; }
 /* 着色层在下、只读、不吃事件；滚动由 textarea 的 onScroll 同步过来（见 SqlEditor.tsx）。 */
 .sql-highlight { position: absolute; inset: 0; overflow: hidden; margin: 0; background: var(--panel); color: var(--text); pointer-events: none; }
 .sql-t-keyword { color: var(--sql-keyword); font-weight: var(--weight-em); }
@@ -343,10 +343,13 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 /* 连字必须关掉：--font-num 里的 JetBrains Mono / Cascadia Mono 会把 `>=` 画成 `≥`、
    `!=` 画成 `≠`。这一格是该模式下唯一能看到查询的地方，显示的字符串必须**就是**执行的那个。
    两层都要关——只关一层，飘的就不只是字形，还有光标位置。 */
-.source-sql-editor textarea { position: relative; display: block; width: 100%; min-height: 170px; resize: vertical; overflow: auto; border-color: var(--line-strong); background: transparent; color: transparent; caret-color: var(--text); }
+.sql-text-input { position: relative; display: block; width: 100%; resize: vertical; overflow: auto; border-color: var(--line-strong); background: transparent; color: transparent; caret-color: var(--text); }
+/* 自定义 SQL 要写整条语句，WHERE 片段只写条件——两格的起始高度因此不同。 */
+.source-sql-editor .sql-text-input { min-height: 170px; }
+.where-clause-editor .sql-text-input { min-height: 92px; }
 /* 字透明了，占位符和选区得单独交代，否则前者跟着一起消失、后者选中即看不见。 */
-.source-sql-editor textarea::placeholder { color: var(--mute); }
-.source-sql-editor textarea::selection { background: var(--brand-dim); }
+.sql-text-input::placeholder { color: var(--mute); }
+.sql-text-input::selection { background: var(--brand-dim); }
 .tree-picker, .target-tree-shell { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
 .tree-picker-toolbar, .target-table-controls, .builder-selected-row { display: flex; align-items: center; gap: 10px; }
 .tree-search { min-width: 0; flex: 1; height: var(--ctl-h); display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--mute); }
@@ -397,17 +400,7 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .spec-editor header span { color: var(--mute); font-size: var(--size-meta); }
 .spec-empty { margin: 0; padding: 14px 12px; color: var(--mute); font-size: var(--size-meta); }
 .spec-note { display: block; padding: 0 12px 11px; color: var(--mute); font-size: var(--size-cap); line-height: var(--lh-prose); }
-.condition-list { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 12px; list-style: none; }
-/* 列序与列宽都按「手要落在哪」排：字段（选）· 比较（三选一，64px 够）·
-   值（唯一要手打的，给最宽）· 值类型（按字典预填，多数时候不动）。 */
-.condition-row { display: grid; grid-template-columns: minmax(110px, 0.9fr) 64px minmax(180px, 1.7fr) 88px auto; align-items: end; gap: 8px; }
-/* 多条条件按 AND 连接——这件事原来一个字都没说。 */
-.condition-join { padding-left: 4px; color: var(--mute); font-size: var(--size-cap); }
-.condition-row label { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.condition-row label > span { color: var(--mute); font-size: var(--size-cap); }
-.condition-row input, .condition-row select { width: 100%; height: var(--ctl-h); padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-size: var(--size-meta); }
-.condition-row input:disabled { background: var(--mute-bg); color: var(--mute); }
-.condition-row .icon-button, .field-mapping-section .icon-button, .spec-editor header .icon-button { width: var(--ctl-h); height: var(--ctl-h); border-color: var(--line-strong); background: var(--panel); color: var(--dim); }
+.field-mapping-section .icon-button, .spec-editor header .icon-button { width: var(--ctl-h); height: var(--ctl-h); border-color: var(--line-strong); background: var(--panel); color: var(--dim); }
 .generated-sql { overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); }
 .generated-sql > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
 .generated-sql > header > div { display: flex; flex-direction: column; gap: 2px; }
@@ -415,14 +408,6 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .generated-sql header span { color: var(--mute); font-size: var(--size-meta); }
 .generated-sql .ddl-output { margin: 12px; }
 .generated-sql > .form-error { margin: 12px; }
-.run-parameter-list { display: flex; flex-direction: column; gap: 5px; padding: 0 12px 12px; font-size: var(--size-meta); }
-.run-parameter-list strong { font-size: var(--size-body); font-weight: var(--weight-em); }
-.run-parameter-list span { color: var(--mute); }
-.run-parameter-list ul { display: flex; flex-direction: column; gap: 3px; margin: 0; padding: 0; list-style: none; }
-.run-parameter-list li { display: flex; gap: 10px; }
-.run-parameter-list li .mono { color: var(--dim); }
-.run-params { display: flex; flex-direction: column; gap: 12px; }
-.run-params-empty { display: flex; flex-direction: column; gap: 3px; margin: 0; color: var(--mute); font-size: var(--size-meta); line-height: var(--lh-prose); }
 .column-fetch-hint { margin: 0; padding: 14px 12px; color: var(--mute); font-size: var(--size-meta); }
 .ddl-output { max-height: 280px; overflow: auto; margin: 0; padding: 12px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--mute-bg); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 
@@ -560,7 +545,6 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
   .tree-picker-toolbar .tree-search, .target-table-controls .tree-search, .builder-selected-row .button { width: 100%; }
   .spec-editor > header, .builder-guide > header, .target-structure > header { align-items: flex-start; flex-direction: column; }
   .spec-editor > header .button, .target-structure > header .button { width: 100%; }
-  .condition-row { grid-template-columns: minmax(0, 1fr); }
   .filter-card { align-items: stretch; flex-direction: column; }
   .filter-field { justify-content: space-between; }
   .filter-actions { margin-left: 0; }

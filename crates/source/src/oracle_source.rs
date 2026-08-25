@@ -1,5 +1,4 @@
 use db_qbs_shared::{canon_date, canon_number, canon_text, canon_timestamp};
-use oracle::sql_type::ToSql;
 use oracle::sql_type::{OracleType, Timestamp};
 use oracle::{Connection, InitParams, ResultSet, Row};
 
@@ -10,24 +9,12 @@ use crate::{
     TaskConfig, TaskSpec, FETCH_ARRAY_SIZE,
 };
 
-/// 一次查询的绑定变量取值：参数名 → 值。全部值都走绑定（ADR-0011 §2「不发明第二套转义」），
-/// 常量条件也不例外，所以它同时承载「写死的常量」与「运行时填的参数」。
-type Bindings = Vec<(String, String)>;
-
-fn named_params(bindings: &Bindings) -> Vec<(&str, &dyn ToSql)> {
-    bindings
-        .iter()
-        .map(|(name, value)| (name.as_str(), value as &dyn ToSql))
-        .collect()
-}
-
 pub struct OracleRowSource {
     rows: ResultSet<'static, Row>,
     columns: Vec<SourceColumn>,
     value_kinds: Vec<ValueKind>,
     access: OracleAccess,
     source_sql: String,
-    bindings: Bindings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,10 +28,7 @@ enum ValueKind {
 impl OracleRowSource {
     pub fn connect(task: &TaskConfig) -> Result<Self, SourceReadError> {
         let source_sql = task.source_sql();
-        let bindings = task
-            .bindings()
-            .map_err(|message| SourceReadError::with_kind(&message, None, FailureKind::Config))?;
-        let rows = open_result_set(&task.oracle, &source_sql, &bindings)?;
+        let rows = open_result_set(&task.oracle, &source_sql)?;
         let (columns, value_kinds) = describe_columns(rows.column_info());
 
         Ok(Self {
@@ -53,11 +37,11 @@ impl OracleRowSource {
             value_kinds,
             access: task.oracle.clone(),
             source_sql,
-            bindings,
         })
     }
 
-    /// 取列面：只为把游标开起来拿列信息，绑定变量喂哑值（见 [`TaskSpec::describe_bindings`]）。
+    /// 取列面：只为把游标开起来拿列信息。语句里**不会有绑定变量**——过滤是一段
+    /// 原样拼进 `WHERE` 的文本，值不再走绑定，所以这里也不必喂哑值。
     ///
     /// 投影里**结构性只有真列**（`a.C AS C`），所以旧那段「表达式列要抹掉精度再重分类」
     /// 的归一化随生成器一起退役了——构建器根本产不出表达式列（ADR-0036 §5 第 5/6 条）。
@@ -65,7 +49,7 @@ impl OracleRowSource {
         access: &OracleAccess,
         spec: &TaskSpec,
     ) -> Result<Vec<SourceColumn>, SourceReadError> {
-        let rows = open_result_set(access, &spec.source_sql(), &spec.describe_bindings())?;
+        let rows = open_result_set(access, &spec.source_sql())?;
         let (columns, _) = describe_columns(rows.column_info());
         Ok(columns)
     }
@@ -74,8 +58,7 @@ impl OracleRowSource {
         access: &OracleAccess,
         source_sql: &str,
     ) -> Result<Vec<SourceColumn>, SourceReadError> {
-        let bindings: Bindings = Vec::new();
-        let rows = open_result_set(access, source_sql, &bindings)?;
+        let rows = open_result_set(access, source_sql)?;
         let (columns, _) = describe_columns(rows.column_info());
         Ok(columns)
     }
@@ -84,22 +67,16 @@ impl OracleRowSource {
     ///
     /// **把当次真正要执行的语句整个套进子查询**（`SELECT COUNT(*) FROM (<source_sql>)`），
     /// 而不是照 `spec` 另拼一条 `SELECT COUNT(*) FROM 表 WHERE 条件`：
-    /// 另拼的那条迟早与生成器漂开，分母就会算的是另一批行。绑定变量用**同一组**，
-    /// 常量条件也走绑定（ADR-0011 §2「不发明第二套转义」）。
+    /// 另拼的那条迟早与生成器漂开，分母就会算的是另一批行。
     ///
     /// 单独开一条连接、用完即关：主游标那条连接上挂着的是取数结果集，
     /// 在它上面再跑一条语句要么排队要么打断取数。代价明码标价——每次发起多一次源端全表计数。
     ///
     /// 失败**不抛给运行**：调用方把它记成「未取到总行数」就继续跑。
     pub fn precount(task: &TaskConfig) -> Result<u64, SourceReadError> {
-        let bindings = task
-            .bindings()
-            .map_err(|message| SourceReadError::with_kind(&message, None, FailureKind::Config))?;
         let query = format!("SELECT COUNT(*) FROM (\n{}\n)", task.source_sql());
         let connection = open_connection(&task.oracle)?;
-        let row = connection
-            .query_row_named(&query, &named_params(&bindings))
-            .map_err(oracle_error)?;
+        let row = connection.query_row(&query, &[]).map_err(oracle_error)?;
         // Oracle 的 COUNT(*) 回的是 NUMBER，取成 i64 再夹到 0：负数不可能出现，
         // 但夹一下比在 `as u64` 上把 -1 变成天文数字安全。
         let total: i64 = row.get(0).map_err(oracle_error)?;
@@ -192,9 +169,7 @@ impl OracleRowSource {
         let query = build_range_check_query(&self.source_sql, columns);
         let connection = open_connection(&self.access)?;
         let statement = connection.statement(&query).build().map_err(oracle_error)?;
-        let mut rows = statement
-            .into_result_set_named(&named_params(&self.bindings))
-            .map_err(oracle_error)?;
+        let mut rows = statement.into_result_set(&[]).map_err(oracle_error)?;
         let row = rows
             .next()
             .ok_or_else(|| {
@@ -240,7 +215,9 @@ fn build_range_check_query(source_sql: &str, columns: &[RangeCheckColumn]) -> St
     } else {
         format!(", {}", checks.join(", "))
     };
-    format!("SELECT COUNT(*) AS SCANNED_ROWS{checks} FROM ({source_sql}) RANGE_CHECK_SOURCE")
+    // 子查询**必须换行包**：过滤条件是用户手写的自由文本，可以用 `--` 起一句行注释，
+    // 而行注释吃掉的是它那一行的余下部分——挤在一行里的话，被吃掉的正是收尾的 `)`。
+    format!("SELECT COUNT(*) AS SCANNED_ROWS{checks} FROM (\n{source_sql}\n) RANGE_CHECK_SOURCE")
 }
 
 fn quote_oracle_identifier(identifier: &str) -> String {
@@ -261,7 +238,6 @@ fn aggregate_count(row: &Row, index: usize, label: &str) -> Result<u64, SourceRe
 fn open_result_set(
     access: &OracleAccess,
     source_sql: &str,
-    bindings: &Bindings,
 ) -> Result<ResultSet<'static, Row>, SourceReadError> {
     let connection = open_connection(access)?;
     let statement = connection
@@ -269,9 +245,7 @@ fn open_result_set(
         .fetch_array_size(FETCH_ARRAY_SIZE)
         .build()
         .map_err(oracle_error)?;
-    let rows = statement
-        .into_result_set_named(&named_params(bindings))
-        .map_err(oracle_error)?;
+    let rows = statement.into_result_set(&[]).map_err(oracle_error)?;
     Ok(rows)
 }
 
@@ -690,9 +664,26 @@ mod tests {
         assert!(query.contains("ABS(\"N_RAW\") >= POWER(10, 8)"));
         assert!(query.contains("\"N_EXPR\" <> TRUNC(\"N_EXPR\", 4)"));
         assert!(query.contains("ABS(\"N_EXPR\") >= POWER(10, 14)"));
-        assert!(
-            query.contains("FROM (SELECT N_RAW, N_EXPR FROM source_table WHERE D_BIZ = :biz_date)")
-        );
+        assert!(query
+            .contains("FROM (\nSELECT N_RAW, N_EXPR FROM source_table WHERE D_BIZ = :biz_date\n)"));
         assert!(!query.contains("; )"));
+    }
+
+    /// 收尾的 `)` **必须自己占一行**：过滤条件是用户手写的自由文本，可以用 `--`
+    /// 起一句行注释，而行注释吃掉的是它那一行的余下部分。挤在一行里的话，
+    /// 被吃掉的正好是那个括号，语句当场不成立——而且只在真跑那一刻才炸。
+    #[test]
+    fn a_trailing_line_comment_cannot_eat_the_closing_parenthesis() {
+        let query = build_range_check_query(
+            "SELECT N_RAW FROM source_table\n WHERE D_BIZ = DATE '2026-08-01' -- 只要当天",
+            &[RangeCheckColumn {
+                column: "N_RAW".to_owned(),
+                precision: 10,
+                scale: 2,
+            }],
+        );
+
+        let last_line = query.lines().last().expect("the query is not empty");
+        assert_eq!(last_line, ") RANGE_CHECK_SOURCE", "实际生成：\n{query}");
     }
 }

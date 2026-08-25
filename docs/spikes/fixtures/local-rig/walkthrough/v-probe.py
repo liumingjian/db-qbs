@@ -81,13 +81,16 @@ def open_drawer(page, task_name):
     return False
 
 
-def start_run(page, load_date):
-    """从任务列表发起一个 run，停在 RunScreen 上。日期即造态开关（见 v-mock.py）。"""
+def start_run(page, task_name):
+    """从作业中心发起一个 run，停在 RunScreen 上。
+
+    **点哪一行就是造态开关**（见 v-mock.py 的 `RUNS_BY_TASK`）：发起没有对话框了，
+    点下去当场就跑，所以造态只能靠行。
+    """
     open_tasks(page)
-    page.click(f'{JOB} tbody tr button[aria-label="发起运行"]')
-    page.wait_for_selector(".modal.is-narrow", timeout=10000)
-    page.fill(".modal.is-narrow input[type=date]", load_date)
-    page.click(".modal.is-narrow button[type=submit]")
+    row = page.query_selector(f'{JOB} tbody tr:has-text("{task_name}")')
+    assert row is not None, f"作业中心里找不到任务：{task_name}"
+    row.query_selector('button[aria-label="发起运行"]').click()
     page.wait_for_selector(".run-card", timeout=20000)
     page.wait_for_selector(".live-state, .run-result", timeout=20000)
 
@@ -95,7 +98,7 @@ def start_run(page, load_date):
 # ---- 一、三条形状轴 ---------------------------------------------------------
 
 def v1_live(page, out):
-    start_run(page, "2026-01-01")
+    start_run(page, "持仓日明细")
     page.wait_for_selector(".phase-item.is-current", timeout=15000)
     out["V1"] = {
         "phase_items": page.evaluate(
@@ -131,7 +134,7 @@ def v1_live(page, out):
 
 def v17_accepted(page, out):
     """V17 的另一半：run 还没进可取消阶段时，按钮仍不禁用，回的是如实拒绝。"""
-    start_run(page, "2026-01-02")
+    start_run(page, "刚受理那条")
     button = page.query_selector(".run-header > button")
     out["V17"]["accepted_state"] = {
         "conclusion": page.eval_on_selector(".live-state strong", "el => el.innerText"),
@@ -146,7 +149,7 @@ def v17_accepted(page, out):
 
 
 def v2_success(page, out):
-    start_run(page, "2026-01-03")
+    start_run(page, "成功那条")
     out["V2"] = {
         "counts": counts(page),
         "terminal_block": probe_all(page, ".terminal-block"),
@@ -157,7 +160,7 @@ def v2_success(page, out):
 
 
 def v3_discarded(page, out):
-    start_run(page, "2026-01-04")
+    start_run(page, "校验失败那条")
     out["V3"] = {
         "counts": counts(page),
         "terminal_block": probe_all(page, ".terminal-block"),
@@ -166,7 +169,7 @@ def v3_discarded(page, out):
 
 
 def v4_v7_v11_v22_mapping(page, out):
-    start_run(page, "2026-01-05")
+    start_run(page, "映射预检失败那条")
     out["V4_on_run_screen"] = {
         "error_summary_children": page.evaluate(
             """() => Array.from(document.querySelectorAll('.error-summary > *')).map(el => ({
@@ -201,7 +204,7 @@ def v4_v7_v11_v22_mapping(page, out):
 
 
 def v8_unknown(page, out):
-    start_run(page, "2026-01-06")
+    start_run(page, "结局不明那条")
     out["V8"] = {
         "counts": counts(page),
         "result_text": page.eval_on_selector(".run-result", "el => el.innerText.replace(/\\n+/g, ' | ')"),
@@ -210,7 +213,7 @@ def v8_unknown(page, out):
 
 
 def v13_escape(page, out):
-    start_run(page, "2026-01-07")
+    start_run(page, "哨兵逃逸那条")
     page.wait_for_selector(".sensitive-value", timeout=10000)
     out["V13"] = {
         "masked": page.evaluate(
@@ -236,7 +239,7 @@ def v13_escape(page, out):
 
 
 def v15_not_started(page, out):
-    start_run(page, "2026-01-08")
+    start_run(page, "未发起那条")
     out["V15"] = {
         "identity": texts(page, ".run-identity > div"),
         "counts": counts(page),
@@ -245,24 +248,27 @@ def v15_not_started(page, out):
 
 
 def v16_stale_hint(page, out):
+    """并跑拦截：**从对话框里的预警改判成屏顶的 409 横幅**。
+
+    发起对话框整个没了（运行参数链退役，点了就跑），原来那条 `.stale-run-hint`
+    随之失去对象。顶上来的是同一件事的另一种说法：服务端当场回 409，
+    那句话落在作业中心顶上的 `.notice.is-error` 里。
+    """
     open_tasks(page)
-    page.click(f'{JOB} tbody tr button[aria-label="发起运行"]')
-    page.wait_for_selector(".modal.is-narrow", timeout=10000)
-    page.fill(".modal.is-narrow input[type=date]", "2026-01-01")
-    page.wait_for_selector(".stale-run-hint", timeout=10000)
-    submit = page.query_selector(".modal.is-narrow button[type=submit]")
+    row = page.query_selector(f'{JOB} tbody tr:has-text("持仓日明细")')
+    row.query_selector('button[aria-label="发起运行"]').click()
+    page.wait_for_selector(".notice.is-error", timeout=10000)
     out["V16"] = {
-        "hint": probe_all(page, ".stale-run-hint"),
-        "hint_left_border": page.eval_on_selector(
-            ".stale-run-hint",
-            "el => { const cs = getComputedStyle(el); return {w: cs.borderLeftWidth,"
-            " color: cs.borderLeftColor, bg: cs.backgroundColor}; }"),
-        "submit_text": submit.inner_text(),
-        "submit_disabled": submit.is_disabled(),
-        "submit_cursor": submit.evaluate("el => getComputedStyle(el).cursor"),
+        "notice": probe_all(page, ".notice.is-error"),
+        "notice_colors": page.eval_on_selector(
+            ".notice.is-error",
+            "el => { const cs = getComputedStyle(el); return {color: cs.color,"
+            " bg: cs.backgroundColor, border: cs.borderLeftColor}; }"),
+        "dismiss_text": page.eval_on_selector(
+            ".notice.is-error .text-button", "el => el.innerText"),
     }
     page.screenshot(path=f"{SHOTS}/v16-stale-hint.png", full_page=True)
-    page.click('.modal.is-narrow button[type="button"]')
+    page.click(".notice.is-error .text-button")
 
 
 # ---- 二、详情抽屉：V2 / V3 / V4 / V5 / V25（原历史列表，ADR-0043 §2 已并入作业中心） ----

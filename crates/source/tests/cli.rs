@@ -127,14 +127,7 @@ fn write_task(directory: &Path) -> PathBuf {
          { source = \"BIZ_DAY\", target = \"BIZ_DAY\" },\n\
          ]\n\
          primary_key = [\"ID\"]\n\
-         \n\
-         [[spec.conditions]]\n\
-         column = \"BIZ_DAY\"\n\
-         operator = \"eq\"\n\
-         value_type = \"date\"\n\
-         parameter = \"biz_day\"\n\
-         value_source = \"runtime\"\n\
-         constant = \"\"\n\
+         where_clause = \"BIZ_DAY = DATE '2026-08-14'\"\n\
          \n\
          [oracle]\n\
          connect_string = \"//oracle:1521/XE\"\n\
@@ -153,10 +146,7 @@ fn write_task(directory: &Path) -> PathBuf {
          agent_id = \"a1\"\n\
          name = \"目标端 A\"\n\
          base_url = \"http://127.0.0.1:1\"\n\
-         instance_id = \"6f1a9c2d\"\n\
-         \n\
-         [run_params]\n\
-         biz_day = \"2026-08-14\"\n",
+         instance_id = \"6f1a9c2d\"\n",
     )
     .unwrap();
     path

@@ -394,13 +394,11 @@ create_task() {
   jq -r '.task_id' <<<"$API_BODY"
 }
 
+# 发起的**全部**输入就是任务身份：过滤写在任务定义的 `where_clause` 里，
+# 一次运行不再接任何取值。
 start_task_run() {
-  local task_id=$1 params=${2:-} payload
-  if [[ -z "$params" ]]; then
-    params=$(jq -nc --arg date "$BIZ_DATE" '{load_date:$date}') || return 1
-  fi
-  payload=$(jq -nc --arg task "$task_id" --argjson params "$params" \
-    '{task_id:$task, run_params:$params}') || return 1
+  local task_id=$1 payload
+  payload=$(jq -nc --arg task "$task_id" '{task_id:$task}') || return 1
   api POST /api/runs "$payload" || return 1
   [[ "$API_STATUS" == 202 ]] || fail "start run status=$API_STATUS body=$API_BODY" || return 1
   jq -r '.run_record_id' <<<"$API_BODY"
@@ -408,22 +406,20 @@ start_task_run() {
 
 # 跑一趟并等到终态；`API_BODY` 留着给调用处继续断言。第二个参数是等待上限（轮询次数）。
 run_task_to_completion() {
-  local task_id=$1 attempts=${2:-400} params=${3:-} record
-  record=$(start_task_run "$task_id" "$params") || return 1
+  local task_id=$1 attempts=${2:-400} record
+  record=$(start_task_run "$task_id") || return 1
   wait_for_run "$record" '.live == false' "$attempts" || return 1
   printf '%s' "$record"
 }
 
-load_date_condition() {
-  jq -nc '{
-    column:"LOAD_DATE", operator:"eq", value_type:"date",
-    parameter:"load_date", value_source:"runtime", constant:""
-  }'
+# 过滤是一段自由 WHERE 文本，原样拼进生成的语句里。
+load_date_clause() {
+  printf "LOAD_DATE = DATE '%s'" "$BIZ_DATE"
 }
 
 c2_spec() {
   # 源列名与目标列名成心取得不一样（ADR-0038 §2）：投影是 `a.SRC_NAME AS DEST_NAME`。
-  jq -nc --argjson load_date "$(load_date_condition)" '{
+  jq -nc --arg load_date "$(load_date_clause)" '{
     owner:"SPIKE", table:"T_V1_C2", target_table:"V1_C2",
     primary_key:["ROW_ID"],
     columns:[
@@ -432,7 +428,7 @@ c2_spec() {
       {source:"SRC_AMOUNT", target:"DEST_AMOUNT"},
       {source:"LOAD_DATE", target:"LOAD_DATE"}
     ],
-    conditions:[$load_date]
+    where_clause:$load_date
   }'
 }
 
@@ -551,11 +547,11 @@ scenario_c2() {
   echo "C2③ target keys: $(jq -c '.keys' <<<"$columns")"
 }
 
+# 第一个参数是要筛哪一组——**写进 WHERE 文本里**。「常量档 / 运行时档」那个二分
+# 随运行参数链一起退役了：值来源不再是一个概念。
 c3_spec() {
-  # 第一个参数是 GRP 那条条件的取值来源：常量档写死 'A'，运行时档留给 run_params。
-  local value_source=$1 constant=${2:-}
-  jq -nc --arg value_source "$value_source" --arg constant "$constant" \
-    --argjson load_date "$(load_date_condition)" '{
+  local group=$1
+  jq -nc --arg group "$group" --arg load_date "$(load_date_clause)" '{
     owner:"SPIKE", table:"T_V1_C3", target_table:"V1_C3",
     primary_key:["ROW_ID"],
     columns:[
@@ -563,63 +559,50 @@ c3_spec() {
       {source:"GRP", target:"GRP"},
       {source:"LOAD_DATE", target:"LOAD_DATE"}
     ],
-    conditions:[
-      $load_date,
-      {column:"GRP", operator:"eq", value_type:"text",
-       parameter:"grp", value_source:$value_source, constant:$constant}
-    ]
+    where_clause:($load_date + " AND GRP = \u0027" + $group + "\u0027")
   }'
 }
 
 scenario_c3() {
   start_source || return 1
-  local constant_task runtime_task sql
+  local group_a_task group_b_task sql
   mysql_exec "DELETE FROM V1_C3" >/dev/null || return 1
 
-  # ① 一个常量条件 + 一个运行时填的条件，各跑一次，行数按预期变
-  constant_task=$(create_task "C3 常量条件（GRP=A）" "$(c3_spec constant A)") || return 1
-  run_task_to_completion "$constant_task" >/dev/null || return 1
-  assert_eq "C3① constant condition outcome" SUCCEEDED "$(jq -r '.outcome' <<<"$API_BODY")" || return 1
-  assert_eq "C3① rows after constant run" 3 "$(mysql_exec "SELECT COUNT(*) FROM V1_C3")" || return 1
+  # ① 两个任务各筛一组，各跑一次，行数按预期变
+  group_a_task=$(create_task "C3 筛 GRP=A" "$(c3_spec A)") || return 1
+  run_task_to_completion "$group_a_task" >/dev/null || return 1
+  assert_eq "C3① group A outcome" SUCCEEDED "$(jq -r '.outcome' <<<"$API_BODY")" || return 1
+  assert_eq "C3① rows after the group A run" 3 "$(mysql_exec "SELECT COUNT(*) FROM V1_C3")" || return 1
   assert_eq "C3① all rows are group A" 3 "$(mysql_exec "SELECT COUNT(*) FROM V1_C3 WHERE GRP = 'A'")" || return 1
 
-  runtime_task=$(create_task "C3 运行时条件（GRP 每次填）" "$(c3_spec runtime)") || return 1
-  run_task_to_completion "$runtime_task" 400 \
-    "$(jq -nc --arg date "$BIZ_DATE" '{load_date:$date, grp:"B"}')" >/dev/null || return 1
-  assert_eq "C3① runtime condition outcome" SUCCEEDED "$(jq -r '.outcome' <<<"$API_BODY")" || return 1
+  group_b_task=$(create_task "C3 筛 GRP=B" "$(c3_spec B)") || return 1
+  run_task_to_completion "$group_b_task" 400 >/dev/null || return 1
+  assert_eq "C3① group B outcome" SUCCEEDED "$(jq -r '.outcome' <<<"$API_BODY")" || return 1
   # upsert 不删别人的行（ADR-0035 §1），所以 B 组是**加**上去的：3 + 2 = 5。
   # 判「B 组恰好 2 行」而不是只判总数——总数变了也可能是 A 组被动了。
   assert_eq "C3① group B rows after runtime run" 2 "$(mysql_exec "SELECT COUNT(*) FROM V1_C3 WHERE GRP = 'B'")" || return 1
   assert_eq "C3① total rows after both runs" 5 "$(mysql_exec "SELECT COUNT(*) FROM V1_C3")" || return 1
 
-  # ② 生成的 SQL 里值一律是绑定变量、**常量也是**（ADR-0036 §2 抬头：理由是转义正确性）
-  api POST /api/builder/sql "$(c3_spec constant A)" || return 1
+  # ② 写进文本框的那段字**原样**落在生成 SQL 的 WHERE 后面——不解析、不改写、不绑定。
+  api POST /api/builder/sql "$(c3_spec A)" || return 1
   assert_eq "C3② builder sql status" 200 "$API_STATUS" || return 1
   sql=$(jq -r '.source_sql' <<<"$API_BODY") || return 1
-  assert_eq "C3② constant is bound, not inlined" true \
-    "$([[ "$sql" == *":grp"* && "$sql" != *"'A'"* ]] && echo true || echo false)" || return 1
-  echo "C3② generated SQL (constant condition):"
-  printf '%s\n' "$sql"
-  api POST /api/builder/sql "$(c3_spec runtime)" || return 1
-  sql=$(jq -r '.source_sql' <<<"$API_BODY") || return 1
-  assert_eq "C3② runtime value is bound too" true \
-    "$([[ "$sql" == *":grp"* ]] && echo true || echo false)" || return 1
-  echo "C3② generated SQL (runtime condition):"
+  assert_eq "C3② the WHERE text reaches the SQL verbatim" true \
+    "$([[ "$sql" == *" WHERE $(load_date_clause) AND GRP = 'A'"* ]] && echo true || echo false)" || return 1
+  echo "C3② generated SQL:"
   printf '%s\n' "$sql"
 
-  # ③ 界面无手改 SQL 入口。**台架证的是协议面**：任务定义收不下裸 SQL——
-  # `TaskSpec` 是 `deny_unknown_fields`，退役的 `source_sql` 字段递进去就是 400。
-  # 界面上有没有那个输入框，归 X 走查看渲染结果，这里不冒充证过。
+  # ③ 退役的结构化条件**收不回来**：`TaskSpec` 是 `deny_unknown_fields`，
+  # 带 `conditions` / `order_by` 的老形态递进去就是 400。旧形态没有并存这一说。
   api POST /api/builder/sql \
-    "$(jq -nc --argjson spec "$(c3_spec constant A)" '$spec + {source_sql:"SELECT 1 FROM dual"}')" || return 1
-  assert_eq "C3③ hand-written SQL is refused by the protocol" 400 "$API_STATUS" || return 1
+    "$(jq -nc --argjson spec "$(c3_spec A)" '$spec + {conditions:[], order_by:[]}')" || return 1
+  assert_eq "C3③ the retired structured conditions are refused" 400 "$API_STATUS" || return 1
   echo "C3③ refusal body: $API_BODY"
-  echo "C3③ 界面上没有手改 SQL 的控件这一半归 X 走查，本报告不主张已观察"
 }
 
 c4_spec() {
   local target_table=$1
-  jq -nc --arg target_table "$target_table" --argjson load_date "$(load_date_condition)" '{
+  jq -nc --arg target_table "$target_table" --arg load_date "$(load_date_clause)" '{
     owner:"SPIKE", table:"T_V1_C4", target_table:$target_table,
     primary_key:["ROW_ID"],
     columns:[
@@ -627,7 +610,7 @@ c4_spec() {
       {source:"V_TEXT", target:"V_TEXT"},
       {source:"LOAD_DATE", target:"LOAD_DATE"}
     ],
-    conditions:[$load_date]
+    where_clause:$load_date
   }'
 }
 
@@ -684,7 +667,7 @@ scenario_c4() {
 
 c5_spec() {
   local target_table=$1
-  jq -nc --arg target_table "$target_table" --argjson load_date "$(load_date_condition)" '{
+  jq -nc --arg target_table "$target_table" --arg load_date "$(load_date_clause)" '{
     owner:"SPIKE", table:"T_V1_C5", target_table:$target_table,
     primary_key:["ROW_ID"],
     columns:[
@@ -692,7 +675,7 @@ c5_spec() {
       {source:"V_TEXT", target:"V_TEXT"},
       {source:"LOAD_DATE", target:"LOAD_DATE"}
     ],
-    conditions:[$load_date]
+    where_clause:$load_date
   }'
 }
 
@@ -744,19 +727,14 @@ scenario_c5() {
 # 这是斜率判据成立的前提（换表或换列宽，比的就不是同一件事了）。
 wide_spec() {
   local row_limit=$1
-  jq -nc --arg row_limit "$row_limit" '{
+  jq -nc --arg row_limit "$row_limit" --arg biz_date "$BIZ_DATE" '{
     owner:"SPIKE", table:"T_M1_WIDE", target_table:"V1_WIDE",
     primary_key:["ROW_ID"],
     columns:(
       [{source:"ROW_ID", target:"ROW_ID"}, {source:"D_BIZ", target:"D_BIZ"}]
       + [range(1; 69) | (if . < 10 then "C0\(.)" else "C\(.)" end) | {source:., target:.}]
     ),
-    conditions:[
-      {column:"D_BIZ", operator:"eq", value_type:"date",
-       parameter:"d_biz", value_source:"runtime", constant:""},
-      {column:"ROW_ID", operator:"lt", value_type:"number",
-       parameter:"row_limit", value_source:"constant", constant:$row_limit}
-    ]
+    where_clause:("D_BIZ = DATE \u0027" + $biz_date + "\u0027 AND ROW_ID < " + $row_limit)
   }'
 }
 
@@ -769,14 +747,13 @@ wide_spec() {
 # 证据打在 stderr、数打在 stdout：调用处要的是六个数，报告要的是全过程。
 c6_tier() {
   local label=$1 baseline_task=$2 tier_task=$3 attempts=$4
-  local sink_pid src_base sink_base src_peak sink_peak started elapsed rows params
-  params=$(jq -nc --arg date "$BIZ_DATE" '{d_biz:$date}') || return 1
+  local sink_pid src_base sink_base src_peak sink_peak started elapsed rows
 
   start_sink >&2 || return 1
   sink_pid=$(compose exec -T client cat "$SINK_PID_FILE" 2>/dev/null | tr -d '\r') || return 1
   echo "C6 $label: sink 已重启，pid=${sink_pid}（VmHWM 跨 run 只增不减，不重启比值恒为 1）" >&2
 
-  run_task_to_completion "$baseline_task" 400 "$params" >/dev/null || return 1
+  run_task_to_completion "$baseline_task" 400 >/dev/null || return 1
   [[ "$(jq -r '.outcome' <<<"$API_BODY")" == SUCCEEDED ]] ||
     { echo "C6 $label baseline run failed: $API_BODY" >&2; return 1; }
   [[ "$(jq -r '.source_rows' <<<"$API_BODY")" == 0 ]] ||
@@ -787,7 +764,7 @@ c6_tier() {
   echo "C6 $label baseline: source ru_maxrss=$src_base B, sink VmHWM=$sink_base B" >&2
 
   started=$SECONDS
-  run_task_to_completion "$tier_task" "$attempts" "$params" >/dev/null || return 1
+  run_task_to_completion "$tier_task" "$attempts" >/dev/null || return 1
   elapsed=$(( SECONDS - started ))
   [[ "$(jq -r '.outcome' <<<"$API_BODY")" == SUCCEEDED ]] ||
     { echo "C6 $label tier run failed: $API_BODY" >&2; return 1; }

@@ -27,7 +27,7 @@ import {
 import type { LatestRunStatus, TaskFilters } from "./listing";
 import { progressOf } from "./progress";
 import { RunDrawer } from "./RunDrawer";
-import { runtimeConditions, sourceSummary } from "./spec";
+import { sourceSummary } from "./spec";
 import { ActionButton, Modal, Pagination } from "./ui";
 
 /**
@@ -54,8 +54,11 @@ export interface JobCenterProps {
   onEdit: (task: Task) => void;
   onRename: (task: Task) => void;
   onDelete: (task: Task) => void;
+  /** 正在发起的那个任务的 id——**只有它那一行**的发起键在这段时间里按不动。 */
+  startingTaskId: string | null;
   onStart: (task: Task) => void;
-  onRerun: (task: Task, run: RunHistory) => void;
+  /** 重跑就是按这个任务当前的定义再跑一次；上一次那条记录不再带进来（没有可预填的东西）。 */
+  onRerun: (task: Task) => void;
   /** 批量删除跑完之后要重读清单——本屏不改 `App` 的 state。 */
   onChanged: () => void;
 }
@@ -70,6 +73,7 @@ export function JobCenterScreen({
   onEdit,
   onRename,
   onDelete,
+  startingTaskId,
   onStart,
   onRerun,
   onChanged,
@@ -161,23 +165,16 @@ export function JobCenterScreen({
    * 不加后端批量端点：那要定部分失败的语义与原子性，是它自己一票的体量，
    * 而现场规模（几十个任务）下逐条调用的代价可以忽略。
    *
-   * **带运行时参数的任务在这里直接判失败**，不去打后端：批量发起没有地方填参数值，
-   * 送一个空参数集过去只会换回一句后端的「缺参数」。与其如此，不如当场说清楚该单独发起。
+   * **没有「这条任务要先填参数」这一支了**：发起的全部输入就是任务身份，
+   * 所以批量发起与单条发起打的是同一个端点、走的是同一条路。
    */
   async function runBulkStart() {
     setBulkBusy(true);
     const failures: BulkFailure[] = [];
     let ok = 0;
     for (const task of selectedTasks) {
-      if (runtimeConditions(task.spec).length > 0) {
-        failures.push({
-          name: task.name,
-          reason: "需要填运行参数，请单独发起",
-        });
-        continue;
-      }
       try {
-        await startRun(task.task_id, {});
+        await startRun(task.task_id);
         ok += 1;
       } catch (error) {
         failures.push({ name: task.name, reason: messageFrom(error) });
@@ -386,6 +383,7 @@ export function JobCenterScreen({
           onEdit={onEdit}
           onRename={onRename}
           onDelete={onDelete}
+          startingTaskId={startingTaskId}
           onStart={onStart}
           onOpen={setOpenTaskId}
         />
@@ -414,9 +412,9 @@ export function JobCenterScreen({
           run={openRun}
           tasks={tasks}
           onClose={() => setOpenTaskId(null)}
-          onRerun={(task, run) => {
+          onRerun={(task) => {
             setOpenTaskId(null);
-            onRerun(task, run);
+            onRerun(task);
           }}
         />
       )}
@@ -497,6 +495,7 @@ function JobResults({
   onEdit,
   onRename,
   onDelete,
+  startingTaskId,
   onStart,
   onOpen,
 }: {
@@ -514,6 +513,7 @@ function JobResults({
   onEdit: (task: Task) => void;
   onRename: (task: Task) => void;
   onDelete: (task: Task) => void;
+  startingTaskId: string | null;
   onStart: (task: Task) => void;
   onOpen: (taskId: string) => void;
 }) {
@@ -659,9 +659,15 @@ function JobResults({
                 </td>
                 <td className="action-column">
                   <span className="row-actions">
+                    {/* 点了就跑：没有对话框，也没有要填的参数。**只锁这一行**的按钮，
+                        免得连点两下换回一个「已有一次运行进行中」的 409；
+                        别的行照常按得动，一条在飞不构成拦住其余每一行的理由。 */}
                     <ActionButton
-                      label="发起运行"
+                      label={
+                        startingTaskId === task.task_id ? "正在发起" : "发起运行"
+                      }
                       icon={<Play size={16} />}
+                      disabled={startingTaskId === task.task_id}
                       onClick={() => onStart(task)}
                     />
                     <span className="divider" />

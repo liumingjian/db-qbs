@@ -1,9 +1,7 @@
-# M1 台架的窄表任务定义 —— 结构化规格（ADR-0036 §1），SQL 由它现算，不再存在这里。
+# M1 台架的窄表任务定义 —— 结构化规格，SQL 由它现算，不再存在这里。
 #
-# 旧的 `d_biz >= :biz_date AND d_biz < :biz_date + 1` 半开区间在 v1 表达不出来：
-# 比较符只有 `>` `<` `=`（ADR-0035 §3 字面），没有 `>=` / `<=`。这里用 `= d` 顶上——
-# 台架里 d_biz 是纯日期（时分秒为零），单点等值与原半开区间同集合。
-# 这条表达力缺口挂在 ADR-0035 的时效 2 上，不要自作主张加 `>=`。
+# 过滤是一段自由 WHERE 文本：台架里 D_BIZ 是纯日期（时分秒为零），
+# 单点等值与旧那条 `>= d AND < d+1` 半开区间同集合，所以照旧写等值。
 
 [spec]
 owner = "SPIKE"
@@ -18,14 +16,10 @@ columns = [
 ]
 # 主键必选（所有者 2026-08-18 裁定）：撤掉 DELETE 之后，幂等全靠它。
 primary_key = ["ROW_ID"]
+# 过滤是一段自由 WHERE 文本，原样拼进生成语句的 `WHERE` 后面。
+# 台架按日期造态时替换的就是这一行（见 run-m1-acceptance.sh 的 `materialize_task`）。
+where_clause = "D_BIZ = DATE '2026-08-14'"
 
-[[spec.conditions]]
-column = "D_BIZ"
-operator = "eq"
-value_type = "date"
-parameter = "d_biz"
-value_source = "runtime"
-constant = ""
 
 # 两端连接直接写在任务文件里（ADR-0037 §1/§8）：编排进程在发起时把数据源解成明文塞进
 # 临时任务文件，M1 的 run 子进程是直接调起来的，没有编排进程，所以这一份由台架自己写死。
@@ -44,5 +38,3 @@ username = "spike"
 password = "spike123"
 database = "qbs"
 
-[run_params]
-d_biz = "2026-08-14"
