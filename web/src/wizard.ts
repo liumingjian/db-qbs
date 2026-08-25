@@ -281,12 +281,22 @@ export function openExisting(
 /**
  * Apply a change, or ask first.
  *
- * The confirmation is not a separate rule: the reducer reports what it cleared,
- * and anything hand-made in that report earns a question. That is why there is
- * no path by which "changing the source datasource" can start clearing silently
- * again — silence would require the reducer to stop reporting.
+ * The reducer reports what a cascading change clears, and anything hand-made in
+ * that report earns a question. Explicit irreversible gestures, such as deleting
+ * one source column, name their loss here and use the same confirmation result.
  */
 export function apply(draft: Draft, change: Change): Applied {
+  if (
+    change.type === "remove-column" &&
+    (draft.sourceColumns.some((column) => column.name === change.source) ||
+      draft.spec.columns.some((mapping) => mapping.source === change.source))
+  ) {
+    return {
+      kind: "needs-confirm",
+      intent: change,
+      loses: { headline: "确认删除这一列？", lines: [`源列 ${change.source} 将不再参与同步`] },
+    };
+  }
   const { draft: next, cleared } = reduce(draft, change);
   const loses = lossOf(draft, cleared);
   return loses === null
@@ -464,15 +474,20 @@ function reduce(draft: Draft, change: Change): Reduced {
       const columns = draft.spec.columns.filter(
         (mapping) => mapping.source !== change.source,
       );
-      if (columns.length === draft.spec.columns.length) {
-        return { draft, cleared: [] };
-      }
       return {
         draft: withColumns(
-          { ...draft, hand: { ...draft.hand, columns: true } },
+          {
+            ...draft,
+            hand: {
+              ...draft.hand,
+              columns: true,
+              mappings: draft.hand.mappings.filter((source) => source !== change.source),
+            },
+            sourceColumns: draft.sourceColumns.filter((column) => column.name !== change.source),
+          },
           columns,
         ),
-        cleared: ["columns"],
+        cleared: [],
       };
     }
 

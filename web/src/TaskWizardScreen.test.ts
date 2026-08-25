@@ -94,6 +94,14 @@ describe("the mapping step UI", () => {
     expect(html).not.toMatch(/>开始导入<\/button>/);
   });
 
+  it("distinguishes settled rows, exposes deletion, and explains disabled controls", () => {
+    const html = renderWizard(done(apply(mappingDraft(), { type: "toggle-column", source: "C_NAME" })));
+    expect(html).toContain("自动匹配");
+    expect(html).toContain('aria-label="删除列 ID"');
+    expect(html).toContain('title="先勾选这一列"');
+    expect(html).toContain('title="请先处理当前步骤中的问题"');
+  });
+
   it("marks both duplicate target rows in place and disables next", () => {
     let draft = done(apply(mappingDraft(), { type: "toggle-primary-key", target: "ID" }));
     draft = done(apply(draft, { type: "rename-target", source: "C_NAME", target: "ID" }));

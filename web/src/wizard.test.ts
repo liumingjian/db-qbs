@@ -213,8 +213,19 @@ describe("when a change is worth asking about", () => {
   });
 
   it("asks before deleting a column even though nothing else is cleared", () => {
-    const { lines } = agreed(workedDraft(), { type: "remove-column", source: "ID" });
-    expect(lines).toEqual(["已选的 2 列"]);
+    const { draft, lines } = agreed(workedDraft(), { type: "remove-column", source: "ID" });
+    expect(lines).toEqual(["源列 ID 将不再参与同步"]);
+    expect(draft.sourceColumns.map((column) => column.name)).not.toContain("ID");
+    expect(draft.spec.columns.map((column) => column.source)).not.toContain("ID");
+  });
+
+  it("asks before deleting a machine-selected column", () => {
+    let draft = done(apply(openNew(SOURCE, TARGET), { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
+    draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
+    expect(apply(draft, { type: "remove-column", source: "ID" })).toMatchObject({
+      kind: "needs-confirm",
+      loses: { headline: "确认删除这一列？" },
+    });
   });
 
   it("asks before a refresh only when there is hand work to overwrite", () => {
@@ -351,6 +362,21 @@ describe("staleness follows the inputs, not the clock", () => {
 });
 
 describe("derived values", () => {
+  it.each(["table", "sql"] as const)("selects every returned column in %s mode", (fetchMode) => {
+    let draft = openNew(SOURCE, TARGET);
+    if (fetchMode === "sql") {
+      draft = done(apply(draft, { type: "fetch-mode", fetchMode }));
+    }
+    draft = done(apply(draft, {
+      type: "source-columns-arrived",
+      columns: [sourceColumn("ID"), sourceColumn("C_NAME")],
+    }));
+    expect(draft.spec.columns).toEqual([
+      { source: "ID", target: "ID" },
+      { source: "C_NAME", target: "C_NAME" },
+    ]);
+  });
+
   it("generates the task name and stops the moment one is typed", () => {
     let draft = withTargetColumns(workedDraft());
     expect(taskName(draft)).toBe("APP.T_CUSTOMER → t_customer");
@@ -393,6 +419,38 @@ describe("derived values", () => {
     if (step.step !== 1) throw new Error("expected step 1");
     expect(step.rows.find((row) => row.source === "ID")?.control).toBe("auto");
     expect(step.rows.find((row) => row.source === "C_NAME")?.control).toBe("manual");
+  });
+
+  it("settles target names without caring about case", () => {
+    let draft = done(apply(openNew(SOURCE, TARGET), {
+      type: "source-columns-arrived",
+      columns: [sourceColumn("ID"), sourceColumn("C_NAME")],
+    }));
+    draft = done(apply(draft, {
+      type: "target-columns-arrived",
+      columns: [targetColumn("id"), targetColumn("c_name", 2)],
+      keys: [],
+    }));
+    const step = view(draft, 1).step;
+    if (step.step !== 1) throw new Error("expected step 1");
+    expect(step.rows.find((row) => row.source === "ID")).toMatchObject({
+      target: "ID",
+      control: "auto",
+    });
+  });
+
+  it("leaves the primary key unlocked when not every target key column is mapped", () => {
+    let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t_customer" }));
+    draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
+    draft = done(apply(draft, {
+      type: "target-columns-arrived",
+      columns: [targetColumn("ID")],
+      keys: [{ name: "PRIMARY", columns: ["ID", "TENANT_ID"] }],
+    }));
+    const step = view(draft, 1).step;
+    if (step.step !== 1) throw new Error("expected step 1");
+    expect(draft.spec.primary_key).toEqual([]);
+    expect(step.rows[0].primaryKeyLock).toBeNull();
   });
 
   it("drops a primary-key entry whose target field stops existing", () => {
