@@ -271,7 +271,15 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    whitelist, `DECIMAL`s with insufficient precision, `NUMBER`s declared without precision, and
    `TIMESTAMP` scales beyond 6 digits, and it **hard-rejects a target table lacking a primary key or
    unique constraint** (without one, `ON DUPLICATE KEY UPDATE` silently degrades into a plain INSERT).
-   It is the **only defence** against values being silently altered.
+   It is the **only defence** against values being silently altered — and the only defence that can
+   be **switched off wholesale**, which is **known gap 8**.
+   A column whose fit cannot be settled from metadata alone gets a **3.5th step, the range check**:
+   sink names the columns and the target shape derived for each, source counts how many rows of the
+   **real data** fall outside it, and **sink judges those counts** — source reports facts, never a
+   verdict. This is the **one place in the system where sink asks source to run SQL**, because the
+   distribution of the source's own data is the one thing sink cannot reach. It costs a second
+   `POST /v1/runs`: the first answers "count these, then ask again", **creates no run and stores
+   nothing**, so a range check that is never answered leaves nothing behind.
    **It is split in half by HTTP**: describing the source SQL happens in `source`, while reading target
    metadata, comparing column by column, and creating the staging table happen in `sink`. **`source`
    makes no per-column type judgement whatsoever** and reports the describe result verbatim, so that
@@ -342,3 +350,17 @@ collector (it crosses the host boundary).
    no SQL shape precheck, so the problem surfaces only during a real run, or silently loses precision.
    **The mapping precheck is unaffected**: it describes through a cursor on the sink side and remains
    a hard gate.
+8. **The mapping precheck can be switched off wholesale.** `DB_QBS_POC_RELAXED_PRECHECK=1` on the
+   sink host turns off the type whitelist, nullability, the unique-constraint check and the range
+   check **together**, and what happens to an out-of-range value then is decided by the target
+   server rather than by this product: under `STRICT_TRANS_TABLES` MySQL refuses the write, so the
+   run fails **while pushing batches** — after the source has been read in full and a staging table
+   created, rather than before anything started — and without strict mode MySQL truncates the value
+   and the write succeeds, which is the silent corruption the precheck exists to prevent. Either
+   way the gate is gone; only the shape of the damage differs.
+   It is announced **once**, in a `sink_started` warning at startup, and nowhere else: a
+   finished run's log, history and screen carry no trace of which mode it ran under. It is not a
+   capability, it is a POC-era escape hatch, and the `POC` in its name is the judgement of whoever
+   added it.
+   **Reopen when**: the first release's acceptance is done and no deployment is found to depend on
+   it — at which point it is deleted.

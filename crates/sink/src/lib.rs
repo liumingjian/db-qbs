@@ -33,7 +33,7 @@ pub use mysql_destination::{check_connection_settings, MysqlDestination, MysqlFa
 // 带主键那一支同样导出，因为漂移闸现在还要守「生成的 DDL 带主键，ADR-0035 §2 三条得过」。
 pub use precheck::{precheck, precheck_with_primary_key};
 pub use service::build_staging_ddl;
-pub(crate) use service::relaxed_precheck_enabled;
+pub use service::PrecheckMode;
 
 const MAX_PREPARED_STATEMENT_PLACEHOLDERS: usize = 65_535;
 const TOMBSTONE_LIMIT: usize = 32;
@@ -285,7 +285,7 @@ pub struct SinkService<F: DestinationFactory> {
     factory: F,
     active_runs: Mutex<HashMap<String, ActiveRun<F::Dest>>>,
     tombstones: Mutex<VecDeque<RunResponse>>,
-    relaxed_precheck: bool,
+    precheck: PrecheckMode,
 }
 
 /// sink 内部的错误模型。**它不是线上形状**——过线的是 [`ErrorEnvelope`]，

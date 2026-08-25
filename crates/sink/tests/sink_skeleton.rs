@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 use db_qbs_sink::test_support::InMemoryDestination;
 use db_qbs_sink::{
     build_staging_ddl, check_connection_settings, precheck, precheck_with_primary_key,
-    CreateStagingError, DropStagingError, OpenOutcome, OpenRunRequest, RangeCheckColumn,
-    RangeCheckResult, SinkConfig, SinkService, SourceColumn, TargetColumn, TargetConnection,
-    TargetKey,
+    CreateStagingError, DropStagingError, FixedDestination, OpenOutcome, OpenRunRequest,
+    PrecheckMode, RangeCheckColumn, RangeCheckResult, SinkConfig, SinkService, SourceColumn,
+    TargetColumn, TargetConnection, TargetKey,
 };
 
 const RUN_ID: &str = "20260814091530_a3f19c";
@@ -749,7 +749,10 @@ fn poc_relaxed_precheck_allows_mixed_types_not_null_and_split_keys() {
         ],
         ..InMemoryDestination::default()
     });
-    let service = SinkService::new_relaxed_precheck("qbs", destination.clone());
+    let service = SinkService::with_factory(
+        FixedDestination::new("qbs", destination.clone()),
+        PrecheckMode::Relaxed,
+    );
     let mut request = open_request(sources);
     request.primary_key = vec!["ID".to_owned(), "SUB_ID".to_owned()];
 
