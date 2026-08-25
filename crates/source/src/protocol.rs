@@ -9,7 +9,8 @@ use url::Url;
 // 客户端错误模型（`SinkError` 一族）与 HTTP 客户端实现。
 use db_qbs_shared::{
     AbortResponse, BatchPayload, BatchResponse, CommitRequest, CommitResponse, ErrorEnvelope,
-    OpenRunRequest, OpenRunResponse, PrecheckIssue, RunResponse,
+    OpenOutcome, OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn,
+    RangeCheckResult, RunResponse,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -70,8 +71,85 @@ impl SinkError {
     }
 }
 
+/// 一个开成了的 run。**没有第二种状态**——拿到它就意味着暂存表已建、可以推批次了。
+///
+/// 这正是它不是 [`OpenRunResponse`] 的原因：那个型别还带着「其实没开成」的可能，
+/// 而调用方一旦漏读一个字段就会往一个不存在的 run 里推批次。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenedRun {
+    pub staging_table: String,
+    pub columns_checked: usize,
+}
+
+/// 开 run 没能开成的三种缘由。**三者的处置各不相同**，所以它们在型别上就是分开的：
+/// 目标端拒绝要把预检问题逐条报给人看，值域校核失败是源端故障，而剩下那类是目标端有缺陷。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenFailure<E> {
+    /// 目标端拒绝或不可达。预检未过也走这条（`PRECHECK_FAILED`，`precheck_issues` 里逐条带着）。
+    Sink(SinkError),
+    /// 值域校核在源端没跑成。`E` 是调用方自己的源端错误型别。
+    RangeCheck(E),
+    /// 目标端答非所问。只可能在目标端有缺陷时出现，人话已经在里面了。
+    Defect(&'static str),
+}
+
 pub trait SinkClient {
-    fn open(&mut self, request: &OpenRunRequest) -> Result<OpenRunResponse, SinkError>;
+    /// 一次 `POST /v1/runs` 往返。**它可能回「还没开成」**（[`OpenOutcome::RangeCheckNeeded`]）——
+    /// 两段式的第二段由 [`SinkClient::open`] 走完，实现这个 trait 只需管好一次往返。
+    fn open_attempt(&mut self, request: &OpenRunRequest) -> Result<OpenOutcome, SinkError>;
+
+    /// 开一个 run，**两段式在这里走完**。
+    ///
+    /// sink 跑完映射预检的 1–3 步后，可能回过头来要求源端跑 3.5 步值域校核：那一步要数真实
+    /// 数据里有多少行超出目标列的值域，只有源端够得着。此时目标端**什么都没建、什么都没存**，
+    /// 要拿着同一份请求、附上校核结果再问一次。`range_check` 就是「去把这几列数一遍」，
+    /// 由调用方提供——数据从哪来是它的事，这里只负责把结果填回请求里续走。
+    ///
+    /// 调用方看不到这一切：要么拿到一个 [`OpenedRun`]，要么拿到一条说得出缘由的失败。
+    fn open<E>(
+        &mut self,
+        mut request: OpenRunRequest,
+        mut range_check: impl FnMut(&[RangeCheckColumn]) -> Result<Vec<RangeCheckResult>, E>,
+    ) -> Result<OpenedRun, OpenFailure<E>> {
+        let mut asked_already = false;
+        loop {
+            let outcome = self.open_attempt(&request).map_err(OpenFailure::Sink)?;
+            // run_id 由源端生成、原样回显。对不上说明目标端认错了 run，两次往返各校验一次:
+            // 第二次对不上意味着中途换了个 run，值得与第一次分开说。
+            if outcome.run_id() != request.run_id {
+                return Err(OpenFailure::Defect(if asked_already {
+                    "目标端第二次开任务响应的 run_id 与请求不一致"
+                } else {
+                    "目标端开任务响应的 run_id 与请求不一致"
+                }));
+            }
+            match outcome {
+                OpenOutcome::Opened {
+                    staging_table,
+                    columns_checked,
+                    ..
+                } => {
+                    return Ok(OpenedRun {
+                        staging_table,
+                        columns_checked,
+                    })
+                }
+                OpenOutcome::RangeCheckNeeded { columns, .. } => {
+                    // 附上结果之后目标端只可能开成或拒绝。再要一次就是它的状态机坏了，
+                    // 这里必须停：接着推批次只会撞上一个不存在的 run。
+                    if asked_already {
+                        return Err(OpenFailure::Defect(
+                            "目标端收到值域校核结果后仍要求值域校核",
+                        ));
+                    }
+                    request.range_check_results =
+                        Some(range_check(&columns).map_err(OpenFailure::RangeCheck)?);
+                    asked_already = true;
+                }
+            }
+        }
+    }
+
     fn push_batch(
         &mut self,
         run_id: &str,
@@ -137,12 +215,13 @@ impl HttpSinkClient {
 }
 
 impl SinkClient for HttpSinkClient {
-    fn open(&mut self, request: &OpenRunRequest) -> Result<OpenRunResponse, SinkError> {
-        self.post(
+    fn open_attempt(&mut self, request: &OpenRunRequest) -> Result<OpenOutcome, SinkError> {
+        let response: OpenRunResponse = self.post(
             "/v1/runs",
             serde_json::to_value(request).expect("open request must serialize"),
             None,
-        )
+        )?;
+        Ok(OpenOutcome::from_response(response))
     }
 
     fn push_batch(

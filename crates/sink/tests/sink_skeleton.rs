@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex};
 use db_qbs_sink::test_support::InMemoryDestination;
 use db_qbs_sink::{
     build_staging_ddl, check_connection_settings, precheck, precheck_with_primary_key,
-    CreateStagingError, DropStagingError, OpenRunRequest, RangeCheckColumn, RangeCheckResult,
-    SinkConfig, SinkService, SourceColumn, TargetColumn, TargetConnection, TargetKey,
+    CreateStagingError, DropStagingError, OpenOutcome, OpenRunRequest, RangeCheckColumn,
+    RangeCheckResult, SinkConfig, SinkService, SourceColumn, TargetColumn, TargetConnection,
+    TargetKey,
 };
 
 const RUN_ID: &str = "20260814091530_a3f19c";
@@ -195,13 +196,40 @@ fn the_three_nullability_branches_judge_mapped_and_unmapped_columns_apart() {
     }];
     // 第 1 分支：被映射到的主键列必须 NOT NULL。第 2 分支：被映射到的非主键列必须可空。
     let key_column = target_column(
-        "ID", "decimal(10,0)", "decimal", Some(10), Some(0), None, None, false, None, 1,
+        "ID",
+        "decimal(10,0)",
+        "decimal",
+        Some(10),
+        Some(0),
+        None,
+        None,
+        false,
+        None,
+        1,
     );
     let mapped = target_column(
-        "C_NAME", "varchar(50)", "varchar", None, None, Some(50), None, true, Some("utf8mb4"), 2,
+        "C_NAME",
+        "varchar(50)",
+        "varchar",
+        None,
+        None,
+        Some(50),
+        None,
+        true,
+        Some("utf8mb4"),
+        2,
     );
     let audit = target_column(
-        "CREATE_TIME", "datetime", "datetime", None, None, None, Some(0), false, None, 3,
+        "CREATE_TIME",
+        "datetime",
+        "datetime",
+        None,
+        None,
+        None,
+        Some(0),
+        false,
+        None,
+        3,
     );
     let judge = |extra_column: &TargetColumn, key_nullable: bool, mapped_nullable: bool| {
         let mut key_column = key_column.clone();
@@ -225,7 +253,10 @@ fn the_three_nullability_branches_judge_mapped_and_unmapped_columns_apart() {
         .unwrap_or_else(|| panic!("{issues:?}"));
     // 报告形态不变（ADR-0009 §8），这一档的源列一栏写「（未映射）」。
     assert_eq!(unmapped.source, "（未映射）");
-    assert!(unmapped.rule.contains("未被映射且不允许留空"), "{unmapped:?}");
+    assert!(
+        unmapped.rule.contains("未被映射且不允许留空"),
+        "{unmapped:?}"
+    );
     assert!(unmapped.rule.contains("CREATE_TIME"), "{unmapped:?}");
     assert!(unmapped.suggestion.is_some());
 
@@ -239,7 +270,16 @@ fn the_three_nullability_branches_judge_mapped_and_unmapped_columns_apart() {
 
     // 第 3 分支之放行 ②：auto_increment 由数据库自己填。
     let mut auto_id = target_column(
-        "SEQ_NO", "bigint", "bigint", Some(20), Some(0), None, None, false, None, 4,
+        "SEQ_NO",
+        "bigint",
+        "bigint",
+        Some(20),
+        Some(0),
+        None,
+        None,
+        false,
+        None,
+        4,
     );
     // 未映射的列不比类型——它压根没有源端对应物。
     auto_id.extra = "auto_increment".to_owned();
@@ -625,14 +665,18 @@ fn open_creates_staging_then_abort_is_idempotent() {
     });
     let service = SinkService::new("qbs", destination.clone());
 
-    let opened = service.open(open_request(sources)).unwrap();
+    let OpenOutcome::Opened {
+        run_id,
+        staging_table,
+        columns_checked,
+    } = service.open(open_request(sources)).unwrap()
+    else {
+        panic!("nothing needs a range check here, so the run must open outright");
+    };
 
-    assert_eq!(opened.run_id, RUN_ID);
-    assert_eq!(
-        opened.staging_table,
-        "T_POSITION__stg_20260814091530_a3f19c"
-    );
-    assert_eq!(opened.columns_checked, 3);
+    assert_eq!(run_id, RUN_ID);
+    assert_eq!(staging_table, "T_POSITION__stg_20260814091530_a3f19c");
+    assert_eq!(columns_checked, 3);
     assert_eq!(destination.created.lock().unwrap().len(), 1);
 
     assert!(service.abort(RUN_ID).unwrap().staging_dropped);
@@ -654,8 +698,30 @@ fn poc_relaxed_precheck_allows_mixed_types_not_null_and_split_keys() {
         source_column("SUB_ID", "NUMBER", Some(10), Some(0), None),
     ];
     let targets = vec![
-        target_column("C_VALUE", "int", "int", Some(10), Some(0), None, None, false, None, 1),
-        target_column("ID", "int", "int", Some(10), Some(0), None, None, false, None, 2),
+        target_column(
+            "C_VALUE",
+            "int",
+            "int",
+            Some(10),
+            Some(0),
+            None,
+            None,
+            false,
+            None,
+            1,
+        ),
+        target_column(
+            "ID",
+            "int",
+            "int",
+            Some(10),
+            Some(0),
+            None,
+            None,
+            false,
+            None,
+            2,
+        ),
         target_column(
             "SUB_ID",
             "int",
@@ -687,9 +753,14 @@ fn poc_relaxed_precheck_allows_mixed_types_not_null_and_split_keys() {
     let mut request = open_request(sources);
     request.primary_key = vec!["ID".to_owned(), "SUB_ID".to_owned()];
 
-    let opened = service.open(request).unwrap();
+    let OpenOutcome::Opened {
+        columns_checked, ..
+    } = service.open(request).unwrap()
+    else {
+        panic!("relaxed precheck skips the range check entirely");
+    };
 
-    assert_eq!(opened.columns_checked, 3);
+    assert_eq!(columns_checked, 3);
     assert_eq!(destination.created.lock().unwrap().len(), 1);
 }
 
@@ -733,15 +804,18 @@ fn bare_number_range_check_delays_staging_and_rejects_invalid_rows() {
 
     let first = service.open(open_request(sources.clone())).unwrap();
 
-    assert_eq!(first.staging_table, "");
-    assert_eq!(first.columns_checked, 2);
+    // 「还没开成」是一个 outcome，不是一个填了空串的响应：暂存表没建，`active_runs` 里也没有条目。
     assert_eq!(
-        first.range_check_columns,
-        Some(vec![RangeCheckColumn {
-            column: "N_RAW".to_owned(),
-            precision: 10,
-            scale: 2,
-        }])
+        first,
+        OpenOutcome::RangeCheckNeeded {
+            run_id: RUN_ID.to_owned(),
+            columns_checked: 2,
+            columns: vec![RangeCheckColumn {
+                column: "N_RAW".to_owned(),
+                precision: 10,
+                scale: 2,
+            }],
+        }
     );
     assert!(destination.created.lock().unwrap().is_empty());
 
@@ -812,7 +886,10 @@ fn bare_number_range_check_with_no_invalid_rows_creates_staging() {
 
     let opened = service.open(second_request).unwrap();
 
-    assert_eq!(opened.range_check_columns, None);
+    assert!(
+        matches!(opened, OpenOutcome::Opened { .. }),
+        "results in hand, the second ask must open the run rather than ask again"
+    );
     assert_eq!(destination.created.lock().unwrap().len(), 1);
 }
 
@@ -925,9 +1002,14 @@ fn open_accepts_a_supported_timestamp_business_date_column() {
     });
     let service = SinkService::new("qbs", destination);
 
-    let opened = service.open(open_request(sources)).unwrap();
+    let OpenOutcome::Opened {
+        columns_checked, ..
+    } = service.open(open_request(sources)).unwrap()
+    else {
+        panic!("a mapped DATE column needs no range check");
+    };
 
-    assert_eq!(opened.columns_checked, 1);
+    assert_eq!(columns_checked, 1);
 }
 
 #[test]

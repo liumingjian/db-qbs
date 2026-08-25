@@ -142,7 +142,9 @@ pub struct OpenRunRequest {
     pub range_check_results: Option<Vec<RangeCheckResult>>,
 }
 
-/// `POST /v1/runs` 的响应体。
+/// `POST /v1/runs` 的响应体。**它有两种含义，别直接读字段**——
+/// 「已开成」与「先去跑值域校核」都走 200，靠 `staging_table` 空串 + `range_check_columns`
+/// 有值这一对暗号区分。暗号只在 [`crate::OpenOutcome`] 里认一次，两端都经由它构造与读取。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenRunResponse {

@@ -25,8 +25,9 @@ pub use agent::{fetch_agent_info, normalize_base_url, Agent, AgentInput, AgentSt
 // crate 内部与既有测试的引用路径一个字不变。
 pub use db_qbs_shared::{
     AbortResponse, BatchPayload, BatchResponse, ColumnSupport, CommitRequest, CommitResponse,
-    ErrorBody, ErrorEnvelope, OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn,
-    RangeCheckResult, RunResponse, RunStage, SourceColumn, TargetConnection, Terminal,
+    ErrorBody, ErrorEnvelope, OpenOutcome, OpenRunRequest, OpenRunResponse, PrecheckIssue,
+    RangeCheckColumn, RangeCheckResult, RunResponse, RunStage, SourceColumn, TargetConnection,
+    Terminal,
 };
 // 九行形态的推导也只有一份定义（#125）——判定式仍两端各一份。
 pub use datasource::{
@@ -41,7 +42,9 @@ pub use db_qbs_shared::{
 pub use db_qbs_shared::{swap_rows_in_range, RowCounts, Verdict};
 pub use failure_kind::{oracle_kind, FailureKind};
 pub use oracle_source::OracleRowSource;
-pub use protocol::{HttpSinkClient, SinkClient, SinkError, SinkErrorKind, SinkGateDetails};
+pub use protocol::{
+    HttpSinkClient, OpenFailure, OpenedRun, SinkClient, SinkError, SinkErrorKind, SinkGateDetails,
+};
 pub use run_history::{
     expired_history_indices, fold_history_lines, HistoryChange, HistoryStore, RunHistory,
     UnknownReason,

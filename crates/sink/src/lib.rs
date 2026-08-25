@@ -18,15 +18,15 @@ use serde_json::Value;
 // crate 内部与既有测试的引用路径一个字不变。
 pub use db_qbs_shared::{
     AbortResponse, BatchPayload, BatchResponse, ColumnSupport, CommitRequest, CommitResponse,
-    ErrorBody, ErrorEnvelope, OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn,
-    RangeCheckResult, RunResponse, SourceColumn, TargetConnection, Terminal,
+    ErrorBody, ErrorEnvelope, OpenOutcome, OpenRunRequest, OpenRunResponse, PrecheckIssue,
+    RangeCheckColumn, RangeCheckResult, RunResponse, SourceColumn, TargetConnection, Terminal,
 };
 // 九行形态的推导也只有一份定义（#125）——判定式仍两端各一份。
+pub use agent::load_or_create as load_agent_identity;
 pub use db_qbs_shared::{
     classify_column, column_support, derive_number_shape, is_business_date_column,
     is_supported_decimal_shape, ColumnShape, ShapeRejection, TargetShape,
 };
-pub use agent::load_or_create as load_agent_identity;
 pub use http::serve;
 pub use mysql_destination::{check_connection_settings, MysqlDestination, MysqlFactory};
 // `precheck` 是不带主键那一支，只给「生成的表喂回预检必过」那道漂移闸用；

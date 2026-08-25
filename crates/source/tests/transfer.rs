@@ -1,8 +1,8 @@
 use db_qbs_source::{
     generate_run_id, run_transfer, BatchPayload, BatchResponse, ColumnSupport, CommitResponse,
-    FailureKind, OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn,
-    RangeCheckResult, RowSource, RunResponse, SinkClient, SinkError, SinkErrorKind, SourceColumn,
-    SourceReadError, TargetConnection, Terminal, TransferEvent, TransferRequest, BATCH_BYTE_BUDGET,
+    FailureKind, OpenOutcome, OpenRunRequest, PrecheckIssue, RangeCheckColumn, RangeCheckResult,
+    RowSource, RunResponse, SinkClient, SinkError, SinkErrorKind, SourceColumn, SourceReadError,
+    TargetConnection, Terminal, TransferEvent, TransferRequest, BATCH_BYTE_BUDGET,
 };
 
 /// 目标端连接（ADR-0037 §1）。搬运骨架不读它，只是原样塞进 `OpenRunRequest`——
@@ -248,6 +248,38 @@ fn range_check_runs_between_two_open_requests_and_emits_scan_event() {
     )));
 }
 
+/// 目标端收下校核结果之后再要一次，就是它的状态机坏了。以前这里**静默放行**：
+/// 第二答的 `staging_table` 是空串，搬运照常往下走，第一批就撞上一个不存在的 run 的 404。
+#[test]
+fn a_sink_that_asks_for_a_range_check_twice_is_a_defect_and_no_batch_is_pushed() {
+    let mut source = FakeSource::new(vec![vec![Some("1".to_owned())]]);
+    source.range_check = Some((
+        vec![RangeCheckResult {
+            column: "ID".to_owned(),
+            invalid_rows: 0,
+        }],
+        7,
+    ));
+    let mut sink = AlwaysRangeCheckSink::default();
+
+    let failure = run_transfer(
+        &mut source,
+        &mut sink,
+        TransferRequest {
+            run_id: RUN_ID.to_owned(),
+            target_table: "ORDERS".to_owned(),
+            target: target(),
+            primary_key: vec!["ID".to_owned()],
+        },
+        |_| {},
+    )
+    .unwrap_err();
+
+    assert_eq!(failure.kind, FailureKind::Defect);
+    assert_eq!(failure.stage, db_qbs_source::RunStage::Preparing);
+    assert_eq!(sink.calls, vec!["open", "open", "abort"]);
+}
+
 #[test]
 fn fetch_failure_aborts_and_does_not_commit() {
     let mut source = FailingSource {
@@ -472,6 +504,14 @@ impl RowSource for FailingSource {
     }
 }
 
+fn opened_run() -> OpenOutcome {
+    OpenOutcome::Opened {
+        run_id: RUN_ID.to_owned(),
+        staging_table: format!("ORDERS__stg_{RUN_ID}"),
+        columns_checked: 1,
+    }
+}
+
 #[derive(Default)]
 struct RecordingSink {
     calls: Vec<&'static str>,
@@ -484,26 +524,20 @@ struct RecordingSink {
 }
 
 impl SinkClient for RecordingSink {
-    fn open(&mut self, request: &OpenRunRequest) -> Result<OpenRunResponse, SinkError> {
+    fn open_attempt(&mut self, request: &OpenRunRequest) -> Result<OpenOutcome, SinkError> {
         self.calls.push("open");
         self.range_check_requests
             .push(request.range_check_results.clone());
         if request.range_check_results.is_none() {
             if let Some(range_check_columns) = &self.range_check_columns {
-                return Ok(OpenRunResponse {
+                return Ok(OpenOutcome::RangeCheckNeeded {
                     run_id: RUN_ID.to_owned(),
-                    staging_table: String::new(),
                     columns_checked: 1,
-                    range_check_columns: Some(range_check_columns.clone()),
+                    columns: range_check_columns.clone(),
                 });
             }
         }
-        Ok(OpenRunResponse {
-            run_id: RUN_ID.to_owned(),
-            staging_table: format!("ORDERS__stg_{RUN_ID}"),
-            columns_checked: 1,
-            range_check_columns: None,
-        })
+        Ok(opened_run())
     }
 
     fn push_batch(
@@ -560,13 +594,60 @@ impl SinkClient for RecordingSink {
     }
 }
 
+/// 一个坏掉的目标端：拿到校核结果之后照旧要求再核一遍。
+#[derive(Default)]
+struct AlwaysRangeCheckSink {
+    calls: Vec<&'static str>,
+}
+
+impl SinkClient for AlwaysRangeCheckSink {
+    fn open_attempt(&mut self, _request: &OpenRunRequest) -> Result<OpenOutcome, SinkError> {
+        self.calls.push("open");
+        Ok(OpenOutcome::RangeCheckNeeded {
+            run_id: RUN_ID.to_owned(),
+            columns_checked: 1,
+            columns: vec![RangeCheckColumn {
+                column: "ID".to_owned(),
+                precision: 8,
+                scale: 0,
+            }],
+        })
+    }
+
+    fn push_batch(
+        &mut self,
+        _run_id: &str,
+        _payload: &BatchPayload,
+    ) -> Result<BatchResponse, SinkError> {
+        unreachable!("the run never opened, so no batch may be pushed")
+    }
+
+    fn commit(
+        &mut self,
+        _run_id: &str,
+        _total_batches: u64,
+        _total_rows: u64,
+    ) -> Result<CommitResponse, SinkError> {
+        unreachable!("the run never opened, so it cannot commit")
+    }
+
+    fn get(&mut self, _run_id: &str) -> Result<RunResponse, SinkError> {
+        unreachable!()
+    }
+
+    fn abort(&mut self, _run_id: &str) -> Result<bool, SinkError> {
+        self.calls.push("abort");
+        Ok(true)
+    }
+}
+
 #[derive(Default)]
 struct RejectingOpenSink {
     calls: Vec<&'static str>,
 }
 
 impl SinkClient for RejectingOpenSink {
-    fn open(&mut self, _request: &OpenRunRequest) -> Result<OpenRunResponse, SinkError> {
+    fn open_attempt(&mut self, _request: &OpenRunRequest) -> Result<OpenOutcome, SinkError> {
         self.calls.push("open");
         let mut error = SinkError::response(Some("PRECHECK_FAILED".to_owned()), "mapping rejected");
         error.precheck_issues = Box::new(vec![PrecheckIssue {
@@ -634,14 +715,9 @@ impl CommitDisconnectSink {
 }
 
 impl SinkClient for CommitDisconnectSink {
-    fn open(&mut self, _request: &OpenRunRequest) -> Result<OpenRunResponse, SinkError> {
+    fn open_attempt(&mut self, _request: &OpenRunRequest) -> Result<OpenOutcome, SinkError> {
         self.calls.push("open");
-        Ok(OpenRunResponse {
-            run_id: RUN_ID.to_owned(),
-            staging_table: format!("ORDERS__stg_{RUN_ID}"),
-            columns_checked: 1,
-            range_check_columns: None,
-        })
+        Ok(opened_run())
     }
 
     fn push_batch(

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use db_qbs_shared::{RowCounts, Verdict};
+use db_qbs_shared::{OpenOutcome, RowCounts, Verdict};
 use regex::Regex;
 use serde_json::json;
 
@@ -9,9 +9,9 @@ use crate::precheck::{precheck_with_primary_key, range_check_columns, range_chec
 use crate::{
     AbortResponse, ActiveRun, ApiError, AtomicSwapError, AtomicSwapRequest, BatchPayload,
     BatchResponse, CommitResponse, CreateStagingError, Destination, DestinationFactory,
-    DropStagingError, FixedDestination, OpenRunRequest, OpenRunResponse, PrecheckIssue,
-    RangeCheckColumn, RangeCheckResult, RunResponse, SinkService, SourceColumn, TargetColumn,
-    Terminal, WriteBatchError, MAX_PREPARED_STATEMENT_PLACEHOLDERS, TOMBSTONE_LIMIT,
+    DropStagingError, FixedDestination, OpenRunRequest, PrecheckIssue, RangeCheckColumn,
+    RangeCheckResult, RunResponse, SinkService, SourceColumn, TargetColumn, Terminal,
+    WriteBatchError, MAX_PREPARED_STATEMENT_PLACEHOLDERS, TOMBSTONE_LIMIT,
 };
 
 static RUN_ID_RE: LazyLock<Regex> =
@@ -55,7 +55,10 @@ impl<F: DestinationFactory> SinkService<F> {
         }
     }
 
-    pub fn open(&self, request: OpenRunRequest) -> Result<OpenRunResponse, ApiError> {
+    /// 开一个 run。**回 [`OpenOutcome::RangeCheckNeeded`] 时什么都没建、什么都没存**——
+    /// 预检的 1–3 步过了，但 3.5 步值域校核要源端去数真实数据，本次调用到此为止。
+    /// 那不是「开成了一半」，`active_runs` 里不会有条目，此时推批次只会拿到 404。
+    pub fn open(&self, request: OpenRunRequest) -> Result<OpenOutcome, ApiError> {
         validate_open_request(&request)?;
 
         // 连接先建起来：目标端元数据、暂存表 DDL、写批次、切换全在这一条连接上跑。
@@ -107,11 +110,10 @@ impl<F: DestinationFactory> SinkService<F> {
         };
         if !range_columns.is_empty() {
             let Some(results) = request.range_check_results.as_deref() else {
-                return Ok(OpenRunResponse {
+                return Ok(OpenOutcome::RangeCheckNeeded {
                     run_id: request.run_id,
-                    staging_table: String::new(),
                     columns_checked: target_columns.len(),
-                    range_check_columns: Some(range_columns),
+                    columns: range_columns,
                 });
             };
             append_range_check_issues(
@@ -179,11 +181,10 @@ impl<F: DestinationFactory> SinkService<F> {
             .expect("active run mutex poisoned")
             .insert(request.run_id.clone(), active_run);
 
-        Ok(OpenRunResponse {
+        Ok(OpenOutcome::Opened {
             run_id: request.run_id,
             staging_table,
             columns_checked: target_columns.len(),
-            range_check_columns: None,
         })
     }
 

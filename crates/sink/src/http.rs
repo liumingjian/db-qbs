@@ -173,7 +173,8 @@ fn handle_open(
         Err(error) => return error_response(error),
     };
     match service.open(request) {
-        Ok(response) => json_response(200, &response),
+        // 两种 outcome 都是 200，区别写在报文里——那份暗号由 `OpenOutcome` 一处编码。
+        Ok(outcome) => json_response(200, &outcome.into_response()),
         Err(error) => error_response(error),
     }
 }
@@ -575,8 +576,11 @@ mod tests {
         assert_eq!(status, 400, "{flattened}");
         assert_eq!(flattened["error"]["code"], "BAD_REQUEST");
 
-        let (status, missing_table) =
-            exchange(service, "/v1/target/columns", &format!(r#"{{"target":{target}}}"#));
+        let (status, missing_table) = exchange(
+            service,
+            "/v1/target/columns",
+            &format!(r#"{{"target":{target}}}"#),
+        );
         assert_eq!(status, 400, "{missing_table}");
     }
 

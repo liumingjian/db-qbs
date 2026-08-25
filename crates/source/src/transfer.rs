@@ -5,7 +5,7 @@ use chrono::Utc;
 use rand::RngCore;
 
 use crate::{
-    swap_rows_in_range, BatchPayload, FailureKind, OpenRunRequest, RangeCheckColumn,
+    swap_rows_in_range, BatchPayload, FailureKind, OpenFailure, OpenRunRequest, RangeCheckColumn,
     RangeCheckResult, RowCounts, RunResponse, RunStage, SinkClient, SinkError, SinkErrorKind,
     SourceColumn, TargetConnection, Terminal,
 };
@@ -254,7 +254,7 @@ pub fn run_transfer(
     let cursor_started = Instant::now();
     observe(TransferEvent::StageChanged(RunStage::Preparing));
 
-    let mut open_request = OpenRunRequest {
+    let open_request = OpenRunRequest {
         run_id: request.run_id.clone(),
         target_table: request.target_table,
         target: request.target,
@@ -262,9 +262,21 @@ pub fn run_transfer(
         source_columns: source.columns().to_vec(),
         range_check_results: None,
     };
-    let opened = match sink.open(&open_request) {
+    // 开 run 可能是两段的：sink 要值域校核时，由这个闭包去源端把数取回来。往返几次、
+    // 暗号长什么样、run_id 校验几遍，都在 `SinkClient::open` 里，这里看不见也不必知道。
+    let open_result = sink.open(open_request, |columns| {
+        let range_started = Instant::now();
+        let (range_check_results, scanned_rows) = source.range_check(columns)?;
+        observe(TransferEvent::RangeCheckExecuted {
+            columns: columns.iter().map(|column| column.column.clone()).collect(),
+            scanned_rows,
+            ms: elapsed_ms(range_started.elapsed()),
+        });
+        Ok(range_check_results)
+    });
+    let opened = match open_result {
         Ok(opened) => opened,
-        Err(error) => {
+        Err(OpenFailure::Sink(error)) => {
             for issue in error.precheck_issues.iter() {
                 observe(TransferEvent::MappingPrecheckFailed {
                     column: issue.column.clone(),
@@ -284,103 +296,32 @@ pub fn run_transfer(
                 ),
             ));
         }
-    };
-    if opened.run_id != request.run_id {
-        return Err(fail_before_commit(
-            sink,
-            &request.run_id,
-            &mut observe,
-            TransferFailure::new(
-                RunStage::Preparing,
-                FailureKind::Defect,
-                "目标端开任务响应的 run_id 与请求不一致",
-                0,
-                0,
-            )
-            .with_timings(
-                Duration::ZERO,
-                Duration::ZERO,
-                Duration::ZERO,
-                cursor_started.elapsed(),
-            ),
-        ));
-    }
-    let opened = if let Some(range_columns) = opened.range_check_columns.clone() {
-        if range_columns.is_empty() {
-            opened
-        } else {
-            let range_started = Instant::now();
-            let (range_check_results, scanned_rows) = match source.range_check(&range_columns) {
-                Ok(result) => result,
-                Err(error) => {
-                    observe(TransferEvent::StageChanged(RunStage::Failed));
-                    return Err(Box::new(
-                        TransferFailure::from_source_error(RunStage::Preparing, error, 0, 0)
-                            .with_timings(
-                                Duration::ZERO,
-                                Duration::ZERO,
-                                Duration::ZERO,
-                                cursor_started.elapsed(),
-                            ),
-                    ));
-                }
-            };
-            observe(TransferEvent::RangeCheckExecuted {
-                columns: range_columns
-                    .iter()
-                    .map(|column| column.column.clone())
-                    .collect(),
-                scanned_rows,
-                ms: elapsed_ms(range_started.elapsed()),
-            });
-            open_request.range_check_results = Some(range_check_results);
-            match sink.open(&open_request) {
-                Ok(opened) => opened,
-                Err(error) => {
-                    for issue in error.precheck_issues.iter() {
-                        observe(TransferEvent::MappingPrecheckFailed {
-                            column: issue.column.clone(),
-                            source: issue.source.clone(),
-                            target: issue.target.clone(),
-                            rule: issue.rule.clone(),
-                            suggestion: issue.suggestion.clone(),
-                        });
-                    }
-                    observe(TransferEvent::StageChanged(RunStage::Failed));
-                    return Err(Box::new(
-                        sink_failure(error, RunStage::Preparing, 0, 0, None).with_timings(
-                            Duration::ZERO,
-                            Duration::ZERO,
-                            Duration::ZERO,
-                            cursor_started.elapsed(),
-                        ),
-                    ));
-                }
-            }
+        Err(OpenFailure::RangeCheck(error)) => {
+            observe(TransferEvent::StageChanged(RunStage::Failed));
+            return Err(Box::new(
+                TransferFailure::from_source_error(RunStage::Preparing, error, 0, 0).with_timings(
+                    Duration::ZERO,
+                    Duration::ZERO,
+                    Duration::ZERO,
+                    cursor_started.elapsed(),
+                ),
+            ));
         }
-    } else {
-        opened
+        Err(OpenFailure::Defect(message)) => {
+            return Err(fail_before_commit(
+                sink,
+                &request.run_id,
+                &mut observe,
+                TransferFailure::new(RunStage::Preparing, FailureKind::Defect, message, 0, 0)
+                    .with_timings(
+                        Duration::ZERO,
+                        Duration::ZERO,
+                        Duration::ZERO,
+                        cursor_started.elapsed(),
+                    ),
+            ));
+        }
     };
-    if opened.run_id != request.run_id {
-        return Err(fail_before_commit(
-            sink,
-            &request.run_id,
-            &mut observe,
-            TransferFailure::new(
-                RunStage::Preparing,
-                FailureKind::Defect,
-                "目标端第二次开任务响应的 run_id 与请求不一致",
-                0,
-                0,
-            )
-            .with_timings(
-                Duration::ZERO,
-                Duration::ZERO,
-                Duration::ZERO,
-                cursor_started.elapsed(),
-            ),
-        ));
-    }
     observe(TransferEvent::RunOpened {
         staging_table: opened.staging_table,
         columns_checked: opened.columns_checked,

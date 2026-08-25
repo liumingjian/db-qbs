@@ -6,11 +6,13 @@ use chrono::{NaiveDate, SecondsFormat, Utc};
 use regex::Regex;
 use serde::{Serialize, Serializer};
 
+mod open_outcome;
 mod protocol;
 mod run_stage;
 mod target_shape;
 mod verification;
 
+pub use open_outcome::OpenOutcome;
 pub use protocol::{
     AbortResponse, AgentInfo, BatchPayload, BatchResponse, ColumnSupport, CommitRequest,
     CommitResponse, ErrorBody, ErrorEnvelope, OpenRunRequest, OpenRunResponse, PrecheckIssue,

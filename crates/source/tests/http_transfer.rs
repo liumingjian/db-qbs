@@ -108,7 +108,7 @@ fn error_response_preserves_sink_diagnostics() {
 
     let mut sink = HttpSinkClient::new(&base_url).unwrap();
     let error = sink
-        .open(&OpenRunRequest {
+        .open_attempt(&OpenRunRequest {
             run_id: RUN_ID.to_owned(),
             target_table: "ORDERS".to_owned(),
             target: TargetConnection {

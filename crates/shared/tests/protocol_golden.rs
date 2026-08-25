@@ -9,8 +9,9 @@
 
 use db_qbs_shared::{
     AbortResponse, AgentInfo, BatchPayload, BatchResponse, ColumnSupport, CommitRequest,
-    CommitResponse, ErrorBody, ErrorEnvelope, OpenRunRequest, OpenRunResponse, PrecheckIssue,
-    RangeCheckColumn, RangeCheckResult, RunResponse, SourceColumn, TargetConnection, Terminal,
+    CommitResponse, ErrorBody, ErrorEnvelope, OpenOutcome, OpenRunRequest, OpenRunResponse,
+    PrecheckIssue, RangeCheckColumn, RangeCheckResult, RunResponse, SourceColumn, TargetConnection,
+    Terminal,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -255,6 +256,73 @@ fn open_run_response_shape_with_range_check_columns() {
             "range_check_columns": [{ "column": "AMT", "precision": 10, "scale": 2 }]
         }),
     );
+}
+
+/// 「还没开成」那一答的暗号：空 `staging_table` 配上有值的 `range_check_columns`。
+/// 两端都不再手搓这一对，但**线上的字节一个都没动**——这里钉的就是那件事。
+#[test]
+fn range_check_needed_outcome_keeps_the_bytes_it_has_always_had() {
+    let response = OpenOutcome::RangeCheckNeeded {
+        run_id: "run-1".to_owned(),
+        columns_checked: 2,
+        columns: vec![RangeCheckColumn {
+            column: "AMT".to_owned(),
+            precision: 10,
+            scale: 2,
+        }],
+    }
+    .into_response();
+
+    round_trip(
+        response.clone(),
+        json!({
+            "run_id": "run-1",
+            "staging_table": "",
+            "columns_checked": 2,
+            "range_check_columns": [{ "column": "AMT", "precision": 10, "scale": 2 }]
+        }),
+    );
+    assert!(matches!(
+        OpenOutcome::from_response(response),
+        OpenOutcome::RangeCheckNeeded { .. }
+    ));
+}
+
+#[test]
+fn opened_outcome_keeps_the_bytes_it_has_always_had() {
+    let response = OpenOutcome::Opened {
+        run_id: "run-1".to_owned(),
+        staging_table: "ORDERS__stg_run-1".to_owned(),
+        columns_checked: 2,
+    }
+    .into_response();
+
+    round_trip(
+        response.clone(),
+        json!({
+            "run_id": "run-1",
+            "staging_table": "ORDERS__stg_run-1",
+            "columns_checked": 2
+        }),
+    );
+    assert!(matches!(
+        OpenOutcome::from_response(response),
+        OpenOutcome::Opened { .. }
+    ));
+}
+
+/// 「要核这零列」不是一个请求。旧 source 一向把它当作开成了，换成 outcome 之后仍然如此。
+#[test]
+fn an_empty_range_check_list_reads_as_opened() {
+    assert!(matches!(
+        OpenOutcome::from_response(OpenRunResponse {
+            run_id: "run-1".to_owned(),
+            staging_table: "ORDERS__stg_run-1".to_owned(),
+            columns_checked: 2,
+            range_check_columns: Some(Vec::new()),
+        }),
+        OpenOutcome::Opened { .. }
+    ));
 }
 
 #[test]
