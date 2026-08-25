@@ -4,6 +4,7 @@ import {
   LoaderCircle,
   RefreshCw,
   Search,
+  Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -46,6 +47,8 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
   const [targetFilter, setTargetFilter] = useState("");
   const [expandedOwners, setExpandedOwners] = useState<ReadonlySet<string>>(new Set());
   const [busy, setBusy] = useState<"tables" | "columns" | "target" | "submit" | null>(null);
+  const tableRequest = useRef(0);
+  const sourceColumnRequest = useRef(0);
   const targetColumnRequest = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [sql, setSql] = useState<BuilderSql | null>(null);
@@ -80,61 +83,102 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
   }
 
   async function loadTables() {
-    if (draft.fetchMode !== "table") return;
+    const request = ++tableRequest.current;
+    const current = draftRef.current;
+    if (current.fetchMode !== "table") return;
+    const datasourceId = current.source.datasource_id;
+    const dblink = current.spec.dblink?.trim() ?? "";
     setBusy("tables");
     setError(null);
     try {
-      const next = await fetchBuilderTables(
-        draft.source.datasource_id,
-        draft.spec.dblink?.trim() ?? "",
-      );
+      const next = await fetchBuilderTables(datasourceId, dblink);
+      const latest = draftRef.current;
+      if (
+        request !== tableRequest.current ||
+        latest.fetchMode !== "table" ||
+        latest.source.datasource_id !== datasourceId ||
+        (latest.spec.dblink?.trim() ?? "") !== dblink
+      ) return;
       setTables(next);
       const owners = new Set(next.map((table) => table.owner));
       if (owners.size === 1) setExpandedOwners(owners);
     } catch (loadError) {
-      setError(messageFrom(loadError));
+      const latest = draftRef.current;
+      if (
+        request === tableRequest.current &&
+        latest.fetchMode === "table" &&
+        latest.source.datasource_id === datasourceId &&
+        (latest.spec.dblink?.trim() ?? "") === dblink
+      ) setError(messageFrom(loadError));
     } finally {
-      setBusy(null);
+      if (request === tableRequest.current) {
+        setBusy((currentBusy) => currentBusy === "tables" ? null : currentBusy);
+      }
     }
   }
 
   async function loadSourceColumns() {
+    const request = ++sourceColumnRequest.current;
+    const current = draftRef.current;
+    const datasourceId = current.source.datasource_id;
+    const fetchMode = current.fetchMode;
+    const dblink = current.spec.dblink?.trim() ?? "";
+    const owner = current.spec.owner;
+    const table = current.spec.table;
+    const sourceSql = current.spec.source_sql?.trim() ?? "";
+    if (fetchMode === "sql" ? sourceSql === "" : owner === "" || table === "") return;
     setBusy("columns");
     setError(null);
     try {
-      if (draft.fetchMode === "sql") {
-        const sourceSql = draft.spec.source_sql?.trim() ?? "";
-        if (sourceSql === "") return;
+      let columns;
+      if (fetchMode === "sql") {
         const fetched = await fetchBuilderSqlColumns({
-          datasource_id: draft.source.datasource_id,
+          datasource_id: datasourceId,
           source_sql: sourceSql,
         });
-        change({
-          type: "source-columns-arrived",
-          columns: fetched.map((column) => ({
-            name: column.name,
-            data_type: column.type,
-            precision: column.precision,
-            scale: column.scale,
-            length: column.length,
-            nullable: true,
-          })),
-        });
-      } else if (draft.spec.owner !== "" && draft.spec.table !== "") {
-        change({
-          type: "source-columns-arrived",
-          columns: await fetchBuilderColumns({
-            datasource_id: draft.source.datasource_id,
-            dblink: draft.spec.dblink?.trim() ?? "",
-            owner: draft.spec.owner,
-            table: draft.spec.table,
-          }),
+        columns = fetched.map((column) => ({
+          name: column.name,
+          data_type: column.type,
+          precision: column.precision,
+          scale: column.scale,
+          length: column.length,
+          nullable: true,
+        }));
+      } else {
+        columns = await fetchBuilderColumns({
+          datasource_id: datasourceId,
+          dblink,
+          owner,
+          table,
         });
       }
+      const latest = draftRef.current;
+      const stillCurrent =
+        request === sourceColumnRequest.current &&
+        latest.fetchMode === fetchMode &&
+        latest.source.datasource_id === datasourceId &&
+        (fetchMode === "sql"
+          ? (latest.spec.source_sql?.trim() ?? "") === sourceSql
+          : (latest.spec.dblink?.trim() ?? "") === dblink &&
+            latest.spec.owner === owner && latest.spec.table === table);
+      if (stillCurrent) {
+        change({ type: "source-columns-arrived", columns });
+      }
     } catch (loadError) {
-      setError(messageFrom(loadError));
+      const latest = draftRef.current;
+      const stillCurrent =
+        request === sourceColumnRequest.current &&
+        latest.fetchMode === fetchMode &&
+        latest.source.datasource_id === datasourceId &&
+        (fetchMode === "sql"
+          ? (latest.spec.source_sql?.trim() ?? "") === sourceSql
+          : (latest.spec.dblink?.trim() ?? "") === dblink &&
+            latest.spec.owner === owner && latest.spec.table === table);
+      if (stillCurrent) setError(messageFrom(loadError));
     } finally {
-      setBusy(null);
+      if (request === sourceColumnRequest.current) {
+        setBusy((currentBusy) => currentBusy === "columns" ? null : currentBusy);
+      }
     }
   }
 
@@ -173,6 +217,11 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
     }
   }
 
+  function refreshTarget() {
+    change({ type: "refresh-target-columns" });
+    void loadTarget();
+  }
+
   useEffect(() => {
     let active = true;
     void Promise.all([
@@ -199,7 +248,13 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
     if (draft.fetchMode === "table" && draft.spec.owner !== "" && draft.spec.table !== "") {
       void loadSourceColumns();
     }
-  }, [draft.fetchMode, draft.spec.owner, draft.spec.table]);
+  }, [draft.fetchMode, draft.source.datasource_id, draft.spec.dblink, draft.spec.owner, draft.spec.table]);
+
+  useEffect(() => {
+    if (draft.fetchMode !== "sql" || (draft.spec.source_sql?.trim() ?? "") === "") return;
+    const timer = window.setTimeout(() => void loadSourceColumns(), 350);
+    return () => window.clearTimeout(timer);
+  }, [draft.fetchMode, draft.source.datasource_id, draft.spec.source_sql]);
 
   useEffect(() => {
     if (draft.spec.target_table !== "") void loadTarget();
@@ -351,7 +406,12 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
           </section>
 
           <section className="wizard-context-section">
-            <div className="wizard-context-title"><strong>目标端 · {model.context.targetName}</strong></div>
+            <div className="wizard-context-title">
+              <strong>目标端 · {model.context.targetName}</strong>
+              <button className="icon-button" type="button" disabled={draft.spec.target_table === "" || busy === "target"} title={draft.spec.target_table === "" ? "先选择目标表" : busy === "target" ? "正在刷新目标列" : "刷新目标列"} aria-label="刷新目标列" onClick={refreshTarget}>
+                <RefreshCw className={busy === "target" ? "is-spinning" : ""} size={15} />
+              </button>
+            </div>
             <label className="tree-search">
               <Search size={14} aria-hidden="true" />
               <input value={targetFilter} placeholder="筛选目标表" onChange={(event) => setTargetFilter(event.target.value)} />
@@ -395,7 +455,7 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
             busy={busy}
             change={change}
             loadSourceColumns={() => void loadSourceColumns()}
-            loadTarget={() => void loadTarget()}
+            loadTarget={refreshTarget}
           />
           {error !== null && <div className="form-error" role="alert">{error}</div>}
         </div>
@@ -410,12 +470,13 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
                 className="button is-primary"
                 type="button"
                 disabled={draft.step !== 3 && advanceBlocked}
+                title={draft.step !== 3 && advanceBlocked ? "请先处理当前步骤中的问题" : undefined}
                 onClick={advance}
               >{draft.step === 3 ? "查看确认页" : "下一步"}</button>
             ) : (
               <>
-                <button className="button" type="button" disabled={busy === "submit" || canAdvance(draft, 4).length > 0} onClick={() => void submit("save-only")}>只保存</button>
-                <button className="button is-primary" type="button" disabled={busy === "submit" || canAdvance(draft, 4).length > 0} onClick={() => void submit("start")}>
+                <button className="button" type="button" disabled={busy === "submit" || canAdvance(draft, 4).length > 0} title={busy === "submit" ? "正在提交" : canAdvance(draft, 4)[0]?.message} onClick={() => void submit("save-only")}>只保存</button>
+                <button className="button is-primary" type="button" disabled={busy === "submit" || canAdvance(draft, 4).length > 0} title={busy === "submit" ? "正在提交" : canAdvance(draft, 4)[0]?.message} onClick={() => void submit("start")}>
                   {busy === "submit" ? <LoaderCircle className="is-spinning" size={15} /> : null}开始导入
                 </button>
               </>
@@ -450,17 +511,18 @@ function StepBody({
     return <section className="wizard-step">
       <header><h1>选列与字段映射</h1><p>确认要搬哪些列，以及每一列写到目标表的哪里。</p></header>
       {draft.fetchMode === "sql" && (
-        <button className="button" type="button" disabled={(draft.spec.source_sql ?? "").trim() === "" || busy === "columns"} onClick={loadSourceColumns}>
-          {busy === "columns" ? <LoaderCircle className="is-spinning" size={15} /> : null}识别结果列
+        <button className="button" type="button" disabled={(draft.spec.source_sql ?? "").trim() === "" || busy === "columns"} title={(draft.spec.source_sql ?? "").trim() === "" ? "先在左侧填写 SQL" : busy === "columns" ? "正在刷新结果列" : undefined} onClick={loadSourceColumns}>
+          {busy === "columns" ? <LoaderCircle className="is-spinning" size={15} /> : <RefreshCw size={15} />}刷新结果列
         </button>
       )}
-      {model.rows.length === 0 ? <p className="wizard-empty">{draft.fetchMode === "sql" ? "先在左侧写好 SQL，再识别结果列。" : "先在左侧选择一张源表。"}</p> : (
-        <div className="table-wrap"><table className="data-grid wizard-mapping"><thead><tr><th>同步</th><th>源列</th><th>目标列</th><th>主键</th></tr></thead><tbody>
+      {model.rows.length === 0 ? <p className="wizard-empty">{draft.fetchMode === "sql" ? "先在左侧写好 SQL，系统会自动识别结果列。" : "先在左侧选择一张源表。"}</p> : (
+        <div className="table-wrap"><table className="data-grid wizard-mapping"><thead><tr><th>同步</th><th>源列</th><th>目标列</th><th>主键</th><th aria-label="操作" /></tr></thead><tbody>
           {model.rows.map((row) => <tr className={row.problem ? "is-problem" : ""} key={row.source}>
             <td><input type="checkbox" checked={row.selected} onChange={() => change({ type: "toggle-column", source: row.source })} /></td>
             <td><span className="mono">{row.source}</span></td>
             <td>{!row.selected ? "—" : <>{row.control === "auto" ? <span>{row.target} <small className="auto-mark">自动匹配</small></span> : <select aria-invalid={row.problem ? true : undefined} value={row.target} onChange={(event) => change({ type: "rename-target", source: row.source, target: event.target.value })}><option value="">请选择</option>{draft.targetColumns.map((column) => <option key={column.name}>{column.name}</option>)}</select>}{row.problem && <small>{row.problem}</small>}</>}</td>
-            <td><input type="checkbox" disabled={!row.selected || row.target === "" || row.primaryKeyLock !== null} title={row.primaryKeyLock ?? undefined} checked={row.primaryKey} onChange={() => change({ type: "toggle-primary-key", target: row.target })} />{row.primaryKeyLock && <small>{row.primaryKeyLock}</small>}</td>
+            <td><input type="checkbox" disabled={!row.selected || row.target === "" || row.primaryKeyLock !== null} title={!row.selected ? "先勾选这一列" : row.target === "" ? "先选择目标列" : row.primaryKeyLock ?? undefined} checked={row.primaryKey} onChange={() => change({ type: "toggle-primary-key", target: row.target })} />{row.primaryKeyLock && <small>{row.primaryKeyLock}</small>}</td>
+            <td><button className="icon-button is-danger" type="button" title={`删除列 ${row.source}`} aria-label={`删除列 ${row.source}`} onClick={() => change({ type: "remove-column", source: row.source })}><Trash2 size={15} /></button></td>
           </tr>)}
         </tbody></table></div>
       )}
