@@ -455,12 +455,22 @@ describe("what goes out", () => {
 });
 
 describe("opening a saved task", () => {
-  it("lands on the earliest step that needs attention", () => {
+  it("opens ordinary editing at the mapping step", () => {
+    expect(openExisting(savedTask(), SOURCE, TARGET).step).toBe(1);
+  });
+
+  it("honours a remediation step when its prerequisites pass", () => {
+    expect(openExisting(savedTask(), SOURCE, TARGET, true, 3).step).toBe(3);
+  });
+
+  it("falls back to the earliest failed prerequisite", () => {
     const broken = savedTask();
     broken.spec.primary_key = [];
-    expect(openExisting(broken, SOURCE, TARGET).step).toBe(1);
-    // 一份四步都通得过的任务落在第 1 步，因为上下文在那里。
-    expect(openExisting(savedTask(), SOURCE, TARGET, false).step).toBe(1);
+    expect(openExisting(broken, SOURCE, TARGET, true, 3).step).toBe(1);
+  });
+
+  it("stops a confirmation-page request at the missing target check", () => {
+    expect(openExisting(savedTask(), SOURCE, TARGET, true, 4).step).toBe(3);
   });
 });
 

@@ -196,16 +196,31 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
   }, [draft.fetchMode, draft.source.datasource_id, draft.spec.dblink]);
 
   useEffect(() => {
-    if (draft.fetchMode === "table" && draft.spec.owner !== "" && draft.spec.table !== "") {
+    if (
+      draft.step === 1 &&
+      draft.fetchMode === "table" &&
+      draft.spec.owner !== "" &&
+      draft.spec.table !== ""
+    ) {
       void loadSourceColumns();
     }
-  }, [draft.fetchMode, draft.spec.owner, draft.spec.table]);
+  }, [draft.step, draft.fetchMode, draft.spec.owner, draft.spec.table]);
 
   useEffect(() => {
-    if (draft.spec.target_table !== "") void loadTarget();
-  }, [draft.target.datasource_id, draft.spec.target_table]);
+    if (
+      (draft.step === 1 || draft.step === 3) &&
+      draft.spec.target_table !== ""
+    ) {
+      void loadTarget();
+    }
+  }, [draft.step, draft.target.datasource_id, draft.spec.target_table]);
 
   useEffect(() => {
+    if (draft.step !== 2) {
+      setSql(null);
+      setSqlError(null);
+      return;
+    }
     if (canAdvance(draft, 1).length > 0) {
       setSql(null);
       setSqlError(null);
@@ -272,7 +287,7 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
   }
 
   return (
-    <section className="task-wizard" aria-label="新建导入">
+    <section className="task-wizard" aria-label={draft.mode === "edit" ? "编辑任务" : "新建导入"}>
       <aside className="wizard-context">
         <header>
           <strong>导入上下文</strong>
@@ -412,6 +427,10 @@ export function TaskWizardScreen({ initial, onCancel, onSubmit }: TaskWizardScre
                 disabled={draft.step !== 3 && advanceBlocked}
                 onClick={advance}
               >{draft.step === 3 ? "查看确认页" : "下一步"}</button>
+            ) : draft.mode === "edit" ? (
+              <button className="button is-primary" type="button" disabled={busy === "submit" || canAdvance(draft, 4).length > 0} onClick={() => void submit("save-only")}>
+                {busy === "submit" ? <LoaderCircle className="is-spinning" size={15} /> : null}保存
+              </button>
             ) : (
               <>
                 <button className="button" type="button" disabled={busy === "submit" || canAdvance(draft, 4).length > 0} onClick={() => void submit("save-only")}>只保存</button>
@@ -448,7 +467,7 @@ function StepBody({
   if (model.step === 1) {
     const mappingBlockers = model.blockers.filter((blocker) => blocker.column === null);
     return <section className="wizard-step">
-      <header><h1>选列与字段映射</h1><p>确认要搬哪些列，以及每一列写到目标表的哪里。</p></header>
+      <header><h1>选列与字段映射</h1><p>系统会先做同名匹配，请判断要搬哪些列，以及每一列应写到目标表的哪里。</p></header>
       {draft.fetchMode === "sql" && (
         <button className="button" type="button" disabled={(draft.spec.source_sql ?? "").trim() === "" || busy === "columns"} onClick={loadSourceColumns}>
           {busy === "columns" ? <LoaderCircle className="is-spinning" size={15} /> : null}识别结果列
@@ -469,7 +488,7 @@ function StepBody({
   }
   if (model.step === 2) {
     return <section className="wizard-step">
-      <header><h1>过滤与验证</h1><p>检查最终查询；按表取数时可以补一段自由 WHERE 条件。</p></header>
+      <header><h1>过滤与验证</h1><p>检查最终查询与样例数据，并判断是否需要补充 WHERE 条件。</p></header>
       {model.whereEditable ? <div className="where-clause-editor"><HighlightedSqlInput value={model.where} placeholder="STATUS = 'ACTIVE' AND CREATED_AT >= DATE '2026-01-01'" label="WHERE 条件" rows={5} onChange={(clause) => change({ type: "where", clause })} /></div> : <div className="wizard-readonly">自定义 SQL 的过滤条件直接写在左侧 SQL 中。</div>}
       <section className="generated-sql"><header><div><strong>构建 SQL</strong><span>实际执行的源端查询</span></div></header>{sqlError ? <div className="form-error">{sqlError}</div> : sql ? <pre className="ddl-output">{sql.source_sql}</pre> : <p className="spec-empty">先完成字段映射与主键，系统才有完整 SQL。</p>}</section>
       <div className="wizard-placeholder"><strong>数据预览</strong><span>前 10 行真实数据预览将在 #188 接入。</span></div>
@@ -478,13 +497,13 @@ function StepBody({
   }
   if (model.step === 3) {
     return <section className="wizard-step">
-      <header><h1>目标表检查</h1><p>这里将核对列、类型、长度与主键，检查通过后才能运行。</p></header>
+      <header><h1>目标表检查</h1><p>系统会核对列、类型、长度与主键，请根据检查结果判断是否需要调整目标表。</p></header>
       <div className="wizard-placeholder is-prominent"><strong>目标表检查接口正在接入</strong><span>当前页面保留完整步骤位置；#187 会在这里展示逐列结论与完整建表语句。</span><button className="button" type="button" disabled={busy === "target"} onClick={loadTarget}><RefreshCw className={busy === "target" ? "is-spinning" : ""} size={15} />刷新目标表元数据</button></div>
     </section>;
   }
   const confirmView = model.confirm;
   return <section className="wizard-step">
-    <header><h1>确认并运行</h1><p>最后核对一次这次导入的完整决定。</p></header>
+    <header><h1>确认并运行</h1><p>最后核对系统汇总的完整决定，并判断是否可以保存或开始导入。</p></header>
     <label className="wizard-name">任务名<input value={taskName(draft)} onChange={(event) => change({ type: "task-name", name: event.target.value })} /></label>
     <dl className="wizard-confirm-grid">
       <div><dt>源端</dt><dd>{confirmView.sourceLabel}</dd></div>

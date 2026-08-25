@@ -234,16 +234,20 @@ export function openNew(
 }
 
 /**
- * Editing lands on the step that needs attention, not always on the first one.
+ * Open a saved task at the caller's point of entry.
  *
- * "The relevant step" is the earliest one whose gate does not pass; a task that
- * is entirely sound opens on step 1, which is where its context is.
+ * A run failure can name the step that needs remediation, while ordinary editing
+ * starts at the mapping step. The requested step is still bounded by the gates
+ * before it, so an invalid saved mapping cannot be hidden by a request for a
+ * later step. Metadata is deliberately absent here and is fetched by the screen
+ * only when the chosen step needs it.
  */
 export function openExisting(
   task: Task,
   source: DraftBinding,
   target: DraftBinding,
   targetAgentOnline = true,
+  requestedStep: Step = 1,
 ): Draft {
   const sql = task.spec.source_sql?.trim() ?? "";
   const draft: Draft = {
@@ -263,9 +267,11 @@ export function openExisting(
     preview: null,
     check: null,
   };
-  const steps: Step[] = [1, 2, 3, 4];
-  const relevant = steps.find((step) => canAdvance(draft, step).length > 0);
-  return { ...draft, step: relevant ?? 1 };
+  const prerequisiteSteps: Step[] = [1, 2, 3, 4].filter(
+    (step): step is Step => step < requestedStep,
+  );
+  const blocked = prerequisiteSteps.find((step) => canAdvance(draft, step).length > 0);
+  return { ...draft, step: blocked ?? requestedStep };
 }
 
 // ---------------------------------------------------------------------------
