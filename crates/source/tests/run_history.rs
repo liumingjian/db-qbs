@@ -3,12 +3,46 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{TimeDelta, TimeZone, Utc};
 use db_qbs_source::{
-    expired_history_indices, fold_history_lines, HistoryStore, RunHistory, UnknownReason,
+    expired_history_indices, fold_history_lines, AgentEvidence, ColumnMapping, HistoryStore,
+    RunEvidence, RunHistory, RunParametersEvidence, SourceEvidence, TargetEvidence, UnknownReason,
 };
 
 const SOURCE_SQL: &str = "SELECT a.ID AS ID\n  FROM APP.ORDERS a\n WHERE D_BIZ = DATE '2026-08-14'";
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+fn evidence() -> RunEvidence {
+    RunEvidence {
+        source: Some(SourceEvidence {
+            datasource_id: "source-1".to_owned(),
+            connect_string: "//oracle:1521/XE".to_owned(),
+            username: "source".to_owned(),
+            client_lib_dir: "/opt/oracle".to_owned(),
+        }),
+        target: Some(TargetEvidence {
+            datasource_id: "target-1".to_owned(),
+            host: "mysql".to_owned(),
+            port: 3306,
+            database: "qbs".to_owned(),
+            username: "sink".to_owned(),
+        }),
+        agent: Some(AgentEvidence {
+            agent_id: "agent-1".to_owned(),
+            name: "target agent".to_owned(),
+            base_url: "http://agent:8080".to_owned(),
+            instance_id: "instance-1".to_owned(),
+        }),
+        parameters: Some(RunParametersEvidence {
+            target_table: "ORDERS".to_owned(),
+            columns: vec![ColumnMapping {
+                source: "ID".to_owned(),
+                target: "ID".to_owned(),
+            }],
+            primary_key: vec!["ID".to_owned()],
+            source_sql: SOURCE_SQL.to_owned(),
+        }),
+    }
+}
 
 #[test]
 fn retention_uses_injected_now_and_a_time_boundary() {
@@ -226,5 +260,73 @@ fn cleanup_metadata_persists_the_run_target_and_becomes_single_use() {
     assert_eq!(cleaned.status, "cleaned");
     assert_eq!(cleaned.deleted_rows, Some(7));
 
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn evidence_round_trips_and_save_preserves_the_original_snapshot_without_passwords() {
+    let suffix = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "db-qbs-run-evidence-test-{}-{suffix}",
+        std::process::id()
+    ));
+    fs::create_dir(&directory).unwrap();
+    let store = HistoryStore::open(&directory).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 25, 12, 0, 0).unwrap();
+    let mut history = RunHistory::accepted("record-evidence", "task-1", SOURCE_SQL, now);
+    history.evidence = evidence();
+    store.insert(&history, now, 90).unwrap();
+
+    let mut stored = store.get("record-evidence").unwrap().unwrap();
+    assert_eq!(stored.evidence, history.evidence);
+    stored.message = Some("later failure".to_owned());
+    store.save(&stored, now, 90).unwrap();
+    assert_eq!(store.get("record-evidence").unwrap().unwrap().evidence, evidence());
+
+    let serialized = serde_json::to_string(&stored).unwrap();
+    assert!(!serialized.contains("oracle-password"));
+    assert!(!serialized.contains("mysql-password"));
+    let connection = rusqlite::Connection::open(directory.join("db-qbs.sqlite3")).unwrap();
+    let encoded: String = connection
+        .query_row(
+            "SELECT evidence FROM run_history WHERE run_record_id = 'record-evidence'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!encoded.contains("password"));
+    drop(connection);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn opening_an_old_history_schema_adds_empty_evidence_without_inventing_facts() {
+    let suffix = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "db-qbs-run-evidence-migration-test-{}-{suffix}",
+        std::process::id()
+    ));
+    fs::create_dir(&directory).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 25, 12, 0, 0).unwrap();
+    let store = HistoryStore::open(&directory).unwrap();
+    store
+        .insert(
+            &RunHistory::accepted("old-record", "task-1", SOURCE_SQL, now),
+            now,
+            90,
+        )
+        .unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(directory.join("db-qbs.sqlite3")).unwrap();
+    connection
+        .execute("ALTER TABLE run_history DROP COLUMN evidence", [])
+        .unwrap();
+    drop(connection);
+
+    let reopened = HistoryStore::open(&directory).unwrap();
+    assert_eq!(
+        reopened.get("old-record").unwrap().unwrap().evidence,
+        RunEvidence::default()
+    );
     fs::remove_dir_all(directory).unwrap();
 }

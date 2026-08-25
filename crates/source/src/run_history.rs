@@ -8,12 +8,12 @@ use rusqlite::{named_params, params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{FailureKind, RunStage};
+use crate::{ColumnMapping, FailureKind, RunStage};
 
 const DATABASE_FILE: &str = "db-qbs.sqlite3";
 
 macro_rules! history_params {
-    ($history:expr, $mapping_issues:expr) => {
+    ($history:expr, $mapping_issues:expr, $evidence:expr) => {
         named_params! {
             ":run_record_id": $history.run_record_id,
             ":run_id": $history.run_id,
@@ -52,8 +52,54 @@ macro_rules! history_params {
             ":last_ts": $history.last_ts,
             ":source_sql": $history.source_sql,
             ":mapping_issues": $mapping_issues,
+            ":evidence": $evidence,
         }
     };
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunEvidence {
+    #[serde(default)]
+    pub source: Option<SourceEvidence>,
+    #[serde(default)]
+    pub target: Option<TargetEvidence>,
+    #[serde(default)]
+    pub agent: Option<AgentEvidence>,
+    #[serde(default)]
+    pub parameters: Option<RunParametersEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceEvidence {
+    pub datasource_id: String,
+    pub connect_string: String,
+    pub username: String,
+    pub client_lib_dir: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetEvidence {
+    pub datasource_id: String,
+    pub host: String,
+    pub port: u16,
+    pub database: String,
+    pub username: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentEvidence {
+    pub agent_id: String,
+    pub name: String,
+    pub base_url: String,
+    pub instance_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunParametersEvidence {
+    pub target_table: String,
+    pub columns: Vec<ColumnMapping>,
+    pub primary_key: Vec<String>,
+    pub source_sql: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +146,9 @@ pub struct RunHistory {
     /// 规格改了它也不能跟着变。过滤条件是原样拼进 `WHERE` 的一段文本，所以这一份就是
     /// 执行的全文——没有另一半取值需要对照着读。
     pub source_sql: String,
+    /// 开跑前从已经解出的连接与任务规格逐字段抄下的无口令快照。
+    /// 空对象只表示这条历史早于快照功能，展示层不得拿当前配置补写过去。
+    pub evidence: RunEvidence,
     pub staging_table: Option<String>,
     pub started_at: String,
     pub finished_at: Option<String>,
@@ -161,6 +210,7 @@ impl RunHistory {
             run_id: None,
             task_id: task_id.to_owned(),
             source_sql: source_sql.to_owned(),
+            evidence: RunEvidence::default(),
             staging_table: None,
             started_at: accepted_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             finished_at: None,
@@ -419,7 +469,8 @@ impl HistoryStore {
                     bytes               INTEGER NOT NULL,
                     ms                  INTEGER NOT NULL,
                     last_ts             TEXT,
-                    mapping_issues      TEXT NOT NULL DEFAULT '[]'
+                    mapping_issues      TEXT NOT NULL DEFAULT '[]',
+                    evidence            TEXT NOT NULL DEFAULT '{}'
                 );
                  CREATE INDEX IF NOT EXISTS run_history_task_started
                      ON run_history(task_id, started_at_ms);
@@ -434,6 +485,7 @@ impl HistoryStore {
             )
             .map_err(|error| format!("初始化 SQLite 运行历史表失败：{error}"))?;
         ensure_json_column(&connection, "mapping_issues")?;
+        ensure_json_object_column(&connection, "evidence")?;
         ensure_nullable_text_column(&connection, "failure_kind")?;
         ensure_nullable_integer_column(&connection, "total_rows")?;
         ensure_nullable_integer_column(&connection, "precount_ms")?;
@@ -451,6 +503,7 @@ impl HistoryStore {
             .transaction()
             .map_err(|error| format!("开启 SQLite 运行历史事务失败：{error}"))?;
         let mapping_issues = json_array_text(&history.mapping_issues)?;
+        let evidence = json_object_text(&history.evidence)?;
         transaction
             .execute(
                 "INSERT INTO run_history (
@@ -460,7 +513,7 @@ impl HistoryStore {
                     received_batches, total_rows, precount_ms,
                     fetch_ms, push_ms, commit_ms, count_ms, cursor_ms,
                     source_code, sink_code, [column], [value], message, unknown_reason,
-                    failure_kind, seq, rows_pushed, bytes, ms, last_ts, mapping_issues
+                    failure_kind, seq, rows_pushed, bytes, ms, last_ts, mapping_issues, evidence
                  ) VALUES (
                     :run_record_id, :run_id, :task_id, :source_sql, :staging_table,
                     :started_at, :started_at_ms, :finished_at, :outcome, :target_table_effect,
@@ -469,9 +522,9 @@ impl HistoryStore {
                     :fetch_ms, :push_ms, :commit_ms,
                     :count_ms, :cursor_ms, :source_code, :sink_code, :column, :value,
                     :message, :unknown_reason, :failure_kind, :seq, :rows_pushed, :bytes, :ms,
-                    :last_ts, :mapping_issues
+                    :last_ts, :mapping_issues, :evidence
                  )",
-                history_params!(history, mapping_issues),
+                history_params!(history, mapping_issues, evidence),
             )
             .map_err(|error| format!("插入 SQLite 运行历史失败：{error}"))?;
         cleanup_transaction(&transaction, now, retention_days)?;
@@ -491,6 +544,7 @@ impl HistoryStore {
             .transaction()
             .map_err(|error| format!("开启 SQLite 运行历史事务失败：{error}"))?;
         let mapping_issues = json_array_text(&history.mapping_issues)?;
+        let evidence = json_object_text(&history.evidence)?;
         transaction
             .execute(
                 "UPDATE run_history SET
@@ -509,9 +563,9 @@ impl HistoryStore {
                     unknown_reason=:unknown_reason, failure_kind=:failure_kind, seq=:seq,
                     rows_pushed=:rows_pushed,
                     bytes=:bytes, ms=:ms, last_ts=:last_ts,
-                    mapping_issues=:mapping_issues
+                    mapping_issues=:mapping_issues, evidence=:evidence
                   WHERE run_record_id=:run_record_id",
-                history_params!(history, mapping_issues),
+                history_params!(history, mapping_issues, evidence),
             )
             .map_err(|error| format!("更新 SQLite 运行历史失败：{error}"))?;
         cleanup_transaction(&transaction, now, retention_days)?;
@@ -759,6 +813,26 @@ fn ensure_json_column(connection: &Connection, name: &str) -> Result<(), String>
     Ok(())
 }
 
+fn ensure_json_object_column(connection: &Connection, name: &str) -> Result<(), String> {
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('run_history') WHERE name = ?1)",
+            [name],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("检查 SQLite 运行历史列 {name} 失败：{error}"))?;
+    if exists {
+        return Ok(());
+    }
+    connection
+        .execute(
+            &format!("ALTER TABLE run_history ADD COLUMN {name} TEXT NOT NULL DEFAULT '{{}}'"),
+            [],
+        )
+        .map_err(|error| format!("迁移 SQLite 运行历史列 {name} 失败：{error}"))?;
+    Ok(())
+}
+
 /// 补一列可空 INTEGER。老库里没有这一列，老历史行补出来就是 `NULL`——
 /// 那正是实话：那些运行跑的时候还没有「开跑前计数」这回事。
 fn ensure_nullable_integer_column(connection: &Connection, name: &str) -> Result<(), String> {
@@ -807,6 +881,10 @@ fn json_array_text(values: &[Value]) -> Result<String, String> {
     serde_json::to_string(values).map_err(|error| format!("序列化运行历史诊断失败：{error}"))
 }
 
+fn json_object_text(value: &RunEvidence) -> Result<String, String> {
+    serde_json::to_string(value).map_err(|error| format!("序列化运行证据失败：{error}"))
+}
+
 fn text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }
@@ -826,7 +904,7 @@ const HISTORY_SELECT: &str = "SELECT
     total_rows, precount_ms,
     commit_ms, count_ms, cursor_ms, source_code, sink_code, [column], [value],
     message, unknown_reason, failure_kind, seq, rows_pushed, bytes, ms, last_ts,
-    mapping_issues
+    mapping_issues, evidence
   FROM run_history";
 
 fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunHistory> {
@@ -835,6 +913,7 @@ fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunHistory> {
         run_id: row.get("run_id")?,
         task_id: row.get("task_id")?,
         source_sql: row.get("source_sql")?,
+        evidence: json_object_from_row(row, "evidence")?,
         staging_table: row.get("staging_table")?,
         started_at: row.get("started_at")?,
         started_at_ms: row.get("started_at_ms")?,
@@ -872,6 +951,18 @@ fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunHistory> {
 }
 
 fn json_array_from_row(row: &rusqlite::Row<'_>, name: &str) -> rusqlite::Result<Vec<Value>> {
+    let encoded: String = row.get(name)?;
+    let column_index = row.as_ref().column_index(name)?;
+    serde_json::from_str(&encoded).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column_index,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })
+}
+
+fn json_object_from_row(row: &rusqlite::Row<'_>, name: &str) -> rusqlite::Result<RunEvidence> {
     let encoded: String = row.get(name)?;
     let column_index = row.as_ref().column_index(name)?;
     serde_json::from_str(&encoded).map_err(|error| {

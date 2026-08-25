@@ -17,6 +17,7 @@ import type { FormEvent } from "react";
 
 import {
   createTask,
+  cancelRun,
   deleteTask,
   fetchBuilderColumns,
   fetchBuilderDblinks,
@@ -425,6 +426,17 @@ export function App() {
     void loadList();
   }
 
+  async function handleStop(runRecordId: string) {
+    setStartError(null);
+    try {
+      await cancelRun(runRecordId);
+    } catch (error) {
+      setStartError(messageFrom(error));
+    } finally {
+      void loadList();
+    }
+  }
+
   async function handleDelete(task: Task) {
     await deleteTask(task.task_id);
     setTasks(
@@ -569,9 +581,13 @@ export function App() {
               onDelete={(task) => setDialog({ kind: "delete", task })}
               startingTaskId={startingTaskId}
               onStart={(task) => void handleStart(task)}
+              onStop={(runRecordId) => void handleStop(runRecordId)}
               /* 重跑与发起现在是**同一件事**：按任务当前的定义再跑一次。
                  上一次没有留下任何需要预填的取值，所以也没有第二条代码路径。 */
               onRerun={handleStart}
+              onEditFailure={(task, requestedStep) =>
+                setDialog({ kind: "edit", task, requestedStep })
+              }
               onChanged={() => void loadList()}
               focusTaskId={focusTaskId}
               onFocusConsumed={consumeTaskFocus}

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { cleanupRun } from "./api";
 import type { RunHistory, Task } from "./api";
 import { messageFrom } from "./errors";
+import { FailureEvidence } from "./FailureEvidence";
 import {
   ErrorCodeTag,
   SensitiveValue,
@@ -12,6 +13,7 @@ import {
 import { formatTimestamp, historyPresentation, runIdPresentation } from "./history";
 import { rerunAction } from "./rerun";
 import { sourceSummary, whereSummary } from "./spec";
+import type { Step } from "./wizard";
 
 /**
  * 运行详情抽屉——**顶替整个「运行历史」屏**（ADR-0043 §2 §4）。
@@ -35,6 +37,7 @@ export function RunDrawer({
   tasks,
   onClose,
   onRerun,
+  onEditTask,
   onCleaned,
 }: {
   task: Task;
@@ -43,6 +46,7 @@ export function RunDrawer({
   tasks: Task[] | null;
   onClose: () => void;
   onRerun: (task: Task) => void;
+  onEditTask: (task: Task, step: Step) => void;
   onCleaned: () => void;
 }) {
   const [cleaning, setCleaning] = useState(false);
@@ -153,6 +157,13 @@ export function RunDrawer({
             )}
           </section>
 
+          {presentation.kind === "failed" && (
+            <FailureEvidence
+              run={run}
+              onEditTask={(step) => onEditTask(task, step)}
+            />
+          )}
+
           <section className="panel">
             <h3>行数核对</h3>
             <div className="panel-body kv">
@@ -182,9 +193,8 @@ export function RunDrawer({
           </section>
 
           <section className="panel">
-            <h3>任务定义</h3>
-            {/* 主键与条件从列表挪进来（ADR-0043 §4）：它们是**任务**的属性，
-                每次运行都一样，占着列表一整列换不来任何区分度。 */}
+            <h3>当前任务定义（可能已修改）</h3>
+            {/* 这是任务当前定义，可能已在运行后修改；当次实际值只读上面的运行证据。 */}
             <div className="panel-body kv is-pairs">
               {/* 自定义 SQL 的任务 owner / table 都是空串，直接拼会打出一个裸点。
                   与作业中心同一口径（sourceSummary）：这里给截断的一行，

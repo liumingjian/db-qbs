@@ -31,10 +31,10 @@ use url::Url;
 
 use crate::{
     embedded_web_asset, fetch_agent_info, generate_target_ddl, validate_builder_dblink,
-    validate_source_sql, Agent, AgentEndpoint, AgentInput, AgentStore, ColumnPrecision,
-    DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess, OracleRowSource,
-    RunHistory, SourceConfig, TargetConnection, Task, TaskConfig, TaskInput, TaskSpec, TaskStore,
-    UnknownReason,
+    validate_source_sql, Agent, AgentEndpoint, AgentEvidence, AgentInput, AgentStore,
+    ColumnPrecision, DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess,
+    OracleRowSource, RunEvidence, RunHistory, RunParametersEvidence, SourceConfig, SourceEvidence,
+    TargetConnection, TargetEvidence, Task, TaskConfig, TaskInput, TaskSpec, TaskStore, UnknownReason,
 };
 
 const MAX_REQUEST_BODY_BYTES: u64 = 1024 * 1024;
@@ -549,6 +549,7 @@ fn handle_get_run(
                 "run_record_id": run_record_id,
                 "run_id": record.run_id,
                 "source_sql": record.source_sql,
+                "evidence": record.evidence,
                 "staging_table": record.staging_table,
                 "stage": record.stage,
                 "total_rows": record.total_rows,
@@ -759,6 +760,33 @@ fn start_run(
         &task.spec.source_sql(),
         Utc::now(),
     );
+    history.evidence = RunEvidence {
+        source: Some(SourceEvidence {
+            datasource_id: task.source_datasource_id.clone(),
+            connect_string: access.connect_string.clone(),
+            username: access.username.clone(),
+            client_lib_dir: access.client_lib_dir.clone(),
+        }),
+        target: Some(TargetEvidence {
+            datasource_id: task.target_datasource_id.clone(),
+            host: target.host.clone(),
+            port: target.port,
+            database: target.database.clone(),
+            username: target.username.clone(),
+        }),
+        agent: Some(AgentEvidence {
+            agent_id: agent.agent_id.clone(),
+            name: agent.name.clone(),
+            base_url: agent.base_url.clone(),
+            instance_id: agent.instance_id.clone(),
+        }),
+        parameters: Some(RunParametersEvidence {
+            target_table: task.spec.target_table.clone(),
+            columns: task.spec.columns.clone(),
+            primary_key: task.spec.primary_key.clone(),
+            source_sql: task.spec.source_sql(),
+        }),
+    };
     register_active_run(runs, &run_record_id, &task.task_id)?;
     if let Err(error) = history_store.insert(&history, Utc::now(), config.history_retention_days) {
         remove_active_run(runs, &run_record_id);
