@@ -1,476 +1,574 @@
-# ADR-0041: 第二版范围由「下周试用就绪」定——不加功能，补交付路径；两端拓扑与公网通道的部署前提第一次真兑现
+# ADR-0041: v2's scope is set by "ready for the trial next week" — no new features, only the delivery path; the two-host topology and the public-internet channel are the first real settlement of the deployment premises
 
-**状态**: 已接受
-**日期**: 2026-08-19
-**票**: [#140](https://github.com/liumingjian/db-qbs/issues/140)（第二版地图）。**规格与实现票尚未生成**——见文末增补 3
-**先例**: `ADR-0034`（第一版范围由客户五条需求定）——本 ADR 是它的**后继**，不是它的兑现
+**Status**: Accepted
+**Date**: 2026-08-19
+**Ticket**: [#140](https://github.com/liumingjian/db-qbs/issues/140) (the v2 map). **The spec and implementation tickets do not exist yet** — see addendum 3
+**Precedent**: `ADR-0034` (v1's scope set by the customer's five requirements) — this ADR is its **successor**, not its fulfilment
 
-## 背景
+## Background
 
-第一版于 2026-08-19 闭环（[#136](https://github.com/liumingjian/db-qbs/issues/136) 验收四份台架全绿，
-尾账 [#137](https://github.com/liumingjian/db-qbs/issues/137) / [#139](https://github.com/liumingjian/db-qbs/issues/139) 已清）。
+v1 closed on 2026-08-19 ([#136](https://github.com/liumingjian/db-qbs/issues/136) accepted with all four rigs green;
+the loose ends [#137](https://github.com/liumingjian/db-qbs/issues/137) /
+[#139](https://github.com/liumingjian/db-qbs/issues/139) are cleared).
 
-范围从哪来，这一版没有现成答案。ADR-0034 把第一版的范围定为「按这一个客户的五条需求」，
-同时写明它的退役触发信号：**出现第二个部署，或客户提出与现有需求形状不同的要求**。
-开图时的实况是——**第一版还没交到客户手里**，两条信号一个都没响。
-于是「照抄第一版的定范围方式」不成立，「按 ADR 里的挂账清单排」也不成立：
-那些挂账的触发信号无一例外是「出现某种部署 / 有真实诉求」，在零部署状态下排它们，
-排的是实现者的技术偏好，不是客户要的东西。
+Where the scope comes from has no ready answer this time. ADR-0034 set v1's scope as "by this one customer's five
+requirements", and wrote down its own retirement signals: **a second deployment appears, or the customer asks for
+something shaped unlike the existing requirements**. The situation when the map was opened is that
+**v1 has not yet been handed to the customer**, so neither signal has fired.
+So "copy v1's way of setting scope" does not apply, and neither does "work the backlog in the ADRs": without
+exception those backlog items are triggered by "some kind of deployment appears / a real need is voiced", and
+ordering them at zero deployments orders the implementer's technical preferences, not what the customer wants.
 
-### 所有者 2026-08-19 的裁定（五轮 grilling，本 ADR 的输入）
+### Owner rulings of 2026-08-19 (five rounds of grilling; the input to this ADR)
 
-| # | 裁定 |
+| # | Ruling |
 |---|---|
-| 1 | **第二版由「让交付真的发生」定**，不由挂账清单定 |
-| 2 | **下周就去客户现场试用**，客户比较着急 |
-| 3 | **所有者本人到场装**，客户提供服务器，环境由所有者一并带过去；**不做过度封装** |
-| 4 | 试用目标是**基本功能能用**，跑通一个业务场景 |
-| 5 | 客户侧是**测试环境**，目标表可以直接改 |
-| 6 | **客户数据里没有中文**；数据量上限约 **100MB**，不会更多 |
-| 7 | 试用期出问题**客户找所有者**，产品不做主动通知 |
-| 8 | **两台主机**：`source` 装在源端（Oracle 侧），`sink` 装在目标端（MySQL 侧）；两库之间网络不通，只能 `source → sink` 走公网 |
-| 9 | 公网那条路**开白名单端口**，访问控制由网络层担 |
-| 10 | 服务器：**CentOS 7**、可出网、有 root、资源充裕 |
+| 1 | **v2 is set by "make the delivery actually happen"**, not by the backlog |
+| 2 | **The on-site trial is next week**; the customer is in a hurry |
+| 3 | **The owner installs it in person**, the customer supplies the server, the owner brings the environment; **no over-packaging** |
+| 4 | The trial's goal is **basic functions usable**, one business scenario running end to end |
+| 5 | The customer side is a **test environment**; target tables may be altered directly |
+| 6 | **The customer's data contains no Chinese**; the data volume is capped at about **100MB** and will not grow |
+| 7 | If something goes wrong during the trial **the customer contacts the owner**; the product does not notify proactively |
+| 8 | **Two hosts**: `source` on the source side (Oracle), `sink` on the target side (MySQL); there is no network between the two databases, only `source → sink` over the public internet |
+| 9 | That public path **runs on a whitelisted port**; access control is the network layer's job |
+| 10 | Servers: **CentOS 7**, outbound access, root, ample resources |
 
-## 决策
+## Decision
 
-### 1. 第二版的范围来源：**交付路径，不是功能清单**
+### 1. Where v2's scope comes from: **the delivery path, not a feature list**
 
-**第二版不加任何搬运能力。** 它买的是一件事：**这套东西能被装到客户的机器上并跑通一次。**
+**v2 adds no transfer capability at all.** It buys exactly one thing: **that this can be installed on the customer's
+machines and run once.**
 
-依据是裁定 1 与 2 的合力。没交付这件事本身就是当前最大的未知——挂账里哪条该做，
-客户用起来之后会自己浮出来；在那之前做，是拿猜测换工时。而下周就要去，
-这一版的时间预算是**一周**，装不下第二件事。
+The basis is rulings 1 and 2 together. Not having delivered is itself the biggest unknown right now — which backlog
+item to do will surface once the customer actually uses it, and doing it before then trades hours for guesses.
+And the trip is next week, so this version's budget is **one week**, which does not hold a second thing.
 
-**连带后果**：ADR-0034 §时效那条「第二版重估通用化」**不在本版发生**。
-它的触发信号（第二个部署）仍然没响，本版也不制造它。
+**Consequence**: ADR-0034's expiry clause "re-assess generalisation in v2" **does not happen in this version**.
+Its trigger (a second deployment) still has not fired, and this version does not create it.
 
-### 2. 交付四样，一行功能不加
+### 2. Four deliverables, not one line of new function
 
-1. **两端装机演练**——在干净的 CentOS 7 上从零走完：源端 `source` + Oracle Instant Client 19c
-   （连客户 Oracle 11g），目标端 `sink`（连 MySQL 8.0）。**演练是产出手册的手段，不是验证手段**：
-   手册必须是走过的记录，不是照着想象写的。
-2. **两份装机手册**——源端一份、目标端一份，**写给所有者本人**（命令为主）。
-   客户版留到试用回来、真知道客户会问什么了再补（裁定 3「不做过度封装」）。
-3. **两端各一个环境自检**——上机第一件事跑它，缺什么、连不上哪个库、隧道通不通，**当场列全**，
-   而不是装到一半炸。判据是「在现场，自检说 OK 之后就不该再有环境类失败」。
-4. **`stunnel` 双端隧道**——配置与装法进手册，理由见 §4。
+1. **A two-host installation rehearsal** — from zero on clean CentOS 7: `source` + Oracle Instant Client 19c on the
+   source side (against the customer's Oracle 11g), `sink` on the target side (against MySQL 8.0).
+   **The rehearsal is the means of producing the manuals, not a means of verification**: the manuals must be a record
+   of a walk actually taken, not written from imagination.
+2. **Two installation manuals** — one per side, **written for the owner himself** (mostly commands). A customer-facing
+   version waits until the trial is over and it is known what customers actually ask (ruling 3, "no over-packaging").
+3. **One environment self-check per side** — the first thing run on the machine; whatever is missing, whichever
+   database is unreachable, whether the tunnel is up, **listed in full on the spot**, rather than blowing up halfway
+   through the install. The criterion is "on site, once the self-check says OK there should be no further
+   environment-class failure".
+4. **A double-ended `stunnel` tunnel** — configuration and installation go into the manuals; see §4 for why.
 
-### 3. 明确不做，逐条给理由
+### 3. Explicitly out of scope, with reasons
 
-| 挂账 | 本版 | 理由 |
+| Backlog item | This version | Reason |
 |---|---|---|
-| 删除传播（ADR-0035 §时效 1） | 不做 | 触发信号是「出现源端物理删行的部署」，未响 |
-| 过滤表达力 `IN`/`BETWEEN`/`sysdate-1`（ADR-0035 §时效 2） | 不做 | 触发信号是「有真实诉求」，未响；试用场景用得上的是按日期筛，现有形态够 |
-| `purged_rows` → `updated_rows`（ADR-0035 §时效 3） | 不做 | 挂的条件是「下次已经要动 ADR-0010/0017/0020 时顺手」，本版不动那三份 |
-| 业务日期按调度推算（ADR-0035 §时效 4） | 不做 | 连带定时调度，明文非目标 |
-| 字符长度真口径（ADR-0033 §时效） | **不做** | **客户数据里没有中文**（裁定 6），`VARCHAR2(n CHAR)` 的 4 倍下界在这个部署里不会被看见。**注意这是一个部署的事实，不是通用判定**——ADR-0033 那笔账原样挂着，触发信号不变 |
-| 通用化：类型面 / 多形态 / 鉴权（ADR-0034 §时效） | 不做 | 见 §1 |
-| `TaskFormDialog` 拆分 | 不做 | 纯内部整理，零客户可见收益，本版时间预算装不下 |
+| Delete propagation (ADR-0035 expiry 1) | no | the trigger is "a deployment with physical source-side deletes appears"; not fired |
+| Filter expressiveness `IN`/`BETWEEN`/`sysdate-1` (ADR-0035 expiry 2) | no | the trigger is "a real need is voiced"; not fired. What the trial scenario needs is filtering by date, and the existing form is enough |
+| `purged_rows` → `updated_rows` (ADR-0035 expiry 3) | no | it is queued behind "do it in passing next time ADR-0010/0017/0020 are touched", and this version touches none of them |
+| Business date derived from the schedule (ADR-0035 expiry 4) | no | it drags in scheduled runs, an explicit non-goal |
+| True character-length semantics (ADR-0033 expiry) | **no** | **the customer's data contains no Chinese** (ruling 6), so the 4x lower bound of `VARCHAR2(n CHAR)` will never be seen in this deployment. **Note this is a fact about one deployment, not a general judgement** — ADR-0033's item stays on the backlog with its trigger unchanged |
+| Generalisation: type surface / multiple shapes / authentication (ADR-0034 expiry) | no | see §1 |
+| Splitting `TaskFormDialog` | no | pure internal tidying, zero customer-visible benefit, and this version's budget does not hold it |
 
-### 4. 公网通道：**白名单 + `stunnel` 隧道，产品零改动**
+### 4. The public channel: **whitelist + `stunnel` tunnel, zero product changes**
 
-裁定 8/9 让两条写在部署前提里、至今没人兑现过的账第一次落到实处：
+Rulings 8/9 make two long-standing items in the deployment premises real for the first time:
 
-- **MySQL 口令明文穿过 `source → sink`**（`ADR-0037` §4）。
-  原文前提是「通道必须可信——同主机、可信内网，或部署者自建 TLS / 隧道」。现在它是**互联网**。
-- **`sink` 没有鉴权**（`ADR-0024`），设计兜底是「只绑回环」。
-  现在 `sink` 必须被公网上的 `source` 访问到。
+- **The MySQL password crosses `source → sink` in cleartext** (`ADR-0037` §4).
+  The original premise was "the channel must be trusted — same host, trusted intranet, or TLS/tunnel built by the
+  deployer". It is now **the internet**.
+- **`sink` has no authentication** (`ADR-0024`), and the design's fallback was "bind loopback only".
+  Now `sink` must be reachable by a `source` on the public internet.
 
-**裁定：访问控制由客户的白名单端口担（裁定 9），机密性由 `stunnel` 双端隧道担，产品代码一行不改。**
-`source` 连本机隧道端口，加密在隧道里走公网，`sink` 侧隧道落到回环上的 `sink`——
-**`sink` 因此仍然只绑回环，ADR-0024 的兜底形态原样成立**。
+**Ruling: access control is the customer's whitelisted port (ruling 9), confidentiality is a double-ended `stunnel`
+tunnel, and not one line of product code changes.**
+`source` connects to the local tunnel port, encryption crosses the internet inside the tunnel, and the target-side
+tunnel lands on a loopback `sink` — **so `sink` still binds loopback only, and ADR-0024's fallback shape holds as
+written**.
 
-**为什么不做产品内 TLS**（这是本版最贵的一处克制）：
+**Why not TLS inside the product** (the most expensive restraint in this version):
 
-- `source` 发 HTTP 用的是 **`ureq` 且编译时没带 TLS**（`Cargo.toml`：`default-features = false, features = ["json"]`）；
-- `crates/source/src/protocol.rs:100` **硬性拒绝非 `http` 的 `sink_base_url`**，填 `https://` 直接启动失败。
+- `source` sends HTTP with **`ureq` compiled without TLS** (`Cargo.toml`: `default-features = false, features = ["json"]`);
+- `crates/source/src/protocol.rs:100` **hard-rejects any `sink_base_url` that is not `http`**, so `https://` fails at startup.
 
-也就是说产品内 TLS = 加 `rustls` feature + 放开 scheme 校验 + `sink` 侧终结 TLS + 四份台架重跑。
-一周的预算里，它挤掉的是装机演练本身。**隧道给到的机密性与它等价，代价是装机多两步。**
+In other words TLS inside the product = adding the `rustls` feature + relaxing the scheme check + terminating TLS in
+`sink` + re-running all four rigs. Within a one-week budget, what that displaces is the installation rehearsal itself.
+**The tunnel gives equivalent confidentiality, at the cost of two extra installation steps.**
 
-**挂账（试用回来重估）**：产品内 TLS 与 `sink` 的凭据校验。触发信号：出现**不是所有者本人装**的部署，
-或客户的安全评审要求产品自证通道安全——那时隧道这条「部署者自建」的兑现方式就该退役。
+**Backlog (re-assess after the trial)**: TLS inside the product, and credential checking in `sink`. Triggers: a
+deployment **not installed by the owner in person**, or the customer's security review demanding the product prove
+the channel secure by itself — at which point the tunnel, as "built by the deployer", is the thing that retires.
 
-### 5. 构建目标：CentOS 7 的 glibc 2.17 是硬约束，**且不能靠 musl 绕**
+### 5. Build target: CentOS 7's glibc 2.17 is a hard constraint, **and musl is not a way around it**
 
-- 客户机是 CentOS 7（glibc **2.17**）。在更新的 Linux 或 macOS 上编出来的二进制**装上去跑不起来**，
-  失败形态是启动即 `GLIBC_2.xx not found`——**这必须在演练里撞到，不是在现场**。
-- **不能换 musl 静态链接**：`source` 要通过 Oracle 的 OCI 加载 `libclntsh.so`，
-  Instant Client 是 glibc 动态库，musl 目标上加载不了。
-- **裁定：在 `centos:7` 容器里构建**，两个二进制都是。附带的两件事一并在演练里解决——
-  CentOS 7 已 EOL、默认 yum 源是死的（走 `vault.centos.org`），`rusqlite` 用的是 bundled SQLite、
-  编译期需要 C 编译器。
+- The customer machine is CentOS 7 (glibc **2.17**). Binaries built on a newer Linux or on macOS **will not run there**,
+  failing at startup with `GLIBC_2.xx not found` — **this must be hit in the rehearsal, not on site**.
+- **Static linking against musl is not an option**: `source` loads `libclntsh.so` through Oracle's OCI, and Instant
+  Client is a glibc dynamic library that a musl target cannot load.
+- **Ruling: build inside a `centos:7` container**, both binaries. Two side effects are handled in the rehearsal as
+  well — CentOS 7 is EOL and its default yum repos are dead (use `vault.centos.org`), and `rusqlite` uses bundled
+  SQLite so a C compiler is needed at build time.
 
-### 6. 验收判据：**照手册装完并搬通一次**，不新开台架入口
+### 6. Acceptance criteria: **install by the manual and transfer once**, no new rig entry point
 
-- **不新开第五个台架入口。** ADR-0040 §2 的字母是按**搬运语义的入口**分的（M2=A、M3=B、v1=C），
-  本版零搬运语义改动，开一个新字母只会让「入口」这个概念漂移。
-- **本版的判据是过程性的，落在演练记录里**：在一台干净的 CentOS 7 上，
-  **只照手册**（不即兴敲命令）装完两端，自检全绿，跑通一次搬运。**中途任何一次「手册没写、临场解决」都算判据未达成**——
-  那正是现场会卡住所有者的地方，必须回写进手册再走一遍。
-- **四份既有台架照旧全绿**（本版不改搬运语义，它们不该有任何变化）。
-- **三份走查**：本版不动 UI，按 `CLAUDE.md` 通则 3 写「未跑及为什么」，并附封存点 diff 证据。
+- **No fifth rig entry point.** ADR-0040 §2's letters partition **entry points for transfer semantics** (M2=A, M3=B,
+  v1=C), and this version changes zero transfer semantics; a new letter would only make "entry point" drift as a concept.
+- **This version's criteria are procedural and live in the rehearsal record**: on a clean CentOS 7,
+  **by the manual only** (no improvised commands), install both sides, all self-checks green, one transfer end to end.
+  **Any "the manual did not say, so it was solved on the spot" counts as the criterion not met** — that is exactly
+  what will stall the owner on site, and it must be written back into the manual and walked again.
+- **The four existing rigs stay green as before** (this version does not change transfer semantics, so nothing about
+  them should change).
+- **The three walkthroughs**: this version does not touch the UI, so per `CLAUDE.md` rule 3 write "not run and why",
+  with seal-point diff evidence attached.
 
-### 7. 试用场景是**假设**，不是既成事实 —— **已被本文末增补 2 作废**
+### 7. The trial scenario is **an assumption**, not a settled fact — **voided by addendum 2 below**
 
-验收用的业务场景是：**按日期筛出昨天的业务明细，按主键 upsert 进目标库的对应表**。
+The business scenario used for acceptance is: **filter yesterday's business detail rows by date and upsert them by
+primary key into the corresponding target table.**
 
-**这是未经客户确认的假设**（所有者认可先按它做，同时去问真实场景）。
-**2026-08-19 当日即作废**：所有者给出了客户的真实说法，见文末增补 2。本节留档，勿引为现行。
-**任何后续决策不得把它当既成事实引用**；客户给出真实场景后就地替换，替换不算返工。
+**This was an assumption the customer had not confirmed** (the owner agreed to proceed on it while asking for the
+real scenario). **Voided the same day, 2026-08-19**: the owner supplied the customer's real words; see addendum 2.
+This section is kept for the record — do not cite it as current.
+**No later decision may cite it as a settled fact**; once the customer gave the real scenario it was replaced in
+place, and that replacement is not rework.
 
-### 8. 事实前提（本版的输入，错一条就回来改本节）
+### 8. Factual premises (this version's inputs; get one wrong and come back to change this section)
 
-| 面 | 事实 |
+| Surface | Fact |
 |---|---|
-| 拓扑 | 两台主机：源端 `source` + Instant Client，目标端 `sink`；两库之间**网络不通** |
-| 通道 | 仅 `source → sink`，公网、白名单端口；机密性由 `stunnel` 担 |
-| 系统 | CentOS 7、可出网、有 root、资源充裕 |
-| 源端 | Oracle **11g** |
-| 目标端 | MySQL **8.0**、`utf8mb4`；目标表**已存在**，测试环境**可直接改** |
-| 数据 | 上限约 **100MB**；**无中文** |
-| 人 | 所有者本人到场装；试用期客户自用，出问题找所有者；产品不做主动通知 |
+| Topology | two hosts: `source` + Instant Client on the source side, `sink` on the target side; **no network** between the two databases |
+| Channel | `source → sink` only, over the public internet on a whitelisted port; confidentiality by `stunnel` |
+| System | CentOS 7, outbound access, root, ample resources |
+| Source | Oracle **11g** |
+| Target | MySQL **8.0**, `utf8mb4`; the target tables **already exist**, and being a test environment they **may be altered directly** |
+| Data | capped at about **100MB**; **no Chinese** |
+| People | the owner installs in person; during the trial the customer uses it alone and contacts the owner on trouble; the product does not notify proactively |
 
-## 后果
+## Consequences
 
-- **好的**：一周的预算全部押在唯一确定有价值的事情上——把「没交付」这个最大的未知变成已知。
-  试用回来之后，挂账清单里哪条该先做，会由客户的实际使用给出答案，而不是由猜测排序。
-- **不好的**：本版对**客户**是零可见增量——所有者过去装的，功能上就是第一版。
-  若客户期待的是「又做了些新功能」，这一版答不上，**这一点所有者已经知情并接受**。
-- **风险**：目标端入口（公网 IP / 端口 / 白名单）由客户提供，**产品这边无法自证**。
-  拿不到就是装机当天彻底停摆——它是本版唯一的外部阻塞项，已列为地图 #140 的首要跟踪项。
+- **Good**: the whole one-week budget goes to the only thing certainly worth doing — turning "not delivered", the
+  biggest unknown, into a known. After the trial, which backlog item comes first will be answered by the customer's
+  actual use rather than ordered by guesswork.
+- **Bad**: this version is a zero-visible increment **to the customer** — what the owner installs is, functionally,
+  v1. If the customer expects "some new features again", this version has no answer, **and the owner knows and
+  accepts that**.
+- **Risk**: the target-side entry (public IP / port / whitelist) is supplied by the customer, and **the product
+  cannot prove it from its side**. Not having it means installation day stops dead — it is this version's only
+  external blocker, and is the top tracked item on map #140.
 
-## 时效
+## Expiry
 
-**试用回来即重估。** 触发信号有三条，任一成立本 ADR 的 §1 就该退役：
+**Re-assess as soon as the trial is over.** Three triggers; any one of them retires §1 of this ADR:
 
-1. **客户真的用起来**——那时范围回到「按实际使用反馈定」，挂账清单按客户撞到的顺序重排；
-2. **出现第二个部署**——ADR-0034 §时效那条终于响，通用化的账开始还；
-3. **出现不是所有者本人装的部署**——§4 的「部署者自建隧道」失去前提，产品内 TLS 与 `sink` 凭据校验必须做。
+1. **The customer actually uses it** — scope then returns to "set by real usage feedback", and the backlog is
+   reordered by what the customer hit;
+2. **A second deployment appears** — ADR-0034's expiry clause finally fires and the generalisation debt starts being paid;
+3. **A deployment not installed by the owner in person appears** — §4's "tunnel built by the deployer" loses its
+   premise, and TLS inside the product plus credential checking in `sink` become mandatory.
 
-## 增补（2026-08-19，所有者补充两条输入）
+## Addendum (2026-08-19, two further owner inputs)
 
-### 1. 演练环境改为 **mac 上的 Docker 容器**，客户实机由所有者现场适配
+### 1. The rehearsal environment becomes **Docker containers on the mac**; the customer's real machines are adapted on site by the owner
 
-所有者裁定：**优先用 mac 的 Docker 模拟客户环境**，客户那台真机的差异到时由他本人适配。
+Owner ruling: **prefer simulating the customer environment with Docker on the mac**, and let the owner absorb the
+real machines' differences on the day.
 
-- 演练台改成两个 `centos:7` 容器充当「源端主机」「目标端主机」，
-  与本地台架既有的 `qbs-oracle11` / `qbs-mysql8` 同处一套 compose；
-  跨容器网络那一跳模拟公网，`stunnel` 照样两端起。
-- **这不降低手册的判据**（§6 不变）：手册仍须是「只照它就能装完」的记录。
-  容器与真机的差异（内核、SELinux、防火墙、已装过的包）由所有者现场吸收——
-  **手册要把「这一步在真机上可能不一样」的地方标出来**，而不是假装没有差异。
-- **代价写明**：容器里 root 是默认的、包管理是干净的、网络是通的。
-  真机上最常卡人的恰恰是这三样。本版接受这个代价，因为装的人是写手册的人本人。
+- The rehearsal rig becomes two `centos:7` containers acting as "source host" and "target host", in the same compose
+  file as the existing local rig's `qbs-oracle11` / `qbs-mysql8`; the cross-container hop simulates the public
+  internet, with `stunnel` running on both ends as designed.
+- **This does not lower the manual's criteria** (§6 unchanged): the manual must still be a record of "install by
+  following this alone". Differences between containers and real machines (kernel, SELinux, firewall, packages
+  already installed) are absorbed on site by the owner — **the manual must mark the steps that may differ on a real
+  machine**, rather than pretend there is no difference.
+- **The cost, stated plainly**: in a container root is the default, the package manager is clean and the network
+  works. Those three are exactly what most often stalls people on a real machine. This version accepts that cost,
+  because the person installing is the person who wrote the manual.
 
-### 2. 试用场景不再是假设——**客户的重点功能已给出**，其中一条现在缺
+### 2. The trial scenario is no longer an assumption — **the customer's key features are in**, and one of them is currently missing
 
-§7 那条「假设，客户确认前不得当既成事实引用」**就此作废**。所有者给出的真实说法是：
+§7's "an assumption, not to be cited as settled before the customer confirms" **is void as of now**. The owner's
+report of the customer's actual words:
 
 > 可以查数据、加过滤条件、导入目标数据库；能看到执行的进度；失败了可以重试。
+>
+> (Query data, add filter conditions, import into the target database; see execution progress; retry after a failure.)
 
-逐条对照现状：
+Item by item against the current state:
 
-| 客户说的 | 现状 | 本版 |
+| What the customer said | Current state | This version |
 |---|---|---|
-| 查数据 | 构建器 + 取列 + 生成 SQL（ADR-0027/0038） | 已有 |
-| 加过滤条件 | 常量条件 / 运行时填（ADR-0036 §1） | 已有 |
-| 导入目标库 | 主键 upsert（ADR-0035） | 已有 |
-| 看执行进度 | 阶段串 + **不确定进度条** + 四个真数（已推行数 / 批次序号 / 已用时 / 累计字节） | 已有，**但没有百分比** |
-| 失败了可以重试 | **缺**——只能回任务屏对那个任务重新发起一次 | **补一个一键重跑** |
+| query data | builder + column fetch + generated SQL (ADR-0027/0038) | already there |
+| add filter conditions | constant conditions / fill at run time (ADR-0036 §1) | already there |
+| import into the target database | primary-key upsert (ADR-0035) | already there |
+| see execution progress | the phase string + an **indeterminate progress bar** + four real numbers (rows pushed / batch number / elapsed / cumulative bytes) | already there, **but no percentage** |
+| retry after a failure | **missing** — the only way is to go back to the task screen and start that task again | **add a one-click re-run** |
 
-**百分比不做，且这次也不做。** ADR-0017 C4 与 `ADR-0026` §3
-两次明文否掉：总行数要预先 `COUNT` 才有分母，那个分母落在另一个 SCN 上、
-与单快照游标的分子不同源，百分比会冲过 100% 或永远停在 97%，还要为装饰付 `ORA-01555` 的风险。
-**试用现场若客户坚持要百分比，那是试用回来的重估触发**（记进 ADR-0026 §时效那条的信号里），本周不动。
+**No percentage, and not this time either.** ADR-0017 C4 and `ADR-0026` §3 both rejected it explicitly: a
+denominator requires a `COUNT` up front, that denominator sits at a different SCN from the numerator's
+single-snapshot cursor, so the percentage would overshoot 100% or stall forever at 97% — and would pay an
+`ORA-01555` risk for decoration. **If the customer insists on a percentage during the trial, that is a re-assessment
+trigger for after the trial** (recorded into the signals of ADR-0026's expiry clause); nothing changes this week.
 
-**一键重跑进本版**，理由是它被客户点名为重点功能，且代价极小：
-历史记录里已经存着 `run_params`（`api.ts:231`），发起入口是现成的 `startRun(taskId, runParams)`（`api.ts:446`），
-要做的只是**把失败那条的参数预填进发起对话框**。
+**The one-click re-run is in this version**, because the customer named it as a key feature and it costs almost
+nothing: the history record already stores `run_params` (`api.ts:231`), the start entry point already exists as
+`startRun(taskId, runParams)` (`api.ts:446`), and all that is needed is **prefilling the failed run's parameters into
+the start dialog**.
 
-**这没有推翻 §1**：§1 说的是不加**搬运能力**。一键重跑不改搬运语义、不动链路、不碰四份台架的判据，
-它是把「客户点名的动作」从两步变成一步。**这是本版唯一的功能增量，不开第二个口子。**
+**This does not overturn §1**: §1 says no new **transfer capability**. A one-click re-run changes no transfer
+semantics, touches no part of the path, and moves none of the four rigs' criteria; it turns "the action the customer
+named" from two steps into one. **It is this version's only functional increment, and no second exception is opened.**
 
-### 3. 规格与实现票由 `/to-spec`、`/to-tickets` 生成，**不手写**
+### 3. Spec and implementation tickets are generated by `/to-spec` and `/to-tickets`, **never handwritten**
 
-2026-08-19 一度手写了一份规格（#141）与七张实现票（#142~#148），**已全部删除**。
+On 2026-08-19 a spec (#141) and seven implementation tickets (#142–#148) were handwritten and **have all been deleted**.
 
-**规矩**：本仓库的规格走 `mattpocock-skills` 的 **`/to-spec`**，实现票走 **`/to-tickets`**。
-这两个技能的 frontmatter 都是 `disable-model-invocation: true`——**模型调不动它们，只能由所有者敲**。
-手写出来的东西形状对不上模板（`to-spec` 要一长串 User Stories、Implementation Decisions 里不许出现文件路径；
-`to-tickets` 要 What to build + 勾选式 Acceptance criteria，且必须先把拆分 quiz 所有者、批准后才发布，
-并使用 GitHub 原生的 blocking 关系），更重要的是它绕过了「所有者批准拆分」这一步。
+**The rule**: specs in this repo go through `mattpocock-skills`' **`/to-spec`**, and implementation tickets through
+**`/to-tickets`**. Both skills have `disable-model-invocation: true` in their frontmatter — **the model cannot invoke
+them; only the owner can.** Handwritten output does not match the templates (`to-spec` wants a long list of User
+Stories and forbids file paths in Implementation Decisions; `to-tickets` wants What to build plus checkbox Acceptance
+criteria, must quiz the owner on the split and get approval before publishing, and must use GitHub's native blocking
+relationships), and more importantly it bypasses the "owner approves the split" step.
 
-**因此：本 ADR 的判定成立，但它没有配套的规格与票；两者由所有者敲 `/to-spec` 与 `/to-tickets` 生成。**
-本 ADR 增补 2 里那张「客户五条重点功能对照表」与 §2 的交付四样，是生成规格时的输入，不是规格本身。
+**Therefore: this ADR's rulings stand, but it has no accompanying spec or tickets; both are generated by the owner
+running `/to-spec` and `/to-tickets`.** The "customer's five key features" table in addendum 2 and the four
+deliverables in §2 are inputs to generating the spec, not the spec itself.
 
-### 4. 演练台的编号、判据 1 的收窄，与「跨容器直达」这条负判据的真实成色（2026-08-20，#152 落地后的两轴评审）
+### 4. The rehearsal rig's numbering, the narrowing of criterion 1, and what the "cross-container reachability" negative criterion was really worth (2026-08-20, two-axis review after #152 landed)
 
-#152 把演练台搭出来之后，`/code-review` 的两轴评审逮到三件要钉死的事。
+Once #152 stood the rehearsal rig up, the two-axis `/code-review` caught three things to nail down.
 
-**（a）`R0–R10` 不是第五个台架字母入口。** ADR-0040 §2 的 A/B/C 编的是**搬运语义的验收场景**，
-R 编的是演练台自己的拓扑自检，一条搬运语义都不碰；第二版的验收判据是过程性的、落在演练记录里
-（§6），不新开验收入口。这条裁定原先只写在 `local-rig/README.md` 正文里，现在钉在这儿。
+**(a) `R0–R10` is not a fifth rig letter.** ADR-0040 §2's A/B/C number **acceptance scenarios for transfer
+semantics**; R numbers the rehearsal rig's own topology self-check and touches no transfer semantics at all.
+v2's acceptance criteria are procedural and live in the rehearsal record (§6); no new acceptance entry point is
+opened. This ruling previously lived only in the body of `local-rig/README.md`, and is nailed here now.
 
-**（b）#152 判据 1「随既有编排起停」按判据 3 让，收窄成「随既有编排停」。**
-两台主机在 compose 的 `rehearsal` profile 下：`down.sh` 带 `--profile rehearsal`，拆的时候连它们一起拆
-（不带的话三张网都因「还在用」删不掉，会留下半拆的台架）；**起**那一半没有并进 `up.sh`——
-并进去就等于给四份既有台架的起停加了两个 centos:7 容器与两张网，同票判据 3
-「既有台架不受影响」当场不成立。两条判据冲突时按判据 3 让，起用 `rehearsal-up.sh`。
+**(b) #152's criterion 1, "starts and stops with the existing orchestration", yields to criterion 3 and narrows to
+"stops with the existing orchestration".** The two hosts live under compose's `rehearsal` profile: `down.sh` carries
+`--profile rehearsal` so teardown takes them with it (without it, all three networks fail to delete as "still in
+use", leaving a half-torn rig); the **start** half is not folded into `up.sh` — folding it in would add two centos:7
+containers and two networks to the four existing rigs' start/stop, breaking the same ticket's criterion 3 ("the
+existing rigs are unaffected") on the spot. When two criteria conflict, yield to criterion 3; starting uses
+`rehearsal-up.sh`.
 
-**（c）「跨容器直达是切断的」在 mac Docker 上原本是一条假绿的负判据。**
-原 R6 按**容器名**连目标端：源端不在目标端那张网上，失败首先发生在名字解析，而不是路由——
-「DNS 查不到」恰恰是判据脚本自己点名的假绿成因。改成按目标端在 `qbs-dst-side` 上的 IP 直连、
-并配一条正对照（目标端经同一个 IP 自连得到令牌）之后，R6 **当场 FAIL**：
-Docker Desktop 在两张 bridge 网之间是转发的，`172.30.0.3 → 172.29.0.3:15443` 直接拿到了令牌。
-R3/R5（两库互不可达）此前同样按容器名判，是同一个成因的更大面积。
+**(c) "Cross-container reachability is severed" was a falsely green negative criterion on mac Docker.**
+The original R6 connected to the target side **by container name**: the source host is not on the target's network,
+so the failure happens first at name resolution rather than routing — and "DNS cannot find it" is precisely the
+false-green cause the criteria script itself names. Changed to connect directly to the target's IP on
+`qbs-dst-side`, with a positive control alongside (the target reaches itself through the same IP and gets a token),
+R6 **FAILed immediately**: Docker Desktop forwards between two bridge networks, and `172.30.0.3 → 172.29.0.3:15443`
+got a token straight away. R3/R5 (the two databases being mutually unreachable) were judged by container name too,
+the same cause over a larger area.
 
-**裁定：负判据一律按 IP 判、且每条都配一条同址正对照；切断由台架显式施加，不靠 Docker 的默认行为。**
-施加方式是**从外部**给两台主机的网络命名空间打黑洞路由（临时辅助容器 `--network container:` +
-`--cap-add NET_ADMIN`），被演练的那台机器本身不装任何东西、`ip` 都没有——
-「干净机器」这条前提原样成立，切断则像客户现场的防火墙那样是台架施加的外部事实。
-删容器即归零，`rehearsal-up.sh` 每次起完重新施加，`rehearsal-reset.sh` 走同一条路径。
+**Ruling: negative criteria are always judged by IP, and every one carries a same-address positive control; the
+severance is imposed by the rig explicitly, never left to Docker's default behaviour.** It is imposed **from
+outside**, by blackholing routes in the two hosts' network namespaces (a temporary helper container with
+`--network container:` and `--cap-add NET_ADMIN`); the host under rehearsal installs nothing itself and does not even
+have `ip` — so the "clean machine" premise holds as written, and the severance is an external fact imposed by the
+rig, just as a firewall would be at the customer site. Deleting the container resets it; `rehearsal-up.sh` re-imposes
+it on every start, and `rehearsal-reset.sh` goes through the same path.
 
-### 5. 「两库之间网络不通」还欠一条：宿主网关那条路（2026-08-20，#152 第二轮两轴评审）
+### 5. "No network between the two databases" still owed one path: the one through the host gateway (2026-08-20, second two-axis review of #152)
 
-增补 4 把负判据改成按 IP 判、并让台架显式打黑洞路由之后，`R3/R3b/R5/R5b` 全绿。**但那张拓扑
-仍然不成立**：两个库在宿主上各发布了一个端口（`1521:1521` / `3306:3306`），而「公网一跳」的落点
-正是宿主——源端主机经 `host.docker.internal` 连 MySQL `3306` **实测是通的**
-（Docker Desktop 给的是 IPv6 网关 `fdc4:f303:9324::254`，与那几条 IPv4 黑洞无关）。
-`README.md` 却把「跨容器直达是切断的／没暴露的端口就是白名单外的端口」写成了全称结论。
+After addendum 4 changed the negative criteria to IP-based and had the rig impose blackhole routes explicitly,
+`R3/R3b/R5/R5b` all went green. **But that topology still did not hold**: each database publishes a port on the host
+(`1521:1521` / `3306:3306`), and the host is exactly where the "one public hop" lands — the source host reaching
+MySQL `3306` via `host.docker.internal` **was measured as reachable** (Docker Desktop supplies an IPv6 gateway
+`fdc4:f303:9324::254`, unrelated to those IPv4 blackholes). `README.md`, meanwhile, stated
+"cross-container reachability is severed / an unpublished port is a port outside the whitelist" as a universal conclusion.
 
-**这条路不能靠拆发布端口来堵**：四份既有台架里的 source 跑在 mac 宿主上，靠的就是这两个发布端口，
-拆了等于让同票判据 3「既有台架不受影响」当场不成立。也不能整条黑掉网关：同一个网关上的 `15443`
-正是白名单那一跳，而两台主机还要出网（`centos:7` 已 EOL，装包得先改源到 `vault.centos.org`，
-那是手册的第一步，演练台在这一点上不该比真机宽松）。
+**This path cannot be closed by removing the published ports**: the source in the four existing rigs runs on the mac
+host and depends on exactly those two published ports, so removing them breaks the same ticket's criterion 3
+("the existing rigs are unaffected") on the spot. Nor can the gateway be blackholed wholesale: `15443` on that same
+gateway is the whitelisted hop, and the two hosts still need outbound access (`centos:7` is EOL, so installing
+packages requires switching repos to `vault.centos.org` first — the manual's very first step, and the rehearsal rig
+should not be more lenient than a real machine on that point).
 
-**裁定：切断分两层，且第 2 层按端口判。**
+**Ruling: severance has two layers, and the second is judged per port.**
 
-1. **路由黑洞**——对面那张网 + default 网的网段。挡「对面那台机器与那个库的所有端口」。
-2. **端口级 DROP，IPv4 / IPv6 两张表都打**——源端主机封死一切 `3306` 出向，目标端封死一切 `1521`
-   出向。挡「绕过路由的那条路」。两台主机各自那一侧的库用的是另一个端口，不受影响；网关上的
-   `15443` 与出网所需的一切照旧。
+1. **Blackhole routes** — the other side's network plus the default network's subnet. This blocks "every port on that
+   machine and that database".
+2. **Port-level DROP, in both the IPv4 and IPv6 tables** — the source host drops all outbound `3306`, the target host
+   drops all outbound `1521`. This blocks "the path that bypasses routing". Each host's own database uses the other
+   port and is unaffected; `15443` on the gateway and everything needed for outbound access are untouched.
 
-施加方式与增补 4 同一条路径：一次性 alpine 共享被演练主机的网络命名空间（`--cap-add NET_ADMIN`），
-被演练的机器本身一个字节没动，删容器即归零。
+It is imposed through the same path as addendum 4: a one-shot alpine sharing the rehearsed host's network namespace
+(`--cap-add NET_ADMIN`), with not a byte changed on the machine under rehearsal, and deleting the container resets it.
 
-**判据随之补三条**：`R3c`（源端 → 宿主 `3306` 不通）、`R5c`（目标端 → 宿主 `1521` 不通），
-以及 `R5d`（目标端 → 宿主 `15443` 通）作为 `R5c` 的同址正对照，`R3c` 的正对照是既有的 `R7`。
-**没有这条正对照，R3c 会在网关整条路断掉时为了错误的理由变绿**——这正是增补 4 判过的同一种假绿，
-换了个地址重演一遍。
+**Three criteria follow**: `R3c` (source → host `3306` unreachable), `R5c` (target → host `1521` unreachable), and
+`R5d` (target → host `15443` reachable) as `R5c`'s same-address positive control; `R3c`'s positive control is the
+existing `R7`. **Without that control, R3c would go green for the wrong reason whenever the gateway path went down
+entirely** — the very false green addendum 4 ruled on, replayed at a different address.
 
-**另有两条一并钉住**：(a) `R0`（同架构、同 glibc）是 #151 的构建目标，不是 #152 的拓扑判据，
-总账分两笔记，别拿别票的证据充本票的数；(b) 演练台三支脚本补一份静态自检
-`scripts/test-rehearsal-topology.sh`，与四份既有台架入口一致——判据脚本是门禁，
-门禁自己没有门禁的话，删掉一条负判据要等下一次实跑才发现。
+**Two more nailed down at the same time**: (a) `R0` (same architecture, same glibc) is #151's build target, not
+#152's topology criterion — keep the two ledgers separate and do not pass another ticket's evidence off as this
+one's; (b) the rehearsal rig's three scripts gain a static self-check
+`scripts/test-rehearsal-topology.sh`, consistent with the four existing rig entry points — a criteria script is a
+gate, and if the gate has no gate of its own, deleting a negative criterion is only discovered on the next real run.
 
-### 6. 隧道的具体形态、桩 sink 的分界，与两份判据的先后（2026-08-20，#153 落地）
+### 6. The tunnel's concrete shape, the boundary of the stub sink, and the ordering of two sets of criteria (2026-08-20, #153 landed)
 
-§4 只裁定了「机密性由 stunnel 双端隧道担，产品代码一行不改」。落地时有五件事要钉住。
+§4 only ruled "confidentiality by a double-ended stunnel tunnel, not one line of product code changed". Landing it
+raised five things to nail down.
 
-**（a）隧道既加密也认人，认的是钉住的那一张证书。** 两端各一张自签证书，互相把**对方那张**
-放进 `CAfile` 并 `verify = 2`；不建 CA。CentOS 7 的 stunnel 是 **4.56**，没有 `checkHost`
-——**钉住证书文件本身就是身份校验**。只加密不认人的话，中间人换一张自签证书照样接得下来，
-而 §4 要挡的恰恰是公网上的第三方。不建 CA 的理由是：两端一共两个身份，签发链唯一的好处是
-「以后能再签第三个」，而第三个的出现（不是所有者本人装的部署）正是 §4 挂账里
-隧道这条兑现方式要**退役**的触发信号——到那天换的是方案，不是多一层链。
-协议下界 TLS 1.2（CentOS 7 的 OpenSSL 1.0.2 给得到 1.2、给不到 1.3），实测协商出
-`TLSv1.2 / ECDHE-RSA-AES256-GCM-SHA384`。私钥就地生成、随身拷贝，**不进版本库**、也不走隧道本身。
+**(a) The tunnel both encrypts and authenticates, and what it authenticates is the pinned certificate.**
+Each end has a self-signed certificate, and each puts **the other's** into its `CAfile` with `verify = 2`; no CA is
+built. CentOS 7's stunnel is **4.56**, which has no `checkHost` — **pinning the certificate file itself is the
+identity check.** Encryption without authentication would let a man in the middle present another self-signed
+certificate and be accepted, and a third party on the public internet is exactly what §4 must block. The reason for
+not building a CA: there are two identities in total, and the only benefit of an issuing chain is "a third one can be
+signed later" — but a third one appearing (a deployment not installed by the owner) is precisely the trigger for the
+tunnel approach in §4's backlog to **retire**. On that day the scheme changes, not the number of layers.
+The protocol floor is TLS 1.2 (CentOS 7's OpenSSL 1.0.2 reaches 1.2, not 1.3); the measured negotiation was
+`TLSv1.2 / ECDHE-RSA-AES256-GCM-SHA384`. Private keys are generated in place and carried by hand, **never entering
+version control**, and never crossing the tunnel itself.
 
-**（b）端口落点：`sink_base_url` 一个字都不用改。** 源端 stunnel 客户端只绑
-`127.0.0.1:8080`，目标端服务端在白名单口 `15443` 上收、落到 `127.0.0.1:8080` 的 `sink`。
-`8080` 正是 `config/source.toml.example` 与 `config/sink.toml.example` 里的现值——
-**「产品零改动」因此不止是「没改代码」，连示例配置里的那个值都没动**。
-`sink` 仍然只绑回环，ADR-0024 的兜底形态原样成立。
+**(b) Where the ports land: not one character of `sink_base_url` changes.** The source-side stunnel client binds only
+`127.0.0.1:8080`; the target-side server accepts on the whitelisted port `15443` and lands on the `sink` at
+`127.0.0.1:8080`. `8080` is exactly the current value in `config/source.toml.example` and `config/sink.toml.example` —
+**so "zero product changes" means more than "no code changed": even that value in the sample configs is untouched.**
+`sink` still binds loopback only, and ADR-0024's fallback shape holds as written.
 
-**（c）#153 上打通的是隧道，落点是桩 sink，不是真 sink。** 真 `sink` 要等 #156 装上来。
-本票要证的是隧道那一段，落点是不是真产品不影响判据——**但「只绑回环」这条必须一模一样**，
-桩就是照 `127.0.0.1:8080` 绑的，判据 `T4`（目标端经自己的侧网 IP 摸不到 `8080`）判的就是它。
-把这条写下来是为了防止后来者把 #153 的绿当成「sink 已经装通了」。
+**(c) What #153 got working is the tunnel, and it lands on a stub sink, not the real one.** The real `sink` arrives
+with #156. This ticket proves the tunnel segment, and whether the landing point is the real product does not affect
+the criteria — **but "loopback only" must be identical**, and the stub binds `127.0.0.1:8080` for exactly that
+reason; criterion `T4` (the target cannot reach `8080` through its own side-network IP) is what judges it.
+This is written down so that nobody later reads #153's green as "sink is installed and working".
 
-**（d）两份判据有先后：先拓扑、后隧道。** `rehearsal-topology-check.sh` 的 `R7a/R8a`
-要在目标端自己起一个探针监听端占用 `15443`，而隧道装完之后那个端口归 stunnel。
-2026-08-20 实测：隧道在跑时跑拓扑判据，`R6a/R7/R7a/R10` **四条一起红**，
-而四条红的真实成因是同一个、且都不是拓扑出了问题。**裁定：顺序是先跑拓扑判据、再装隧道；
-已装完还想复核拓扑就先 `rehearsal-reset.sh` 推倒重建。** 拓扑脚本在起探针前加一条占用检测，
-把这个成因当场说出来——负判据红在错误的成因上，与假绿是同一类问题的两面。
+**(d) The two sets of criteria have an order: topology first, tunnel second.** `rehearsal-topology-check.sh`'s
+`R7a/R8a` need the target to start its own probe listener occupying `15443`, and after the tunnel is installed that
+port belongs to stunnel. Measured on 2026-08-20: running the topology criteria while the tunnel is up turns
+`R6a/R7/R7a/R10` **red together**, and all four share one cause, none of which is a topology problem.
+**Ruling: run the topology criteria first, then install the tunnel; to re-check topology after installation, tear
+down and rebuild with `rehearsal-reset.sh` first.** The topology script gains an occupancy check before starting the
+probe, so it says that cause out loud — a negative criterion going red for the wrong reason is the other face of a
+false green.
 
-**（e）`T0–T11` 与 `R0–R10` 同理，不是第五个台架字母入口**（增补 4(a) 的同一条裁定）：
-它编的是演练台上隧道那一段的自检，一条搬运语义都不碰。隧道那两支脚本同样配一份静态自检
-`scripts/test-rehearsal-tunnel.sh`，**本票第四条判据「产品代码零改动」就判在那里**——
-它是一条静态事实，台架只看得见跑起来的样子，看不见有没有为了跑起来偷偷放开 scheme 校验。
+**(e) `T0–T11`, like `R0–R10`, is not a fifth rig letter** (the same ruling as addendum 4(a)): it numbers the
+rehearsal rig's self-check for the tunnel segment and touches no transfer semantics. The two tunnel scripts likewise
+get a static self-check `scripts/test-rehearsal-tunnel.sh` — **and this ticket's fourth criterion, "zero product code
+changes", is judged there**: it is a static fact, and the rig can only see what running looks like, not whether the
+scheme check was quietly relaxed to make it run.
 
-那条门禁**按内容判，不按分支的 diff 判**。按 diff 判有两处会当场坏掉：一支公共静态自检会在
-**兄弟票**（比如动 `web/` 的一键重跑）的分支上无辜变红；而本票一旦合入 `main`，
-`merge-base` 就是 `HEAD`、diff 恒空，判据永久绿——**一条永远绿的门禁不是门禁**。
-所以它断言的是隧道方案赖以成立的那三处内容本身：`protocol.rs` 仍然硬性拒绝非 `http` 的
-`sink_base_url`、`source.toml.example` 的 `sink_base_url` 仍是 `http://127.0.0.1:8080`、
-`sink.toml.example` 的 `listen` 仍只绑回环。这三处只要有一处被改动，
-「零改动」这句话就不再成立，门禁当场红——**合入之后也一样红**。
+That gate **judges by content, not by a branch diff.** Judging by diff breaks in two places: a shared static
+self-check would go red innocently on a **sibling ticket's** branch (one touching `web/` for the one-click re-run,
+say); and once this ticket merges into `main`, `merge-base` is `HEAD`, the diff is always empty and the criterion is
+permanently green — **a permanently green gate is not a gate**. So what it asserts is the three pieces of content the
+tunnel approach rests on: `protocol.rs` still hard-rejects a non-`http` `sink_base_url`, `source.toml.example`'s
+`sink_base_url` is still `http://127.0.0.1:8080`, and `sink.toml.example`'s `listen` still binds loopback only.
+Change any one of the three and "zero changes" stops being true and the gate goes red on the spot —
+**red after the merge too**.
 
-### 7. 源端装机手册的两条落地裁定，与自检 S4 的一处假绿（2026-08-20，#155 落地）
+### 7. Two landing rulings for the source-side installation manual, and one false green in self-check S4 (2026-08-20, #155 landed)
 
-§6 只裁定了「照手册装完并搬通一次」。源端那一半落地时有三件事要钉住。
+§6 only ruled "install by the manual and transfer once". Landing the source-side half raised three things to nail down.
 
-**（a）演练里「对端」由台架准备，「本端」必须由人照手册敲。** `rehearsal-tunnel-up.sh`
-新增 `--side both|source|target`：#155 用 `--side target` 只把目标端准备好，源端那一头
-逐条走手册。脚本代劳本端，「手册是走过的记录」这句话就当场作废——而那正是 §6 的全部内容。
-同理新增 `--sink stub|real`：**源端自检 S8 判的是产品自己的错误码 `RUN_UNKNOWN`**
-（#154），#153 的桩 sink 回不出来，所以 #155 的对端是 #151 编出来的真 `db-qbs-sink`。
-代价写明：`--sink real` 下 `rehearsal-tunnel-check.sh` 的 T3/T5/T7 按桩的标记判，会红在标记上，
-**隧道那一段的加密取证仍以 #153 的实录为准，不在 #155 重做**。
+**(a) In a rehearsal the rig prepares the far end; the near end must be typed by a human following the manual.**
+`rehearsal-tunnel-up.sh` gains `--side both|source|target`: #155 used `--side target` to prepare only the target end,
+and walked the source end through the manual line by line. If the script does the near end, "the manual is a record
+of a walk actually taken" is void on the spot — and that is the whole of §6.
+Likewise `--sink stub|real` is added: **source-side self-check S8 judges the product's own error code `RUN_UNKNOWN`**
+(#154), which #153's stub sink cannot return, so #155's far end is the real `db-qbs-sink` built by #151.
+The cost, stated plainly: under `--sink real`, `rehearsal-tunnel-check.sh`'s T3/T5/T7 judge by the stub's marker and
+go red on the marker; **the encryption evidence for the tunnel segment remains #153's record, and is not redone in #155.**
 
-**（b）自检 S4 原先是一条假绿，成因是它替产品加了 `LD_LIBRARY_PATH`。**
-2026-08-20 的源端演练上，`S1–S8` 全绿之后「测试连接」当场
-`DPI-1047 ... libnnz19.so: cannot open shared object file`——**#154 那条判据
-「自检说 OK 之后，现场不该再出现环境类失败」当场破了**。成因：ODPI-C 按全路径 `dlopen` 的
-只有 `libclntsh.so`，同包的 `libnnz19.so` / `libclntshcore.so` 由动态链接器按**它自己的**
-搜索路径找；Instant Client 目录不进 `ldconfig` 就找不到。而 S4 在查之前先把那个目录塞进
-`LD_LIBRARY_PATH`，查的根本不是产品会遇到的那条路径。
+**(b) Self-check S4 was a false green, because it added `LD_LIBRARY_PATH` on the product's behalf.**
+In the source-side rehearsal of 2026-08-20, after `S1–S8` all went green, "test connection" immediately gave
+`DPI-1047 ... libnnz19.so: cannot open shared object file` — **#154's criterion "after the self-check says OK, no
+environment-class failure should appear on site" broke on the spot.** The cause: ODPI-C `dlopen`s only `libclntsh.so`
+by full path, while its siblings `libnnz19.so` / `libclntshcore.so` are found by the dynamic linker on **its own**
+search path; without the Instant Client directory in `ldconfig` they are not found. And S4 pushed that directory into
+`LD_LIBRARY_PATH` before checking, so what it checked was not the path the product will take.
 
-**裁定：自检一律按产品自己的搜索路径判，不替产品把路铺好再去查。** S4 改成
-`env -u LD_LIBRARY_PATH ldd`——**「本脚本不加」不够，还要显式抹掉继承来的那一份**：
-把 `export LD_LIBRARY_PATH=/opt/oracle/instantclient` 写进 root 的 profile 是这类机器上最常见的
-习惯，而 systemd 拉起来的 `db-qbs-source` 不继承任何 profile，留着它查到的是
-「运维当前这个 shell 里能不能加载」，不是「服务进程里能不能加载」；缺的那几个若「加上 Instant Client 目录就都在」，处置直接给 `ldconfig`
-那两条命令，与「包没装」两种成因分开说，**两种同时成立时一次列全**（脚本头纪律 1：
-只报一条就等于让人清完一条再撞下一条）。手册第 4 步随之补上 `ld.so.conf.d` + `ldconfig`。
-**负对照**（改了就得证它真的抓得住）：在装完的机器上撤掉那个 conf 再 `ldconfig`，S4 当场红
-并给出 `ldconfig` 的处置；复原后回到 8/0。
+**Ruling: a self-check always judges by the product's own search path, and never paves the road before checking it.**
+S4 becomes `env -u LD_LIBRARY_PATH ldd` — **"this script does not add it" is not enough, the inherited one must be
+wiped explicitly**: putting `export LD_LIBRARY_PATH=/opt/oracle/instantclient` into root's profile is the commonest
+habit on machines like these, and the `db-qbs-source` started by systemd inherits no profile, so leaving it in checks
+"can this shell load it right now" rather than "can the service process load it". If what is missing would "all be
+there once the Instant Client directory is added", the remedy gives the two `ldconfig` commands directly, kept
+separate from the "the package is not installed" cause, and **when both hold, list them together in one pass**
+(script-header discipline 1: reporting only one means making people clear one and hit the next).
+Step 4 of the manual gains `ld.so.conf.d` + `ldconfig` accordingly.
+**Negative control** (having changed it, prove it really catches things): on an installed machine, remove that conf,
+run `ldconfig`, and S4 goes red on the spot with the `ldconfig` remedy; restore it and it returns to 8/0.
 
-> 附带一条观察，别误读：撤掉之后**已经在跑的** source 进程测试连接仍回 `ok:true`——
-> ODPI-C 一个进程只初始化一次。这条故障只在新进程第一次连库时现形，
-> 所以自检比运行中的进程更严格，这是对的。
+> An incidental observation, do not misread it: after removal, an **already running** source process still returns
+> `ok:true` on test connection — ODPI-C initialises once per process. This fault only appears when a new process
+> connects for the first time, so the self-check is stricter than a running process, and that is correct.
 
-**（c）`S` 不是第五个台架字母**（增补 4(a) 的同一条裁定，第四次援引）：源端装机的判据落在
-`docs/install/records/` 的实录里，一条搬运语义都不碰。手册与实录同处一个文档区（规格 #149 E.17），
-台架那边只放「在演练台上走它」的那一半，并配一份不起台架的静态自检
-`test-rehearsal-source-install.sh`——它守的是**手册与回放脚本说的是同一件事**：
-自检的 S1–S8 一条不落地出现在手册里、真机差异标记不少于规格点名的五类、端口与路径两边同值、
-vault 换源那一段与构建镜像指同一个存档（这段现在有四份实现）。
+**(c) `S` is not a fifth rig letter** (the same ruling as addendum 4(a), cited for the fourth time): the source-side
+installation criteria live in the record under `docs/install/records/` and touch no transfer semantics. The manual
+and the record share one documentation area (spec #149 E.17); the rig side holds only the "walk it on the rehearsal
+rig" half, plus a static self-check that starts no rig, `test-rehearsal-source-install.sh` — which guards
+**that the manual and the replay script say the same thing**: every one of the self-check's S1–S8 appears in the
+manual, the real-machine difference markers number at least the five classes the spec names, ports and paths match on
+both sides, and the vault repo-switch section points at the same archive as the build image (there are now four
+implementations of that section).
 
-### 8. 目标端装机手册的落地裁定，与隧道判据在真 sink 上的第一次成立（2026-08-20，#156 落地）
+### 8. Landing rulings for the target-side installation manual, and the tunnel criteria holding on a real sink for the first time (2026-08-20, #156 landed)
 
-§6 只裁定了「照手册装完并搬通一次」，增补 7 落了源端那一半。目标端这一半落地时有五件事要钉住。
+§6 only ruled "install by the manual and transfer once", and addendum 7 landed the source-side half. Landing the
+target-side half raised five things to nail down.
 
-**（a）对端换了个方向，手册的顺序随之定下：先目标端、后源端。** #155 由台架准备目标端
-（`rehearsal-tunnel-up.sh --side target --sink real`）、人敲源端；#156 由台架准备源端（`--side source`：
-stunnel 客户端 + 证书 + `openssl`）、人敲目标端。目标端自己的自检 D1–D9 **不依赖源端**，源端只在手册
-第 10 步「从公网侧核一眼」时用到——而源端自检的 S8 要摸到目标端回环上的 sink，反过来装的话源端那一份的
-最后一步转不了绿。两份手册与 `docs/install/README.md` 都写这一句。
+**(a) The far end swaps direction, so the manual order is fixed: target side first, source side second.** #155 had
+the rig prepare the target (`rehearsal-tunnel-up.sh --side target --sink real`) and a human type the source; #156 has
+the rig prepare the source (`--side source`: stunnel client + certificates + `openssl`) and a human type the target.
+The target's own self-checks D1–D9 **do not depend on the source**, which is used only at step 10 of the manual
+("check once from the public side") — whereas the source's self-check S8 must reach the sink on the target's
+loopback, so in the reverse order the last step of the source's self-check cannot go green. Both manuals and
+`docs/install/README.md` say this.
 
-**（b）隧道判据在真 sink 上第一次成立：`rehearsal-tunnel-check.sh --sink stub|real`。** 增补 7(a) 写明的那条代价
-（`--sink real` 下 T3/T5/T7 按桩的标记判、会红在标记上）在真 sink 成为本票的交付物之后不再接受——
-一条在交付物上必红的判据不是判据。裁定：**判据按落点种类认指纹**，桩认它回的那一行标记，真 sink 认它对不存在的
-run 回的 404 里的产品错误码 `RUN_UNKNOWN`（与源端自检 S8、目标端自检 D2 同一个指纹；「有人应答」不算，隧道通到
-别的服务上也会有人应答）。真 sink 没有健康检查端点（路由全集是 `/v1/runs*` 与 `/v1/target/*`），所以打的是
-`/v1/runs/__tunnel-probe__`。落点种类由调用方声明、与 `rehearsal-tunnel-up.sh --sink` 对上，对不上三条会红在一个
-假成因上——这与增补 4 判过的「负判据红在错误的成因上」是同一类问题。#153 那份桩 sink 的实录照旧是隧道加密取证的
-第一份证据，本票在真 sink 上重走 T0–T11 是第二份。
+**(b) The tunnel criteria hold on a real sink for the first time: `rehearsal-tunnel-check.sh --sink stub|real`.**
+The cost stated in addendum 7(a) (under `--sink real`, T3/T5/T7 judge by the stub's marker and go red on it) is no
+longer acceptable once the real sink is this ticket's deliverable — a criterion guaranteed to be red on the
+deliverable is not a criterion. Ruling: **the criteria recognise a fingerprint per landing-point kind**; the stub is
+recognised by the marker line it returns, the real sink by the product error code `RUN_UNKNOWN` inside the 404 it
+returns for a nonexistent run (the same fingerprint as source self-check S8 and target self-check D2; "somebody
+answered" does not count, since a tunnel landing on some other service also produces an answer). The real sink has no
+health endpoint (its whole route set is `/v1/runs*` and `/v1/target/*`), so the probe hits
+`/v1/runs/__tunnel-probe__`. The landing-point kind is declared by the caller and must match
+`rehearsal-tunnel-up.sh --sink`; a mismatch turns three criteria red on a false cause — the same class of problem as
+addendum 4's "a negative criterion going red for the wrong reason". #153's stub-sink record remains the first piece of
+encryption evidence for the tunnel; this ticket re-walking T0–T11 on a real sink is the second.
 
-**（c）MySQL 三前提的判定权在 sink，目标端不装 MySQL 客户端。** CentOS 7 base 源里的客户端是 5.x 那一代，
-对 MySQL 8.0 默认的 `caching_sha2_password` 认不了，装上去红出来的是一条假故障（#154 已裁定，这里把它写进手册
-的「别装」）。所以手册第 7 步**在这台机器上没有命令可敲**，它是给客户 DBA 的纸条：账号的 `GRANT`
-（`SELECT, INSERT, UPDATE, CREATE, DROP`——`information_schema` 元数据、`INSERT … SELECT` 切换段、暂存表建删；
-没有 `DELETE`，ADR-0035 的 upsert 不删行）、`my.cnf` 两行（`character-set-server = utf8mb4`、
-`max_allowed_packet = 64M`）、`init_connect` / 中间层不许改写会话 `sql_mode`。数值口径三处同一个数
-（sink 的 `MIN_PACKET` / 自检的 `MIN_PACKET=67108864` / 手册给 DBA 的 67108864）由静态自检钉住。
-D4–D7 在本票**第一次在真 sink 上转绿**——此前台架上只有桩给的九档分类（C1–C9），连不上之外的每一档都没在真 sink
-上走过。演练台的 MySQL 天然满足三项（compose 起的 `utf8mb4`、8.0 默认 `max_allowed_packet` 恰是 64M），
-**这是演练台比真机宽松的一处**，手册以真机差异 ⑥ 标出、行李清单第 11 项把纸条列为要带的东西。
+**(c) The three MySQL premises are judged by sink, and no MySQL client is installed on the target host.** The client
+in CentOS 7's base repo is the 5.x generation, which cannot authenticate against MySQL 8.0's default
+`caching_sha2_password`, so installing it produces a fake fault (already ruled in #154; here it becomes a "do not
+install" note in the manual). So step 7 of the manual **has no command to type on this machine**; it is a note for
+the customer's DBA: the account's `GRANT` (`SELECT, INSERT, UPDATE, CREATE, DROP` — `information_schema` metadata,
+the `INSERT … SELECT` swap segment, creating and dropping the staging table; no `DELETE`, since ADR-0035's upsert
+deletes no rows), two `my.cnf` lines (`character-set-server = utf8mb4`, `max_allowed_packet = 64M`), and that
+`init_connect` / any middle layer must not rewrite the session `sql_mode`. The same number appears in three places
+(sink's `MIN_PACKET`, the self-check's `MIN_PACKET=67108864`, and the 67108864 given to the DBA in the manual) and is
+pinned by the static self-check. D4–D7 **go green on a real sink for the first time** on this ticket — until now the
+rig had only the stub's nine-way classification (C1–C9), and every level beyond "cannot connect" had never been
+walked on a real sink. The rehearsal rig's MySQL satisfies all three premises naturally (compose brings it up as
+`utf8mb4`, and 8.0's default `max_allowed_packet` happens to be 64M) — **this is one place where the rehearsal rig is
+more lenient than a real machine**, marked in the manual as real-machine difference ⑥, with item 11 of the packing
+list naming the DBA note as something to bring.
 
-**（d）真机差异加两类目标端独有的，静态自检的门槛提到七处。** 规格 #149 User Story 4 点名的五类里，
-**root 是顶层前提**（手册开头「全程 root」，与 #155 的源端手册一字同处理——它不是逐步的分歧，是通篇的假设：
-容器里 root 默认在、真机上也有 root，两边并不分岔），其余四类（防火墙 / SELinux / 已装包 / yum 源）各有
-`⚠ 真机差异` 标记。目标端另有两类演练台上撞不到、真机上必撞的也各带标记：白名单端口与公网 IP 由客户给
-（§8「风险」那条唯一外部阻塞项，目标端这一头只要端口、`accept` 绑 `0.0.0.0`），以及 MySQL 是客户的库（(c)）。
-`test-rehearsal-target-install.sh` 按标记数 ≥ 7 与那六类的关键词判（root 走顶层前提、不进标记计数，与 #155 同）。
+**(d) Two target-only real-machine differences are added, raising the static self-check's bar to seven markers.**
+Of the five classes named in spec #149 User Story 4, **root is a top-level premise** (the manual opens with
+"root throughout", handled word for word as in #155's source manual — it is not a step-by-step divergence but a
+whole-document assumption: root is present by default in a container and available on a real machine, so the two do
+not diverge), and the other four (firewall / SELinux / packages already installed / yum repos) each carry a
+`⚠ 真机差异` marker. The target side has two more that cannot be hit on the rehearsal rig and certainly will be on a
+real machine, each marked: the whitelisted port and public IP are supplied by the customer (the sole external blocker
+in §8's "Risk"; this end needs only the port, with `accept` bound to `0.0.0.0`), and MySQL being the customer's
+database (see (c)). `test-rehearsal-target-install.sh` judges by a marker count ≥ 7 plus keywords for those six
+classes (root goes to the top-level premise and is not counted, as in #155).
 
-**（e）`D` 不是第五个台架字母**（增补 4(a) 的同一条裁定，第五次援引）：目标端装机的判据落在
-`docs/install/records/` 的实录里，一条搬运语义都不碰。手册与实录同处一个文档区（规格 #149 E.17），
-台架那边只放「在演练台上走它」的那一半：`rehearsal-target-install.sh` 是手册的可执行回放（不是第二套装法），
-`test-rehearsal-target-install.sh` 守「手册与回放说的是同一件事」。
+**(e) `D` is not a fifth rig letter** (the same ruling as addendum 4(a), cited for the fifth time): the target-side
+installation criteria live in the record under `docs/install/records/` and touch no transfer semantics. The manual and
+the record share one documentation area (spec #149 E.17); the rig side holds only the "walk it on the rehearsal rig"
+half: `rehearsal-target-install.sh` is an executable replay of the manual (not a second way to install), and
+`test-rehearsal-target-install.sh` guards "the manual and the replay say the same thing".
 
-### 9. 终局演练的编排层、真实搬运那一段的判定面，与「过滤生效」的反面（2026-08-20，#157 落地）
+### 9. The final rehearsal's orchestration layer, the assertion surface of the real transfer segment, and the negative side of "the filter took effect" (2026-08-20, #157 landed)
 
-§6 的判据到这一票才算走完整：增补 7 落了源端那一半、增补 8 落了目标端那一半，本票把两份手册**连起来**跑一遍，
-并补上此前两票都不做的那件事——**经隧道跑通一次真实搬运**（规格 #149 User Story 14）。落地时有五件事要钉住。
+§6's criteria are only fully walked at this ticket: addendum 7 landed the source half, addendum 8 the target half, and
+this ticket runs both manuals **joined up**, plus the thing neither earlier ticket did — **one real transfer through
+the tunnel** (spec #149 User Story 14). Landing it raised five things to nail down.
 
-**（a）编排层自己不装任何东西，装法只有一份来源。** `rehearsal-final.sh` 是编排：推倒重建 → 行李清单逐项核对 →
-拓扑判据 → 目标端那一趟 → 源端那一趟 → 隧道判据 → 一次真实搬运。装机命令一条都不在它里面，
-目标端出自 `rehearsal-target-install.sh`（照目标端手册）、源端出自 `rehearsal-source-install.sh`（照源端手册）。
-理由与增补 7(a)/8(a) 是同一条：脚本一旦自己敲起装机命令，实录证的就不再是手册，
-而 §6「手册没写、临场解决算判据未达成」当场失去抓手。`test-rehearsal-final.sh` 第 2 条按内容判——
-编排脚本里出现 `yum -y install` / `ldconfig` / `unzip -oq` / 占位符替换 / 起 preflight 之类，一律红。
+**(a) The orchestration layer installs nothing itself; there is only one source for how to install.**
+`rehearsal-final.sh` orchestrates: tear down and rebuild → check the packing list item by item → topology criteria →
+the target-side walk → the source-side walk → tunnel criteria → one real transfer. Not one installation command is in
+it; the target side comes from `rehearsal-target-install.sh` (following the target manual) and the source side from
+`rehearsal-source-install.sh` (following the source manual). The reason is the same as addendum 7(a)/8(a): the moment
+the script types installation commands itself, the record no longer evidences the manual, and §6's "the manual did
+not say it and it was solved on the spot counts as the criterion not met" loses its hold. `test-rehearsal-final.sh`
+item 2 judges by content — `yum -y install` / `ldconfig` / `unzip -oq` / placeholder substitution / starting a
+preflight appearing in the orchestration script all go red.
 
-**（b）目标端手册第 10 步延后，为此给那支回放开两个开关。** 那四条命令**在源端那台上敲**（手册明写），
-而终局演练里源端也得照它自己那份手册装——装目标端时源端还是干净机器，敲不了。裁定：
-`--defer-step10` 装完第 1–9 步、把第 10 步留到源端装完之后由 `--only-step10` 补上。
-**两个开关都只减不加**：不带参数时那支脚本与 #156 落地时一字不差（增补 8 的实录仍然成立）；
-总账里**没走过的一条都不列**——把没跑的记成绿或记成红，都是把「没跑」伪装成判定，
-与增补 4 判过的「负判据红在错误的成因上」同类。
+**(b) Step 10 of the target manual is deferred, so that replay gets two switches.** Those four commands are
+**typed on the source host** (the manual says so), and in the final rehearsal the source is installed from its own
+manual too — while the target is being installed the source is still a clean machine and cannot type them. Ruling:
+`--defer-step10` installs steps 1–9 and leaves step 10 for `--only-step10` after the source is installed.
+**Both switches only subtract, never add**: with no arguments that script is word for word what it was when #156
+landed (addendum 8's record still holds); and **nothing unwalked is listed in the ledger** — recording an unrun step
+as green or as red both disguise "not run" as a judgement, the same class as addendum 4's "a negative criterion going
+red for the wrong reason".
 
-**（c）真实搬运的断言面是产品自己的 `/api/*`，在源端主机容器里用 `curl` 打。** 这是 ADR-0028 §1 的同一条纪律
-（断言面是 API 不是 DOM）在演练台上的第一次应用：那条路径与所有者经 `ssh -L 8088:127.0.0.1:8088` 点界面
-**是同一条**，界面那一半归三份视觉走查，不在这里重判。搬运走完的六件事逐一有判据：两条数据源（目标库那条的测连
-**经隧道到 sink、再由 sink 连 MySQL**）、构建器查表取列、任务定义加一条**运行时填**的过滤条件、发起、
-轮询看阶段与已推行数、目标库逐值核对。**目标表由产品生成的建表 DDL 建**（v1 手工建表，ADR-0039）——
-台架里不另写一份 `CREATE TABLE`，另写一份等于绕开建表 SQL 生成器，现场那一步就没被演练到，
-静态自检第 6 条盯的是这个。
+**(c) The real transfer's assertion surface is the product's own `/api/*`, hit with `curl` inside the source-host
+container.** This is the first application on the rehearsal rig of the same discipline as ADR-0028 §1 (the assertion
+surface is the API, not the DOM): that path is **the same one** the owner uses when clicking the UI through
+`ssh -L 8088:127.0.0.1:8088`, and the UI half belongs to the three visual walkthroughs and is not re-judged here.
+Each of the six things in a completed transfer has its criterion: two datasources (the target one's connection test
+goes **through the tunnel to sink, and from sink to MySQL**), the builder listing tables and fetching columns, a task
+definition with one **fill-at-run-time** filter condition, starting the run, polling the phase and rows pushed, and
+value-by-value verification in the target database. **The target table is created from the DDL the product
+generates** (v1 creates tables by hand, ADR-0039) — the rig does not write its own `CREATE TABLE`, which would bypass
+the DDL generator and leave that on-site step un-rehearsed; item 6 of the static self-check watches for it.
 
-**（d）「过滤生效」必须有反面。** fixture `acceptance/oracle-v2-final.sql` 的两个业务日期**行数刻意不等量**
-（08-20 五行、08-19 两行），核对时除了行数与逐值一致，另判**过滤外的那两行没被搬过去**。
-只数行数的话，「整表搬了一遍又恰好只有五行」这种巧合会被记成绿——这与增补 4 那条
-「每条负判据都要配同址正对照」是一体两面：正面要有反面，反面要有正对照。
+**(d) "The filter took effect" must have a negative side.** The fixture `acceptance/oracle-v2-final.sql` deliberately
+gives its two business dates **unequal row counts** (five rows on 08-20, two on 08-19), and verification asserts not
+only the row count and value-by-value equality but also **that the two rows outside the filter were not transferred**.
+Counting rows alone would record the coincidence "the whole table was transferred and happens to have exactly five
+rows" as green — the other face of addendum 4's "every negative criterion carries a same-address positive control":
+a positive needs a negative, and a negative needs a positive control.
 
-**（e）行李清单第 8 项（离线 rpm）在演练台上记「不适用」，不记 OK 也不记缺。** 容器联网走 vault 三源，
-离线那条路是手册的真机差异 ②，演练台上**验不到**。记 OK 是假绿（那批 rpm 根本没被用过），
-记缺又会挡住整趟。第三档「不适用 + 为什么」是唯一诚实的记法，与 `CLAUDE.md` 视觉门禁通则 3
-（没跑就写明「未跑及为什么」，但沉默不算跳过）同一条纪律。其余十项逐项核对，缺一项就地停——
-装机那天没有第二次机会。
+**(e) Item 8 of the packing list (offline rpms) is recorded as "not applicable" on the rehearsal rig, neither OK nor
+missing.** The containers have network and use the three vault repos, so the offline path is the manual's
+real-machine difference ②, and **it cannot be verified** on the rehearsal rig. Recording OK is a false green (those
+rpms were never used), and recording it missing would block the whole run. A third state, "not applicable + why", is
+the only honest record, and it is the same discipline as `CLAUDE.md` visual-gate rule 3 (if it was not run, say "not
+run and why", but silence is not a skip). The other ten items are checked one by one, and one missing stops
+everything on the spot — installation day has no second chance.
 
-**（e2）「看进度」这一条，演练台给不出全程。** 2026-08-20 那一趟的搬运是五行，
-一秒的轮询间隔里只采到 `PREPARING` 一帧就落了终态。裁定：**实录如实记一帧，不拿它冒充「看完了进度」**——
-长时间的进行中态早有去处（M2 走查的 V1/V16/V17 靠 `M2_KEEP_RIG` 交出来的 `hang-streaming` 台架、
-M1 的 10 万行档），在本入口再造一个只会多出一个各自漂移的真源（ADR-0040 §1 的同一条理由）。
-要在终局演练里看到全程，得把 fixture 灌到十万行量级，那正是 M1 那一档已经在做的事。
+**(e2) "Seeing progress" cannot be shown end to end on the rehearsal rig.** The 2026-08-20 transfer was five rows,
+and a one-second polling interval caught only a single `PREPARING` frame before it reached a final state. Ruling:
+**the record states the one frame honestly and does not pass it off as "progress was watched"** — a long-running
+in-progress state already has homes (the `hang-streaming` rig that M2's walkthrough V1/V16/V17 obtain via
+`M2_KEEP_RIG`, and M1's 100k-row level), and building another at this entry point only adds a second source of truth
+that will drift (ADR-0040 §1's reasoning). Seeing it end to end in the final rehearsal would require a fixture at the
+100k-row scale, which is exactly what M1's level already does.
 
-**（e3）判据 4「临场解决要回写并重走」对编排脚本一视同仁。** 2026-08-20 这一票跑了三趟：
-第一趟整趟绿，随后 code review 报出七处（第 3 项恒 OK、建表报错被吞、轮询把非 200 当终态等），
-脚本一改，**那份实录记的就不是仓库里这版脚本跑出来的东西**——作废重走；第二趟栽在
-`jq` 的 `//` 把 `false` 也当「缺失」（`.live // empty` 在落终态那一刻取回空串，搬运其实成了、
-脚本却报「卡住」），修掉再重走第三趟。裁定：**手册要重走，编排脚本改了同样要重走**，
-且实录里把「跑了几趟、每趟为什么重跑」一并记下——判据是过程性的，重跑的理由本身就是记录的一部分。
+**(e3) Criterion 4, "solved on the spot must be written back and walked again", applies equally to the orchestration
+script.** This ticket ran three times on 2026-08-20: the first was green throughout, then code review reported seven
+issues (item 3 always OK, a create-table error swallowed, polling treating a non-200 as a final state, and others);
+once the script changed, **that record no longer evidenced the version of the script in the repo** — voided and
+re-walked. The second run tripped over `jq`'s `//` treating `false` as "missing" (`.live // empty` returned an empty
+string at the moment of reaching a final state, so the transfer actually succeeded while the script reported "stuck");
+fixed, and re-walked as the third run. Ruling: **the manual gets re-walked, and so does the orchestration script when
+it changes**, with the record noting how many runs there were and why each re-run happened — the criteria are
+procedural, so the reason for a re-run is itself part of the record.
 
-**（f）本票不新开台架字母**（增补 4(a) 的同一条裁定，第六次援引）：终局演练的判据仍落在
-`docs/install/records/` 的实录里，与两份手册同处一个文档区（规格 #149 E.17）。
-四份既有台架（M1/M2/M3/v1）一个字节不动。
+**(f) This ticket opens no new rig letter** (the same ruling as addendum 4(a), cited for the sixth time): the final
+rehearsal's criteria still live in the record under `docs/install/records/`, in the same documentation area as the two
+manuals (spec #149 E.17). The four existing rigs (M1/M2/M3/v1) are untouched to the byte.
 
-### 10. 「跑 M2 台架」不等于「M2 验收」，以及三道代码门槛要留原始输出（2026-08-20，#158 验收后的两轴评审）
+### 10. "Running the M2 rig" is not "M2 acceptance", and the three code gates must keep their raw output (2026-08-20, two-axis review after #158's acceptance)
 
-两轴评审各自独立报出同一处：`CLAUDE.md` 视觉门禁触发表给 V1–V25 的第一条触发是
-「every M2 acceptance」，而每一次整体验收都会**复跑 M2 台架**——照字面读，V1–V25 每版必跑，
-与 ADR-0040 §6.1「V1–V25 跑一次即封」正面撞车。#136（第一版验收）已经按「不撞」处理过一次，
-但那是**先例，不是成文裁定**，于是 #158 又自证了一遍。裁定如下，往后不再重证：
+Both review axes independently reported the same thing: `CLAUDE.md`'s visual-gate trigger table gives V1–V25's first
+trigger as "every M2 acceptance", while every overall acceptance **re-runs the M2 rig** — read literally, V1–V25 runs
+in every version, colliding head-on with ADR-0040 §6.1's "V1–V25 runs once and is sealed". #136 (v1's acceptance)
+already handled it as "no collision", but that was **a precedent, not a written ruling**, so #158 proved it again.
+The ruling, so it need not be proved a third time:
 
-**（a）「M2 acceptance」指 M2 这个里程碑的验收，不指 `run-m2-acceptance.sh` 这支脚本的任何一次执行。**
-后者在 M3、第一版、第二版的整体验收里都会跑，它是**回归复跑**——证的是「本版没碰坏 M2 的判据」，
-不是「M2 这个里程碑在验收」。里程碑验收一生只有一次（M2 的那次已于 #72 完成），
-所以这条触发条件**在 M2 之后永久不再响**。V1–V25 此后只由第二条触发条件驱动：
-`docs/design-system/README.md` 或 `tokens.css` 的任何改动。
+**(a) "M2 acceptance" means the acceptance of the M2 milestone, not any execution of the `run-m2-acceptance.sh`
+script.** The latter runs in M3's, v1's and v2's overall acceptances as a **regression re-run** — proving "this
+version did not break M2's criteria", not "the M2 milestone is being accepted". A milestone is accepted once in its
+life (M2's was completed under #72), so this trigger **never fires again after M2**. V1–V25 is thereafter driven only
+by the second trigger: any change to `docs/design-system/README.md` or `tokens.css`.
 
-**（b）这不是给通则 1 开豁免。** 通则 1 说「触发了就跑，不找豁免」，管的是**触发条件成立时**
-不许自行斟酌；本条裁的是**触发条件的所指**，是读法不是豁免。判别方式很硬：
-第二条触发条件（设计系统两文件有无改动）**每版仍要逐条查、查完附 git 证据**，
-查出有改动就跑整份 V1–V25，没有第二种处理。#158 查出的是 `e581056..d2bf782` 零个提交。
+**(b) This is not an exemption from rule 1.** Rule 1 says "a trigger fires, you run it, no exemptions", and governs
+what may not be second-guessed **once a trigger holds**; this clause rules on **what the trigger refers to** — a
+reading, not an exemption. The test is hard: the second trigger (whether the two design-system files changed) is
+**still checked item by item every version, with git evidence attached**, and if a change is found the whole of
+V1–V25 runs, with no second option. What #158 found was zero commits in `e581056..d2bf782`.
 
-**（c）W1–W6 不套用本条。** 它的两条触发条件（`.precheck-reports` 布局、`DiagnosticTable` 列结构）
-本来就是「改了才跑」，没有「每次某某验收」这一档，逐版查 git 证据即可（#158 查出的是
-`app.css` 零提交、整段前端 diff 里两个关键词命中 0 次）。
+**(c) W1–W6 does not take this clause.** Its two triggers (the `.precheck-reports` layout, the `DiagnosticTable`
+column structure) were always "run it if it changed", with no "every such-and-such acceptance" tier, so checking git
+evidence per version suffices (what #158 found: zero commits to `app.css`, and the two keywords appearing 0 times in
+the whole front-end diff).
 
-**（d）三道代码门槛（`cargo test --workspace` / `npm run typecheck` / `npm test`）要留原始输出，
-不是只留一行结论。** 四份台架报告都带逐条断言的原始 payload，唯独这三道门槛此前只在验收总账里
-留一句「全过」——下一台机器无从复核，与 `CLAUDE.md` 通则 2「记实际观察，不记一句『通过』」
-是同一条纪律，只是那条纪律此前只写给视觉走查。裁定：**整体验收的总账里附三道门槛的原始输出**
-（测试目标名、逐个 `test result` 行、退出码），跑在哪台机器上、什么时候跑的一并记下。
+**(d) The three code gates (`cargo test --workspace` / `npm run typecheck` / `npm test`) must keep their raw output,
+not just a one-line conclusion.** All four rig reports carry the raw payload of each assertion; only these three
+gates had until now left just "all passed" in the acceptance ledger — the next machine cannot re-check that, and it
+is the same discipline as `CLAUDE.md` rule 2 ("record actual observations, never a bare pass claim"), which had only
+been written for the visual walkthroughs. Ruling: **the overall acceptance ledger attaches the three gates' raw
+output** (test target names, each `test result` line, exit codes), along with which machine it ran on and when.

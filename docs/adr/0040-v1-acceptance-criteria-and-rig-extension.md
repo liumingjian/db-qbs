@@ -1,608 +1,674 @@
-# ADR-0040: 第一版验收判据与台架第四个入口——10w/100M 已在 M1 兑现，新增维度只有内存峰值；三份既有台架必须重推判据
+# ADR-0040: v1 acceptance criteria and the rig's fourth entry point — 100k rows / 100MB is already met by M1, the only new dimension is peak memory, and all three existing rigs need their criteria re-derived
 
-**状态**: 已接受
-**日期**: 2026-08-19
-**票**: [#122](https://github.com/liumingjian/db-qbs/issues/122)（地图 [#117](https://github.com/liumingjian/db-qbs/issues/117) 的第六票，也是最后一张）
-**先例**: `ADR-0028`（M2 第一次）、`ADR-0032`（M3 第二次）——本 ADR 是第三次，照着走
+**Status**: Accepted
+**Date**: 2026-08-19
+**Ticket**: [#122](https://github.com/liumingjian/db-qbs/issues/122) (the sixth and last ticket on map [#117](https://github.com/liumingjian/db-qbs/issues/117))
+**Precedent**: `ADR-0028` (M2, the first time), `ADR-0032` (M3, the second) — this ADR is the third, and follows them
 
-## 背景
+## Background
 
-第一版闭环地图的前五票已全部收口：`ADR-0035`（主键 upsert）、
-`ADR-0036`（结构化 `TaskSpec`）、
-`ADR-0037`（数据源与凭据）、
-`ADR-0038`（字段映射与目标端列面）、
-[ADR-0039](0039-v1-ui-increments.md)（界面增量）。本票定的是：**这五条怎么算验收通过，台架怎么扩。**
+The first five tickets of the v1 closed-loop map are all settled: `ADR-0035` (primary-key upsert),
+`ADR-0036` (structured `TaskSpec`),
+`ADR-0037` (datasources and credentials),
+`ADR-0038` (column mapping and the target-side column face),
+[ADR-0039](0039-v1-ui-increments.md) (UI increments). This ticket decides: **what makes those five count as
+accepted, and how the rig extends.**
 
-### 开票前的三条事实，查证后有两条翻了
+### Three facts assumed when the ticket was opened; two of them flipped on inspection
 
-| 票正文的假设 | 查证结果 |
+| What the ticket assumed | What inspection found |
 |---|---|
-| 「10 万行 / 约 100MB」是要新构造的用例 | **翻了。** M1 的 `wide-100k` 早就超额兑现，见 §1 |
-| 「三份既有台架要不要重跑」是个待判问题 | **翻了。** 不是要不要——三份**现在全部对不上新 API**，非改不可，见 §5 |
-| 「M3 的 W1–W6 要不要重跑」由 #123 决定 | **换了触发源。** #123 确实没碰，但 `ADR-0036` §5 碰了，见 §6 |
+| "100k rows / about 100MB" needs a new fixture | **Flipped.** M1's `wide-100k` already exceeds it — see §1 |
+| "should the three existing rigs be re-run" is an open question | **Flipped.** Not a question — all three **currently fail against the new API**, so they must change; see §5 |
+| "should M3's W1–W6 be re-run" is decided by #123 | **Trigger source changed.** #123 indeed did not touch it, but `ADR-0036` §5 did; see §6 |
 
-### 所有者 2026-08-19 的两条裁定（本 ADR 的输入）
+### Two owner rulings of 2026-08-19 (inputs to this ADR)
 
-1. **db-qbs 服务端跑在独立服务器上，内存充裕。**
-2. **10 万行是夜间批量，跑多久都行。**
+1. **The db-qbs server runs on a dedicated machine with ample memory.**
+2. **100k rows is a nightly batch; it can take as long as it takes.**
 
-## 决策
+## Decision
 
-### 1. 「10 万行 / 约 100MB」不新造用例——M1 的 `wide-100k` 已超额兑现 3.3 倍
+### 1. No new fixture for "100k rows / ~100MB" — M1's `wide-100k` already exceeds it by 3.3x
 
-`acceptance/oracle.sql` 的 `t_m1_wide` 是 **68 列 `VARCHAR2(48)` + `NUMBER(8)` + `DATE`，10 万行**，
-每行约 **3.3 KB**。2026-08-16 那份 9/9 报告的实测批体分布可以直接换算：
+`t_m1_wide` in `acceptance/oracle.sql` is **68 `VARCHAR2(48)` columns + `NUMBER(8)` + `DATE`, 100,000 rows**,
+about **3.3 KB per row**. The measured batch-size distribution in the 9/9 report of 2026-08-16 converts directly:
 
-> `wide.jsonl`：100000 行 / **21 批**，批体 min/p50/max = **14.5 / 16.78 / 16.78 MB**
-> → 单次导入的线上载荷 ≈ **336 MB**
+> `wide.jsonl`: 100000 rows / **21 batches**, batch size min/p50/max = **14.5 / 16.78 / 16.78 MB**
+> → on-wire payload for one import ≈ **336 MB**
 
-「约 100MB」这条**在行宽维度上早已被超额覆盖**，且是在真实搬运路径上、不是探针上量的。
-**新构造一份「刚好 100MB」的 fixture 是纯浪费**——它比现有用例更弱，通过它证明不了现有用例没证明的任何事。
+"About 100MB" is **already exceeded on the row-width axis**, and on the real transfer path rather than on a probe.
+**Building a fixture that lands exactly on 100MB is pure waste** — it is weaker than the existing case, and passing
+it would prove nothing the existing case does not already prove.
 
-**因此：**
+**Therefore:**
 
-- 第一版第 ⑤ 条需求的兑现点是 **M1 的 `wide-100k` + 本 ADR §3 的内存断言**，**两者合起来才算兑现，缺一不可**。
-  行数与行宽那一半在 M1，内存形状那一半在新入口。**不在任何一处重复。**
-- **M1 报告必须新增一行「载荷记账」**：源行宽（字节/行）、批数、批体 p50、载荷总量估算。
-  没有这一行，将来没人看得出那条「约 100MB」是在哪里兑现的——数据一直都在，只是没人把它读成这条判据的证据。
-- `STRATEGY-V1.md` 成功标准第 1 条（「70+ 列、10 万行宽表跑通」）**与本条是同一件事的两种说法**，
-  68 列 + 2 列 = 70 列，不是巧合。**不另立判据。**
+- Requirement ⑤ of v1 is met by **M1's `wide-100k` plus the memory assertion in §3 of this ADR**, and
+  **only both together**. The row-count and row-width half lives in M1, the memory-shape half in the new entry
+  point. **Neither half is duplicated anywhere.**
+- **The M1 report must gain a "payload accounting" line**: source row width (bytes/row), batch count,
+  batch-size p50, estimated total payload. Without it nobody will later be able to see where "about 100MB"
+  was met — the data was always there, nobody had read it as evidence for this criterion.
+- Success criterion 1 in `STRATEGY-V1.md` ("a 70+ column, 100k-row wide table runs end to end")
+  **is the same thing said differently**: 68 columns + 2 = 70 columns, not a coincidence. **No separate criterion.**
 
-**不设耗时判据**（所有者裁定 2）。台架 Oracle 是 amd64 模拟层，绝对秒数按
-`ADR-0005` 本来就不作数；
-现场是夜间批量，耗时也不构成体验约束。**报告里照记实测秒数，只看趋势、不判红绿。**
+**No elapsed-time criterion** (owner ruling 2). The rig's Oracle runs under an amd64 emulation layer, so absolute
+seconds never counted under `ADR-0005`; on site this is a nightly batch, so duration is not an experience
+constraint either. **Reports record the measured seconds as usual — read for trend, never judged pass/fail.**
 
-### 2. 另起第四个入口 `run-v1-acceptance.sh`，场景编号用 C 系列
+### 2. A fourth entry point `run-v1-acceptance.sh`, with scenario numbers in the C series
 
-照 `ADR-0032` §2 的 M3 先例：**另起，不往既有入口里塞。**
-理由与 M3 那次一字不改——既有入口的场景集是**该里程碑的常量**，往里塞新场景会让「9/9」「B1–B6」这类
-历史锚点随时间漂移，旧报告就对不上了。
+Following the M3 precedent in `ADR-0032` §2: **start a new one, do not stuff scenarios into an existing entry point.**
+The reasoning is unchanged from M3 — an entry point's scenario set is **a constant of its milestone**, and adding to
+it makes historical anchors like "9/9" and "B1–B6" drift over time, so old reports stop matching.
 
-**编号面**：M1 无字母（场景名即编号）、M2 是 **A1–A14**、M3 是 **B1–B6**、第一版是 **C1–C6**。
-字母是全局唯一的，**任何情况下不复用、不重编**。
+**Numbering**: M1 has no letter (the scenario name is the number), M2 is **A1–A14**, M3 is **B1–B6**, v1 is **C1–C6**.
+Letters are globally unique and are **never reused or renumbered, under any circumstances**.
 
-> **注意本次与 M3 那次的一处不同，别照抄错**：M3 的「9/9 是不受后续里程碑影响的常量」这句话
-> **这一次不成立**。第一版动的是**搬运语义本身**（写入模型换 upsert），不是往上加一层新能力。
-> M1/M2/M3 三份既有台架的**判据**因此必须重推——**编号与场景数不动，动的是断言措辞与期望值**（§5）。
+> **One difference from the M3 case — do not copy it wrong**: M3's line that "9/9 is a constant unaffected by later
+> milestones" **does not hold this time**. v1 changes **the transfer semantics themselves** (the write model becomes
+> upsert) rather than adding a capability on top. The **criteria** of all three existing rigs must therefore be
+> re-derived — **numbers and scenario counts stay put, the assertion wording and expected values change** (§5).
 
-### 3. 内存断言：量 `VmHWM` / `ru_maxrss`，两档比斜率，两个进程各判一次
+### 3. The memory assertion: measure `VmHWM` / `ru_maxrss`, compare the slope across two levels, judge each process separately
 
-这是第一版唯一真正新增的验收维度。判据必须是**能自动判 PASS/FAIL 的数**，不是一段观察记录——
-否则它不是门禁。
+This is the only genuinely new acceptance dimension in v1. The criterion must be **a number that can be judged
+PASS/FAIL automatically**, not a paragraph of observation — otherwise it is not a gate.
 
-#### 3.1 量什么：内核记的高水位，不是采样值
+#### 3.1 What to measure: the kernel's own high-water mark, not a sample
 
-- **source（`db-qbs-source-run`，一次性进程）**：由 wrapper 用 `wait4()` 取子进程的 **`ru_maxrss`**。
-- **sink（常驻进程）**：run 结束后读 `/proc/<pid>/status` 的 **`VmHWM`**。
+- **source (`db-qbs-source-run`, a one-shot process)**: the wrapper takes the child's **`ru_maxrss`** via `wait4()`.
+- **sink (a long-lived process)**: read **`VmHWM`** from `/proc/<pid>/status` after the run finishes.
 
-**两者都是内核维护的单调高水位，不是轮询采样。** 这一条是判据成立的前提：
-峰值是单点事件，采样式的 RSS 探测会漏掉它，漏掉之后判据会**假绿**——比没有判据更坏。
-（`spike-bulk` 已有 `VmHWM` 的读法先例，`acceptance/m2-source-run-wrapper.py` 已有 wrapper 先例，两处都照抄。）
+**Both are kernel-maintained monotonic high-water marks, not polled samples.** This is the premise the criterion
+rests on: a peak is a point event, and sampled RSS probing will miss it — and a missed peak makes the criterion
+**falsely green**, which is worse than having no criterion.
+(`spike-bulk` already reads `VmHWM`, and `acceptance/m2-source-run-wrapper.py` already has the wrapper; copy both.)
 
-#### 3.2 量谁：source 与 sink **各量一份**，不合并
+#### 3.2 Who to measure: source and sink **separately**, never combined
 
-两端的内存形状是**两条独立风险**，合并成一个数会互相掩盖：
+The two ends have **two independent memory risks**, and one combined number lets them mask each other:
 
-- **source** 是流式读方——风险是「攒批的缓冲跟着总行数长」。
-- **sink** 是暂存表写方 + 事务内切换方——风险是「`INSERT ... SELECT` 或切换事务把整批留在内存里」。
+- **source** is the streaming reader — the risk is "the batching buffer grows with total row count".
+- **sink** is the staging-table writer and in-transaction swapper — the risk is "`INSERT ... SELECT` or the swap
+  transaction holds a whole batch in memory".
 
-#### 3.3 怎么判：减基线、比斜率、系数 2
+#### 3.3 How to judge: subtract the baseline, compare slopes, factor of 2
 
-同一张宽表（`t_m1_wide`）跑 **1 万行**与 **10 万行**各一次（数据量差 **10 倍**），断言：
+Run the same wide table (`t_m1_wide`) once at **10k rows** and once at **100k rows** (a **10x** data difference), then assert:
 
 ```
-peak(100k) - baseline  ≤  2 × ( peak(10k) - baseline )
+peak(100k) - baseline  <=  2 x ( peak(10k) - baseline )
 ```
 
-**source 与 sink 各判一次，两条都绿才算 PASS。**
+**Judged once for source and once for sink; both must be green to PASS.**
 
-- **`baseline` = 进程起来、连上库、还没搬第一行时的高水位。**
-  不减基线，进程的固定开销（运行时、连接池、Instant Client）会把斜率稀释成假绿——
-  一个 200MB 固定开销的进程，就算数据部分真的线性涨，比值也接近 1。
-- **系数 2**：纯线性会给 **10×**，纯常数会给 **1×**。取 **2** 是「明确不线性」的判据，
-  余量留给批缓冲、分配器碎片、glibc 不还页给内核这三件确定会发生的事。
-  **它是形状判据，不是性能指标**——不要拿它当「内存优化到什么程度」的标尺，那是 M4 以后的事。
-- **四个绝对数（两个进程 × 两档）必须原样进报告**，外加两个基线。
-  只写 PASS 不写数，将来放宽或收紧系数时没有历史可比。
+- **`baseline` = the high-water mark once the process is up and connected but has not yet moved a single row.**
+  Without subtracting it, the process's fixed overhead (runtime, connection pool, Instant Client) dilutes the slope
+  into a false green — a process with 200MB of fixed overhead gives a ratio near 1 even if the data part really does
+  grow linearly.
+- **The factor 2**: purely linear gives **10x**, purely constant gives **1x**. **2** is the criterion for
+  "definitely not linear", with headroom for the three things that will certainly happen: batch buffering,
+  allocator fragmentation, and glibc not returning pages to the kernel.
+  **It is a shape criterion, not a performance metric** — do not read it as a yardstick for "how far memory has been
+  optimised"; that is an M4-and-later concern.
+- **All four absolute numbers (two processes x two levels) go into the report verbatim**, plus the baselines.
+  Writing PASS without the numbers leaves no history to compare against when the factor is later loosened or tightened.
 
-#### 3.4 不设绝对上限（所有者裁定 1）
+#### 3.4 No absolute ceiling (owner ruling 1)
 
-现场是独立服务器、内存充裕，一个绝对上限只会变成一个凭空拍的数，且第一次撞上就会被随手放宽——
-**判据被随手放宽过一次，就不再是判据**。
+On site this is a dedicated server with ample memory. An absolute ceiling would just be a number pulled from the air,
+and the first time it was hit it would be loosened on the spot —
+**a criterion loosened on the spot once is no longer a criterion**.
 
-> **时效**：若现场部署改成与旧系统同机共存，本条要补一个绝对上限，并按那台机器的实际余量取值。
-> 触发条件是**部署形态变化**，不是内存数字变大。
+> **Expiry**: if the deployment shape changes to co-existing with the legacy system on one machine, this clause needs
+> an absolute ceiling set from that machine's real headroom. The trigger is a **change in deployment shape**,
+> not a larger memory number.
 
-#### 3.5 sink 是常驻进程，两档之间必须重启
+#### 3.5 sink is long-lived, so it must be restarted between the two levels
 
-`VmHWM` 是**进程生命周期内**的高水位，跨 run 只增不减。不重启的话第二档读到的是第一档的残留，
-比值恒等于 1，**判据永久假绿**。脚本里两档之间必须重启 sink，并**在报告里记下重启这一步确实执行了**。
+`VmHWM` is the high-water mark **for the process's lifetime**, and only rises across runs. Without a restart, the
+second level reads the first level's residue, the ratio is identically 1, and **the criterion is permanently
+falsely green**. The script must restart sink between the two levels, and **the report must record that the restart
+actually happened**.
 
-### 4. C 系列：六个场景，覆盖前五票的新能力
+### 4. The C series: six scenarios covering the new capabilities of the first five tickets
 
-| 编号 | 场景 | 断言 | 来源 |
+| No. | Scenario | Assertions | Source |
 |---|---|---|---|
-| **C1** | 数据源 CRUD + 测试连接 | ①建 Oracle 源与 MySQL 目标各一条；②**凭据错的连接测连失败 → 存不进去**（所有者裁定 2 的负向档）；③API 视图**连密文都不回**；④删除被任务引用的数据源 → **409 且报文点名引用它的任务**；⑤只改名称免测连 | ADR-0037 §6/§7、ADR-0039 §3/§4 |
-| **C2** | 字段映射与目标端列面 | ①源列映到**不同名**目标列，跑通后按**目标名**核对目标端数据；②默认预填同名（恒等映射）；③`/v1/target/tables` 与 `/v1/target/columns` 各取一次，闭集不增 | ADR-0038 §2/§3 |
-| **C3** | 用户可填筛选条件 | ①一个常量条件 + 一个「运行时填」条件，各跑一次，行数按预期变；②生成的 SQL 里**值一律是绑定变量、常量也是**；③界面无手改 SQL 入口 | ADR-0036 §1/§2 |
-| **C4** | 主键 upsert 的幂等 | ①**同一 run 连跑两次，目标表行数不变**；②`staged ≤ affected ≤ 2×staged`；③`purged_rows` 恒 **0**；④改一列源值重跑 → 目标端该列**被更新**（证明是 upsert 不是 INSERT IGNORE）；⑤**目标表缺 PK/UNIQUE → 预检拒跑**（ADR-0035 的静默退化防线） | ADR-0035 §1 |
-| **C5** | 映射预检三分支的三条负向用例 | ①主键列在目标端可空 → **拒**；②被映射的非主键列可空 → **放行**；③未映射列既无 `COLUMN_DEFAULT` 也无 `EXTRA` → **拒** | ADR-0038 §5（该 ADR 点名「三条负向用例归 #122」） |
-| **C6** | 内存形状 | §3 的两条斜率断言，source 与 sink 各一 | 本 ADR §3 |
+| **C1** | Datasource CRUD + connection test | ① create one Oracle source and one MySQL target; ② **a connection test with wrong credentials fails → it cannot be saved** (the negative case of owner ruling 2); ③ the API view **returns not even the ciphertext**; ④ deleting a datasource referenced by a task → **409, and the body names the referencing tasks**; ⑤ renaming only skips the connection test | ADR-0037 §6/§7, ADR-0039 §3/§4 |
+| **C2** | Column mapping and the target column face | ① map a source column to a **differently named** target column, then verify target data by the **target name**; ② the default prefill is the identical name (identity mapping); ③ call `/v1/target/tables` and `/v1/target/columns` once each, closed set does not grow | ADR-0038 §2/§3 |
+| **C3** | User-supplied filter conditions | ① one constant condition and one "fill at run time" condition, one run each, row counts change as expected; ② in the generated SQL **every value is a bind variable, constants included**; ③ the UI has no hand-edit-SQL entry | ADR-0036 §1/§2 |
+| **C4** | Idempotence of primary-key upsert | ① **run the same run twice, the target row count does not change**; ② `staged <= affected <= 2 x staged`; ③ `purged_rows` is always **0**; ④ change one source column value and re-run → that column **is updated** on the target (proving upsert, not INSERT IGNORE); ⑤ **target table without PK/UNIQUE → precheck refuses to run** (the silent-degradation guard of ADR-0035) | ADR-0035 §1 |
+| **C5** | Three negative cases for the three branches of the mapping precheck | ① a primary-key column nullable on the target → **reject**; ② a mapped non-key column nullable → **allow**; ③ an unmapped column with neither `COLUMN_DEFAULT` nor `EXTRA` → **reject** | ADR-0038 §5 (which assigns "the three negative cases" to #122) |
+| **C6** | Memory shape | The two slope assertions of §3, one for source and one for sink | §3 of this ADR |
 
-**C4 的第 ④ 条不许省。** 只验「跑两次行数不变」的话，`INSERT IGNORE` 也能过——
-而 `INSERT IGNORE` 会把「源端改了值」静默吞掉，正是 `ADR-0034` §1b
-点名的那类**静默改值**。行数不变是必要条件，不是充分条件。
+**C4's assertion ④ may not be dropped.** Verifying only "run twice, row count unchanged" would also pass under
+`INSERT IGNORE` — and `INSERT IGNORE` silently swallows a changed source value, exactly the class of
+**silent value change** that `ADR-0034` §1b names. An unchanged row count is necessary, not sufficient.
 
-**不设 C7 收「10w/100M」**，理由见 §1：那条判据留在 M1，重复设一个只会有两个会各自漂移的真源。
+**No C7 for "100k/100MB"**, for the reason in §1: that criterion lives in M1, and setting up a second one only
+creates two sources of truth that will each drift.
 
-### 5. 三份既有台架：全部要改、全部要重跑，判据逐条重推
+### 5. The three existing rigs: all must change, all must be re-run, criteria re-derived clause by clause
 
-三份脚本**当前全部对不上新 API**（脚本抬头已自行标注，且都把修复归到本票）。
-本节把「哪些断言的语义翻了」逐条钉死——**实现票照这张表改，不要重新推导一遍。**
+All three scripts **currently fail against the new API** (their headers say so themselves, and all three assign the
+fix to this ticket). This section nails down **which assertions have flipped in meaning** —
+**the implementation ticket follows this table rather than re-deriving it.**
 
-#### 5.1 M1（9 个场景，编号与场景数不动）
+#### 5.1 M1 (9 scenarios; numbers and scenario count unchanged)
 
-| 场景 | 现判据（DELETE 时代） | 新判据（upsert） |
+| Scenario | Current criterion (the DELETE era) | New criterion (upsert) |
 |---|---|---|
-| `wide-100k` / `narrow-100k` | 行数 = 100000 | **不变**，另加 §1 的载荷记账行 |
-| `empty-result` | `purged_rows = 7`（空结果集 → 当日 7 行被清空） | **语义整个翻转**：`purged_rows = 0`，且**目标端当日行原封不动**。upsert 下「空结果集」= 什么都不做 |
-| `source-kill-rerun` | 重跑后目标哈希回到 `baseline`（哨兵被清掉） | **哨兵留存**：重跑后哈希 = `target_with_sentinel`。哨兵主键不冲突，upsert 碰不到它 |
-| `sink-kill-rerun` | 同上 | 同上 |
-| 其余 4 个 | 与写入模型无关 | 不变 |
+| `wide-100k` / `narrow-100k` | row count = 100000 | **unchanged**, plus the payload-accounting line of §1 |
+| `empty-result` | `purged_rows = 7` (empty result set → 7 rows for that day are purged) | **The meaning inverts entirely**: `purged_rows = 0`, and the target's rows for that day **are untouched**. Under upsert an empty result set means doing nothing |
+| `source-kill-rerun` | after the re-run the target hash returns to `baseline` (the sentinel is purged) | **The sentinel survives**: after the re-run the hash is `target_with_sentinel`. Its primary key does not collide, so upsert never touches it |
+| `sink-kill-rerun` | same as above | same as above |
+| the other 4 | unrelated to the write model | unchanged |
 
-> `empty-result` 与两个 kill 场景是**同一条前提的三个面**：「幂等 = 按业务日期区间整段重刷」。
-> 这条前提被 ADR-0035 换掉了，三处断言**不是措辞要调，是结论反过来**。改的时候不要只改数字。
+> `empty-result` and the two kill scenarios are **three faces of one premise**: "idempotence = re-flushing the whole
+> business-date range". ADR-0035 replaced that premise, so those three assertions **are not rewordings — their
+> conclusions invert**. Do not just change the numbers.
 
-#### 5.2 M2（14 个 A 场景，编号不动、不重编）
+#### 5.2 M2 (14 A scenarios; numbers unchanged, no renumbering)
 
-调用面要从退役的 `source_sql` / `biz_date` 报文改到 `TaskSpec` + 数据源 id 绑定。判据面只有一处翻转：
+The call surface moves from the retired `source_sql` / `biz_date` payload to `TaskSpec` + a bound datasource id.
+On the criteria side there is exactly one inversion:
 
-- **`A3-column-fetch-shape-failure` 与 `A6-run-shape-failure` 失去对象**——
-  `ADR-0036` §5 整段取消了 SQL 形状预检（生成器结构性产不出坏形状）。
-- **裁定：保留编号，脚本里跳过，报告里打 `N/A（判据已随 ADR-0036 §5 退役）`。**
-  **不删号、不重编、不拿别的场景补位。** 编号是历史锚点，重编之后 2026-08-16 那几份旧报告就对不上了;
-  而一个写着「已退役及其依据」的 N/A 行，比一个消失的编号更能回答「A6 去哪了」。
+- **`A3-column-fetch-shape-failure` and `A6-run-shape-failure` lose their subject** —
+  `ADR-0036` §5 removed the SQL shape precheck entirely (the generator structurally cannot produce a bad shape).
+- **Ruling: keep the numbers, skip them in the script, and mark them `N/A（判据已随 ADR-0036 §5 退役）` in the report.**
+  **Do not delete the numbers, do not renumber, do not promote another scenario into the slot.** Numbers are
+  historical anchors; renumbering breaks the old reports of 2026-08-16. And an N/A row stating "retired, and by what"
+  answers "where did A6 go" far better than a vanished number.
 
-#### 5.3 M3（B1–B6，编号不动）
+#### 5.3 M3 (B1–B6; numbers unchanged)
 
-调用面**一个字都还没改**（六条全是 `source_sql` / `biz_date` 形状），要整体改到新报文。判据面：
+The call surface **has not been touched at all** (all six still use the `source_sql` / `biz_date` shape) and must move
+to the new payload wholesale. On the criteria side:
 
-- **B1「哨兵被删除」→「哨兵留存」**（与 M1 两个 kill 场景同一条理由）。
-- **B4 / B6 的「哨兵留存」不变**——它们本来就是被拒跑的用例，目标端从头到尾没被碰过。
+- **B1's "the sentinel is deleted" → "the sentinel survives"** (same reason as M1's two kill scenarios).
+- **B4 / B6's "the sentinel survives" is unchanged** — they were refused-to-run cases all along, so the target was
+  never touched.
 
-#### 5.4 重跑门槛
+#### 5.4 Re-run bar
 
-**改完之后 M1 / M2 / M3 / C 四份全跑**，地图 #117「验证基准」那条
-（涉及搬运语义必须跑三份台架）对第一版**升格为四份**。
-`M2_HOST_CARGO_TARGET=x86_64-apple-darwin` 少不得；真跑一律派到 mac。
+**Once changed, all four of M1 / M2 / M3 / C run.** The map #117 clause "anything touching transfer semantics must run
+the three rigs" is **promoted to four** for v1.
+`M2_HOST_CARGO_TARGET=x86_64-apple-darwin` is required; anything that actually runs goes to the mac.
 
-### 6. 走查：V1–V25 单独成票、跑一次即封；W1–W6 要重跑，但触发源不是 #123；新增屏另立 X 系列
+### 6. Walkthroughs: V1–V25 on its own ticket, run once and sealed; W1–W6 re-runs but with a different trigger; new screens get their own X series
 
-#### 6.1 整份 V1–V25：算「README 订正票」的验收，排在界面实现票之后
+#### 6.1 The whole of V1–V25: it is the acceptance of the "README correction" ticket, placed after the UI implementation tickets
 
-[ADR-0039](0039-v1-ui-increments.md) §9 已裁定**照 `CLAUDE.md` 字面触发整份 V1–V25，认下不找豁免**。
-本 ADR **不重开这条**，只定何时跑、算哪张票：
+[ADR-0039](0039-v1-ui-increments.md) §9 already ruled that the whole of V1–V25 fires **on the literal wording of
+`CLAUDE.md`, taken on the chin with no exemption sought**. This ADR **does not reopen that**; it only fixes when it
+runs and on which ticket:
 
-- **`docs/design-system/README.md` 的两处事实性订正单独成一张最小实现票**，
-  **排在数据源屏与构建器控件的实现票之后、第一版整体验收之前**。
-- **V1–V25 在那张票上跑一次，跑完即封**，不在每张界面实现票上各跑一遍。
-- **理由是订正的对象得先存在**：README §5 那句「不画连接配置页」要改成什么、§7 的预留位置要补哪一条，
-  取决于数据源屏与目标表下拉**实际长成什么样**。排在前面订正的是一个还不存在的事实,
-  排在后面才既订正得准、又只跑一遍走查。
-- **不许在实现票里悄悄跳过**（ADR-0039 §9 原话）。这张票的验收报告没有 25 条逐条观察，就是没做完。
+- **The two factual corrections to `docs/design-system/README.md` become one minimal implementation ticket of their own**,
+  placed **after the datasource screen and builder-control tickets, and before overall v1 acceptance**.
+- **V1–V25 runs once on that ticket and is sealed on completion**, rather than being re-run on every UI ticket.
+- **The reason is that the thing being corrected has to exist first**: what README §5's "no connection-config page"
+  should become, and which line §7's placeholder needs, both depend on **what the datasource screen and the target
+  dropdown actually look like**. Placed earlier, it corrects a fact that does not yet exist; placed later it corrects
+  accurately and runs the walkthrough exactly once.
+- **No quiet skipping inside the implementation tickets** (ADR-0039 §9's own words). If that ticket's acceptance
+  report lacks 25 individual observations, it is not done.
 
-#### 6.2 M3 的 W1–W6：要重跑，触发源是 ADR-0036 §5
+#### 6.2 M3's W1–W6: it re-runs, and the trigger is ADR-0036 §5
 
-ADR-0039 §9 的自查结论「`.precheck-reports` 布局与 `DiagnosticTable` 列结构未变」
-**对 #123 成立，但对整个第一版不成立**：
+ADR-0039 §9's self-check conclusion — "the `.precheck-reports` layout and the `DiagnosticTable` column structure are
+unchanged" — **holds for #123 but not for v1 as a whole**:
 
-> `ADR-0036` §5 取消了 SQL 形状预检，
-> **`.precheck-reports` 从此只剩映射预检一段**——这正是 `CLAUDE.md` M3 门禁点名的
-> 「`.precheck-reports` 布局改动」。
+> `ADR-0036` §5 removed the SQL shape precheck, so **`.precheck-reports` now holds only the mapping precheck
+> section** — precisely the "change to the `.precheck-reports` layout" that the M3 gate in `CLAUDE.md` names.
 
-**裁定：W1–W6 重跑，记在取消形状预检的那张实现票上。**
-W2 的对照半句（「`shape-failed` 态仍是两栏并置」）已于 2026-08-19 随 #121 订正过，
-`m3-visual-walkthrough.md` 里现存的措辞就是重跑要用的措辞，**不再改**。
+**Ruling: W1–W6 re-runs, recorded on the implementation ticket that removes the shape precheck.**
+W2's contrast clause ("the `shape-failed` state still places the two panels side by side") was already corrected on
+2026-08-19 under #121; the wording now in `m3-visual-walkthrough.md` is the wording to use for the re-run, **unchanged**.
 
-#### 6.3 新增屏：另立 `v1-visual-walkthrough.md`，编号 X1–X8
+#### 6.3 New screens: a separate `v1-visual-walkthrough.md`, numbered X1–X8
 
-照 ADR-0032 §8 的 M3 先例——**另立清单文件，不塞进 V 系列**。V 系列是 M2 设计系统的定盘星,
-往里加号会让「整份 V1–V25」这个门禁对象随时间漂移，而它恰恰是 §6.1 要跑的那份。
+Following the M3 precedent in ADR-0032 §8 — **a separate checklist file, not additions to the V series**. The V series
+is M2's design-system fixed point; adding numbers to it makes "the whole of V1–V25" — the very gate object §6.1 must
+run — drift over time.
 
-编号 **X1–X8**，落在 `docs/spikes/fixtures/local-rig/v1-visual-walkthrough.md`（本票一并交付）。
-形态判据全部来自 ADR-0039，**本 ADR 不新造任何形态裁定**。
+Numbered **X1–X8**, in `docs/spikes/fixtures/local-rig/v1-visual-walkthrough.md` (delivered with this ticket).
+All form criteria come from ADR-0039; **this ADR creates no new form ruling.**
 
-### 7. `CLAUDE.md` 的两道视觉门禁段合并成一段（地图记着 #122 是这条的落点）
+### 7. The two visual-gate sections of `CLAUDE.md` merge into one (the map records #122 as where this lands)
 
-现有 M2 / M3 两段各自重复了「触发条件 / 清单文件 / 不许只写通过」三件事，
-第一版再加一段就是第三份重复。**合成一段「视觉门禁」，正文是一张表**：触发条件 → 清单文件 → 编号段。
+The existing M2 and M3 sections each repeat the same three things (trigger condition / checklist file / no bare pass
+claims), and v1 would make it a third repetition. **Merge into one "visual gates" section whose body is a table**:
+trigger condition → checklist file → number range.
 
-**合并只动组织形式，一条门禁的效力都不改。** 三条原有条款原样保留：
-①「任何改动都要跑，不找豁免」；②「记录实际观察，不许只写通过」；
-③「不触发的要写明『未跑及为什么』」。
+**The merge changes only the organisation; not one gate loses any force.** All three original clauses are preserved
+verbatim: ① "any change fires it, no exemptions"; ② "record actual observations, never a bare pass claim";
+③ "if nothing fired, say 'not run' and why".
 
-## 对既有文档的订正与增补
+## Corrections and additions to existing documents
 
-| 文档 | 改动 |
+| Document | Change |
 |---|---|
-| `CLAUDE.md` | 两道视觉门禁段合并成一段并加入第一版 X 系列（§7）；#122 的 consolidation 落点就此兑现 |
-| `docs/spikes/fixtures/local-rig/v1-visual-walkthrough.md` | **新建**，X1–X8（§6.3） |
-| `docs/STRATEGY-V1.md` 第一版验收段 | 「判据与台架入口由 #122 定稿」改成指向本 ADR，并写明兑现点分落两处（§1） |
-| `docs/spikes/fixtures/local-rig/scripts/run-m{1,2,3}-acceptance.sh` | 抬头那两段「归 #122」的待办注释，实现票改完后换成指向本 ADR §5 的判据依据 |
-| `docs/adr/0032` §8 | 不改。「另立清单不重跑 V1–V25」那条是 M3 的裁定，第一版的答案不同（§6.1），**两者不冲突：触发条件不同** |
+| `CLAUDE.md` | the two visual-gate sections merge into one and gain the v1 X series (§7); #122's consolidation lands here |
+| `docs/spikes/fixtures/local-rig/v1-visual-walkthrough.md` | **new**, X1–X8 (§6.3) |
+| `docs/STRATEGY-V1.md`, v1 acceptance section | "criteria and rig entry point to be settled by #122" now points at this ADR, and states that requirement ⑤ is met in two places (§1) |
+| `docs/spikes/fixtures/local-rig/scripts/run-m{1,2,3}-acceptance.sh` | the two "assigned to #122" TODO comments in the headers become pointers to §5 of this ADR once the implementation ticket lands |
+| `docs/adr/0032` §8 | unchanged. "A separate checklist, no V1–V25 re-run" was M3's ruling; v1's answer differs (§6.1), and **the two do not conflict: the trigger conditions differ** |
 
-## 已知代价
+## Known costs
 
-1. **第一版的验收面从三份台架变成四份**，一次全跑的时间成本上升约三分之一。
-   接受：写入模型换了，三份既有台架不重推判据的话，绿的是过期语义——那比慢更坏。
-2. **整份 V1–V25 要跑一遍**，25 条逐条观察。接受，理由见 ADR-0039 §9（门禁的可信度比这次省事值钱）。
-3. **M2 的 A3/A6 永久留成 N/A 行**，报告里从此有两行不参与红绿。
-   接受：换来的是编号跨里程碑稳定，旧报告一直可比。
-4. **内存判据只管形状、不管绝对量**。撞不到上限就发现不了「峰值一直很高但确实不涨」这种情况。
-   接受：现场独立服务器内存充裕（所有者裁定 1），且 §3.4 已写明重开条件。
-5. **C6 要跑两档、sink 要重启两次**，是 C 系列里最慢的一条。无更便宜的替代——
-   斜率判据按定义就需要两个点。
+1. **The v1 acceptance surface goes from three rigs to four**, raising the cost of a full run by about a third.
+   Accepted: the write model changed, and leaving the three existing rigs un-re-derived means green against stale
+   semantics — worse than slow.
+2. **The whole of V1–V25 must be run**, 25 individual observations. Accepted, for the reason in ADR-0039 §9
+   (a gate's credibility is worth more than the convenience saved this once).
+3. **M2's A3/A6 remain N/A rows permanently**, so two rows in the report no longer participate in pass/fail.
+   Accepted: what it buys is numbering stable across milestones, so old reports stay comparable.
+4. **The memory criterion governs shape only, not absolute size.** Without a ceiling to hit, "the peak is always high
+   but genuinely does not grow" goes undetected. Accepted: the site is a dedicated server with ample memory
+   (owner ruling 1), and §3.4 already states the condition for reopening.
+5. **C6 needs two levels and two sink restarts**, making it the slowest item in the C series. No cheaper substitute —
+   a slope criterion needs two points by definition.
 
-## 时效
+## Expiry
 
-- **§3.4 的绝对上限**：部署形态若改成与旧系统同机共存，补一个按实际余量取的绝对上限。
-- **§3.3 的系数 2**：连续三次第一版验收都远低于 2（比值 < 1.3）就可以收紧到 1.5；
-  **撞上就放宽是明令禁止的**，要放宽必须先解释清楚多出来的内存去了哪里。
-- **§1 的载荷记账**：目前是从批体分布换算出来的估算值。若将来要一个精确的载荷总量，
-  在 `run_finished` 里加一个累计字节字段即可——**第一版不加**，估算值足以支撑「约 100MB」这条判据。
-- **耗时**：现在只记不判（所有者裁定 2）。若第一版之后出现「白天也要跑」的需求，耗时才需要升格成判据。
+- **§3.4's absolute ceiling**: if the deployment changes to co-existing with the legacy system on one machine, add an
+  absolute ceiling derived from the real headroom.
+- **§3.3's factor of 2**: three consecutive v1 acceptances well under 2 (ratio < 1.3) allow tightening to 1.5;
+  **loosening on a hit is expressly forbidden** — any loosening must first explain where the extra memory went.
+- **§1's payload accounting**: currently an estimate derived from the batch-size distribution. If an exact total
+  payload is ever needed, add a cumulative byte field to `run_finished` — **not in v1**, the estimate is enough to
+  support the "about 100MB" criterion.
+- **Elapsed time**: recorded but not judged (owner ruling 2). Only if a "must also run during the day" requirement
+  appears does duration need promoting to a criterion.
 
-## 增补（2026-08-19，#133 跑整份 V1–V25 时）：六条 V 判据的对象已被第一版拿掉或反向，打 N/A、编号不动
+## Addendum (2026-08-19, while running the whole of V1–V25 under #133): six V criteria have lost their subject or inverted — mark N/A, keep the numbers
 
-### 背景
+### Background
 
-§6.1 定了整份 V1–V25 跑在 README 订正票（[#133](https://github.com/liumingjian/db-qbs/issues/133)）
-上、跑完即封。真跑的时候撞上一件本 ADR 写的时候没想到的事：**V 系列里有六条的对象已经不存在了**——
-不是「没做到」，是第一版的三条 ADR 把它们所描述的那个东西拿掉了，或者明文反了向。
+§6.1 placed the whole of V1–V25 on the README-correction ticket
+([#133](https://github.com/liumingjian/db-qbs/issues/133)), to run once and be sealed. The actual run hit something
+this ADR had not anticipated: **six items in the V series no longer have a subject** — not "not achieved", but three
+v1 ADRs removed the thing they describe, or expressly inverted it.
 
-| 条目 | 判据说的 | 现状 | 谁判的 |
+| Item | What the criterion says | Current state | Who ruled it |
 |---|---|---|---|
-| **V6** | 形状预检失败屏不出终态块 | 形状预检整段取消，这一屏造不出来 | ADR-0036 §5 |
-| **V10** | 上下两张卡 + 灰色「未执行」占位卡 | 只剩一段；`.is-skipped` 已由 #132 从 `app.css` 撤掉 | ADR-0036 §5 |
-| **V11 前半** | 第一张卡形状预检六条逐条列出 | 同上。**后半（映射预检那张卡逐列摆 + 总计）照跑不误** | ADR-0036 §5 |
-| **V12** | 形状预检屏没有错误码标签 | 屏不存在 | ADR-0036 §5 |
-| **V18** | 手改 SQL 的常驻角标与「整段替换」确认模态 | 源端 SQL 改由结构化规格现算、**只读**，手改入口没了 | ADR-0036 §2 |
-| **V21** | **没有**目标表下拉、**没有**目标列列表，且屏上明写「是不画」 | 两样都明文要求画出来并已落地，那段文案已按判废删掉 | ADR-0038 §3 / ADR-0039 §5 |
+| **V6** | the shape-precheck failure screen shows no final-state block | the shape precheck is gone entirely; the screen cannot be produced | ADR-0036 §5 |
+| **V10** | two stacked cards plus a grey "not executed" placeholder card | only one section remains; `.is-skipped` was removed from `app.css` by #132 | ADR-0036 §5 |
+| **V11, first half** | the first card lists all six shape-precheck rules | as above. **The second half (the mapping-precheck card laid out column by column plus a total) runs as usual** | ADR-0036 §5 |
+| **V12** | the shape-precheck screen carries no error-code tag | the screen does not exist | ADR-0036 §5 |
+| **V18** | the persistent badge and "replace whole section" confirm modal for hand-edited SQL | source SQL is now derived live from the structured spec and is **read-only**; the hand-edit entry is gone | ADR-0036 §2 |
+| **V21** | there is **no** target-table dropdown and **no** target-column list, and the screen says so explicitly | both are expressly required, and shipped; that copy was deleted when the criterion was overturned | ADR-0038 §3 / ADR-0039 §5 |
 
-**V15 不在此列**：它的判据（`run_id` 栏位写「未发起，目标端不知道这次运行」，不是空白也不是横杠）
-一个字都没变，只是原来用来造这一态的手段（形状预检失败）没了。**换一个造态手段（源端在发请求之前
-就失败）照跑**，清单里把情形一栏改写成「任一未向 sink 发出请求的失败」。
+**V15 is not among them**: its criterion (the `run_id` field reads `未发起，目标端不知道这次运行`, neither blank nor a
+dash) is unchanged word for word; only the means of producing that state (shape-precheck failure) is gone.
+**It runs with a different means (the source failing before it sends the request)**, and the checklist's "situation"
+column is reworded to "any failure that never issued a request to sink".
 
-### 决策
+### Decision
 
-1. **编号一个都不重编、不删行**，判据行就地标注 `N/A（判据已随 ADR-XXXX 退役）`。
-   照抄本 ADR §5.2 给 M2 A3/A6 的处置——**编号跨里程碑稳定，旧走查记录一直可比**。
-   2026-08-16 那四份 V 系列记录里 V6/V10/V11/V12/V18/V21 各自写了什么，将来还查得到。
-2. **走查记录里照实写 N/A 并写明是谁判废的，不许写「通过」，也不许静悄悄跳过。**
-   这是 ADR-0039 §9「不许在实现票里悄悄跳过」的同一条要求：一条判据失效是一个要记账的事实，
-   与「这次不跑」是两回事。
-3. **整份 V1–V25 仍是一个整体门禁**：N/A 是**判据的状态**，不是**一次跑的豁免**。
-   下一次触发条件命中时，这六条照样要逐条确认「对象还是不存在」——它们随时可能因为
-   某条 ADR 被再次改判而复活。
-4. **不把这六条删掉换成新编号**，也**不往 V 系列里加号**。§6.3 已定 V 系列是 M2 设计系统的定盘星，
-   往里加号会让「整份 V1–V25」这个门禁对象随时间漂移。第一版新增屏的形态判据全在
-   `v1-visual-walkthrough.md` 的 X1–X8 里（V21 那两样东西的正身就是 X5 / X7）。
+1. **No renumbering, no deleted rows**; the criterion row is marked in place as `N/A（判据已随 ADR-XXXX 退役）`.
+   This copies §5.2's handling of M2's A3/A6 — **numbering stays stable across milestones, and old walkthrough
+   records stay comparable**. What V6/V10/V11/V12/V18/V21 each said in the four V-series records of 2026-08-16
+   remains findable.
+2. **Walkthrough records write the N/A honestly and name what retired it; never "passed", never a quiet skip.**
+   This is the same requirement as ADR-0039 §9's "no quiet skipping inside implementation tickets": a criterion
+   losing force is a fact to be accounted for, and is a different thing from "not run this time".
+3. **The whole of V1–V25 remains one gate**: N/A is **the state of a criterion**, not **an exemption for one run**.
+   Next time a trigger fires, these six are still confirmed one by one to have no subject — any of them may be
+   revived by a later ADR overturning something.
+4. **Do not delete the six and issue new numbers**, and **do not add numbers to the V series**. §6.3 already fixed
+   the V series as M2's design-system fixed point, and adding numbers makes "the whole of V1–V25" drift as a gate
+   object. Form criteria for v1's new screens all live in X1–X8 in `v1-visual-walkthrough.md`
+   (the two things V21 denied are X5 / X7 themselves).
 
-### 为什么不是「删掉它们」
+### Why not simply delete them
 
-删行看着更干净，代价有三：旧记录对不上号；「这条为什么没了」将来只能靠翻 git；
-而最贵的是**门禁条数会随时间缩水**——一个 25 条的清单缩成 19 条之后，
-下一次再删两条也不会有人察觉。**保留 + 标注，是让判据的死亡本身留下痕迹。**
+Deleting rows looks tidier, at three costs: old records stop lining up; "why did this one disappear" becomes a git
+excavation; and, worst, **the gate shrinks over time** — once a 25-item checklist is down to 19, nobody notices the
+next two going. **Keep and annotate, so the death of a criterion leaves a trace.**
 
-### 时效
+### Expiry
 
-- **某条 N/A 的对象若被后续 ADR 重新开出**（比如哪天又要一个形状预检），
-  **就地把 N/A 撤掉、判据原样复活**，不新编号。
-- **N/A 若超过第一版还在累积**（比如再多出五条），那说明 V 系列作为 M2 定盘星的寿命到头了，
-  正解是**另立一份 V2 系列清单并显式宣告 V1–V25 整体退役**，不是继续在里面打补丁。
+- **If a later ADR reopens the subject of some N/A** (say a shape precheck is wanted again),
+  **drop the N/A in place and revive the criterion as written**, without a new number.
+- **If N/As keep accumulating past v1** (another five, say), the V series has outlived its usefulness as M2's fixed
+  point, and the answer is **a separate V2 checklist with V1–V25 explicitly retired as a whole**, not more patching
+  inside it.
 
-## 增补（2026-08-19，#134 改三份既有台架时）：§5 那三张表漏了三处，逐条钉在这里
+## Addendum (2026-08-19, while changing the three existing rigs under #134): §5's three tables missed three cases, nailed down here
 
-### 背景
+### Background
 
-§5 把「哪些断言的语义翻了」列成三张表，实现票照抄即可。真改的时候撞上三处**表里没有、
-但同样已经翻了**的判据——它们不是新判断，是 §5 写的时候把前提看漏了。逐条记在这里，
-下次谁质疑「这条为什么和 §5 不一样」，出处就是本节。
+§5 lists "which assertions have flipped in meaning" in three tables for the implementation ticket to follow.
+The actual work hit three criteria that **are not in the tables but have flipped just the same** — not new judgements,
+but premises §5 overlooked. Recorded here one by one, so that "why does this differ from §5" has an answer.
 
-### 1. §5.1 说「其余 4 个与写入模型无关」——`commit-disconnect` 两场不成立
+### 1. §5.1 says "the other 4 are unrelated to the write model" — that fails for the two `commit-disconnect` scenarios
 
-两场造态用的是**空结果集 + 当日哨兵**，断言「当日范围被清空 = 诊断出来的 SWAPPED 确实落到了目标端」。
-这条断言**整个建立在 DELETE 语义上**：upsert 下空结果集等于什么都不做，切换是否发生过在目标端
-**观察不到任何差别**，那一场会退化成一条永远为真的断言——比没有断言更坏。
+Both produce their state with **an empty result set plus a same-day sentinel**, and assert "the day's range is purged
+= the diagnosed SWAPPED really did land on the target". That assertion **rests entirely on DELETE semantics**: under
+upsert an empty result set means doing nothing, so whether the swap happened is **indistinguishable on the target**,
+and the scenario degenerates into an assertion that is always true — worse than no assertion.
 
-**裁定**：编号与场景数不动，**造态手段换成主键相撞的哨兵**——先在目标端写一行 `ROW_ID = 1`，
-让它与源结果集里的第一行主键相撞：
+**Ruling**: numbers and scenario count unchanged, **the state is produced with a primary-key-colliding sentinel** —
+write a row with `ROW_ID = 1` on the target first, so it collides with the first row of the source result set:
 
-| 场景 | 新判据 |
+| Scenario | New criterion |
 |---|---|
-| `commit-disconnect` | 诊断为 `SWAPPED` 后，`ROW_ID = 1` 的值**被源端的值盖掉**（`M1-00000001`），全表 100000 行 |
-| `commit-disconnect-discarded` | 诊断为 `DISCARDED` 后，`ROW_ID = 1` **原样是 `discard-sentinel`**，全表 1 行，暂存表 0 张 |
+| `commit-disconnect` | after diagnosing `SWAPPED`, the value at `ROW_ID = 1` **is overwritten by the source value** (`M1-00000001`), 100000 rows in the whole table |
+| `commit-disconnect-discarded` | after diagnosing `DISCARDED`, `ROW_ID = 1` **is still `discard-sentinel`**, 1 row in the table, 0 staging tables |
 
-判据的**意图**一字未改（证的仍是「两种终态各自落到目标端的效果」），换的是**能观察到它的手段**。
-这与 #133 对 V15 的处置同源：**判据可量，观察手段也得可量**。
+The **intent** of the criterion is unchanged (it still proves "what each final state does to the target"); what
+changed is **the means of observing it**. Same root as #133's handling of V15: **a criterion must be measurable, and
+so must the means of observing it.**
 
-### 2. B1 的 `N_EXPR` 与 B2 的 `C_EXPR` 失去对象——表达式列在 v1 结构性进不来
+### 2. B1's `N_EXPR` and B2's `C_EXPR` lose their subject — expression columns structurally cannot enter v1
 
-两列都是 SQL 表达式（`n_bare * 1`、`v_text || v_text`）。ADR-0036 §2 之后 SQL 由规格现算、
-投影结构性只产 `a.C AS C`，且界面上没有手改入口——`oracle_source.rs` 里那句
-「表达式列的元数据修正已随 ADR-0036 §5 删除：**表达式列在 v1 根本进不来**」就是这条的代码侧落款。
+Both columns are SQL expressions (`n_bare * 1`, `v_text || v_text`). After ADR-0036 §2, SQL is derived live from the
+spec and the projection structurally emits only `a.C AS C`, with no hand-edit entry in the UI — the line in
+`oracle_source.rs` ("metadata correction for expression columns was deleted with ADR-0036 §5:
+**expression columns cannot enter v1 at all**") is this clause's counterpart in code.
 
-**裁定**：照 §5.2 给 A3/A6 的先例——**编号不动、记录里打 N/A 并写明谁判废的**。落到两处：
+**Ruling**: follow §5.2's precedent for A3/A6 — **numbers unchanged, records marked N/A naming what retired it.**
+Two places:
 
-- **B1**：`N_EXPR` 退出投影，「数值表达式列」那一条打 N/A。裸 NUMBER 这一档由 `N_BARE` 照原样守着，
-  一条覆盖都没少。
-- **B2**：`C_EXPR` 退出投影，问题数 **10 → 9**（另一条见下，最终是 **8**）。
+- **B1**: `N_EXPR` leaves the projection, and the "numeric expression column" item is marked N/A. The bare-NUMBER
+  case is still held by `N_BARE` as before, so no coverage is lost.
+- **B2**: `C_EXPR` leaves the projection, and the problem count goes **10 → 9** (the other one is below; the final
+  number is **8**).
 
-**不拿虚拟列顶替**：`GENERATED ALWAYS AS (v_text || v_text)` 描述出来是 `VARCHAR2(20)`——
-长度是**可判定的**，`CharacterLengthMissing` 那条规则根本不会触发。顶替进来的是一个看着像、
-实则证不到同一件事的用例，比一个诚实的 N/A 更坏。
+**Do not substitute a virtual column**: `GENERATED ALWAYS AS (v_text || v_text)` describes as `VARCHAR2(20)` — the
+length **is determinable**, so the `CharacterLengthMissing` rule never fires at all. Substituting it in brings a case
+that looks the part but proves something else, which is worse than an honest N/A.
 
-### 3. B2 的 `EXTRA` 判据方向反了——ADR-0038 §4 把列名集合判定撤成了子集
+### 3. B2's `EXTRA` criterion points the wrong way — ADR-0038 §4 relaxed the column-name test to a subset test
 
-`EXTRA` 原本断言 `源端结果缺少同名列`。ADR-0038 §4 把「两边列名集合完全相等」撤成**子集判定**之后，
-一个未被映射的**可空**目标列不再是问题。
+`EXTRA` originally asserted `源端结果缺少同名列`. After ADR-0038 §4 relaxed "the two column-name sets are exactly
+equal" to **a subset test**, an unmapped **nullable** target column is no longer a problem.
 
-**裁定**：**就地把断言反过来**——断言 `EXTRA` 一条问题都不出。这比删掉它更有价值：
-子集这条改判本身需要一条正向用例守着，而 `EXTRA` 正好是现成的。
+**Ruling: invert the assertion in place** — assert that `EXTRA` produces no problem at all. This is worth more than
+deleting it: the subset relaxation itself needs a positive case guarding it, and `EXTRA` is one already to hand.
 
-**不把 `EXTRA` 改成 `NOT NULL` 无默认值**来凑回原来的问题数。那一档（§5 第 3 分支的拒绝面）
-是 **C5 的对象**（§4 那张表），在 M3 里再设一份等于让同一条判据有两个会各自漂移的真源——
-与 §1 拒绝为「10w/100M」另设 C7 是同一条理由。
+**Do not turn `EXTRA` into a `NOT NULL` column without a default** to restore the old problem count. That case
+(the rejecting side of §5's third branch) **belongs to C5** (the table in §4), and setting up a second one in M3 gives
+one criterion two sources of truth that will each drift — the same reason §1 refuses a C7 for "100k/100MB".
 
-**B2 的问题数因此是 8**：`BF` / `BD` / `PAYLOAD` / `C_CHAR` / `N_TOO_WIDE` / `N_TOO_SCALE` /
-`N_MISSING` / `D_WRONG`，其余八条规则一字不改。
+**B2's problem count is therefore 8**: `BF` / `BD` / `PAYLOAD` / `C_CHAR` / `N_TOO_WIDE` / `N_TOO_SCALE` /
+`N_MISSING` / `D_WRONG`; the other eight rules are unchanged.
 
-### 4. 顺带：三份台架的目标表都补了主键，M3 的 B2/B3 补了 `ROW_ID` 列
+### 4. Incidentally: all three rigs' target tables gained primary keys, and M3's B2/B3 gained a `ROW_ID` column
 
-主键必选（所有者 2026-08-18 裁定），且 sink 侧预检要求目标端**真有**一条列集合与勾选主键一致的
-`PRIMARY KEY` / `UNIQUE`（ADR-0035 §2）。M3 六张 `M3_B*` 表原来一条唯一约束都没有，
-B2/B3 甚至没有一列可以做主键。**这不是判据变化，是台架 fixture 补上新写入模型的前提**——
-不补的话六场全数被「目标表上必须有一条 PRIMARY KEY 或 UNIQUE 约束」这条预检拒掉，
-B2 数出来的就不是那八条真正要证的问题。
+A primary key is mandatory (owner ruling of 2026-08-18), and the sink-side precheck requires the target to
+**actually carry** a `PRIMARY KEY` / `UNIQUE` whose column set matches the chosen primary key (ADR-0035 §2). The six
+`M3_B*` tables had no unique constraint at all, and B2/B3 had no column that could serve as one. **This is not a
+change of criteria, it is the rig fixture catching up to the new write model's premise** — without it all six
+scenarios are refused by the "the target table must carry a PRIMARY KEY or UNIQUE constraint" precheck, and B2's count
+would not be the eight problems it is meant to prove.
 
-`column_precision` 一并从 M3 的任务定义里去掉：它已随 ADR-0036 §6 退出任务定义，
-裸 NUMBER 的 `(p,s)` 现在**从目标端 DECIMAL 列取**（`precheck.rs` 的 `range_check_columns`），
-B1/B4 不必也不能再配它。
+`column_precision` is dropped from M3's task definitions at the same time: it left the task definition with
+ADR-0036 §6, and a bare NUMBER's `(p,s)` now **comes from the target DECIMAL column** (`range_check_columns` in
+`precheck.rs`), so B1/B4 neither need nor may configure it.
 
-### 时效
+### Expiry
 
-- 本节 1 的两场若将来要回到「按区间整段重刷」的语义（ADR-0035 时效 1 被翻），
-  造态手段跟着翻回去，**编号仍然不动**。
-- 本节 2 的两条 N/A 若哪天 v1 之后重新开出手改 SQL 或表达式投影，**就地把 N/A 撤掉、判据原样复活**，
-  不新编号——与 #133 增补的时效条款一字不差。
+- If the two scenarios in item 1 ever return to "re-flush the whole range" semantics (ADR-0035's expiry clause 1
+  being overturned), the means of producing the state flips back, **with the numbers still unchanged**.
+- If hand-edited SQL or expression projections are reopened after v1, item 2's two N/As are **dropped in place and the
+  criteria revive as written**, without new numbers — word for word the same as #133's addendum expiry clause.
 
-## 增补（2026-08-19，#135 落地 C 系列时）：内存判据的编排、C 系列的能证边界，与所有者的两条使用裁定
+## Addendum (2026-08-19, while landing the C series under #135): the choreography of the memory criterion, what the C series can and cannot prove, and two owner rulings on usage
 
-### 背景
+### Background
 
-§3 与 §4 把**判据**定死了（判据式、量什么、系数 2、六个场景各断言什么），
-但把**编排**留给了实现票——#126 明写 ⑨ 是十张实现票里唯一还留着实现时要选的地方。
-真写的时候有五处只能在写代码时才看得见，逐条钉在这里；另有两条是所有者 2026-08-19
-对「这套检查怎么用」的裁定。**判据一条都没改**，改的是它怎么被量出来、报告怎么写。
+§3 and §4 fixed the **criteria** (the formula, what to measure, the factor 2, what each of the six scenarios asserts),
+but left the **choreography** to the implementation ticket — #126 states ⑨ is the one place among ten implementation
+tickets where a choice remains at implementation time. Five things only became visible while writing the code, and
+are nailed down here; two more are owner rulings of 2026-08-19 on **how this check gets used**.
+**Not one criterion changed**; what changed is how it gets measured and how the report is written.
 
-### 1. 基线是**每档各测一次的同进程读数**，不是一个全局常数
+### 1. The baseline is **a same-process reading taken once per level**, not one global constant
 
-§3.3 写的是「两个基线」（source 一个、sink 一个）。实现时不成立：
+§3.3 says "two baselines" (one for source, one for sink). That does not hold in implementation:
 
-- **sink 每档都是新进程**（§3.5 要求两档之间必须重启）。跨进程的基线不可比——
-  连接池、缓冲池、分配器状态都是新的，拿第一档的基线去减第二档的峰值，减掉的是另一个进程的开销。
-- **source 是一次性进程**，它连「跨档复用一个基线」的机会都没有。
+- **sink is a new process at each level** (§3.5 requires a restart between levels). Baselines across processes are
+  not comparable — connection pool, buffer pool and allocator state are all new, and subtracting the first level's
+  baseline from the second level's peak subtracts another process's overhead.
+- **source is a one-shot process**, so it never even has the option of reusing a baseline across levels.
 
-**裁定：基线随档走，一档一测，四个基线全部进报告。** 判据式不变，只是式子里的
-`baseline` 取的是**同一档、同一进程**的那个读数。这比一个全局常数更严，不是更松——
-固定开销被减得更干净。
+**Ruling: the baseline follows the level, one measurement per level, and all four baselines go into the report.**
+The formula is unchanged; the `baseline` in it is simply the reading from **the same level and the same process**.
+This is stricter than a global constant, not looser — the fixed overhead is subtracted more cleanly.
 
-### 2. source 的基线只能由一趟「真的跑起来、一行都没搬」的 run 给出
+### 2. The source baseline can only come from a run that **really runs and moves zero rows**
 
-`ru_maxrss` 由 `wait4()` 在**子进程退出时**取回，进程活着的时候拿不到。
-所以 source 的基线不能像 sink 那样「起来之后读一下」，只能是一趟**行数为 0 的真 run**：
-连库、装 Instant Client、建暂存表、走完事务内切换，**唯独没搬第一行**。
+`ru_maxrss` is retrieved by `wait4()` **when the child exits**, and cannot be read while the process is alive.
+So the source baseline cannot be "read it once it is up" the way sink's can; it can only be **a real run of zero rows**:
+connect, load Instant Client, create the staging table, complete the in-transaction swap — **just without moving a
+first row**.
 
-台架用 `ROW_ID < 1` 这个常量条件造这一趟（同表、同投影、同链路，只有行数是 0）。
-**报告必须核对这一趟的 `source_rows` 确实是 0**——它要是搬了行，那就不是基线，
-而是一个被数据污染过的起点，减出来的斜率会偏小、判据会偏松。
+The rig produces that run with the constant condition `ROW_ID < 1` (same table, same projection, same path, only the
+row count is 0). **The report must verify that this run's `source_rows` really is 0** — if it moved rows, it is not a
+baseline but a data-contaminated starting point, and the resulting slope is too small and the criterion too loose.
 
-### 3. C6 的目标端另起 `V1_WIDE`，源表仍是 `t_m1_wide`
+### 3. C6 gets its own target table `V1_WIDE`; the source table stays `t_m1_wide`
 
-§3.3 说的「同一张宽表」指的是**源表**，这一条照办：C6 的源就是 M1 的 `t_m1_wide`，
-不新造 fixture（§1 的理由：新造一份只会更弱）。
+"The same wide table" in §3.3 means **the source table**, and that is followed: C6's source is M1's `t_m1_wide`, with
+no new fixture (§1's reasoning: a new one would only be weaker).
 
-**目标端另起一张同形的 `V1_WIDE`**：C6 跑完会在目标表里留下 10 万行，压在 `M1_WIDE` 上
-等于让下一份 M1 台架从别人的残留开始。M1 的 `scenario_wide` 确实会先 `DELETE`，
-但让四份台架共用一张目标表是一条**只在执行顺序碰巧正确时才成立**的前提，不值得留着。
+**The target end gets its own identically shaped `V1_WIDE`**: C6 leaves 100k rows in the target table, and stacking
+that on `M1_WIDE` makes the next M1 rig start from someone else's residue. M1's `scenario_wide` does `DELETE` first,
+true, but sharing one target table across four rigs is a premise that **holds only while the execution order happens
+to be right**, and is not worth keeping.
 
-### 4. `ru_maxrss` 的单位不是跨平台常量——报告同时记原始值与归一值
+### 4. `ru_maxrss`'s unit is not a cross-platform constant — the report records the raw value and the normalised one
 
-**macOS 的 `ru_maxrss` 是字节，Linux 是 kB。** 台架的 source 跑在宿主 mac 上、
-sink 跑在 Linux 容器里，两边都要读，一个数字如果不带单位就是错的。
+**On macOS `ru_maxrss` is bytes; on Linux it is kB.** The rig's source runs on the host mac and its sink in a Linux
+container, both are read, and a number without its unit is simply wrong.
 
-wrapper 因此记三样：原始值、平台、归一到字节之后的值；报告里的四个绝对数**一律是字节**。
-将来现场部署在 Linux 上跑同一套脚本时，这一段是它自己说得清的唯一凭据。
+The wrapper therefore records three things: the raw value, the platform, and the value normalised to bytes; the four
+absolute numbers in the report are **always bytes**. When the same scripts are one day run on a Linux deployment,
+this section is the only evidence that explains itself.
 
-### 5. 分母为零时判据恒真——显式拒绝，不许静默放行
+### 5. A zero denominator makes the criterion always true — reject it explicitly, never pass silently
 
-`peak(100k) − baseline ≤ 2 × (peak(10k) − baseline)`：当 10k 档的增量是 **0** 时，
-右边是 0、左边通常也是 0，判据**恒真**。而 10k 档增量为 0 只有一种解释——**测量坏了**
-（基线读晚了、wrapper 没接上、读到的是别的进程），不是产品好。
+`peak(100k) − baseline <= 2 x (peak(10k) − baseline)`: when the 10k increment is **0**, the right side is 0 and the
+left side usually is too, so the criterion is **always true**. And a zero increment at 10k has exactly one
+explanation — **the measurement is broken** (the baseline was read too late, the wrapper did not attach, the reading
+came from another process) — not a good product.
 
-**裁定：脚本显式断言两个 10k 增量都 > 0，不成立即 FAIL。**
-与 #138 拒绝把区间下界放宽到 0、#134 拒绝用空结果集造 `commit-disconnect` 是同一条理由：
-**一条永远为真的断言比没有断言更坏**。
+**Ruling: the script explicitly asserts both 10k increments are > 0, and FAILs otherwise.**
+Same reasoning as #138 refusing to relax the range's lower bound to 0 and #134 refusing to produce
+`commit-disconnect` from an empty result set: **an assertion that is always true is worse than no assertion.**
 
-### 6. C 系列有三条判据的一半在界面上——台架只证协议面那一半，报告写明分界
+### 6. Three C criteria have half their subject in the UI — the rig proves the protocol half, and the report states the boundary
 
-C1②「测通才让存」、C2②「默认预填同名」、C3③「界面无手改 SQL 入口」，
-这三条的对象**部分在前端**（对话框的存盘门槛、构建器的预填、有没有那个输入框），
-命令行台架够不着。
+C1② ("only a successful test allows saving"), C2② ("default prefill of the identical name") and C3③ ("no hand-edit
+SQL entry in the UI") have subjects **partly in the front end** (the dialog's save gate, the builder's prefill,
+whether that input box exists), which a command-line rig cannot reach.
 
-**裁定：台架证协议面那一半并在报告里点名另一半归 X 走查，不合并、不冒充。** 具体是：
+**Ruling: the rig proves the protocol half and names the other half as belonging to the X walkthrough; no merging,
+no impersonating.** Specifically:
 
-| 判据 | 台架证的 | 归 X 走查的 |
+| Criterion | What the rig proves | What belongs to the X walkthrough |
 |---|---|---|
-| C1② | 错凭据的测连确实失败；失败之后库里没多出一条 | 对话框「测通才让存」的门槛本身 |
-| C2② | 取列面回的源列名齐备（预填吃的输入） | 构建器里 target 的初值真的预填成源列名 |
-| C3③ | 任务定义收不下裸 SQL（`deny_unknown_fields` → 400） | 界面上没有手改 SQL 的控件 |
+| C1② | the test with wrong credentials really fails, and no row is added afterwards | the dialog's "only a successful test allows saving" gate itself |
+| C2② | the column face returns the full set of source column names (the prefill's input) | that `target` in the builder really is prefilled with the source column name |
+| C3③ | the task definition refuses raw SQL (`deny_unknown_fields` → 400) | that the UI has no hand-edit SQL control |
 
-**报告里单列一节写这个分界。** 一份声称证了六件事、实际只证了五件半的报告，
-比一份老实说「这半件归走查」的报告更危险——前者会让人以为门禁覆盖到了那里。
+**The report gives this boundary its own section.** A report claiming six things proved while really proving five and
+a half is more dangerous than one that plainly says "this half belongs to the walkthrough" — the former leaves people
+believing the gate reaches there.
 
-### 7. 所有者 2026-08-19 的两条使用裁定
+### 7. Two owner rulings of 2026-08-19 on usage
 
-1. **跑完默认不清场。** C1/C2 建出来的两条数据源与那个不同名映射的任务，
-   正是 X1–X8 过半条目要用的数据；清干净等于让人手工再造一遍。
-   要清场传 `--clean`（反选，不是默认）。**与 M3 的 `M3_KEEP_RIG` 相反**——
-   M3 那次保留是例外，这次保留是常态，因为第一版的走查清单就跟在四份台架后面跑。
-2. **报告开头是「客户五条需求 → 在哪儿验 → 本次结果」的五行对照表。**
-   C1–C6 是按技术模块分的，与客户提的五条不是一一对应（第 5 条尤其：
-   行数与行宽在 M1 的 `wide-100k`，内存形状在 C6，§1 已判分落两处）。
-   这份报告不只给改台架的人看，也是对客户交代第一版做完了的凭据，
-   对照关系必须由报告自己回答，不能靠读者对着 ADR 拼。
+1. **No teardown by default after a run.** The two datasources and the differently-named-mapping task built by C1/C2
+   are exactly the data more than half of X1–X8 needs; tearing them down means building them by hand again.
+   Pass `--clean` to tear down (opt-in, not the default). **The opposite of M3's `M3_KEEP_RIG`** — keeping the rig was
+   the exception there and is the norm here, because v1's walkthrough checklist runs right behind the four rigs.
+2. **The report opens with a five-row table of "the customer's five requirements → where each is verified → this run's
+   result".** C1–C6 are split by technical module and do not map one to one onto the customer's five (requirement 5
+   especially: row count and row width are in M1's `wide-100k`, memory shape in C6, split across two places by §1).
+   This report is not only for whoever changes the rig; it is also the evidence shown to the customer that v1 is done,
+   so the report must answer the mapping itself rather than leave the reader to assemble it from the ADR.
 
-### 8. `swapped_rows` 的区间判据是**双侧镜像**的——sink 与 source 两边都得是区间
+### 8. The range criterion for `swapped_rows` is **a mirrored pair** — both the sink and the source side must be ranges
 
-ADR-0035 §4 把 `swapped_rows` 的判据从等值改成区间 `[staged, 2 × staged]`：MySQL 在
-`ON DUPLICATE KEY UPDATE` 下**插入记 1、更新记 2**，一趟重跑只要有既有行的值真的变了，
-`affected_rows` 就必然大于 `staged_rows`。sink 侧 `mysql_destination.rs` 当时改了，
-**source 侧 `transfer.rs` 里那条镜像断言漏改，等值判据留到了今天**。
+ADR-0035 §4 changed the `swapped_rows` criterion from equality to the range `[staged, 2 x staged]`: under
+`ON DUPLICATE KEY UPDATE` MySQL counts 1 for an insert and 2 for an update, so on any re-run where an existing row's
+value really changed, `affected_rows` necessarily exceeds `staged_rows`. The sink side, `mysql_destination.rs`, was
+changed at the time; **the mirrored assertion on the source side in `transfer.rs` was missed, and the equality test
+survived until today**.
 
-后果不是台架的问题，是**产品在 v1 主路径上必炸**：重跑时改动 5 行里的 1 行 →
-`swapped_rows = 6 ≠ staged_rows = 5` → 任务判 `FAILED`。而「主键 upsert、重跑只更新变化的行」
-正是客户第 4 条需求。C4④ 抓到的就是它。
+The consequence is not a rig problem, it is **the product blowing up on the v1 main path**: a re-run changing 1 of 5
+rows gives `swapped_rows = 6 != staged_rows = 5`, so the task is judged `FAILED`. And "primary-key upsert, a re-run
+updates only the changed rows" is the customer's fourth requirement. C4④ is what caught it.
 
-**裁定：`swapped_rows` 的判据是双侧的一对，任何一边改了，另一边同时改。**
-这条不是「记得同步」的软约定——两处断言的对象是同一个 MySQL 语义，
-它们要么都是区间、要么都是等值，**分叉状态在任何一天都是错的**，只是要等到有行真变了才炸。
-今后再有这种一份语义两处断言的地方，改的人负责把镜像那一半一起改，评审按这条看。
+**Ruling: the `swapped_rows` criterion is a two-sided pair; changing either side changes the other at the same time.**
+This is not a soft "remember to sync" convention — the two assertions have one MySQL semantic as their subject, and
+they are **either both ranges or both equalities; a diverged state is wrong on any given day**, it just waits for a
+row to actually change before it blows up. Wherever else one semantic carries two assertions, whoever changes one
+owns changing its mirror, and review checks against this clause.
 
-### 9. ADR-0038 §5 第 3 分支同时约束**切换语句的列集合**——切换只能覆盖被映射的列
+### 9. ADR-0038 §5's third branch also constrains **the swap statement's column set** — the swap may cover only mapped columns
 
-ADR-0038 §5 第 3 分支写的是预检那一半：**未映射但目标列有默认值 → 放行**。
-运行时那一半当时是空的，切换语句于是取了**目标表的全部列**——未映射列在暂存表里是 NULL，
-切换把这个 NULL 一路写进目标表，撞 `ERROR 1048 Column cannot be null`。
-**预检放行、运行时炸**，两套语义打架。C5② 抓到的就是它。
+ADR-0038 §5's third branch states the precheck half: **unmapped but the target column has a default → allow**.
+The runtime half was empty at the time, so the swap statement took **all** the target's columns — unmapped columns are
+NULL in the staging table, and the swap wrote that NULL straight into the target, hitting
+`ERROR 1048 Column cannot be null`. **Precheck allows, runtime explodes**: two semantics at odds. C5② is what caught it.
 
-**裁定：切换语句的列集合 = 被映射到的目标列集合，未映射列一个都不进。**
-这样未映射列在 INSERT 时走它自己的 `DEFAULT`、在 UPDATE 时保持原值——
-两者都正是「放行」当初承诺的行为。ADR-0038 §5 第 3 分支从此**同时管两处**：
-预检怎么判，切换就怎么写；以后动其中一处，另一处一起看。
+**Ruling: the swap statement's column set = the set of mapped target columns; no unmapped column enters.**
+Unmapped columns then take their own `DEFAULT` on INSERT and keep their existing value on UPDATE — both exactly what
+"allow" promised. ADR-0038 §5's third branch from now on **governs both halves**: as the precheck judges, so the swap
+is written; changing either later means looking at the other.
 
-### 10. 假绿的第二种形态：断言被 schema 错误白捡——报告里原样打 status 与 body
+### 10. The second form of false green: an assertion that gets its result free from a schema error — print status and body verbatim in the report
 
-本节 5 拒的是「一条永远为真的断言」。C1② 暴露的是同一族的另一种：
-**断言本身正确，但请求根本没走到被测的那条路上，失败是被别的原因白捡的。**
+Item 5 rejects "an assertion that is always true". C1② exposed another member of the same family:
+**the assertion itself is correct, but the request never reached the path under test, and the failure came free from
+something else.**
 
-具体是：`test-connection` 的草稿字段在协议上 `#[serde(flatten)]` 平铺，台架多包了一层
-`{draft: …}`，请求在解析阶段就被 `400 missing field name` 挡下；而断言只要求「不是 200」
-——它拿到了 400，判 PASS。**测的是台架自己拼错了 JSON，不是错凭据被拒。**
+Specifically: `test-connection`'s draft fields are `#[serde(flatten)]`-ed in the protocol, the rig wrapped them in an
+extra `{draft: …}` layer, and the request was rejected at parse time with `400 missing field name`; the assertion only
+required "not 200", got its 400, and judged PASS. **What was tested was the rig's own malformed JSON, not the
+rejection of bad credentials.**
 
-**裁定两条：**
+**Two rulings:**
 
-1. **凡「断言某请求失败」的检查，必须再断言一条失败的理由**——C1② 现在同时要求失败报文里
-   **不许出现** `JSON 请求体无效|missing field`。改对之后实测是
-   `502 / ERROR 1045 Access denied for user 'spike'`，真的走到口令那条路上了。
-2. **报告里把 status 与 body 原样打出来。** 假绿光看 PASS 看不出来，
-   只有把原文摆在报告里，人工扫一眼才会发现「这个 400 不对劲」。
-   这也是本节 6「不冒充证过」的同一条理由：**报告要能被质疑，才挡得住假绿。**
+1. **Any check asserting that a request fails must also assert a reason for the failure** — C1② now additionally
+   requires that the failure body **not match** `JSON 请求体无效|missing field`. After the fix the measured result is
+   `502 / ERROR 1045 Access denied for user 'spike'`, which really did reach the credentials path.
+2. **Print status and body verbatim in the report.** A false green is invisible from a PASS alone; only with the
+   original text in the report does a human scan catch "that 400 looks wrong". Same reasoning as item 6's
+   "no impersonating": **a report has to be open to challenge before it can hold back false greens.**
 
-### 时效
+### Expiry
 
-- **本节 1 的「四个基线」**：若将来 sink 改成两档共用一个进程（那要先推翻 §3.5），
-  基线才退回「一个进程一个」。触发条件是**进程模型变化**，不是嫌四个数太多。
-- **本节 6 的三条分界**：若哪天台架长出驱动浏览器的能力（现在没有，也不为这一条去长），
-  界面那一半可以并回来；在那之前，**报告不许把走查的结论写进台架的结论**。
-- **本节 8/9 是两条产品缺陷的裁定，不设时效**：它们不是「当前这样安排」，
-  是两处本来就该一致、当年漏掉一半的语义。除非 ADR-0035 §4 的区间判据或 ADR-0038 §5
-  第 3 分支本身被推翻，这两条跟着一起改；单独放宽任何一半都是把分叉状态放回来。
+- **Item 1's "four baselines"**: only if sink one day shares one process across both levels (which requires
+  overturning §3.5 first) does the baseline revert to "one per process". The trigger is **a change in the process
+  model**, not four numbers feeling like too many.
+- **Item 6's three boundaries**: if the rig ever grows the ability to drive a browser (it has not, and will not grow
+  it for this alone), the UI halves can be merged back in; until then, **the report may not write the walkthrough's
+  conclusions into the rig's conclusions.**
+- **Items 8 and 9 are rulings on two product defects, and do not expire**: they are not "how it is arranged now" but
+  two semantics that should always have agreed and were half-implemented. Unless ADR-0035 §4's range criterion or
+  ADR-0038 §5's third branch is itself overturned — in which case these follow — loosening either half alone puts the
+  diverged state back.
 
-## 增补（2026-08-19，#136 跑第一版整体验收时）：走查触发的复核方法、X 系列改判为对活台架跑、探针会随界面漂移
+## Addendum (2026-08-19, while running overall v1 acceptance under #136): how to re-check a walkthrough trigger, the X series re-ruled to run against a live rig, and probes drifting with the UI
 
-### 背景
+### Background
 
-§6 排过第一版的走查计划（V 跑一次即封在 #133、W 落在 #132、X 另立清单），但排的是**计划**。
-#136 真跑整场时，三件事只有跑起来才看得见：一份「未跑」怎么才算证得住、X 系列拿什么造态、
-以及探针这类走查工具本身会不会说谎。逐条钉在这里。**判据一条都没改。**
+§6 planned v1's walkthroughs (V runs once and is sealed on #133, W lands on #132, X gets its own checklist), but what
+it planned was **a plan**. Running the whole thing under #136 made three things visible that only a real run shows:
+what makes a "not run" hold up, what the X series uses to produce its states, and whether a probe can itself lie.
+Nailed down here. **Not one criterion changed.**
 
-### 1. 「未跑」要立得住，凭的是**封存点之后的 diff**，不是一句声明
+### 1. A "not run" holds up on **the diff since the seal point**, not on a declaration
 
-`CLAUDE.md` 通则 3 允许「已封存 + 此后零改动」作为合法的「未跑」，但没说这个「零改动」
-怎么证。#136 的做法是**逐条给出封存点与其后的 diff 结果**，原样进报告：
+`CLAUDE.md` rule 3 allows "sealed + zero changes since" as a legitimate "not run", but does not say how that
+"zero changes" is proven. #136's method is **to give the seal point and the resulting diff for each, verbatim in the
+report**:
 
-- **V1–V25**：封存点 `e581056`（「design-system README 三处事实订正，整份 V1–V25 跑一次即封」）。
-  `git log e581056..HEAD -- docs/design-system/ web/src/app.css web/src/` **零个提交**
-  ——两条触发条件（设计系统改动 / `tokens.css` 改动）都不成立。
-- **W1–W6**：封存点 `1348df1`。其后 `e63c492`、`aa510db` 两个提交**确实动了前端**
-  （9 个文件、+1439 行），单看「动没动 `web/src/`」会误判成触发。逐行核过：
-  `.precheck-reports` 与 `DiagnosticTable` 两个字符串在整段 diff 里**命中 0 次**
-  ——清单要的是这两处的布局与列结构，不是「前端有没有改」。
+- **V1–V25**: seal point `e581056` ("three factual corrections to the design-system README; the whole of V1–V25 run
+  once and sealed"). `git log e581056..HEAD -- docs/design-system/ web/src/app.css web/src/` gives **zero commits** —
+  neither trigger condition (a design-system change / a `tokens.css` change) holds.
+- **W1–W6**: seal point `1348df1`. Two commits after it, `e63c492` and `aa510db`, **did touch the front end**
+  (9 files, +1439 lines), so looking only at "did `web/src/` change" would misjudge this as triggered. Checked line by
+  line: the strings `.precheck-reports` and `DiagnosticTable` appear **0 times** in the whole diff — the checklist
+  names those two things' layout and column structure, not "did the front end change".
 
-**裁定：走查的触发判定按清单写的那个对象核，不按文件粒度外推；
-判定结论必须附上「怎么核的」，否则「未跑」只是一句声明。**
-这比「改了前端就重跑」更省，也比「反正没改」更严——省的是无谓的整份重跑，
-严的是那句话必须可被质疑。
+**Ruling: a walkthrough's trigger is judged against the object the checklist names, not extrapolated at file
+granularity; and the judgement must carry "how it was checked", or the "not run" is only a declaration.**
+This is cheaper than "the front end changed, so re-run everything" and stricter than "nothing changed, surely" —
+what it saves is pointless full re-runs, what it tightens is that the claim can be challenged.
 
-### 2. X1–X8 改判为**对活台架跑**，桩降为回落手段
+### 2. X1–X8 re-ruled to run **against a live rig**, with the stub demoted to a fallback
 
-§6.3 立 X 清单时没有指定造态源，实现票用的是桩（`v1-mock.py`）。所有者 2026-08-19 裁定（Q5）：
-**X1–X8 对着 `run-v1-acceptance.sh` 跑完留下的真服务取观察。**
+§6.3 did not specify a state source when it created the X checklist, and the implementation ticket used a stub
+(`v1-mock.py`). Owner ruling of 2026-08-19 (Q5): **X1–X8 take their observations from the real service left running
+by `run-v1-acceptance.sh`.**
 
-理由是这几条判据的内容决定的：X3 判的是「填错凭据存不进去」，X4 判的是「删除被拒并点名任务」
-——用桩，失败报文和被引用的任务名都是自己编的，**等于自己给自己发证**。
-改对活台架之后，X3 拿到的是真的 `ORA-01017`，X4 点名的是 C 系列真建的那 11 个任务。
+The content of these criteria is the reason: X3 judges "wrong credentials cannot be saved", X4 judges "deletion is
+refused and names the tasks" — against a stub, the failure body and the referencing task names are made up by the
+walkthrough itself, which is **issuing yourself your own certificate**. Against a live rig, X3 gets a real `ORA-01017`
+and X4 names the 11 tasks the C series really created.
 
-**代价与补数**：台架只建 2 条数据源，而 X2 判的是「录满 5 条」。补的 3 条走
-`POST /api/datasources`（与人手同一个入口），**不要求连得通**——POST 本身不测连
-（ADR-0039 §3 把「测通才让存」放在对话框上），X2 只读列表的列与取值。
-补数脚本 `walkthrough/x-rig-seed.sh` 与探针同处一棵树、一起入库。
+**Cost and the top-up**: the rig creates only 2 datasources, while X2 judges "five rows recorded". The other 3 are
+added via `POST /api/datasources` (the same entry point a human uses), **without requiring that they connect** — the
+POST does not test the connection (ADR-0039 §3 puts "only a successful test allows saving" on the dialog), and X2 only
+reads the list's columns and values. The seeding script `walkthrough/x-rig-seed.sh` lives in the same tree as the
+probes and is committed with them.
 
-**桩不删**：`X_RIG` 不为 1 时仍走桩。它是回落手段——某一条在活台架上没有对象时
-（例如「一条数据源都没有」那一态），照实记「这条回落到桩、偏差是什么」，
-**不许硬拗、不许让一条挡住整份**。
+**The stub stays**: with `X_RIG` unset to 1 it still runs against the stub. It is a fallback — when some item has no
+subject on the live rig (the "no datasources at all" state, say), record honestly "this one fell back to the stub, and
+here is the deviation"; **no forcing it, and never let one item block the whole run.**
 
-### 3. 探针的选择器会随界面漂移，而**探针读错和界面变坏，在报告里长得一模一样**
+### 3. A probe's selectors drift with the UI, and **a misreading probe and a broken UI look identical in the report**
 
-`m3-probe.py` 是 M3 时期写的，v1 的构建器在它脚下换了三处形态，本轮实测踩到四个坑：
+`m3-probe.py` was written in the M3 era, and v1's builder changed three forms under its feet; this run hit four traps:
 
-1. 目标表从普通输入框换成 `<input list>` + `<datalist>`——旧写法认 React **不反射的 `value` 属性**，
-   永远选不中。
-2. `.column-fetch-section` 在 v1 有两处（「目标表建表 SQL」与新增的「目标表列参考」共用这个类），
-   裸选命中歧义。
-3. 「拿建表 SQL」按钮落到了模态框滚动区的视口之外；`page.click()` 滚过去的途中，
-   填目标表名触发的 `/api/builder/sql` 把这一段重渲染了，**点击落空**——
-   一次 `/api/columns` 都不发，等的那个选择器永远等不到。
-4. `.ddl-output` 在 v1 **也有两处**（构建器上方的「生成的 SQL」共用这个类）。裸选命中的是它，
-   于是 W4 读出「DDL 只有 9 行、不以 `utf8mb4;` 收尾」、W5 读出「DDL 区块还在」
-   ——**两条读数都长得像界面回退，其实是探针作用域错。**
+1. The target table moved from a plain input to `<input list>` + `<datalist>` — the old approach targets the
+   **`value` attribute React does not reflect**, so it never selects anything.
+2. `.column-fetch-section` occurs twice in v1 ("目标表建表 SQL" and the new "目标表列参考" share the class), so a bare
+   selector is ambiguous.
+3. The "拿建表 SQL" button ended up outside the viewport of the modal's scroll area; while `page.click()` scrolled to
+   it, the `/api/builder/sql` call triggered by filling in the target table name re-rendered that section, so
+   **the click missed** — not one `/api/columns` request was sent, and the awaited selector never appeared.
+4. `.ddl-output` **also occurs twice** in v1 (the builder's "生成的 SQL" above shares the class). A bare selector hits
+   that one, so W4 read "the DDL is only 9 lines and does not end in `utf8mb4;`" and W5 read "the DDL block is still
+   there" — **both readings look like a UI regression and are in fact the probe's scope being wrong.**
 
-第 4 条是本节的要害。**报告读不出「这个数是探针错还是产品坏」**，所以定两条做法：
+Item 4 is the crux. **The report cannot tell "is this number a probe error or a broken product"**, so two practices:
 
-- **选择器一律认标签文字或 `aria-*`，不认位置、不认 React 不反射的属性**；
-  同一个类在页面上出现多处时，作用域必须收到唯一的祖先（`.fetch-ready .ddl-output`
-  而不是 `.ddl-output`）。
-- **观察对不上时，先拿上一份走查记录逐项对，再回渲染代码核分支，最后才写「界面变了」。**
-  #136 就是靠这一步把两条假回退摘出来的。
+- **Selectors always target label text or `aria-*`, never position and never attributes React does not reflect**;
+  when one class appears more than once on a page, the scope must be narrowed to a unique ancestor
+  (`.fetch-ready .ddl-output`, not `.ddl-output`).
+- **When an observation does not line up, first compare item by item against the previous walkthrough record, then
+  check the branch in the rendering code, and only then write "the UI changed".** That step is how #136 extracted the
+  two false regressions.
 
-这两条与 §6 的「走查工具必须入库」（落点是 `CLAUDE.md` 通则 4）是同一件事的两半：
-入库解决「下一台机器跑不跑得了」，本节解决「跑出来的数信不信得过」。
+These two are the two halves of one thing with §6's "walkthrough tooling must be committed" (which lands as
+`CLAUDE.md` rule 4): committing solves "can the next machine run it", this section solves "can the numbers it
+produces be trusted".
 
-### 4. 「顺手跑了」不等于「被触发了」——报告要把两者分开写
+### 4. "Run in passing" is not "triggered" — the report keeps the two apart
 
-本轮 W1–W6 真跑了一遍，但它的触发判定仍然是「已在 #132 兑现」（见本节 1 的 diff 证据）。
-跑它的理由是探针本来就要当票修，修完不跑反而别扭（所有者裁定 Q6）。
+W1–W6 really was run this time, but its trigger judgement is still "already met on #132" (see item 1's diff evidence).
+The reason for running it is that the probe had to be fixed on this ticket anyway, and fixing it without running it
+would be odd (owner ruling Q6).
 
-**裁定：走查记录里，「触发判定」与「本轮有没有跑」是两栏，不许互相顶替。**
-跑过而未触发的，观察进报告作**附带证据**；触发而未跑的，那是欠账，不是记录。
-反过来说，本轮 V1–V25 没跑，也不因为「W 顺手跑了」就跟着松动——V 的封存证据是它自己那条。
+**Ruling: in a walkthrough record, "trigger judgement" and "was it run this time" are two columns, and neither
+substitutes for the other.** Run but not triggered: the observations go into the report as **supporting evidence**.
+Triggered but not run: that is a debt, not a record. Conversely, V1–V25 not being run this time is not loosened by
+"W happened to be run" — V's seal evidence is its own.
 
-### 时效
+### Expiry
 
-- **本节 1 的复核方法**：只要 `CLAUDE.md` 通则 3 还允许「封存 + 零改动」当合法未跑，它就有效。
-  若哪天改成「每次验收无条件重跑」，本节 1 连同那条通则一起作废。
-- **本节 2 的活台架判定**：绑在「C 系列跑完不清场」这个事实上。若 `run-v1-acceptance.sh`
-  将来改成跑完即拆，X 系列要么自带起台架的编排，要么退回桩——**退回桩必须在记录里写明**，
-  不许悄悄退。
-- **本节 3 不设时效**：它不是「当前这样安排」，是走查工具这类代码的固有性质。
+- **Item 1's re-check method**: valid as long as `CLAUDE.md` rule 3 still allows "sealed + zero changes" as a
+  legitimate not-run. If it ever becomes "unconditional re-run on every acceptance", item 1 is void along with the rule.
+- **Item 2's live-rig ruling**: bound to the fact that the C series does not tear down. If `run-v1-acceptance.sh` ever
+  tears down on completion, the X series either carries its own rig orchestration or falls back to the stub —
+  **and a fallback must be stated in the record**, never done quietly.
+- **Item 3 does not expire**: it is not "how it is arranged now" but an inherent property of walkthrough tooling as code.
