@@ -251,6 +251,34 @@ export interface ColumnFetchResult {
   target_ddl: string;
 }
 
+export interface RunEvidence {
+  source?: {
+    datasource_id: string;
+    connect_string: string;
+    username: string;
+    client_lib_dir: string;
+  } | null;
+  target?: {
+    datasource_id: string;
+    host: string;
+    port: number;
+    database: string;
+    username: string;
+  } | null;
+  agent?: {
+    agent_id: string;
+    name: string;
+    base_url: string;
+    instance_id: string;
+  } | null;
+  parameters?: {
+    target_table: string;
+    columns: ColumnMapping[];
+    primary_key: string[];
+    source_sql: string;
+  } | null;
+}
+
 export interface RunHistory {
   run_record_id: string;
   run_id: string | null;
@@ -260,6 +288,7 @@ export interface RunHistory {
    * 过滤条件就在这条语句里，没有另一半取值需要对照着读。
    */
   source_sql: string;
+  evidence?: RunEvidence;
   staging_table: string | null;
   started_at: string;
   finished_at: string | null;
@@ -315,6 +344,7 @@ export interface LiveRunDetail {
   run_record_id: string;
   run_id: string | null;
   source_sql: string;
+  evidence?: RunEvidence;
   staging_table: string | null;
   stage: string | null;
   total_rows: number | null;

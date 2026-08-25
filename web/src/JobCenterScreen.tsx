@@ -1,4 +1,5 @@
 import {
+  Ban,
   Check,
   Clock3,
   Copy,
@@ -31,6 +32,8 @@ import type { LatestRunStatus, TaskFilters } from "./listing";
 import { progressOf } from "./progress";
 import { RunDrawer } from "./RunDrawer";
 import { sourceSummary } from "./spec";
+import { rowRunAction } from "./troubleshooting";
+import type { Step } from "./wizard";
 import { ActionButton, Modal, Pagination } from "./ui";
 
 /**
@@ -60,8 +63,10 @@ export interface JobCenterProps {
   /** 正在发起的那个任务的 id——**只有它那一行**的发起键在这段时间里按不动。 */
   startingTaskId: string | null;
   onStart: (task: Task) => void;
+  onStop: (runRecordId: string) => void;
   /** 重跑就是按这个任务当前的定义再跑一次；上一次那条记录不再带进来（没有可预填的东西）。 */
   onRerun: (task: Task) => void;
+  onEditFailure: (task: Task, step: Step) => void;
   /** 批量删除跑完之后要重读清单——本屏不改 `App` 的 state。 */
   onChanged: () => void;
   focusTaskId: string | null;
@@ -80,7 +85,9 @@ export function JobCenterScreen({
   onDelete,
   startingTaskId,
   onStart,
+  onStop,
   onRerun,
+  onEditFailure,
   onChanged,
   focusTaskId,
   onFocusConsumed,
@@ -444,6 +451,7 @@ export function JobCenterScreen({
           onDelete={onDelete}
           startingTaskId={startingTaskId}
           onStart={onStart}
+          onStop={onStop}
           onOpen={setOpenTaskId}
           copiedTaskId={copyStatus?.error === null ? copyStatus.taskId : null}
           onCopyCurl={(task) => void copyCurl(task)}
@@ -478,6 +486,10 @@ export function JobCenterScreen({
           onRerun={(task) => {
             setOpenTaskId(null);
             onRerun(task);
+          }}
+          onEditTask={(task, step) => {
+            setOpenTaskId(null);
+            onEditFailure(task, step);
           }}
           onCleaned={() => {
             setOpenTaskId(null);
@@ -564,6 +576,7 @@ function JobResults({
   onDelete,
   startingTaskId,
   onStart,
+  onStop,
   onOpen,
   copiedTaskId,
   onCopyCurl,
@@ -586,6 +599,7 @@ function JobResults({
   onDelete: (task: Task) => void;
   startingTaskId: string | null;
   onStart: (task: Task) => void;
+  onStop: (runRecordId: string) => void;
   onOpen: (taskId: string) => void;
   copiedTaskId: string | null;
   onCopyCurl: (task: Task) => void;
@@ -661,6 +675,10 @@ function JobResults({
             const status = latestRunStatus(run);
             const progress = progressOf(run);
             const source = sourceSummary(task.spec);
+            const runAction = rowRunAction(
+              run,
+              startingTaskId === task.task_id,
+            );
             return (
               <tr
                 className={task.task_id === focusTaskId ? "is-new-task" : undefined}
@@ -738,17 +756,22 @@ function JobResults({
                 </td>
                 <td className="action-column">
                   <span className="row-actions">
-                    {/* 点了就跑：没有对话框，也没有要填的参数。**只锁这一行**的按钮，
-                        免得连点两下换回一个「已有一次运行进行中」的 409；
-                        别的行照常按得动，一条在飞不构成拦住其余每一行的理由。 */}
-                    <ActionButton
-                      label={
-                        startingTaskId === task.task_id ? "正在发起" : "发起运行"
-                      }
-                      icon={<Play size={16} />}
-                      disabled={startingTaskId === task.task_id}
-                      onClick={() => onStart(task)}
-                    />
+                    {/* 发起与停止共用这一格：进行中只给停止，终局或从未运行只给发起。
+                        发起请求在途时只锁这一行，别的任务仍然可以操作。 */}
+                    {runAction.kind === "start" ? (
+                      <ActionButton
+                        label={runAction.disabled ? "正在发起" : "发起运行"}
+                        icon={<Play size={16} />}
+                        disabled={runAction.disabled}
+                        onClick={() => onStart(task)}
+                      />
+                    ) : (
+                      <ActionButton
+                        label={`停止运行 ${runAction.runRecordId}`}
+                        icon={<Ban size={16} />}
+                        onClick={() => onStop(runAction.runRecordId)}
+                      />
+                    )}
                     <ActionButton
                       label={copiedTaskId === task.task_id ? "cURL 已复制" : "复制 cURL"}
                       icon={

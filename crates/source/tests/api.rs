@@ -949,9 +949,11 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
         .unwrap()
         .to_owned();
 
-    let detail = wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+    let mut detail = wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
         body["rows_pushed"] == 7
     });
+    assert!(detail["evidence"].is_object());
+    detail.as_object_mut().unwrap().remove("evidence");
     assert_eq!(
         detail,
         serde_json::json!({
@@ -1097,8 +1099,12 @@ while [ ! -f '{}' ]; do sleep 0.02; done
         emit.display(),
         release.display(),
     ));
-    let (_agent_id, source_id, target_id) = rig.seed();
-    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+    let (agent_id, source_id, target_id) = rig.seed();
+    let task_id = rig.create_task(
+        "holdings",
+        "HOLDINGS",
+        &(source_id.clone(), target_id.clone()),
+    );
 
     let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
     assert_eq!(started.status, 202, "{}", started.body_text());
@@ -1110,12 +1116,48 @@ while [ ! -f '{}' ]; do sleep 0.02; done
     assert_eq!(accepted["stage"], Value::Null);
     assert_eq!(accepted["run_id"], Value::Null);
     assert_eq!(accepted["source_sql"], EXPECTED_SOURCE_SQL);
+    assert_eq!(accepted["evidence"]["source"]["datasource_id"], source_id);
+    assert_eq!(
+        accepted["evidence"]["source"]["connect_string"],
+        "//oracle:1521/XE"
+    );
+    assert_eq!(accepted["evidence"]["source"]["username"], "source");
+    assert_eq!(
+        accepted["evidence"]["source"]["client_lib_dir"],
+        "/db-qbs-missing-oracle-client"
+    );
+    assert_eq!(accepted["evidence"]["target"]["datasource_id"], target_id);
+    assert_eq!(accepted["evidence"]["target"]["host"], "127.0.0.1");
+    assert_eq!(accepted["evidence"]["target"]["port"], 3306);
+    assert_eq!(accepted["evidence"]["target"]["database"], "qbs");
+    assert_eq!(accepted["evidence"]["target"]["username"], "sink");
+    assert_eq!(accepted["evidence"]["agent"]["agent_id"], agent_id);
+    assert_eq!(accepted["evidence"]["agent"]["name"], "目标端");
+    assert_eq!(accepted["evidence"]["agent"]["base_url"], agent_stub_url());
+    assert_eq!(accepted["evidence"]["agent"]["instance_id"], "stub-agent");
+    assert_eq!(accepted["evidence"]["parameters"]["target_table"], "HOLDINGS");
+    assert_eq!(accepted["evidence"]["parameters"]["primary_key"], serde_json::json!(["ID"]));
+    assert_eq!(accepted["evidence"]["parameters"]["source_sql"], EXPECTED_SOURCE_SQL);
+    assert!(!serde_json::to_string(&accepted).unwrap().contains("change-me"));
+    assert!(!serde_json::to_string(&accepted).unwrap().contains("secret"));
     assert_eq!(accepted["seq"], 0);
     assert_eq!(accepted["rows_pushed"], 0);
     assert_eq!(accepted["bytes"], 0);
     assert_eq!(accepted["ms"], 0);
     assert_eq!(accepted["last_ts"], Value::Null);
     assert_eq!(accepted["live"], true);
+
+    let changed = rig.put(
+        &format!("/api/datasources/{source_id}"),
+        r#"{"name":"源库（改）","kind":"oracle","connect_string":"//changed:1521/NEW","username":"changed","password":"new-secret"}"#,
+    );
+    assert_eq!(changed.status, 200, "{}", changed.body_text());
+    let still_original = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(
+        still_original["evidence"]["source"]["connect_string"],
+        "//oracle:1521/XE"
+    );
+    assert_eq!(still_original["evidence"]["source"]["username"], "source");
 
     fs::write(emit, "").unwrap();
     let partial = wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
