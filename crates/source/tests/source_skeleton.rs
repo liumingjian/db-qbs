@@ -1,3 +1,10 @@
+//! source 长驻进程的**哨兵**：只证「二进制真的起得来、对外真的在服务」。
+//!
+//! 判断怎么回话——路由、30 个 handler、发起运行那条链——全在 `tests/api.rs` 里
+//! 进程内直调 `Api::handle` 证完了，那边 27 条测试跑不到 2 秒。留在这里的，
+//! 是**只有一个真进程才有意义**的那几样：监听与端口释放、SIGTERM、
+//! 启动期的配置迁移、重启时对未完成运行的封存。
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -11,15 +18,6 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
-
-/// 任务定义在线上恰好三样：名字、结构化规格、身份。SQL 不在里面（ADR-0036 §2）。
-const TASK_FIELDS: [&str; 5] = [
-    "name",
-    "source_datasource_id",
-    "spec",
-    "target_datasource_id",
-    "task_id",
-];
 
 /// 一台**真的在应答**的目标端 agent 桩（ADR-0044）。
 ///
@@ -118,315 +116,6 @@ fn task_json(name: &str, target_table: &str, datasources: &(String, String)) -> 
     )
 }
 
-/// 上面那份规格现算出来的源端 SQL。父子两端算的是同一份，历史里钉的也是它。
-const EXPECTED_SOURCE_SQL: &str = "SELECT a.ID AS ID,\n       a.D_BIZ AS D_BIZ\n  FROM APP.HOLDINGS a\n WHERE D_BIZ = DATE '2026-08-14'";
-
-#[test]
-fn task_crud_persists_stable_identity_without_exposing_credentials() {
-    let directory = temp_directory();
-    let (port, config, child, _ready) =
-        start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
-    let datasources = seed_datasources(port);
-
-    let created = request(
-        port,
-        "POST",
-        "/api/tasks",
-        Some(&task_json("持仓明细", "HOLDINGS", &datasources)),
-    )
-    .unwrap();
-    assert_eq!(created.status, 201, "{}", created.body);
-    let created = json_body(&created);
-    assert_task_fields(&created);
-    let task_id = created["task_id"].as_str().unwrap().to_owned();
-    assert!(!task_id.is_empty());
-
-    let listed = get(port, "/api/tasks").unwrap();
-    assert_eq!(listed.status, 200);
-    assert_eq!(json_body(&listed), serde_json::json!([created]));
-
-    let detail = get(port, &format!("/api/tasks/{task_id}")).unwrap();
-    assert_eq!(detail.status, 200);
-    assert_eq!(json_body(&detail), created);
-
-    let updated = request(
-        port,
-        "PUT",
-        &format!("/api/tasks/{task_id}"),
-        Some(&task_json("持仓日明细", "HOLDINGS_DAILY", &datasources)),
-    )
-    .unwrap();
-    assert_eq!(updated.status, 200, "{}", updated.body);
-    let updated = json_body(&updated);
-    assert_task_fields(&updated);
-    assert_eq!(updated["task_id"], task_id);
-    assert_eq!(updated["name"], "持仓日明细");
-    assert_eq!(updated["spec"]["target_table"], "HOLDINGS_DAILY");
-
-    let first_output = terminate(child);
-    assert_success(&first_output);
-    let database = directory.join("db-qbs.sqlite3");
-    assert_eq!(
-        fs::metadata(&database).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
-
-    let mut restarted = start_source(&config);
-    let listed = wait_for_tasks(port, &mut restarted);
-    assert_eq!(listed.status, 200);
-    assert_eq!(json_body(&listed), serde_json::json!([updated]));
-
-    let no_config_endpoint = get(port, "/api/config").unwrap();
-    assert_eq!(no_config_endpoint.status, 404);
-    for response in [&listed, &no_config_endpoint] {
-        assert!(!response.body.contains("secret"));
-        assert!(!response.body.contains("oracle_password"));
-    }
-
-    let deleted = request(port, "DELETE", &format!("/api/tasks/{task_id}"), None).unwrap();
-    assert_eq!(deleted.status, 200, "{}", deleted.body);
-    assert_eq!(json_body(&deleted), updated);
-    assert_eq!(
-        get(port, &format!("/api/tasks/{task_id}")).unwrap().status,
-        404
-    );
-    assert_eq!(
-        json_body(&get(port, "/api/tasks").unwrap()),
-        serde_json::json!([])
-    );
-
-    assert_success(&terminate(restarted));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn task_writes_reject_client_identity_and_incomplete_definitions() {
-    let directory = temp_directory();
-    let (port, _config, child, _ready) =
-        start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
-    let datasources = seed_datasources(port);
-
-    let client_identity = request(
-        port,
-        "POST",
-        "/api/tasks",
-        Some(&format!(
-            r#"{{"task_id":"chosen-by-client",{}"#,
-            &task_json("持仓明细", "HOLDINGS", &datasources)[1..]
-        )),
-    )
-    .unwrap();
-    assert_eq!(client_identity.status, 400, "{}", client_identity.body);
-
-    let missing_name = request(
-        port,
-        "POST",
-        "/api/tasks",
-        Some(
-            r#"{"spec":{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{"source":"ID","target":"ID"}],"primary_key":["ID"]}}"#,
-        ),
-    )
-    .unwrap();
-    assert_eq!(missing_name.status, 400, "{}", missing_name.body);
-    assert_eq!(
-        json_body(&get(port, "/api/tasks").unwrap()),
-        serde_json::json!([])
-    );
-
-    assert_success(&terminate(child));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn run_launch_materializes_task_and_aggregates_child_output_until_exit() {
-    let directory = temp_directory();
-    let release = directory.join("release-child");
-    let invocation = directory.join("child-args");
-    let fake_child = write_fake_child(
-        &directory,
-        &format!(
-            r#"printf '%s\n' "$@" > '{}'
-printf '%s\n' '{{"ts":"2026-08-15T10:00:00.000Z","level":"info","event":"source_started","run_id":null,"task":null,"message":"started"}}'
-printf '%s\n' '{{"ts":"2026-08-15T10:00:01.000Z","level":"info","event":"stage_changed","run_id":"run-7","task":null,"stage":"PREPARING","message":"preparing"}}'
-printf '%s\n' '{{"ts":"2026-08-15T10:00:02.000Z","level":"info","event":"run_opened","run_id":"run-7","task":null,"staging_table":"STG_7","columns_checked":2,"message":"opened"}}'
-printf '%s\n' '{{"ts":"2026-08-15T10:00:03.000Z","level":"info","event":"stage_changed","run_id":"run-7","task":null,"stage":"STREAMING","message":"streaming"}}'
-printf '%s\n' '{{"ts":"2026-08-15T10:00:04.000Z","level":"info","event":"batch_pushed","run_id":"run-7","task":null,"seq":1,"rows":3,"source_rows":3,"bytes":100,"written":3,"ms":10}}'
-printf '%s\n' '{{"ts":"2026-08-15T10:00:05.000Z","level":"info","event":"batch_pushed","run_id":"run-7","task":null,"seq":2,"rows":4,"source_rows":7,"bytes":120,"written":4,"ms":12}}'
-while [ ! -f '{}' ]; do sleep 0.02; done
-printf '%s\n' '{{"ts":"2026-08-15T10:00:06.000Z","level":"info","event":"stage_changed","run_id":"run-7","task":null,"stage":"COMMITTING","message":"committing"}}'
-printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_finished","run_id":"run-7","task":null,"terminal":"SUCCEEDED","stage":"SUCCEEDED","message":"done","source_code":null,"sink_code":null,"column":null,"value":null,"source_rows":7,"source_batches":2,"staged_rows":7,"received_batches":2,"sink_reported_rows":7,"purged_rows":1,"fetch_ms":4,"push_ms":22,"commit_ms":6,"count_ms":2,"cursor_ms":1}}'
-"#,
-            invocation.display(),
-            release.display(),
-        ),
-    );
-    let (port, config, source, _ready) =
-        start_source_ready(|port| write_run_config(&directory, port, &fake_child));
-    let datasources = seed_datasources(port);
-    let created = post(
-        port,
-        "/api/tasks",
-        &task_json("holdings", "HOLDINGS", &datasources),
-    )
-    .unwrap();
-    assert_eq!(created.status, 201, "{}", created.body);
-    let task_id = json_body(&created)["task_id"].as_str().unwrap().to_owned();
-    let audit = rusqlite::Connection::open(directory.join("db-qbs.sqlite3")).unwrap();
-    audit
-        .execute_batch(
-            "CREATE TABLE history_write_audit (operation TEXT NOT NULL);
-             CREATE TRIGGER audit_history_insert AFTER INSERT ON run_history
-             BEGIN INSERT INTO history_write_audit VALUES ('INSERT'); END;
-             CREATE TRIGGER audit_history_update AFTER UPDATE ON run_history
-             BEGIN INSERT INTO history_write_audit VALUES ('UPDATE'); END;",
-        )
-        .unwrap();
-    drop(audit);
-
-    let started = post(port, "/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#)).unwrap();
-    assert_eq!(started.status, 202, "{}", started.body);
-    let run_record_id = json_body(&started)["run_record_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-
-    let detail = wait_for_json(port, &format!("/api/runs/{run_record_id}"), |body| {
-        body["rows_pushed"] == 7
-    });
-    assert_eq!(
-        detail,
-        serde_json::json!({
-            "run_record_id": run_record_id,
-            "run_id": "run-7",
-            "source_sql": EXPECTED_SOURCE_SQL,
-            "staging_table": "STG_7",
-            "stage": "STREAMING",
-            "total_rows": null,
-            "precount_ms": null,
-            "seq": 2,
-            "rows_pushed": 7,
-            "bytes": 220,
-            "ms": 22,
-            "last_ts": "2026-08-15T10:00:05.000Z",
-            "live": true,
-        })
-    );
-    let live_list = json_body(&get(port, &format!("/api/runs?task_id={task_id}")).unwrap());
-    assert_eq!(live_list.as_array().unwrap().len(), 1);
-    assert_eq!(live_list[0]["run_record_id"], run_record_id);
-    assert_eq!(live_list[0]["rows_pushed"], 7);
-    assert_eq!(live_list[0]["finished_at"], Value::Null);
-
-    let task_files = directory_entries(&directory.join("run-tasks"));
-    assert_eq!(task_files.len(), 1);
-    assert!(task_files[0]
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .contains(&run_record_id));
-    assert_eq!(
-        fs::metadata(&task_files[0]).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
-    let task_toml = fs::read_to_string(&task_files[0]).unwrap();
-    for field in ["owner", "table", "columns", "primary_key", "where_clause"] {
-        assert!(task_toml.contains(field), "{task_toml}");
-    }
-    // SQL 不落进任务文件：子进程从同一份规格现算。
-    assert!(!task_toml.contains("SELECT"), "{task_toml}");
-    // 任务身份仍不落进去——子进程按规格干活，不需要知道自己是哪条任务。
-    for absent in ["holdings", "task_id"] {
-        assert!(!task_toml.contains(absent), "{task_toml}");
-    }
-    // **两端凭据现在落进去了**（ADR-0037 §1/§8，推翻了原来那条「任务文件不含凭据」的断言）：
-    // 编排进程解一次，子进程不碰数据源库、也不碰密钥文件。兜底是上面那条 0600
-    // 与「启动 / 退出各扫一次 run-tasks」的清扫。
-    // 目标端 agent 也落进去（ADR-0044 §4）：子进程照任务文件里这一份打，
-    // **不回头读 `source.toml` 的全局地址**——那个字段已经退役。
-    for present in [
-        "[oracle]",
-        "[target]",
-        "client_lib_dir",
-        "[agent]",
-        "instance_id",
-    ] {
-        assert!(task_toml.contains(present), "{task_toml}");
-    }
-
-    let args = fs::read_to_string(invocation).unwrap();
-    assert_eq!(
-        args.lines().collect::<Vec<_>>(),
-        [
-            "--config",
-            config.to_str().unwrap(),
-            "--task",
-            task_files[0].to_str().unwrap(),
-        ]
-    );
-
-    fs::write(release, "").unwrap();
-    let history = wait_for_json(port, &format!("/api/runs/{run_record_id}"), |body| {
-        body["live"] == false
-    });
-    assert_eq!(history["run_record_id"], run_record_id);
-    assert_eq!(history["run_id"], "run-7");
-    assert_eq!(history["task_id"], task_id);
-    // 当次执行的 SQL 快照：过滤片段就在语句里，没有另一半取值需要对照着读。
-    assert_eq!(history["source_sql"], EXPECTED_SOURCE_SQL);
-    assert_eq!(history["outcome"], "SUCCEEDED");
-    assert_eq!(history["target_table_effect"], "SWAPPED");
-    assert_eq!(history["source_rows"], 7);
-    assert_eq!(history["source_batches"], 2);
-    assert_eq!(history["rows_pushed"], 7);
-    assert_eq!(history["seq"], 2);
-    assert_eq!(history["bytes"], 220);
-    assert_eq!(history["ms"], 22);
-    assert_eq!(history["source_code"], Value::Null);
-    assert_eq!(history["sink_code"], Value::Null);
-
-    let by_task = json_body(&get(port, &format!("/api/runs?task_id={task_id}")).unwrap());
-    assert_eq!(by_task.as_array().unwrap().len(), 1);
-    assert_eq!(by_task[0]["run_record_id"], run_record_id);
-    // 筛选只剩任务这一维：运行参数是任务自定义的名字，筛不出一个跨任务的通用维度。
-    let no_match = json_body(&get(port, "/api/runs?task_id=nonexistent").unwrap());
-    assert_eq!(no_match, serde_json::json!([]));
-    let audit = rusqlite::Connection::open(directory.join("db-qbs.sqlite3")).unwrap();
-    let history_writes: u64 = audit
-        .query_row("SELECT COUNT(*) FROM history_write_audit", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(history_writes, 5);
-    wait_for_empty_directory(&directory.join("run-tasks"));
-
-    assert_success(&terminate(source));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn silent_child_disappearance_evicts_projection_and_removes_task_file() {
-    let directory = temp_directory();
-    let fake_child = write_fake_child(&directory, "exit 1\n");
-    let (port, _config, source, _ready) =
-        start_source_ready(|port| write_run_config(&directory, port, &fake_child));
-    let task_id = create_task(port);
-
-    let run_record_id = start_run(port, &task_id);
-    let history = wait_for_json(port, &format!("/api/runs/{run_record_id}"), |body| {
-        body["live"] == false
-    });
-    assert_eq!(history["outcome"], "FAILED");
-    assert_eq!(history["unknown_reason"], "PROCESS_DISAPPEARED");
-    assert_eq!(history["message"], "进程消失，无终态日志");
-    assert_eq!(history["source_code"], Value::Null);
-    assert_eq!(history["sink_code"], Value::Null);
-    assert_eq!(history["target_table_effect"], Value::Null);
-    wait_for_empty_directory(&directory.join("run-tasks"));
-
-    assert_success(&terminate(source));
-    fs::remove_dir_all(directory).unwrap();
-}
-
 #[test]
 fn restart_cleanup_distinguishes_graceful_restart_from_process_disappearance() {
     let directory = temp_directory();
@@ -478,201 +167,6 @@ sleep 2
 }
 
 #[test]
-fn child_hanging_mid_run_remains_live_and_accepted_is_not_preparing() {
-    let directory = temp_directory();
-    let emit = directory.join("emit-lines");
-    let release = directory.join("release-child");
-    let fake_child = write_fake_child(
-        &directory,
-        &format!(
-            r#"while [ ! -f '{}' ]; do sleep 0.02; done
-printf '%s\n' '{{"ts":"2026-08-15T11:00:00.000Z","level":"info","event":"source_started","run_id":null,"task":null,"message":"started"}}'
-printf '%s\n' '{{"ts":"2026-08-15T11:00:01.000Z","level":"info","event":"stage_changed","run_id":"run-hanging","task":null,"stage":"PREPARING","message":"preparing"}}'
-printf '%s\n' '{{"ts":"2026-08-15T11:00:02.000Z","level":"info","event":"batch_pushed","run_id":"run-hanging","task":null,"seq":1,"rows":5,"source_rows":5,"bytes":64,"written":5,"ms":9}}'
-while [ ! -f '{}' ]; do sleep 0.02; done
-"#,
-            emit.display(),
-            release.display(),
-        ),
-    );
-    let (port, _config, source, _ready) =
-        start_source_ready(|port| write_run_config(&directory, port, &fake_child));
-    let task_id = create_task(port);
-
-    let run_record_id = start_run(port, &task_id);
-    let accepted = json_body(&get(port, &format!("/api/runs/{run_record_id}")).unwrap());
-    assert_eq!(accepted["stage"], Value::Null);
-    assert_eq!(accepted["run_id"], Value::Null);
-    assert_eq!(accepted["source_sql"], EXPECTED_SOURCE_SQL);
-    assert_eq!(accepted["seq"], 0);
-    assert_eq!(accepted["rows_pushed"], 0);
-    assert_eq!(accepted["bytes"], 0);
-    assert_eq!(accepted["ms"], 0);
-    assert_eq!(accepted["last_ts"], Value::Null);
-    assert_eq!(accepted["live"], true);
-
-    fs::write(emit, "").unwrap();
-    let partial = wait_for_json(port, &format!("/api/runs/{run_record_id}"), |body| {
-        body["rows_pushed"] == 5
-    });
-    assert_eq!(partial["stage"], "PREPARING");
-    assert_eq!(partial["run_id"], "run-hanging");
-    assert_eq!(partial["seq"], 1);
-    assert_eq!(partial["bytes"], 64);
-    assert_eq!(partial["ms"], 9);
-    assert_eq!(partial["live"], true);
-
-    thread::sleep(Duration::from_millis(100));
-    assert_eq!(
-        get(port, &format!("/api/runs/{run_record_id}"))
-            .unwrap()
-            .status,
-        200
-    );
-    fs::write(release, "").unwrap();
-    let history = wait_for_json(port, &format!("/api/runs/{run_record_id}"), |body| {
-        body["live"] == false
-    });
-    assert_eq!(history["unknown_reason"], "PROCESS_DISAPPEARED");
-
-    assert_success(&terminate(source));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn run_launch_rejects_a_second_run_of_the_same_task_until_child_reap() {
-    let directory = temp_directory();
-    let release = directory.join("release-children");
-    let fake_child = write_fake_child(
-        &directory,
-        &format!(
-            "while [ ! -f '{}' ]; do sleep 0.02; done\nexit 1\n",
-            release.display()
-        ),
-    );
-    let (port, _config, source, _ready) =
-        start_source_ready(|port| write_run_config(&directory, port, &fake_child));
-    let first_task_id = create_task(port);
-    let second_task_id = create_task(port);
-
-    let first = start_run(port, &first_task_id);
-    let duplicate = post(
-        port,
-        "/api/runs",
-        &format!(r#"{{"task_id":"{first_task_id}"}}"#),
-    )
-    .unwrap();
-    assert_eq!(duplicate.status, 409, "{}", duplicate.body);
-    assert!(json_body(&duplicate)["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("已有一次运行进行中"));
-
-    // 互斥键退化成了任务本身：别的任务照样起得来，同一个任务起不来第二次。
-    let other_task = start_run(port, &second_task_id);
-
-    // 老界面（或老脚本）送来的运行参数**当场拒**，不是静默忽略。
-    let with_run_params = post(
-        port,
-        "/api/runs",
-        &format!(r#"{{"task_id":"{second_task_id}","run_params":{{"d_biz":"2026-08-14"}}}}"#),
-    )
-    .unwrap();
-    assert_eq!(with_run_params.status, 400, "{}", with_run_params.body);
-
-    fs::write(release, "").unwrap();
-    for run_record_id in [&first, &other_task] {
-        wait_for_json(port, &format!("/api/runs/{run_record_id}"), |body| {
-            body["live"] == false
-        });
-    }
-    wait_for_empty_directory(&directory.join("run-tasks"));
-
-    let relaunched = start_run(port, &first_task_id);
-    wait_for_json(port, &format!("/api/runs/{relaunched}"), |body| {
-        body["live"] == false
-    });
-
-    assert_success(&terminate(source));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn cancel_signals_preparing_and_streaming_but_rejects_committing() {
-    let directory = temp_directory();
-    let canceled = directory.join("canceled-stages");
-    let counter = directory.join("run-counter");
-    let release_committing = directory.join("release-committing");
-    // 三次运行各停在一个阶段。**按第几次运行分派，不按运行参数**——参数链已经没了，
-    // 而互斥键退化成任务本身之后，这三次本来也只能一次接一次地跑。
-    let fake_child = write_fake_child(
-        &directory,
-        &format!(
-            r#"count=$(cat '{}' 2>/dev/null || echo 0)
-count=$((count + 1))
-printf '%s' "$count" > '{}'
-case "$count" in
-  1) stage=PREPARING ;;
-  2) stage=STREAMING ;;
-  *) stage=COMMITTING ;;
-esac
-trap 'printf "%s\n" "$stage" >> "{}"; exit 0' TERM
-printf '%s\n' "{{\"ts\":\"2026-08-15T13:00:00.000Z\",\"level\":\"info\",\"event\":\"stage_changed\",\"run_id\":\"run-$count\",\"task\":null,\"stage\":\"$stage\"}}"
-if [ "$stage" = COMMITTING ]; then
-  while [ ! -f '{}' ]; do sleep 0.02; done
-else
-  while :; do sleep 0.02; done
-fi
-"#,
-            counter.display(),
-            counter.display(),
-            canceled.display(),
-            release_committing.display(),
-        ),
-    );
-    let (port, _config, source, _ready) =
-        start_source_ready(|port| write_run_config(&directory, port, &fake_child));
-    let task_id = create_task(port);
-
-    for stage in ["PREPARING", "STREAMING"] {
-        let run_record_id = start_run(port, &task_id);
-        wait_for_json(port, &format!("/api/runs/{run_record_id}"), |body| {
-            body["stage"] == stage
-        });
-        let canceled_response =
-            post(port, &format!("/api/runs/{run_record_id}/cancel"), "").unwrap();
-        assert_eq!(canceled_response.status, 202, "{}", canceled_response.body);
-        wait_for_file_text(&canceled, |text| text.lines().any(|line| line == stage));
-        wait_for_json(port, &format!("/api/runs/{run_record_id}"), |body| {
-            body["live"] == false
-        });
-    }
-
-    let committing = start_run(port, &task_id);
-    wait_for_json(port, &format!("/api/runs/{committing}"), |body| {
-        body["stage"] == "COMMITTING"
-    });
-    let rejected_response = post(port, &format!("/api/runs/{committing}/cancel"), "").unwrap();
-    assert_eq!(rejected_response.status, 409, "{}", rejected_response.body);
-    let rejected_body = json_body(&rejected_response);
-    assert_eq!(rejected_body["error"]["message"], "已过封口点，停不了");
-    assert!(rejected_body.get("code").is_none());
-    assert!(rejected_body["error"].get("code").is_none());
-    assert!(!fs::read_to_string(&canceled)
-        .unwrap()
-        .lines()
-        .any(|line| line == "COMMITTING"));
-
-    fs::write(release_committing, "").unwrap();
-    wait_for_json(port, &format!("/api/runs/{committing}"), |body| {
-        body["live"] == false
-    });
-
-    assert_success(&terminate(source));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
 fn tasks_endpoint_is_ready_and_sigterm_allows_same_port_restart() {
     let directory = temp_directory();
     let (port, config, first, response) =
@@ -693,9 +187,61 @@ fn tasks_endpoint_is_ready_and_sigterm_allows_same_port_restart() {
     let response = wait_for_tasks(port, &mut second);
     assert_eq!(response.status, 200);
     assert_eq!(response.body, "[]");
-    let second_output = terminate(second);
-    assert_success(&second_output);
 
+    // 任务定义**熬得过一次重启**，而且库文件只有属主读得了。
+    let datasources = seed_datasources(port);
+    let created = post(
+        port,
+        "/api/tasks",
+        &task_json("持仓明细", "HOLDINGS", &datasources),
+    )
+    .unwrap();
+    assert_eq!(created.status, 201, "{}", created.body);
+    let created = json_body(&created);
+    assert_success(&terminate(second));
+    let database = directory.join("db-qbs.sqlite3");
+    assert_eq!(
+        fs::metadata(&database).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let mut third = start_source(&config);
+    let listed = wait_for_tasks(port, &mut third);
+    assert_eq!(json_body(&listed), serde_json::json!([created]));
+    assert!(!listed.body.contains("secret"));
+    assert_success(&terminate(third));
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+/// `source.toml` 里那两组退役字段的**首启迁移**（ADR-0037 §10 / ADR-0044 §5）。
+///
+/// 它只在 `serve()` 起来的那一刻跑一次，`Api` 上没有这条路径——所以它是哨兵，
+/// 不是进程内测试。
+#[test]
+fn first_boot_migrates_the_retired_config_fields() {
+    let directory = temp_directory();
+    let (port, _config, child, _ready) =
+        start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
+
+    // `sink_base_url` 迁成一台名为「默认」的 agent，身份还空着（没探过）。
+    let agents = json_body(&get(port, "/api/agents").unwrap());
+    assert_eq!(agents.as_array().unwrap().len(), 1, "{agents}");
+    assert_eq!(agents[0]["name"], "默认");
+    assert_eq!(agents[0]["base_url"], agent_stub_url());
+
+    // `oracle_*` 那三样迁成一条名为「默认」的 Oracle 数据源，口令不出现在线上。
+    let datasources = json_body(&get(port, "/api/datasources").unwrap());
+    let oracle = datasources
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|datasource| datasource["kind"] == "oracle")
+        .expect("首启迁移必须留下一条 Oracle 数据源");
+    assert_eq!(oracle["connect_string"], "//oracle:1521/XE");
+    assert!(!datasources.to_string().contains("secret"));
+
+    assert_success(&terminate(child));
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -747,537 +293,6 @@ fn non_loopback_listen_emits_the_required_warning() {
     fs::remove_dir_all(directory).unwrap();
 }
 
-#[test]
-fn column_fetch_rejects_an_invalid_spec_before_reaching_oracle() {
-    // SQL 形状预检整段取消后，取列前的本地闸只剩规格自身的合法性：
-    // 标识符白名单、主键落在选中列里这一类。它仍必须在**连 Oracle 之前**判完。
-    let directory = temp_directory();
-    let (port, _config, child, _ready) =
-        start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
-
-    let response = post(
-        port,
-        "/api/columns",
-        r#"{
-          "datasource_id":"unused-the-spec-gate-runs-first",
-          "spec":{
-            "owner":"APP","table":"ORDERS","target_table":"ORDERS",
-            "columns":[{"source":"ID","target":"ID"}],"primary_key":["MISSING"]
-          }
-        }"#,
-    )
-    .unwrap();
-
-    assert_eq!(response.status, 400, "{}", response.body);
-    let body: Value = serde_json::from_str(&response.body).unwrap();
-    assert_eq!(body["kind"], "request");
-    assert!(body.get("code").is_none());
-    assert!(body.get("run_id").is_none());
-    assert!(body["message"].as_str().unwrap().contains("MISSING"));
-
-    assert_success(&terminate(child));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn builder_sql_is_derived_from_the_spec_and_never_travels_back() {
-    let directory = temp_directory();
-    let (port, _config, child, _ready) =
-        start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
-
-    let generated = post(
-        port,
-        "/api/builder/sql",
-        r#"{
-          "dblink":"FA",
-          "owner":"HTBR45",
-          "table":"T_R_FR_ASTSTAT",
-          "target_table":"T_POSITION",
-          "columns":[{"source":"N_VA_PRICE","target":"N_VA_PRICE"},{"source":"D_BIZ","target":"D_BIZ"}],
-          "primary_key":["D_BIZ"],
-          "where_clause":"D_BIZ >= DATE '2026-08-01' AND STATUS IN ('OK','WARN')"
-        }"#,
-    )
-    .unwrap();
-
-    assert_eq!(generated.status, 200, "{}", generated.body);
-    let derived: Value = serde_json::from_str(&generated.body).unwrap();
-    // 派生面只剩一样：现算的源端 SQL。运行参数清单随运行参数链一起退役。
-    assert_eq!(derived.as_object().unwrap().len(), 1);
-    let sql = derived["source_sql"].as_str().unwrap();
-    assert!(sql.contains("T_R_FR_ASTSTAT@FA"), "{sql}");
-    // 文本框里那段字原样到了 WHERE 后面——这是本票在 HTTP 面上的落点。
-    assert!(
-        sql.ends_with(" WHERE D_BIZ >= DATE '2026-08-01' AND STATUS IN ('OK','WARN')"),
-        "{sql}"
-    );
-
-    // 形状预检那个端点整段没了，不是改了语义。
-    let retired = post(port, "/api/sql-shape", &generated.body).unwrap();
-    assert_eq!(retired.status, 404);
-
-    let tasks = get(port, "/api/tasks").unwrap();
-    assert_eq!(tasks.status, 200);
-    assert_eq!(
-        serde_json::from_str::<Value>(&tasks.body).unwrap(),
-        Value::Array(Vec::new())
-    );
-
-    assert_success(&terminate(child));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn builder_rejects_an_invalid_dblink_before_connecting_to_oracle() {
-    let directory = temp_directory();
-    let (port, _config, child, _ready) =
-        start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
-
-    let response = post(
-        port,
-        "/api/builder/tables",
-        r#"{"datasource_id":"unused-the-dblink-gate-runs-first","dblink":"FA WHERE 1=1"}"#,
-    )
-    .unwrap();
-
-    assert_eq!(response.status, 400);
-    let body: Value = serde_json::from_str(&response.body).unwrap();
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("dblink"));
-
-    assert_success(&terminate(child));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn builder_rejects_non_select_custom_sql_before_connecting_to_oracle() {
-    let directory = temp_directory();
-    let (port, _config, child, _ready) =
-        start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
-
-    let response = post(
-        port,
-        "/api/builder/sql-columns",
-        r#"{"datasource_id":"unused","source_sql":"UPDATE T SET C = 1"}"#,
-    )
-    .unwrap();
-
-    assert_eq!(response.status, 400);
-    let body: Value = serde_json::from_str(&response.body).unwrap();
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("SELECT"));
-
-    assert_success(&terminate(child));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn column_fetch_oracle_failure_does_not_create_a_run_touch_sink_or_write_storage() {
-    let directory = temp_directory();
-    let sink = TcpListener::bind("127.0.0.1:0").unwrap();
-    sink.set_nonblocking(true).unwrap();
-    let sink_url = format!("http://{}", sink.local_addr().unwrap());
-    let (port, _config, child, _ready) = start_source_ready(|port| {
-        write_config_with_oracle(
-            &directory,
-            &format!("127.0.0.1:{port}"),
-            &sink_url,
-            "/db-qbs-missing-oracle-client",
-        )
-    });
-    // 数据源要真存在：本用例买的是「Oracle 连不上时不留痕」，不是「数据源解不出来」。
-    let (source_datasource_id, _) = seed_datasources(port);
-    let files_before = directory_entries(&directory);
-
-    let response = post(
-        port,
-        "/api/columns",
-        &format!(
-            r#"{{
-          "datasource_id":"{source_datasource_id}",
-          "spec":{{
-            "owner":"APP","table":"MISSING_ORDERS","target_table":"ORDERS",
-            "columns":[{{"source":"ID","target":"ID"}},{{"source":"BIZ_DAY","target":"BIZ_DAY"}}],"primary_key":["ID"]
-          }}
-        }}"#
-        ),
-    )
-    .unwrap();
-
-    assert_eq!(response.status, 502);
-    let body: Value = serde_json::from_str(&response.body).unwrap();
-    assert_eq!(body["kind"], "oracle");
-    assert!(body.get("run_id").is_none());
-    assert_eq!(directory_entries(&directory), files_before);
-    // 这条地址上现在**会**有流量：agent 注册表按 15 秒一轮探身份（ADR-0044 §3），
-    // 而这份 `source.toml` 里的 `sink_base_url` 首启就被迁成了一台 agent。
-    // 所以判据从「一个连接都没有」改成**「只有身份探测，没有元数据 / run 请求」**——
-    // 「取列失败不碰 sink 的业务端点」这一条一字未松。
-    let mut seen = Vec::new();
-    loop {
-        match sink.accept() {
-            Ok((mut stream, _)) => {
-                stream.set_nonblocking(false).unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(2)))
-                    .unwrap();
-                let mut head = [0_u8; 256];
-                let read = stream.read(&mut head).unwrap_or(0);
-                seen.push(
-                    String::from_utf8_lossy(&head[..read])
-                        .lines()
-                        .next()
-                        .unwrap_or_default()
-                        .to_owned(),
-                );
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(error) => panic!("accept 失败：{error}"),
-        }
-    }
-    assert!(
-        seen.iter()
-            .all(|line| line.starts_with("GET /v1/agent/info")),
-        "取列失败之后，除了 agent 身份探测不该有任何流量：{seen:?}"
-    );
-
-    assert_success(&terminate(child));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn the_target_metadata_proxy_resolves_credentials_and_writes_nothing() {
-    // 目标端元数据面（ADR-0038 §3）：source 仍不建 MySQL 连接，只把解出来的凭据转给 sink。
-    // 本用例买三件事——凭据由 datasource_id 解、请求确实过线到 sink、**一个字节都不落盘**
-    // （结果纯瞬态，ADR-0038 §8）。真查到什么列归台架的 C 系列去证，那要一个活的 MySQL。
-    let directory = temp_directory();
-    // agent 活着、目标端那些端点它不认（桩只认 `/v1/agent/info`）：请求过得了 agent 这一关、
-    // 停在目标库这一关，回话必须是 502 kind=sink。「agent 不在线」是另一条路径，
-    // 由 `a_stopped_agent_breaks_every_target_side_link` 单独证。
-    let (port, _config, child, _ready) = start_source_ready(|port| {
-        write_config_with_oracle(
-            &directory,
-            &format!("127.0.0.1:{port}"),
-            agent_stub_url(),
-            "/db-qbs-missing-oracle-client",
-        )
-    });
-    let (source_datasource_id, target_datasource_id) = seed_datasources(port);
-    let files_before = directory_entries(&directory);
-
-    // Oracle 数据源上没有目标端连接——按名字拒，不编一份出来。
-    let wrong_kind = post(
-        port,
-        "/api/target/tables",
-        &format!(r#"{{"datasource_id":"{source_datasource_id}"}}"#),
-    )
-    .unwrap();
-    assert_eq!(wrong_kind.status, 400, "{}", wrong_kind.body);
-
-    // 取列面必须点名一张表：不给库清单端点、也不替用户猜表（ADR-0038 §3）。
-    let missing_table = post(
-        port,
-        "/api/target/columns",
-        &format!(r#"{{"datasource_id":"{target_datasource_id}"}}"#),
-    )
-    .unwrap();
-    assert_eq!(missing_table.status, 400, "{}", missing_table.body);
-    assert!(
-        missing_table.body.contains("target_table"),
-        "{}",
-        missing_table.body
-    );
-
-    for (path, body) in [
-        (
-            "/api/target/tables",
-            format!(r#"{{"datasource_id":"{target_datasource_id}"}}"#),
-        ),
-        (
-            "/api/target/columns",
-            format!(r#"{{"datasource_id":"{target_datasource_id}","target_table":"T_POSITION"}}"#),
-        ),
-    ] {
-        let response = post(port, path, &body).unwrap();
-        assert_eq!(response.status, 502, "{}", response.body);
-        let parsed: Value = serde_json::from_str(&response.body).unwrap();
-        assert_eq!(parsed["kind"], "sink");
-        // 不属于任何 run：回话里没有 run_id（ADR-0038 §3）。
-        assert!(parsed.get("run_id").is_none(), "{}", response.body);
-    }
-
-    // 不进任务定义、不进 SQLite、不留临时文件——目录里一个新条目都没有。
-    assert_eq!(directory_entries(&directory), files_before);
-
-    assert_success(&terminate(child));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn the_draft_test_connection_reads_the_form_values_and_writes_nothing() {
-    // 「测通才让存」（ADR-0039 §3）要测的是**还没存进去的那组值**——新建态库里根本没有这条，
-    // 按 id 测无从谈起。本用例买三件事：路由没被按 id 那条吃掉、草稿走的是表单里的值、
-    // **一个字节都不落盘**（测连不产生数据源、不留 run）。
-    let directory = temp_directory();
-    let (port, _config, child, _ready) = start_source_ready(|port| {
-        write_config_with_oracle(
-            &directory,
-            &format!("127.0.0.1:{port}"),
-            agent_stub_url(),
-            "/db-qbs-missing-oracle-client",
-        )
-    });
-    let agent_id = migrated_agent_id(port);
-    let datasources_before = json_body(&get(port, "/api/datasources").unwrap());
-    let files_before = directory_entries(&directory);
-
-    // 路由：`test-connection` 那一截不许被 `resource_id_from_path` 当成数据源 id 吃掉。
-    // 若被吃掉，这里回的是 404「数据源不存在」而不是 400「请求体读不出来」。
-    let malformed = post(port, "/api/datasources/test-connection", "{}").unwrap();
-    assert_eq!(malformed.status, 400, "{}", malformed.body);
-
-    // 字段不全按字段判，不按 id 判——库里有没有这条数据源与它无关。
-    let empty_host = post(
-        port,
-        "/api/datasources/test-connection",
-        &format!(
-            r#"{{"name":"草稿","kind":"mysql","agent_id":"{agent_id}","host":"","port":3306,"username":"u","password":"p","database":"dw"}}"#
-        ),
-    )
-    .unwrap();
-    assert_eq!(empty_host.status, 400, "{}", empty_host.body);
-    assert!(empty_host.body.contains("host"), "{}", empty_host.body);
-
-    // 没选 agent 的草稿：连测都不该测（ADR-0044 §1）。这条 400 是表单面的判定，
-    // 不是网络失败——说清楚「少选了一样东西」，而不是回一句「连不上」。
-    let no_agent = post(
-        port,
-        "/api/datasources/test-connection",
-        r#"{"name":"草稿","kind":"mysql","host":"127.0.0.1","port":3306,"username":"u","password":"p","database":"dw_stage"}"#,
-    )
-    .unwrap();
-    assert_eq!(no_agent.status, 400, "{}", no_agent.body);
-    assert!(no_agent.body.contains("agent"), "{}", no_agent.body);
-
-    // 目标端草稿：source 不建 MySQL 连接，测连经 agent 转给 sink（ADR-0037 §9 / ADR-0044 §4）。
-    // agent 活着但不认这个端点 → 502。
-    let mysql_draft = post(
-        port,
-        "/api/datasources/test-connection",
-        &format!(
-            r#"{{"name":"草稿","kind":"mysql","agent_id":"{agent_id}","host":"127.0.0.1","port":3306,"username":"u","password":"p","database":"dw_stage"}}"#
-        ),
-    )
-    .unwrap();
-    assert_eq!(mysql_draft.status, 502, "{}", mysql_draft.body);
-    let parsed: Value = serde_json::from_str(&mysql_draft.body).unwrap();
-    assert_eq!(parsed["kind"], "sink");
-    // 不属于任何 run：回话里没有 run_id，也没有错误码标签（ADR-0039 §3）。
-    assert!(parsed.get("run_id").is_none(), "{}", mysql_draft.body);
-
-    // Oracle 草稿：客户端库路径是假的，连不上——但它同样不该落盘。
-    let oracle_draft = post(
-        port,
-        "/api/datasources/test-connection",
-        r#"{"name":"草稿","kind":"oracle","connect_string":"//127.0.0.1:1521/NOPE","username":"u","password":"p"}"#,
-    )
-    .unwrap();
-    assert_ne!(oracle_draft.status, 200, "{}", oracle_draft.body);
-
-    // 三次测连之后：数据源清单逐字未变、目录里一个新条目都没有。
-    assert_eq!(
-        json_body(&get(port, "/api/datasources").unwrap()),
-        datasources_before
-    );
-    assert_eq!(directory_entries(&directory), files_before);
-
-    assert_success(&terminate(child));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-/// agent 注册表的写入面（ADR-0044 §3）。
-///
-/// 四件事：**注册要求对方活着**（打不通不落库）、身份钉在记录上、探测按需重跑、
-/// **被数据源引用的 agent 删不掉**。前两件是本票的判定地基，后两件是它可用的前提。
-#[test]
-fn agent_registration_requires_a_live_agent_and_pins_its_identity() {
-    let directory = temp_directory();
-    let (port, _config, child, _ready) =
-        start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
-
-    // 迁移出来的那条（§5）：地址是 `sink_base_url`，身份还空着。
-    let migrated = json_body(&get(port, "/api/agents").unwrap());
-    assert_eq!(migrated.as_array().unwrap().len(), 1, "{migrated}");
-    assert_eq!(migrated[0]["name"], "默认");
-    assert_eq!(migrated[0]["base_url"], agent_stub_url());
-
-    // 注册一台不存在的：**不落库**。库里放一条从没连通过的记录，
-    // 只会让人在数据源那一屏选到一台并不存在的 agent。
-    let dead = TcpListener::bind("127.0.0.1:0").unwrap();
-    let dead_url = format!("http://{}", dead.local_addr().unwrap());
-    drop(dead);
-    let refused = post(
-        port,
-        "/api/agents",
-        &format!(r#"{{"name":"死的","base_url":"{dead_url}"}}"#),
-    )
-    .unwrap();
-    assert_eq!(refused.status, 502, "{}", refused.body);
-    assert_eq!(
-        json_body(&get(port, "/api/agents").unwrap())
-            .as_array()
-            .unwrap()
-            .len(),
-        1,
-        "注册失败不许在库里留下痕迹"
-    );
-
-    // https / 带 query 的地址在打网络之前就拒（与 `protocol.rs` 那条同一口径）。
-    let bad_scheme = post(
-        port,
-        "/api/agents",
-        r#"{"name":"错的","base_url":"https://target:8080"}"#,
-    )
-    .unwrap();
-    assert_eq!(bad_scheme.status, 400, "{}", bad_scheme.body);
-
-    // 注册一台活的：身份、版本、最近可见时间一起落下来。
-    let registered = post(
-        port,
-        "/api/agents",
-        &format!(r#"{{"name":"目标端 A","base_url":"{}"}}"#, agent_stub_url()),
-    )
-    .unwrap();
-    assert_eq!(registered.status, 201, "{}", registered.body);
-    let registered = json_body(&registered);
-    assert_eq!(registered["instance_id"], "stub-agent");
-    assert_eq!(registered["status"], "online");
-    assert_eq!(registered["version"], "0.0.0-test");
-    assert!(registered["last_seen_at"].is_string(), "{registered}");
-    let agent_id = registered["agent_id"].as_str().unwrap().to_owned();
-
-    // 手动探测：结果本身是信息，**失败也回 200**，界面靠 status 那一列标红。
-    let probed = post(port, &format!("/api/agents/{agent_id}/probe"), "{}").unwrap();
-    assert_eq!(probed.status, 200, "{}", probed.body);
-    assert_eq!(json_body(&probed)["status"], "online");
-
-    // 被数据源引用就删不掉，与「数据源被任务引用」那条 409 同一形态。
-    let bound = post(
-        port,
-        "/api/datasources",
-        &format!(
-            r#"{{"name":"目标库","kind":"mysql","agent_id":"{agent_id}","host":"127.0.0.1","port":3306,"username":"sink","password":"p","database":"qbs"}}"#
-        ),
-    )
-    .unwrap();
-    assert_eq!(bound.status, 201, "{}", bound.body);
-    assert_eq!(json_body(&bound)["agent_id"], agent_id);
-    let refused_delete = request(port, "DELETE", &format!("/api/agents/{agent_id}"), None).unwrap();
-    assert_eq!(refused_delete.status, 409, "{}", refused_delete.body);
-    assert!(
-        refused_delete.body.contains("目标库"),
-        "{}",
-        refused_delete.body
-    );
-
-    // 绑一台不在注册表里的 agent：写入面当场拒。
-    let dangling = post(
-        port,
-        "/api/datasources",
-        r#"{"name":"野的","kind":"mysql","agent_id":"nonexistent","host":"127.0.0.1","port":3306,"username":"sink","password":"p","database":"qbs"}"#,
-    )
-    .unwrap();
-    assert_eq!(dangling.status, 400, "{}", dangling.body);
-
-    assert_success(&terminate(child));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-/// **本票的核心判据**（ADR-0044 §1/§4）：目标端 agent 停掉之后，
-/// 四条目标端链路——测连、取表、取列、发起运行——必须**全部当场断**，
-/// 而且断在「agent 不在线」这一句上，不是断在别处、更不是照样跑通。
-///
-/// 现场撞到的正是它的反面：把 agent 停掉，同步照样完成。
-#[test]
-fn a_stopped_agent_breaks_every_target_side_link() {
-    let directory = temp_directory();
-    let stopped = TcpListener::bind("127.0.0.1:0").unwrap();
-    let stopped_url = format!("http://{}", stopped.local_addr().unwrap());
-    drop(stopped); // 这台 agent「停了」：端口上没人应答。
-    let fake_child = write_fake_child(&directory, "sleep 5\n");
-    let (port, _config, child, _ready) = start_source_ready(|port| {
-        let path = write_run_config(&directory, port, &fake_child);
-        // `write_run_config` 指的是活着的桩；这里改成停掉的那个地址。
-        let text = fs::read_to_string(&path).unwrap();
-        fs::write(&path, text.replace(agent_stub_url(), &stopped_url)).unwrap();
-        path
-    });
-    let datasources = seed_datasources(port);
-    let (_source_datasource_id, target_datasource_id) = datasources.clone();
-    let created = post(
-        port,
-        "/api/tasks",
-        &task_json("holdings", "HOLDINGS", &datasources),
-    )
-    .unwrap();
-    assert_eq!(created.status, 201, "{}", created.body);
-    let task_id = json_body(&created)["task_id"].as_str().unwrap().to_owned();
-
-    for (method, path, body) in [
-        (
-            "POST",
-            format!("/api/datasources/{target_datasource_id}/test-connection"),
-            String::from("{}"),
-        ),
-        (
-            "POST",
-            "/api/target/tables".to_owned(),
-            format!(r#"{{"datasource_id":"{target_datasource_id}"}}"#),
-        ),
-        (
-            "POST",
-            "/api/target/columns".to_owned(),
-            format!(r#"{{"datasource_id":"{target_datasource_id}","target_table":"T_POSITION"}}"#),
-        ),
-        (
-            "POST",
-            "/api/runs".to_owned(),
-            format!(r#"{{"task_id":"{task_id}"}}"#),
-        ),
-    ] {
-        let response = request(port, method, &path, Some(&body)).unwrap();
-        assert_eq!(response.status, 502, "{path}: {}", response.body);
-        let parsed: Value = serde_json::from_str(&response.body).unwrap();
-        assert_eq!(parsed["kind"], "agent", "{path}: {}", response.body);
-        assert!(
-            parsed["message"].as_str().unwrap().contains("不在线"),
-            "{path}: {}",
-            response.body
-        );
-    }
-
-    // 一次运行都没起来：没有子进程、没有临时任务文件、历史是空的。
-    assert_eq!(
-        json_body(&get(port, "/api/runs").unwrap()),
-        serde_json::json!([])
-    );
-    assert!(
-        !directory.join("run-tasks").exists()
-            || directory_entries(&directory.join("run-tasks")).is_empty()
-    );
-
-    // 注册表那一列也如实变红，人不必去猜。
-    let agents = json_body(&get(port, "/api/agents").unwrap());
-    assert_eq!(agents[0]["status"], "offline", "{agents}");
-    assert!(agents[0]["last_error"].is_string(), "{agents}");
-
-    assert_success(&terminate(child));
-    fs::remove_dir_all(directory).unwrap();
-}
 
 fn start_source(config: &Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_db-qbs-source"))
@@ -1456,16 +471,6 @@ fn json_body(response: &HttpResponse) -> Value {
     serde_json::from_str(&response.body).unwrap()
 }
 
-fn assert_task_fields(task: &Value) {
-    let mut fields: Vec<_> = task
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    fields.sort_unstable();
-    assert_eq!(fields, TASK_FIELDS);
-}
 
 fn create_task(port: u16) -> String {
     let datasources = seed_datasources(port);
@@ -1546,18 +551,6 @@ fn wait_for_empty_directory(path: &Path) {
     }
 }
 
-fn wait_for_file_text(path: &Path, predicate: impl Fn(&str) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Ok(text) = fs::read_to_string(path) {
-            if predicate(&text) {
-                return;
-            }
-        }
-        assert!(Instant::now() < deadline, "timed out waiting for {path:?}");
-        thread::sleep(Duration::from_millis(20));
-    }
-}
 
 fn write_config(directory: &Path, listen: &str) -> PathBuf {
     write_config_with_oracle(directory, listen, agent_stub_url(), "/opt/oracle")
@@ -1587,14 +580,6 @@ fn write_config_with_oracle(
     path
 }
 
-fn directory_entries(directory: &Path) -> Vec<PathBuf> {
-    let mut entries = fs::read_dir(directory)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect::<Vec<_>>();
-    entries.sort();
-    entries
-}
 
 fn unused_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
