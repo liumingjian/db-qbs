@@ -1,19 +1,14 @@
-// 结构化任务规格的展示口径，唯一来源（ADR-0036 §1）。
+// 结构化任务规格的展示口径，唯一来源。
 //
-// 构建器、发起面、运行历史三处都要把同一批概念摆出来：比较符怎么写、参数名默认叫什么、
-// 一组运行参数怎么读。各写一份迟早漂成三种说法，所以都从这里取。
+// 构建器、发起面、运行历史三处都要把同一批概念摆出来：一列映到哪、过滤条件怎么读成一行、
+// 源端在列表里显示成什么。各写一份迟早漂成三种说法，所以都从这里取。
+//
+// 词汇表随运行参数链的退役**变小了，但角色没变**：这里仍然是那三处共用的唯一一份。
 
-import type {
-  ColumnMapping,
-  Comparison,
-  Condition,
-  RunParams,
-  TaskSpec,
-  ValueType,
-} from "./api";
+import type { ColumnMapping, TaskSpec } from "./api";
 
 /**
- * 这个源列映到哪个目标字段——没选中就是 `undefined`（ADR-0038 §2）。
+ * 这个源列映到哪个目标字段——没选中就是 `undefined`。
  *
  * 界面上一行代表一个**源列**，而主键存的是**目标字段**，两个名字空间要在这里换一次。
  * 恒等映射下它们同名，省掉这一层在改过名的列上就会错。
@@ -26,7 +21,7 @@ export function targetFieldOf(
 }
 
 /**
- * 改目标字段名——**主键跟着走**（ADR-0039 增补 1）。
+ * 改目标字段名——**主键跟着走**。
  *
  * 这是换名字空间的单点：`columns[].target` 与 `primary_key` 存的是同一个名字，改一处
  * 另一处必须同步重写。**不许出现「界面勾着、`TaskSpec` 里是旧名」的中间态**——
@@ -50,6 +45,12 @@ export function renameTargetField(
   if (!spec.primary_key.includes(previous)) {
     return { columns, primary_key: spec.primary_key };
   }
+  if (nextTarget.trim() === "") {
+    return {
+      columns,
+      primary_key: spec.primary_key.filter((name) => name !== previous),
+    };
+  }
   const primary_key: string[] = [];
   for (const name of spec.primary_key) {
     const renamed = name === previous ? nextTarget : name;
@@ -60,107 +61,93 @@ export function renameTargetField(
   return { columns, primary_key };
 }
 
-export function comparisonSymbol(operator: Comparison): string {
-  switch (operator) {
-    case "gt":
-      return ">";
-    case "lt":
-      return "<";
-    case "eq":
-      return "=";
-  }
-}
-
-/** 下拉里的三个比较符，顺序固定。第一版只做这三个（ADR-0035 §3 字面）。 */
-export const COMPARISONS: ReadonlyArray<Comparison> = ["gt", "lt", "eq"];
-
-export const VALUE_TYPE_LABELS: Readonly<Record<ValueType, string>> = {
-  text: "文本",
-  number: "数字",
-  date: "日期",
-};
-
 /**
- * 按 Oracle 字典类型给这一条条件的 `value_type` **预填**。
+ * 任务过滤条件的一行读法（详情抽屉里那一格）。
  *
- * 它只是预填：`value_type` 是用户的声明，不是缓存下来的元数据（ADR-0036 §6 不许把
- * describe 的类型存进任务定义），所以用户随时可以改，改了以生成的 SQL 为准。
+ * WHERE 文本是用户自己写的，可能有换行、可能很长，而这里只有一行的位置：
+ * 折叠空白之后原样给，**一个字符不改写**——这一格的全部价值就是它是那段原文。
+ * 没写过滤时给「整表」，不是空白：空白读起来像「这里应该有点什么但没渲染」。
  */
-export function defaultValueType(dataType: string | undefined): ValueType {
-  const normalized = (dataType ?? "").toUpperCase();
-  if (normalized.startsWith("DATE") || normalized.startsWith("TIMESTAMP")) {
-    return "date";
-  }
-  if (
-    normalized.startsWith("NUMBER") ||
-    normalized.startsWith("FLOAT") ||
-    normalized.startsWith("BINARY_") ||
-    normalized.startsWith("INTEGER")
-  ) {
-    return "number";
-  }
-  return "text";
+export function whereSummary(spec: Pick<TaskSpec, "where_clause">): string {
+  // `?? ""`：这个字段在服务端是 `Option<String>`，`None` 时整个不序列化。
+  const collapsed = (spec.where_clause ?? "").replace(/\s+/g, " ").trim();
+  return collapsed === "" ? "整表" : collapsed;
 }
 
 /**
- * 新条件的默认参数名：列名小写，与已有参数冲突时加序号后缀。
+ * 源端在列表里的一行读法（作业中心的「源表」列 + 搜索索引）。
  *
- * 参数名由用户拥有、可改——它是运行参数与运行历史里的键，**按序号自动编号会让增删一条
- * 参数把此前所有历史里的键都对不上**（ADR-0036 §7 否掉顺序串接是同一个理由）。
- * 这里只负责给一个不撞车的起点。
+ * 自定义 SQL 的规格里 `owner` / `table` 都是空串，直接拼 `owner.table` 会渲染成一个
+ * 孤零零的 `.`，搜索索引里也只剩这个点——那类任务**按源表关键字永远搜不到**。
+ * 两处都从这里取，口径只有一份。
+ *
+ * `label` 进单元格（折叠空白、截断），`full` 进搜索索引与 `title` 提示——
+ * 索引吃全文是有意的：用户记得的是 SQL 里那张表的名字，不是任务名。
  */
-export function defaultParameterName(
-  column: string,
-  taken: ReadonlyArray<string>,
-): string {
-  const base = column.toLowerCase();
-  const used = new Set(taken.map((name) => name.toLowerCase()));
-  if (!used.has(base)) {
-    return base;
-  }
-  for (let suffix = 2; ; suffix += 1) {
-    const candidate = `${base}_${suffix}`;
-    if (!used.has(candidate)) {
-      return candidate;
-    }
-  }
+export interface SourceSummary {
+  kind: "table" | "sql";
+  /** 单元格里显示的一行：空白已折叠，过长时尾部截断成省略号。 */
+  label: string;
+  /** 完整原文：`owner.table`，或整条 SQL 的原样文本。 */
+  full: string;
 }
 
-/** 运行时逐条填的条件，按参数名排序——与 source 侧 `runtime_parameters()` 同序。 */
-export function runtimeConditions(spec: TaskSpec): Condition[] {
-  return spec.conditions
-    .filter((condition) => condition.value_source === "runtime")
-    .sort((left, right) => left.parameter.localeCompare(right.parameter));
+/** 单元格里一行放得下的字数。超出只截 `label`，`full` 永远是全文。 */
+const SOURCE_LABEL_MAX = 48;
+
+export function sourceSummary(
+  spec: Pick<TaskSpec, "owner" | "table" | "source_sql">,
+): SourceSummary {
+  const sourceSql = spec.source_sql?.trim() ?? "";
+  if (sourceSql === "") {
+    const label = `${spec.owner}.${spec.table}`;
+    return { kind: "table", label, full: label };
+  }
+  const collapsed = sourceSql.replace(/\s+/g, " ").trim();
+  return {
+    kind: "sql",
+    label:
+      collapsed.length > SOURCE_LABEL_MAX
+        ? `${collapsed.slice(0, SOURCE_LABEL_MAX)}\u2026`
+        : collapsed,
+    full: sourceSql,
+  };
+}
+
+/** 同名匹配只认名字，不认大小写——目标端是 MySQL。 */
+export interface TargetColumnName {
+  name: string;
 }
 
 /**
- * 两个运行参数集是不是同一组（ADR-0036 §7 的规范形式：参数名 → 值，值原样字符串）。
+ * 把源列按**同名**接到目标字段上，返回改动后的 `columns` + `primary_key`。
  *
- * 这是**提示用**的比较，真正的并发判断在后端；两边用同一个口径，提示才不会与门禁打架。
+ * 两个调用点共用这一份：读取目标列之后的自动接线（`onlyUnmapped: true`，
+ * 只补空位，绝不冲掉用户手改过的映射），以及「同名填充」那颗键
+ * （`onlyUnmapped: false`，用户显式要求，覆盖）。
+ * 差别只有这一个开关——两份各写一遍的时候，差别藏在函数名里看不见。
+ *
+ * 走 `renameTargetField` 而不是直接改 `columns`，是因为目标名一变主键就要跟着走
+ * （主键存的是目标字段名）。
  */
-export function sameRunParams(left: RunParams, right: RunParams): boolean {
-  const leftKeys = Object.keys(left).sort();
-  const rightKeys = Object.keys(right).sort();
-  if (leftKeys.length !== rightKeys.length) {
-    return false;
-  }
-  return leftKeys.every(
-    (key, index) => rightKeys[index] === key && left[key] === right[key],
+export function matchSameNameTargets(
+  spec: Pick<TaskSpec, "columns" | "primary_key">,
+  targetColumns: readonly TargetColumnName[],
+  { onlyUnmapped }: { onlyUnmapped: boolean },
+): Pick<TaskSpec, "columns" | "primary_key"> {
+  const targetByUpper = new Map(
+    targetColumns.map((column) => [column.name.toUpperCase(), column.name]),
   );
-}
-
-/**
- * 一组运行参数的单行读法：`参数名=值`，按参数名排序，值**原样**给。
- *
- * 不做格式化、不做类型解释——历史那一列的全部价值是它是当时的事实，
- * 值是什么字符串就显示什么字符串。无参数的任务给破折号，不给空白。
- */
-export function runParamsSummary(params: RunParams): string {
-  const entries = Object.entries(params).sort(([left], [right]) =>
-    left.localeCompare(right),
+  return spec.columns.reduce<Pick<TaskSpec, "columns" | "primary_key">>(
+    (current, mapping) => {
+      if (onlyUnmapped && mapping.target.trim() !== "") {
+        return current;
+      }
+      const target = targetByUpper.get(mapping.source.toUpperCase());
+      return target === undefined
+        ? current
+        : renameTargetField(current, mapping.source, target);
+    },
+    { columns: spec.columns, primary_key: spec.primary_key },
   );
-  if (entries.length === 0) {
-    return "—";
-  }
-  return entries.map(([name, value]) => `${name}=${value}`).join(" · ");
 }

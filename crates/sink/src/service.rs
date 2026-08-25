@@ -16,20 +16,41 @@ use crate::{
 static RUN_ID_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[0-9]{14}_[0-9a-f]{6}$").expect("run id regex must compile"));
 
+const POC_RELAXED_PRECHECK_ENV: &str = "DB_QBS_POC_RELAXED_PRECHECK";
+
+pub(crate) fn relaxed_precheck_enabled() -> bool {
+    std::env::var(POC_RELAXED_PRECHECK_ENV)
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
 impl<D: Destination> SinkService<FixedDestination<D>> {
     /// 固定一份目的地的服务：请求里的连接信息被忽略。测试与夹具走这条。
     pub fn new(database: impl Into<String>, destination: Arc<D>) -> Self {
         Self::with_factory(FixedDestination::new(database, destination))
+    }
+
+    pub fn new_relaxed_precheck(database: impl Into<String>, destination: Arc<D>) -> Self {
+        Self::with_factory_relaxed_precheck(FixedDestination::new(database, destination))
     }
 }
 
 impl<F: DestinationFactory> SinkService<F> {
     /// 生产路径：每个 run 按请求里的连接信息现建目的地（ADR-0037 §2）。
     pub fn with_factory(factory: F) -> Self {
+        Self::with_precheck_mode(factory, relaxed_precheck_enabled())
+    }
+
+    pub fn with_factory_relaxed_precheck(factory: F) -> Self {
+        Self::with_precheck_mode(factory, true)
+    }
+
+    fn with_precheck_mode(factory: F, relaxed_precheck: bool) -> Self {
         Self {
             factory,
             active_runs: Mutex::new(HashMap::new()),
             tombstones: Mutex::new(VecDeque::new()),
+            relaxed_precheck,
         }
     }
 
@@ -67,14 +88,22 @@ impl<F: DestinationFactory> SinkService<F> {
                 run_id: Some(request.run_id.clone()),
                 details: json!({ "kind": "OTHER" }),
             })?;
-        let mut issues = precheck_with_primary_key(
-            &request.target_table,
-            &request.primary_key,
-            &request.source_columns,
-            &target_columns,
-            &target_keys,
-        );
-        let range_columns = range_check_columns(&request.source_columns, &target_columns);
+        let mut issues = if self.relaxed_precheck {
+            Vec::new()
+        } else {
+            precheck_with_primary_key(
+                &request.target_table,
+                &request.primary_key,
+                &request.source_columns,
+                &target_columns,
+                &target_keys,
+            )
+        };
+        let range_columns = if self.relaxed_precheck {
+            Vec::new()
+        } else {
+            range_check_columns(&request.source_columns, &target_columns)
+        };
         if !range_columns.is_empty() {
             let Some(results) = request.range_check_results.as_deref() else {
                 return Ok(OpenRunResponse {

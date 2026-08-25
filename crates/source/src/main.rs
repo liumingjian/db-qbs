@@ -3,12 +3,13 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Instant;
 
 use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
 use db_qbs_source::{
-    generate_run_id, load_source_config, load_task_config, run_transfer, FailureKind,
-    HttpSinkClient, OracleRowSource, RunStage, TransferEvent, TransferFailure, TransferRequest,
-    TransferSummary,
+    fetch_agent_info, generate_run_id, load_source_config, load_task_config, run_transfer,
+    FailureKind, HttpSinkClient, OracleRowSource, RunStage, TransferEvent, TransferFailure,
+    TransferRequest, TransferSummary,
 };
 use serde_json::{json, Map, Value};
 
@@ -50,7 +51,10 @@ fn run() -> bool {
         )],
     );
 
-    let source_config = match load_source_config(&arguments.config) {
+    // `source.toml` 仍然要读得动、解得开——**但这个进程已经不从里面取任何值了**：
+    // 目标端地址随任务文件里的 agent 端点过来（ADR-0044 §4），Oracle 客户端库目录在
+    // `task.oracle` 里。留着这一步是为了「配置坏了要在开跑前就报 CONFIG」这条行为不变。
+    let _source_config = match load_source_config(&arguments.config) {
         Ok(config) => config,
         Err(error) => {
             emit(
@@ -118,7 +122,67 @@ fn run() -> bool {
         }
     };
 
-    let mut sink = match HttpSinkClient::new(&source_config.sink_base_url) {
+    // 开跑前的一次源端 `COUNT(*)`：迁移进度那一列的分母（ADR-0043 §7）。
+    //
+    // **成败都发事件，失败不中断运行**（§7 边界 3）：`total_rows` 为 null 时界面把进度退回
+    // `—` 并自陈「未取到总行数」，这次搬运照样跑完。计数自己的耗时单独记 `precount_ms`，
+    // 不混进 `fetch_ms`——揉进去的话，下一个人看到的「取数慢」会是两件事的和。
+    //
+    // 摆在游标已开、sink 还没连之前：连不上 Oracle 那一类失败在上一步就已经如实报成失败了，
+    // 到这里再失败的只可能是计数本身（超时、权限、语句），那正是可以降级的那一类。
+    let precount_started = Instant::now();
+    match OracleRowSource::precount(&task) {
+        Ok(total_rows) => emit_with_run(
+            LogLevel::Info,
+            LogEvent::PrecountFinished,
+            Some(&run_id),
+            Some(&task_path),
+            [
+                ("total_rows", json!(total_rows)),
+                (
+                    "precount_ms",
+                    json!(precount_started.elapsed().as_millis() as u64),
+                ),
+                ("message", Value::Null),
+            ],
+        ),
+        Err(error) => emit_with_run(
+            LogLevel::Warn,
+            LogEvent::PrecountFinished,
+            Some(&run_id),
+            Some(&task_path),
+            [
+                ("total_rows", Value::Null),
+                (
+                    "precount_ms",
+                    json!(precount_started.elapsed().as_millis() as u64),
+                ),
+                ("message", json!(error.user_message())),
+            ],
+        ),
+    }
+
+    // 开跑前核一次目标端 agent 的身份（ADR-0044 §4）。**这是「停了 agent 就搬不动」
+    // 那条保证的最后一道**：编排进程发起时核过一次，但从那一刻到真的开始写之间，
+    // agent 可能已经停掉或被顶替；这里不核，写入就又变成了「谁在那个地址上都行」。
+    if let Err(message) = verify_agent(&task) {
+        emit_with_run(
+            LogLevel::Error,
+            LogEvent::StageChanged,
+            Some(&run_id),
+            Some(&task_path),
+            [
+                ("stage", json!(RunStage::Failed.as_str())),
+                ("message", json!("target agent verification failed")),
+            ],
+        );
+        let failure =
+            TransferFailure::new(RunStage::Preparing, FailureKind::Network, message, 0, 0);
+        emit_failed_run(&failure, &run_id, &task_path);
+        return false;
+    }
+
+    let mut sink = match HttpSinkClient::new(&task.agent.base_url) {
         Ok(sink) => sink,
         Err(message) => {
             emit_with_run(
@@ -160,6 +224,27 @@ fn run() -> bool {
             false
         }
     }
+}
+
+/// 目标端 agent 的身份核对。**地址通还不够**：注册时钉下的 `instance_id` 必须仍是
+/// 现在应答的那一个，否则「同一个地址后面换了一台 agent」会被当成一切正常。
+///
+/// 迁移进来、还没探过的那条记录 `instance_id` 是空的（ADR-0044 §5）——那时候只核连通性，
+/// 因为根本没有可比的身份；第一次探测把它补上之后这条分支就不再走了。
+fn verify_agent(task: &db_qbs_source::TaskConfig) -> Result<(), String> {
+    let info = fetch_agent_info(&task.agent.base_url).map_err(|error| {
+        format!(
+            "目标端 agent「{}」（{}）不可用：{error}。目标库只能经它访问",
+            task.agent.name, task.agent.base_url
+        )
+    })?;
+    if !task.agent.instance_id.is_empty() && info.agent_id != task.agent.instance_id {
+        return Err(format!(
+            "目标端 agent「{}」（{}）身份不符：注册时钉的是 {}，现在应答的是 {}",
+            task.agent.name, task.agent.base_url, task.agent.instance_id, info.agent_id
+        ));
+    }
+    Ok(())
 }
 
 fn emit_successful_run(summary: &TransferSummary, run_id: &str, task: &Path) {
@@ -429,8 +514,8 @@ mod tests {
 
     #[test]
     fn only_the_two_documented_options_are_accepted() {
-        // `--biz-date` 随 ADR-0035 §3 取消：业务日期不再是一等概念，本次运行的取值
-        // 由任务文件的 `[run_params]` 带进来，不再走命令行。
+        // `--biz-date` 早已取消：业务日期不是一等概念。过滤条件是任务定义里那段
+        // WHERE 文本，跟着任务文件走，一次运行不再从命令行接任何取值。
         let arguments = vec![
             "--config".to_owned(),
             "source.toml".to_owned(),

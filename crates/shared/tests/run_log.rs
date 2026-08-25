@@ -87,6 +87,7 @@ fn event_vocabulary_is_closed_and_stable() {
             "stage_changed",
             "mapping_precheck_failed",
             "range_check_executed",
+            "precount_finished",
             "run_opened",
             "batch_pushed",
             "commit_diagnosed",

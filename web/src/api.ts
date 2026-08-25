@@ -1,59 +1,37 @@
 export type ColumnPrecision = Record<string, [number, number]>;
 
-/** 比较符只有这三个（ADR-0035 §3 字面）：`>` / `<` / `=`。 */
-export type Comparison = "gt" | "lt" | "eq";
-
 /**
- * 条件值怎么绑进 SQL。**不是源列的 Oracle 类型**——describe 回来的类型不许进任务定义
- * （ADR-0036 §6），所以这是用户在构建器里就该列做的声明：按字典 `DATA_TYPE` 预填、可改。
- */
-export type ValueType = "text" | "number" | "date";
-
-/** 值来源二选一（ADR-0035 §3）：建任务时写死，或发起运行时逐条填。 */
-export type ValueSource = "constant" | "runtime";
-
-export type Direction = "asc" | "desc";
-
-export interface Condition {
-  column: string;
-  operator: Comparison;
-  value_type: ValueType;
-  /** 绑定变量名，规格内唯一，由用户拥有——运行参数与运行历史都拿它当键。 */
-  parameter: string;
-  value_source: ValueSource;
-  /** 仅 `value_source === "constant"` 时有意义；运行时填的条件必须留空。 */
-  constant: string;
-}
-
-export interface OrderTerm {
-  column: string;
-  direction: Direction;
-}
-
-/**
- * 任务定义的**结构化规格**（ADR-0036 §1），唯一真相源。
+ * 任务定义的**结构化规格**，唯一真相源。
  *
- * SQL 不在里面：它由规格现算，界面上只读，v1 没有编辑入口。
+ * SQL 不在里面：它由规格现算，界面上只读，没有编辑入口。
  */
 export interface ColumnMapping {
   source: string;
-  /** 目标列名，默认预填 = `source`（ADR-0038 §2）。落到 SQL 上就是投影的别名。 */
+  /** 目标列名，默认预填 = `source`。落到 SQL 上就是投影的别名。 */
   target: string;
 }
 
 export interface TaskSpec {
+  source_sql?: string;
   dblink?: string;
   owner: string;
   table: string;
   target_table: string;
   /**
-   * upsert 的去重键，必选（所有者 2026-08-18 裁定）。存的是**目标列名**（ADR-0038 §2/§6），
-   * 与 `columns[].target` 同一个名字空间。
+   * upsert 的去重键，必选。存的是**目标列名**，与 `columns[].target` 同一个名字空间。
    */
   primary_key: string[];
   columns: ColumnMapping[];
-  conditions: Condition[];
-  order_by: OrderTerm[];
+  /**
+   * 过滤条件：**原样拼进 `WHERE` 后面的一段自由文本**，不含 `WHERE` 这个词本身。
+   *
+   * 空串就是不加 `WHERE`，即整表取数。前端始终送字符串（哪怕是空串）。
+   *
+   * **读的时候它可能缺席**：服务端那边是 `Option<String>`，`None` 时整个字段不序列化
+   * （直接调 API 建的任务就会这样）。所以每个读它的地方都得 `?? ""`——
+   * 少一处就是一个 `undefined.trim()`。
+   */
+  where_clause?: string;
 }
 
 /**
@@ -71,6 +49,11 @@ export interface OracleDatasourceView {
 
 export interface MysqlDatasourceView {
   kind: "mysql";
+  /**
+   * 这条目标库经**哪台 agent** 访问（ADR-0044 §3）。回的是 id 不是地址——
+   * 名字与在线状态在 `/api/agents` 那份里，两处各有各的真相源。
+   */
+  agent_id: string;
   host: string;
   port: number;
   username: string;
@@ -88,6 +71,8 @@ export type DatasourceInput = { name: string } & (
   | { kind: "oracle"; connect_string: string; username: string; password: string }
   | {
       kind: "mysql";
+      /** 必填（ADR-0044 §1）：目标库只能经 agent 访问，没绑 agent 的数据源存不进去。 */
+      agent_id: string;
       host: string;
       port: number;
       username: string;
@@ -95,6 +80,32 @@ export type DatasourceInput = { name: string } & (
       database: string;
     }
 );
+
+/**
+ * 目标端 agent（ADR-0044）。**一台 agent = 目标端那个 sink 进程**，
+ * 目标库只能经它访问：元数据、测连、写入三条链都落在它身上。
+ *
+ * `status` 三档不是两档：`mismatch` 说的是「这个地址还通，但应答的是另一台 agent」，
+ * 它的处置与「没起来」完全不同，合并成一个「离线」等于把线索抹掉。
+ */
+export type AgentStatus = "online" | "offline" | "mismatch";
+
+export interface Agent {
+  agent_id: string;
+  name: string;
+  base_url: string;
+  /** agent 自报的稳定身份，注册那一刻钉下。迁移出来、还没探过的那条是空串。 */
+  instance_id: string;
+  version: string;
+  last_seen_at: string | null;
+  status: AgentStatus;
+  last_error: string | null;
+}
+
+export interface AgentInput {
+  name: string;
+  base_url: string;
+}
 
 export interface TaskInput {
   name: string;
@@ -107,9 +118,6 @@ export interface TaskInput {
 export interface Task extends TaskInput {
   task_id: string;
 }
-
-/** 运行时逐条填的参数：参数名 → 值。顺序无关，服务端按参数名规范化（ADR-0036 §7）。 */
-export type RunParams = Record<string, string>;
 
 export interface BuilderTable {
   owner: string;
@@ -159,21 +167,13 @@ export interface TargetTableMetadata {
   keys: TargetKey[];
 }
 
-/** `POST /api/builder/sql` 回的一条运行参数声明。 */
-export interface RunParameter {
-  parameter: string;
-  column: string;
-  value_type: ValueType;
-}
-
 /**
- * 规格的派生面（ADR-0036 §6）：源端 SQL 与运行参数清单。
+ * 规格的派生面：现算的源端 SQL。
  *
  * **只出不进**——web 拿规格换一份现算的 SQL 来展示，没有把 SQL 传回来的路。
  */
 export interface BuilderSql {
   source_sql: string;
-  run_parameters: RunParameter[];
 }
 
 export interface MappingIssue {
@@ -227,11 +227,9 @@ export interface RunHistory {
   run_record_id: string;
   run_id: string | null;
   task_id: string;
-  /** 本次运行参数集，参数名 → 值（ADR-0036 §7）。无参数的任务是空对象。 */
-  run_params: RunParams;
   /**
-   * 当次**实际执行**的源端 SQL 快照（ADR-0036 §2）。存的是未绑定的语句文本，
-   * 参数值不内联——值由 `run_params` 展示。
+   * 当次**实际执行**的源端 SQL 快照：它回答「当时执行了什么」，规格之后怎么改都不动它。
+   * 过滤条件就在这条语句里，没有另一半取值需要对照着读。
    */
   source_sql: string;
   staging_table: string | null;
@@ -246,6 +244,19 @@ export interface RunHistory {
   purged_rows: number | null;
   source_batches: number | null;
   received_batches: number | null;
+  /**
+   * 开跑前那一次 `COUNT(*)` 拿到的**总行数**，也就是迁移进度那一列的分母（ADR-0043 §7）。
+   *
+   * **可以为 `null`**：计数本身失败时它缺席，而那次运行**照常跑**——为了一个进度条把整次
+   * 搬运判死是拿主功能换装饰。前端读到 `null` 就把进度退回 `—` 并在 `title` 上自陈。
+   * 它是**开跑那一刻**的事实，不是实时的：与随后的读取之间存在时间差。
+   */
+  total_rows: number | null;
+  /**
+   * 那一次计数自己的耗时。**单独一栏，不混进读取耗时**（`fetch_ms`）——把它揉进去，
+   * 下一个人看到的「取数慢」会是两件事的和。与 sink 侧的门禁计数 `count_ms` 也是两回事。
+   */
+  precount_ms: number | null;
   fetch_ms: number | null;
   push_ms: number | null;
   commit_ms: number | null;
@@ -273,10 +284,11 @@ export interface RunHistory {
 export interface LiveRunDetail {
   run_record_id: string;
   run_id: string | null;
-  run_params: RunParams;
   source_sql: string;
   staging_table: string | null;
   stage: string | null;
+  total_rows: number | null;
+  precount_ms: number | null;
   seq: number;
   rows_pushed: number;
   bytes: number;
@@ -290,8 +302,7 @@ export type RunDetail = LiveRunDetail | (RunHistory & { live: false });
 /**
  * 运行历史的筛选面只剩任务一维。
  *
- * 业务日期那一维随 ADR-0035 §3 一起没了：运行参数是任务自己定义的名字，
- * 不同任务的参数名各不相同，筛不出一个跨任务的通用维度。
+ * 业务日期那一维早就没了：它从来不是一个跨任务的通用维度。
  */
 export interface RunHistoryFilters {
   taskId?: string;
@@ -314,8 +325,7 @@ export function emptySpec(): TaskSpec {
     target_table: "",
     columns: [],
     primary_key: [],
-    conditions: [],
-    order_by: [],
+    where_clause: "",
   };
 }
 
@@ -330,6 +340,57 @@ export function taskInputFrom(
     spec: task.spec,
     ...overrides,
   };
+}
+
+export async function listAgents(): Promise<Agent[]> {
+  const response = await fetch("/api/agents", {
+    headers: { Accept: "application/json" },
+  });
+  return readJson<Agent[]>(response, "加载目标端 agent 失败");
+}
+
+/**
+ * 注册一台 agent。**服务端当场探一次，探不通就不落库**（ADR-0044 §3）——
+ * 所以这个调用失败的含义是「那个地址上没有一台活着的 agent」，不是「表单填错了」。
+ */
+export async function registerAgent(input: AgentInput): Promise<Agent> {
+  return postJson<Agent>("/api/agents", input, "注册目标端 agent 失败");
+}
+
+export async function updateAgent(
+  agentId: string,
+  input: AgentInput,
+): Promise<Agent> {
+  const response = await fetch(`/api/agents/${encodeURIComponent(agentId)}`, {
+    method: "PUT",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return readJson<Agent>(response, "更新目标端 agent 失败");
+}
+
+/** 手动探一台。**探测失败也是 200**：结果本身就是要显示的信息。 */
+export async function probeAgent(agentId: string): Promise<Agent> {
+  return postJson<Agent>(
+    `/api/agents/${encodeURIComponent(agentId)}/probe`,
+    {},
+    "探测目标端 agent 失败",
+  );
+}
+
+export async function deleteAgent(agentId: string): Promise<Agent> {
+  const response = await fetch(`/api/agents/${encodeURIComponent(agentId)}`, {
+    method: "DELETE",
+    headers: { Accept: "application/json" },
+  });
+  return readJson<Agent>(response, "删除目标端 agent 失败");
+}
+
+/**
+ * 删 agent 被拒（409）时，服务端点名的那几条数据源。与 [`referencedTasksFrom`] 同一形态。
+ */
+export function referencedDatasourcesFrom(error: unknown): string[] {
+  return namesFromConflict(error, "datasources");
 }
 
 export async function listDatasources(): Promise<Datasource[]> {
@@ -399,6 +460,11 @@ export async function testDatasourceDraft(
  * 拿不到就返回空数组——**报文正文里本来就带着同一句话**，列表只是把它摆成可扫的形状。
  */
 export function referencedTasksFrom(error: unknown): string[] {
+  return namesFromConflict(error, "tasks");
+}
+
+/** 409 报文里 `error.<key>` 那串名字。拿不到就空数组——正文里本来就带着同一句话。 */
+function namesFromConflict(error: unknown, key: string): string[] {
   if (!(error instanceof ApiError) || error.status !== 409) {
     return [];
   }
@@ -407,11 +473,13 @@ export function referencedTasksFrom(error: unknown): string[] {
     return [];
   }
   const detail = (body as { error: unknown }).error;
-  if (typeof detail !== "object" || detail === null || !("tasks" in detail)) {
+  if (typeof detail !== "object" || detail === null || !(key in detail)) {
     return [];
   }
-  const tasks = (detail as { tasks: unknown }).tasks;
-  return Array.isArray(tasks) ? tasks.filter((name): name is string => typeof name === "string") : [];
+  const names = (detail as Record<string, unknown>)[key];
+  return Array.isArray(names)
+    ? names.filter((name): name is string => typeof name === "string")
+    : [];
 }
 
 export async function testDatasource(datasourceId: string): Promise<{ ok: true }> {
@@ -443,13 +511,17 @@ export async function listRunHistory(
   return readJson<RunHistory[]>(response, "加载运行历史失败");
 }
 
+/**
+ * 发起一次运行。**任务身份就是全部输入**——点了就跑，没有对话框、没有参数。
+ *
+ * 同一个任务已有一次在飞时服务端回 409，消息由调用方原样展示。
+ */
 export async function startRun(
   taskId: string,
-  runParams: RunParams,
 ): Promise<{ run_record_id: string }> {
   return postJson<{ run_record_id: string }>(
     "/api/runs",
-    { task_id: taskId, run_params: runParams },
+    { task_id: taskId },
     "发起运行失败",
   );
 }
@@ -515,6 +587,25 @@ export async function fetchBuilderTables(
   );
 }
 
+export async function fetchBuilderDblinks(datasourceId: string): Promise<string[]> {
+  return postJson<string[]>(
+    "/api/builder/dblinks",
+    { datasource_id: datasourceId },
+    "读取 Oracle DBLINK 失败",
+  );
+}
+
+export async function fetchBuilderSqlColumns(input: {
+  datasource_id: string;
+  source_sql: string;
+}): Promise<FetchedColumn[]> {
+  return postJson<FetchedColumn[]>(
+    "/api/builder/sql-columns",
+    input,
+    "读取自定义 SQL 列失败",
+  );
+}
+
 export async function fetchBuilderColumns(input: {
   datasource_id: string;
   dblink: string;
@@ -555,6 +646,13 @@ export async function generateBuilderSql(spec: TaskSpec): Promise<BuilderSql> {
   return postJson<BuilderSql>("/api/builder/sql", spec, "生成 SQL 失败");
 }
 
+/**
+ * 取列面（`POST /api/columns`）。
+ *
+ * **当前没有 UI 调用方**：构建器里那张取列卡随 `47a2fed` 摘掉，所有者 2026-08-21
+ * 裁定判废（ADR-0043 「两条收尾裁定」第一条）。**端点与本函数都留着**——
+ * 端点是协议面的东西，不因为界面上暂时没人调就删；真要接回建表 SQL 时从这里起步。
+ */
 export async function fetchColumns(
   datasourceId: string,
   spec: TaskSpec,

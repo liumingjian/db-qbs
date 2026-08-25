@@ -243,3 +243,23 @@ pub struct ErrorBody {
     pub run_id: Option<String>,
     pub details: Value,
 }
+
+/// `GET /v1/agent/info` 的响应体（ADR-0044 §2）。
+///
+/// 它是**目标端 agent 的身份自述**：source 侧的 agent 注册、在线探测、以及每次运行开跑前的
+/// 身份核对，读的都是这一份。三个字段各有各的用处，都不许省：
+///
+/// - `agent_id`：agent **跨重启稳定**的身份。注册时钉进 source 侧那条记录，之后每次探测
+///   都拿它比一次——比不上就说明「同一个地址上换了一个 agent 应答」，那正是
+///   ADR-0044 §1 要抓的那种静默（把地址指到别处、或另起一个 sink 顶上）。
+/// - `name`：给人看的名字，agent 自报（默认取主机名）。**不作判据**，只进界面。
+/// - `version`：agent 的构建版本，排障时用来判「两端是不是同一批二进制」。
+///
+/// **没有凭据字段，也永远不许加**：这个端点是未鉴权面（ADR-0024），任何进得来的人都读得到。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentInfo {
+    pub agent_id: String,
+    pub name: String,
+    pub version: String,
+}

@@ -208,7 +208,6 @@ docker exec -i "$SRC" bash -s <<'SH'
 set -euo pipefail
 cat > /etc/db-qbs/source.toml <<'EOF'
 oracle_client_lib_dir = "/opt/oracle/instantclient"
-sink_base_url = "http://127.0.0.1:8080"
 listen = "127.0.0.1:8088"
 data_dir = "/var/lib/db-qbs-source"
 EOF
@@ -241,6 +240,14 @@ test_out=$(docker exec -e BODY="$draft" "$SRC" bash -lc \
   'curl -sS -X POST http://127.0.0.1:8088/api/datasources/test-connection -H "Content-Type: application/json" -d "$BODY"' 2>&1)
 echo "  $test_out"
 
+# ---------------------------------------------------------------- 第 10.5 步：注册目标端 agent
+step "第 10.5 步：注册目标端 Agent（界面「注册 Agent」的等价命令）"
+agent_body='{"name":"演练目标端","base_url":"http://127.0.0.1:8080"}'
+echo "  \$ curl -sS -X POST http://127.0.0.1:8088/api/agents -d '<名称 + 本机隧道入口>'"
+agent_out=$(docker exec -e BODY="$agent_body" "$SRC" bash -lc \
+  'curl -sS -X POST http://127.0.0.1:8088/api/agents -H "Content-Type: application/json" -d "$BODY"' 2>&1)
+echo "  $agent_out"
+
 # ---------------------------------------------------------------- 收尾核对
 step "收尾核对"
 x "ss -ltnp | grep -E '8080|8088'"
@@ -262,6 +269,9 @@ verdict "第 9 步：自检 S1–S8 全绿" "8/0" "$green/$red"
 verdict "第 9 步：自检退出码" 0 "$second_rc"
 verdict "第 10 步：测试连接（产品自己的 Oracle 连接路径）" 通过 \
   "$(grep -q '"ok":true' <<<"$test_out" && echo 通过 || echo 未通过)"
+# 注册**要求对方活着**（ADR-0044 §3）：这一条转绿等于隧道 + 目标端 agent 两段一起验过了。
+verdict "第 10.5 步：目标端 agent 注册成功且在线" 通过 \
+  "$(grep -q '"status":"online"' <<<"$agent_out" && echo 通过 || echo 未通过)"
 echo
 if (( ok )); then
   echo "==== 源端装机演练：未达成（上面 FAIL 那几条就是手册还欠的地方）===="

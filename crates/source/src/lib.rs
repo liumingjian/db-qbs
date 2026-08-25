@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
+mod agent;
 mod datasource;
 mod failure_kind;
 mod oracle_source;
@@ -19,6 +20,7 @@ mod task_store;
 mod transfer;
 mod web_assets;
 
+pub use agent::{fetch_agent_info, normalize_base_url, Agent, AgentInput, AgentStatus, AgentStore};
 // 报文形状的唯一定义在 `db-qbs-shared`（#124）。这里只保留门面，
 // crate 内部与既有测试的引用路径一个字不变。
 pub use db_qbs_shared::{
@@ -43,13 +45,11 @@ pub use run_history::{
     UnknownReason,
 };
 pub use sql_builder::{
-    builder_column_query, builder_table_query, validate_builder_dblink, BuilderColumn, BuilderTable,
+    builder_column_query, builder_dblink_query, builder_table_query, validate_builder_dblink,
+    BuilderColumn, BuilderTable,
 };
 pub use target_ddl::{generate_target_ddl, TargetDdlColumnError, TargetDdlError};
-pub use task_spec::{
-    ColumnMapping, Comparison, Condition, Direction, OrderTerm, RunParams, TaskSpec, ValueSource,
-    ValueType,
-};
+pub use task_spec::{validate_source_sql, ColumnMapping, TaskSpec};
 pub use task_store::{Task, TaskInput, TaskStore};
 pub use transfer::{
     generate_run_id, run_transfer, RowSource, RunStage, SourceReadError, TransferEvent,
@@ -74,9 +74,15 @@ pub struct SourceConfig {
     /// **不退役**（ADR-0037 §6）：ODPI-C 的 client 库一个进程只初始化一次，
     /// 做成数据源级字段时第二个值会被**静默忽略**，实际用第一个初始化的库。
     pub oracle_client_lib_dir: String,
-    /// 同样是进程级：一个 sink 进程能连任意 MySQL（ADR-0037 §1），
-    /// 「哪个 sink」与「哪个库」在第一版没有必须解绑的理由。
-    pub sink_base_url: String,
+    /// **已退役**（ADR-0044 §5）：目标端 agent 的真相源是 agent 注册表，
+    /// 「哪个库走哪台 agent」由数据源逐条绑定。这个字段只在**首次启动、且 agent 表为空**时
+    /// 被迁成一条名为「默认」的 agent，迁完打 `warn` 提示删除。
+    ///
+    /// 它退役的理由不是整洁：一个进程级的全局地址意味着**任何一条 MySQL 数据源都在偷偷
+    /// 复用同一台 sink**，于是「把目标端 agent 停掉」这个动作在界面上没有任何后果——
+    /// 现场撞到的正是这个（ADR-0044 §1）。
+    #[serde(default)]
+    pub sink_base_url: Option<String>,
     pub listen: String,
     pub data_dir: PathBuf,
     #[serde(default = "default_history_retention_days")]
@@ -123,13 +129,13 @@ impl fmt::Debug for OracleAccess {
     }
 }
 
-/// 一次运行要用到的全部任务面事实：规格 + 两端连接 + 本次运行参数取值。
+/// 一次运行要用到的全部任务面事实：规格 + 两端连接。
 ///
 /// 编排进程把它落成临时 TOML（0600，跑完即删）交给 run 子进程。**规格是真相源，SQL 不在里面**
-/// （ADR-0036 §2）——两端都从同一份规格现算，不存在「存下来的那份与规格对不上」这个面。
+/// ——两端都从同一份规格现算，不存在「存下来的那份与规格对不上」这个面。
 ///
-/// 两端连接在这里已经是**解出来的明文**：编排进程按任务上的数据源绑定去库里解一次
-/// （ADR-0037 §8），子进程不碰数据源库、也不碰密钥。
+/// 两端连接在这里已经是**解出来的明文**：编排进程按任务上的数据源绑定去库里解一次，
+/// 子进程不碰数据源库、也不碰密钥。
 ///
 /// **字段顺序即 TOML 里的表顺序**：全是表，没有裸标量，所以不受
 /// 「值必须排在 array-of-tables 之前」那条约束——但也别往前面加标量字段。
@@ -139,17 +145,27 @@ pub struct TaskConfig {
     pub spec: TaskSpec,
     pub oracle: OracleAccess,
     pub target: TargetConnection,
-    #[serde(default)]
-    pub run_params: RunParams,
+    /// 这次运行经哪台目标端 agent 落地（ADR-0044 §4）。**它不是可选的**：
+    /// 没有它，run 子进程就得回头去读进程级的全局地址，那正是本票判废的东西。
+    pub agent: AgentEndpoint,
+}
+
+/// 一次运行钉死的 agent 端点。编排进程从注册表里解出来写进临时任务文件，
+/// 子进程照着打——**并在开跑前核一次身份**（`instance_id`），核不上就判失败。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentEndpoint {
+    pub agent_id: String,
+    pub name: String,
+    pub base_url: String,
+    /// 注册时钉下的 agent 自报身份。迁移进来、还没探过的那条记录里它是空的，
+    /// 空串的含义是「还没钉住」——此时只核连通性，不核身份。
+    pub instance_id: String,
 }
 
 impl TaskConfig {
     pub fn source_sql(&self) -> String {
         self.spec.source_sql()
-    }
-
-    pub fn bindings(&self) -> Result<Vec<(String, String)>, String> {
-        self.spec.bindings(&self.run_params)
     }
 }
 

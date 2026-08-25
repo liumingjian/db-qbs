@@ -111,8 +111,9 @@ if grep -Fq '.shape_checks | length' "$runner"; then
   exit 1
 fi
 
-# 调用面：TaskSpec + 数据源 id 绑定 + run_params（ADR-0036 §1、ADR-0037 §1/§8）。
-for surface in 'source_datasource_id' 'target_datasource_id' 'run_params' 'narrow_spec'; do
+# 调用面：TaskSpec + 数据源 id 绑定（ADR-0037 §1/§8）。`run_params` 已随
+# 运行参数链一起退役，顶上来的是任务定义里那段 `where_clause`。
+for surface in 'source_datasource_id' 'target_datasource_id' 'where_clause' 'narrow_spec'; do
   grep -Fq "$surface" "$runner" || {
     echo "M2 must drive the current call surface: missing $surface" >&2
     exit 1

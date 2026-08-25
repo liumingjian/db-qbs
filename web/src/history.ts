@@ -30,7 +30,7 @@ const countFormatter = new Intl.NumberFormat("zh-CN");
  * 失败分类的中文短名（ADR-0029 §3）。
  *
  * 它加在结论条最前面，作用是**给这次失败归类**，不是复述人话——所以是方括号里的类目名，
- * 不是一句话。类目词表对齐 STRATEGY-V1 M4「区分 Oracle 连接失败 / dblink 不可用 /
+ * 不是一句话。类目词表对齐 M4「区分 Oracle 连接失败 / dblink 不可用 /
  * 类型映射错 / 网络中断 / MySQL 写入失败 / 校验不通过」那六类。
  * 闭集外的值原样显示，不吞掉——那说明 source 增了分类而这里没跟上。
  */
@@ -68,7 +68,14 @@ const UNKNOWN_CONCLUSIONS: Readonly<
   SERVICE_RESTARTED: "服务重启，结局未知",
 };
 
-export function runIdPresentation(history: RunHistory): string {
+/**
+ * 「目标端运行号」栏位的显示值（走查 V15）。
+ *
+ * 没有 `run_id` 时写的是**一句话，不是空白也不是横杠**：这一次根本没走到向 sink 发请求那步，
+ * 目标端对它一无所知。空白会被读成「漏渲染」，横杠会被读成「有但没给」，
+ * 两者都不如把事实说出来。`run_record_id` 与 `run_id` **谁也不替代谁**（原 V14，现由 V15 兼守）。
+ */
+export function runIdPresentation(history: { run_id: string | null }): string {
   return history.run_id ?? "未发起，目标端不知道这次运行";
 }
 
@@ -162,4 +169,30 @@ function sinkTerminalEffect(
     return effect;
   }
   return null;
+}
+
+/**
+ * 列表屏共用的时间戳格式化。
+ *
+ * 它原来长在 `HistoryScreen.tsx` 里，任务屏的「最近运行」要显示同一种时间——
+ * 两处各写一份的后果是同一个时刻在两屏上长得不一样。**一个字都没改**，只换了住处。
+ * 解析不出来的值**原样回显**，不吞成「—」：那说明服务端给的不是时间戳，得看得见。
+ */
+export function formatTimestamp(value: string | null, includeDate = false): string {
+  if (value === null) {
+    return "—";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: includeDate ? "numeric" : undefined,
+    month: includeDate ? "2-digit" : undefined,
+    day: includeDate ? "2-digit" : undefined,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
 }

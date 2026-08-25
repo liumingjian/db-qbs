@@ -1,99 +1,35 @@
 import { describe, expect, it } from "vitest";
 
 import { emptySpec } from "./api";
-import type { Condition, TaskSpec } from "./api";
+import type { TaskSpec } from "./api";
 import {
-  comparisonSymbol,
-  defaultParameterName,
-  defaultValueType,
+  matchSameNameTargets,
   renameTargetField,
-  runParamsSummary,
-  runtimeConditions,
-  sameRunParams,
+  sourceSummary,
   targetFieldOf,
+  whereSummary,
 } from "./spec";
 
-function condition(overrides: Partial<Condition> = {}): Condition {
-  return {
-    column: "D_BIZ",
-    operator: "eq",
-    value_type: "date",
-    parameter: "d_biz",
-    value_source: "runtime",
-    constant: "",
-    ...overrides,
-  };
-}
-
-function spec(conditions: Condition[]): TaskSpec {
-  return { ...emptySpec(), conditions };
-}
-
-describe("comparison operators", () => {
-  it("offers exactly the three the first version supports", () => {
-    // ADR-0035 §3 字面：`>` `<` `=`。>= / <= 不在第一版，别自作主张加。
-    expect(["gt", "lt", "eq"].map((operator) =>
-      comparisonSymbol(operator as Condition["operator"]),
-    )).toEqual([">", "<", "="]);
-  });
-});
-
-describe("value type prefill", () => {
-  it.each([
-    ["DATE", "date"],
-    ["TIMESTAMP(6)", "date"],
-    ["NUMBER", "number"],
-    ["BINARY_DOUBLE", "number"],
-    ["VARCHAR2", "text"],
-    ["CLOB", "text"],
-    [undefined, "text"],
-  ] as const)("prefills %s as %s", (dataType, expected) => {
-    expect(defaultValueType(dataType)).toBe(expected);
-  });
-});
-
-describe("parameter naming", () => {
-  it("defaults to the lowercased column name", () => {
-    expect(defaultParameterName("D_BIZ", [])).toBe("d_biz");
-  });
-
-  it("suffixes only to avoid a collision, never renumbers existing names", () => {
-    // 参数名是历史里的键：按序号自动编号会让增删一条参数把此前所有历史的键都对不上。
-    expect(defaultParameterName("D_BIZ", ["d_biz"])).toBe("d_biz_2");
-    expect(defaultParameterName("D_BIZ", ["d_biz", "d_biz_2"])).toBe("d_biz_3");
-  });
-});
-
-describe("runtime parameters", () => {
-  it("lists only the runtime-valued conditions, ordered by parameter name", () => {
-    const conditions = [
-      condition({ parameter: "to_date" }),
-      condition({ parameter: "fixed", value_source: "constant", constant: "A" }),
-      condition({ parameter: "from_date" }),
-    ];
-
+describe("where clause summary", () => {
+  it("gives the text back verbatim, only collapsing whitespace to one line", () => {
+    // 这一格的全部价值是它是那段原文：不重排、不补 WHERE、不改一个字符。
     expect(
-      runtimeConditions(spec(conditions)).map((each) => each.parameter),
-    ).toEqual(["from_date", "to_date"]);
-  });
-});
-
-describe("run parameter sets", () => {
-  it("compares two sets by name and value, order-insensitively", () => {
-    expect(sameRunParams({ a: "1", b: "2" }, { b: "2", a: "1" })).toBe(true);
-    expect(sameRunParams({ a: "1" }, { a: "2" })).toBe(false);
-    expect(sameRunParams({ a: "1" }, { a: "1", b: "2" })).toBe(false);
-    expect(sameRunParams({}, {})).toBe(true);
+      whereSummary({
+        where_clause: "  D_BIZ >= DATE '2026-08-01'\n   AND STATUS IN ('OK')  ",
+      }),
+    ).toBe("D_BIZ >= DATE '2026-08-01' AND STATUS IN ('OK')");
   });
 
-  it("reads a set as name=value pairs sorted by name, values verbatim", () => {
-    expect(runParamsSummary({ to: "2026-08-15", from: "2026-08-14" })).toBe(
-      "from=2026-08-14 · to=2026-08-15",
-    );
+  it("says 整表 when nothing was written, not a blank cell", () => {
+    // 空白读起来像「这里应该有点什么但没渲染」。
+    expect(whereSummary({ ...emptySpec(), where_clause: "" })).toBe("整表");
+    expect(whereSummary({ where_clause: "  \n " })).toBe("整表");
   });
 
-  it("says so out loud when a task takes no parameters", () => {
-    expect(runParamsSummary({})).toBe("—");
+  it("survives the field being absent altogether", () => {
+    // 服务端那边是 `Option<String>`，`None` 时整个字段不序列化——直接调 API 建的任务
+    // 回来就是这样。少一个 `?? ""` 这里就是一次 `undefined.trim()`。
+    expect(whereSummary({})).toBe("整表");
   });
 });
 
@@ -160,7 +96,111 @@ describe("renameTargetField（改目标名时主键跟着走）", () => {
   it("清空目标名不会留下「界面勾着、规格里是旧名」的中间态", () => {
     const next = renameTargetField(spec, "ID", "");
     expect(next.columns[0]).toEqual({ source: "ID", target: "" });
-    // 旧名 ID 已经不在主键里了——留着它就是那个被 ADR-0039 增补 1 明令禁止的中间态。
-    expect(next.primary_key).toEqual(["", "C_NAME"]);
+    // 没有目标字段就不能再作主键；留下空字符串只会把错误拖到提交时才爆。
+    expect(next.primary_key).toEqual(["C_NAME"]);
+  });
+});
+
+describe("source summary", () => {
+  it("reads a table-mode spec as owner.table", () => {
+    const summary = sourceSummary({ ...emptySpec(), owner: "APP", table: "T_HOLDING" });
+    expect(summary).toEqual({
+      kind: "table",
+      label: "APP.T_HOLDING",
+      full: "APP.T_HOLDING",
+    });
+  });
+
+  it("never renders a bare dot for a custom-SQL spec", () => {
+    // 自定义 SQL 的规格里 owner / table 都是空串。作业中心那一列原来直接拼
+    // `owner.table`，于是渲染成一个孤零零的 `.`——这条用例守住它不再回来。
+    const summary = sourceSummary({
+      ...emptySpec(),
+      owner: "",
+      table: "",
+      source_sql: "SELECT *\n  FROM APP.T_HOLDING@POC_LINK_A",
+    });
+    expect(summary.kind).toBe("sql");
+    expect(summary.label).not.toBe(".");
+    expect(summary.label).toBe("SELECT * FROM APP.T_HOLDING@POC_LINK_A");
+  });
+
+  it("keeps the whole statement in `full` and truncates only the label", () => {
+    const source_sql =
+      "SELECT ID, C_NAME, LOAD_DATE, N_AMT, STATUS FROM APP.T_HOLDING@POC_LINK_A WHERE STATUS = 1";
+    const summary = sourceSummary({ ...emptySpec(), source_sql });
+    expect(summary.full).toBe(source_sql);
+    expect(summary.label.endsWith("\u2026")).toBe(true);
+    expect(summary.label.length).toBeLessThan(source_sql.length);
+  });
+
+  it("treats a blank source_sql as table mode", () => {
+    const summary = sourceSummary({
+      ...emptySpec(),
+      owner: "APP",
+      table: "T_HOLDING",
+      source_sql: "   ",
+    });
+    expect(summary.kind).toBe("table");
+  });
+});
+
+describe("matchSameNameTargets（同名接线，两个调用点共用）", () => {
+  const targets = [{ name: "ID" }, { name: "c_name" }, { name: "OTHER" }];
+
+  function draft(columns: TaskSpec["columns"], primary_key: string[] = []) {
+    return { columns, primary_key };
+  }
+
+  it("只补空位时不碰用户已经改过的映射", () => {
+    const next = matchSameNameTargets(
+      draft([
+        { source: "ID", target: "" },
+        { source: "C_NAME", target: "CUSTOMER_NAME" },
+      ]),
+      targets,
+      { onlyUnmapped: true },
+    );
+    expect(next.columns).toEqual([
+      { source: "ID", target: "ID" },
+      // 用户手改成 CUSTOMER_NAME，同名的 c_name 不许把它冲掉。
+      { source: "C_NAME", target: "CUSTOMER_NAME" },
+    ]);
+  });
+
+  it("显式填充时覆盖已有映射", () => {
+    const next = matchSameNameTargets(
+      draft([{ source: "C_NAME", target: "CUSTOMER_NAME" }]),
+      targets,
+      { onlyUnmapped: false },
+    );
+    expect(next.columns).toEqual([{ source: "C_NAME", target: "c_name" }]);
+  });
+
+  it("大小写不敏感地匹配，但落的是目标端原样的大小写（ADR-0038 §8）", () => {
+    const next = matchSameNameTargets(
+      draft([{ source: "C_NAME", target: "" }]),
+      targets,
+      { onlyUnmapped: true },
+    );
+    expect(next.columns).toEqual([{ source: "C_NAME", target: "c_name" }]);
+  });
+
+  it("目标端没有同名列就留着不动", () => {
+    const next = matchSameNameTargets(
+      draft([{ source: "NOT_THERE", target: "" }]),
+      targets,
+      { onlyUnmapped: true },
+    );
+    expect(next.columns).toEqual([{ source: "NOT_THERE", target: "" }]);
+  });
+
+  it("改了目标名的列，主键跟着走", () => {
+    const next = matchSameNameTargets(
+      draft([{ source: "C_NAME", target: "TMP" }], ["TMP"]),
+      targets,
+      { onlyUnmapped: false },
+    );
+    expect(next.primary_key).toEqual(["c_name"]);
   });
 });

@@ -1,3 +1,4 @@
+mod agent;
 mod http;
 mod mysql_destination;
 mod precheck;
@@ -6,7 +7,7 @@ mod service;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
@@ -24,12 +25,14 @@ pub use db_qbs_shared::{
     classify_column, column_support, derive_number_shape, is_business_date_column,
     is_supported_decimal_shape, ColumnShape, ShapeRejection, TargetShape,
 };
+pub use agent::load_or_create as load_agent_identity;
 pub use http::serve;
 pub use mysql_destination::{check_connection_settings, MysqlDestination, MysqlFactory};
 // `precheck` 是不带主键那一支，只给「生成的表喂回预检必过」那道漂移闸用；
 // 带主键那一支同样导出，因为漂移闸现在还要守「生成的 DDL 带主键，ADR-0035 §2 三条得过」。
 pub use precheck::{precheck, precheck_with_primary_key};
 pub use service::build_staging_ddl;
+pub(crate) use service::relaxed_precheck_enabled;
 
 const MAX_PREPARED_STATEMENT_PLACEHOLDERS: usize = 65_535;
 const TOMBSTONE_LIMIT: usize = 32;
@@ -46,6 +49,17 @@ pub struct SinkConfig {
     #[serde(default)]
     pub database: Option<String>,
     pub listen: String,
+    /// 这台 agent 给人看的名字（ADR-0044 §2），留空取主机名。**不作判据**，只进 source 的界面。
+    #[serde(default)]
+    pub agent_name: Option<String>,
+    /// agent 身份文件的位置。默认是 `sink.toml` 同目录下的 `agent-id`——
+    /// 不需要人来准备，没有就现生成（见 [`crate::load_agent_identity`]）。
+    #[serde(default)]
+    pub agent_id_file: Option<PathBuf>,
+    /// `sink.toml` 所在目录，**不来自配置文件本身**：`agent_id_file` 留空时的默认位置按它算。
+    /// [`SinkConfig::parse`] 出来的配置里它是空的，那条路径只有测试在走。
+    #[serde(skip)]
+    pub config_dir: PathBuf,
 }
 
 impl SinkConfig {
@@ -57,8 +71,17 @@ impl SinkConfig {
         let path = path.as_ref();
         let input = fs::read_to_string(path)
             .map_err(|error| format!("读取 sink 配置 {} 失败：{error}", path.display()))?;
-        Self::parse(&input)
-            .map_err(|error| format!("解析 sink 配置 {} 失败：{error}", path.display()))
+        let mut config = Self::parse(&input)
+            .map_err(|error| format!("解析 sink 配置 {} 失败：{error}", path.display()))?;
+        config.config_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        Ok(config)
+    }
+
+    /// 身份文件的最终位置：配置里指了就用那个，没指就落在 `sink.toml` 隔壁。
+    pub fn agent_id_path(&self) -> PathBuf {
+        self.agent_id_file
+            .clone()
+            .unwrap_or_else(|| self.config_dir.join("agent-id"))
     }
 }
 
@@ -261,6 +284,7 @@ pub struct SinkService<F: DestinationFactory> {
     factory: F,
     active_runs: Mutex<HashMap<String, ActiveRun<F::Dest>>>,
     tombstones: Mutex<VecDeque<RunResponse>>,
+    relaxed_precheck: bool,
 }
 
 /// sink 内部的错误模型。**它不是线上形状**——过线的是 [`ErrorEnvelope`]，

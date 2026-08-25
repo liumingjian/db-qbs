@@ -1,0 +1,21 @@
+# Copy to /opt/tools/db-qbs/conf/source.toml and edit before starting.
+
+# Web UI and source orchestration service.
+# Use 0.0.0.0 only when the customer firewall allows trusted admin hosts.
+listen = "0.0.0.0:18088"
+
+# The sink service address as seen from the source server.
+# Example: http://10.250.0.202:18080
+sink_base_url = "http://<SINK_SERVER_IP>:18080"
+
+# Oracle Instant Client directory on the source server.
+oracle_client_lib_dir = "/opt/tools/db-qbs/oracle/instantclient"
+
+# Runtime data and run history. Keep this directory persistent.
+data_dir = "/opt/tools/db-qbs/data/source"
+
+# Child process used by db-qbs-source to execute one migration run.
+run_executable = "/opt/tools/db-qbs/bin/db-qbs-source-run"
+
+# Keep 90 days of run history by default.
+history_retention_days = 90

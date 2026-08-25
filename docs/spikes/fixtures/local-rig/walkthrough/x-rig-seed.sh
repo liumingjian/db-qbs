@@ -29,11 +29,21 @@ add() {
 before=$(count) || { echo "取不到数据源列表：$BASE" >&2; exit 1; }
 echo "补前 $before 条"
 
+# MySQL 数据源**必须绑一台已注册的 agent**（ADR-0044 §1），所以补数据之前先取一台。
+# 台架上那台是 `sink_base_url` 首启迁移出来的「默认」（§5），不必现注册。
+AGENT_ID=$(curl -sf "$BASE/api/agents" | jq -r '.[0].agent_id // empty')
+if [[ -z "$AGENT_ID" ]]; then
+  echo "注册表里一台 agent 都没有——X 系列的 MySQL 数据源建不出来。" >&2
+  echo "先起 sink，再 POST /api/agents（或让 source 首启迁移 sink_base_url）。" >&2
+  exit 1
+fi
+echo "用 agent：$AGENT_ID"
+
 add "$(jq -nc '{name:"财务库（走查）", kind:"oracle",
   connect_string:"//oracle-fa:1521/FAPDB", username:"fa_reader", password:"fa"}')"
-add "$(jq -nc '{name:"集市 MySQL（走查）", kind:"mysql",
+add "$(jq -nc --arg a "$AGENT_ID" '{name:"集市 MySQL（走查）", kind:"mysql", agent_id:$a,
   host:"10.0.0.13", port:3307, username:"mart", password:"mart", database:"dw_mart"}')"
-add "$(jq -nc '{name:"备用 MySQL（走查）", kind:"mysql",
+add "$(jq -nc --arg a "$AGENT_ID" '{name:"备用 MySQL（走查）", kind:"mysql", agent_id:$a,
   host:"10.0.0.14", port:3306, username:"spare", password:"", database:"dw_spare"}')"
 
 after=$(count)

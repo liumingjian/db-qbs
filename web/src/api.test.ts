@@ -6,6 +6,8 @@ import {
   deleteTask,
   emptySpec,
   fetchBuilderColumns,
+  fetchBuilderDblinks,
+  fetchBuilderSqlColumns,
   fetchBuilderTables,
   fetchColumns,
   fetchTargetColumns,
@@ -87,21 +89,24 @@ describe("task API", () => {
     });
   });
 
+  it("keeps an Oracle dblink in the structured task spec", async () => {
+    const input = taskInput({ spec: spec({ dblink: "FA" }) });
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ task_id: "task-01", ...input }), { status: 201 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createTask(input);
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/tasks", expect.objectContaining({
+      body: JSON.stringify(input),
+    }));
+  });
+
   it("never sends a SQL string with the task definition", async () => {
     const input = taskInput({
       name: "持仓明细",
-      spec: spec({
-        conditions: [
-          {
-            column: "D_BIZ",
-            operator: "eq",
-            value_type: "date",
-            parameter: "d_biz",
-            value_source: "runtime",
-            constant: "",
-          },
-        ],
-      }),
+      spec: spec({ where_clause: "D_BIZ = DATE '2026-08-14'" }),
     });
     const fetchMock = vi
       .fn()
@@ -110,7 +115,7 @@ describe("task API", () => {
 
     await createTask(input);
 
-    // ADR-0036 §2：SQL 由规格现算，任务定义里一个字都不存。
+    // SQL 由规格现算，任务定义里一个字都不存——过滤那段文本除外，它本来就是定义。
     const body = String(fetchMock.mock.calls[0][1].body);
     expect(body).not.toContain("SELECT");
     expect(body).not.toContain("source_sql");
@@ -186,7 +191,7 @@ describe("run history API", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    // 业务日期那一维随 ADR-0035 §3 一起没了：运行参数是任务自定义的名字，筛不出通用维度。
+    // 业务日期那一维早就没了：它从来不是一个跨任务的通用维度。
     await expect(listRunHistory({ taskId: "task/a" })).resolves.toEqual([]);
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(fetchMock).toHaveBeenCalledWith("/api/runs?task_id=task%2Fa", {
@@ -194,15 +199,16 @@ describe("run history API", () => {
     });
   });
 
-  it("starts, reads, and cancels a run by its two stable inputs", async () => {
+  it("starts, reads, and cancels a run by its stable identity alone", async () => {
     const accepted = { run_record_id: "record/01" };
     const live = {
       run_record_id: accepted.run_record_id,
       run_id: null,
-      run_params: { d_biz: "2026-08-14" },
       source_sql: "SELECT a.ID AS ID\n  FROM APP.HOLDINGS a",
       staging_table: null,
       stage: null,
+      total_rows: null,
+      precount_ms: null,
       seq: 0,
       rows_pushed: 0,
       bytes: 0,
@@ -218,16 +224,14 @@ describe("run history API", () => {
       .mockResolvedValueOnce(new Response(JSON.stringify(canceled), { status: 202 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(startRun("task-01", { d_biz: "2026-08-14" })).resolves.toEqual(accepted);
+    await expect(startRun("task-01")).resolves.toEqual(accepted);
     await expect(fetchRun(accepted.run_record_id)).resolves.toEqual(live);
     await expect(cancelRun(accepted.run_record_id)).resolves.toEqual(canceled);
 
     expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/runs", expect.objectContaining({
       method: "POST",
-      body: JSON.stringify({
-        task_id: "task-01",
-        run_params: { d_biz: "2026-08-14" },
-      }),
+      // 发起的**全部**请求体就是任务身份：没有 `run_params`，也没有别的字段。
+      body: JSON.stringify({ task_id: "task-01" }),
     }));
     expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/runs/record%2F01", {
       headers: { Accept: "application/json" },
@@ -237,18 +241,6 @@ describe("run history API", () => {
     }));
   });
 
-  it("starts a run with no parameters at all", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(new Response(JSON.stringify({ run_record_id: "r1" }), { status: 202 }));
-    vi.stubGlobal("fetch", fetchMock);
-
-    await startRun("task-01", {});
-
-    expect(fetchMock).toHaveBeenCalledWith("/api/runs", expect.objectContaining({
-      body: JSON.stringify({ task_id: "task-01", run_params: {} }),
-    }));
-  });
 });
 
 describe("SQL builder API", () => {
@@ -297,6 +289,54 @@ describe("SQL builder API", () => {
       }),
     }));
     expect(columns[0]).not.toHaveProperty("supported");
+  });
+
+  it("loads DBLINK suggestions by Oracle datasource id", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(["FA", "REPORTING"]), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchBuilderDblinks("ds-oracle")).resolves.toEqual(["FA", "REPORTING"]);
+    expect(fetchMock).toHaveBeenCalledWith("/api/builder/dblinks", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ datasource_id: "ds-oracle" }),
+    }));
+  });
+
+  it("describes columns from a custom source SELECT", async () => {
+    const columns = [
+      {
+        name: "CUSTOMER_ID",
+        type: "NUMBER",
+        precision: 10,
+        scale: 0,
+        length: null,
+        fsp: null,
+        support: "ok",
+      },
+    ];
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(columns), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchBuilderSqlColumns({
+        datasource_id: "ds-oracle",
+        source_sql: "SELECT CUSTOMER_ID FROM APP.CUSTOMER",
+      }),
+    ).resolves.toEqual(columns);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/builder/sql-columns",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          datasource_id: "ds-oracle",
+          source_sql: "SELECT CUSTOMER_ID FROM APP.CUSTOMER",
+        }),
+      }),
+    );
   });
 
   it("asks the target end for tables and columns by datasource id alone", async () => {
@@ -352,30 +392,16 @@ describe("SQL builder API", () => {
   it("exchanges a spec for the read-only SQL and its run parameters", async () => {
     const output = {
       source_sql:
-        "SELECT a.ID AS ID\n  FROM APP.HOLDINGS a\n WHERE a.D_BIZ = TO_DATE(:d_biz,'YYYY-MM-DD')",
-      run_parameters: [
-        { parameter: "d_biz", column: "D_BIZ", value_type: "date" },
-      ],
+        "SELECT a.ID AS ID\n  FROM APP.HOLDINGS a\n WHERE D_BIZ = DATE '2026-08-14'",
     };
     const fetchMock = vi
       .fn()
       .mockResolvedValue(new Response(JSON.stringify(output), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const input = spec({
-      conditions: [
-        {
-          column: "D_BIZ",
-          operator: "eq",
-          value_type: "date",
-          parameter: "d_biz",
-          value_source: "runtime",
-          constant: "",
-        },
-      ],
-    });
+    const input = spec({ where_clause: "D_BIZ = DATE '2026-08-14'" });
     await expect(generateBuilderSql(input)).resolves.toEqual(output);
-    // 只出不进：送出去的是规格，回来的是 SQL，没有把 SQL 传回后端的路（ADR-0036 §1）。
+    // 只出不进：送出去的是规格，回来的是 SQL，没有把 SQL 传回后端的路。
     expect(fetchMock).toHaveBeenCalledWith("/api/builder/sql", expect.objectContaining({
       method: "POST",
       body: JSON.stringify(input),

@@ -10,9 +10,9 @@ mod protocol;
 mod target_shape;
 
 pub use protocol::{
-    AbortResponse, BatchPayload, BatchResponse, ColumnSupport, CommitRequest, CommitResponse,
-    ErrorBody, ErrorEnvelope, OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn,
-    RangeCheckResult, RunResponse, SourceColumn, TargetConnection, Terminal,
+    AbortResponse, AgentInfo, BatchPayload, BatchResponse, ColumnSupport, CommitRequest,
+    CommitResponse, ErrorBody, ErrorEnvelope, OpenRunRequest, OpenRunResponse, PrecheckIssue,
+    RangeCheckColumn, RangeCheckResult, RunResponse, SourceColumn, TargetConnection, Terminal,
 };
 pub use target_shape::{
     classify_column, column_support, derive_number_shape, is_business_date_column,
@@ -128,6 +128,10 @@ pub enum LogEvent {
     StageChanged,
     MappingPrecheckFailed,
     RangeCheckExecuted,
+    /// 开跑前那一次源端 `COUNT(*)`（ADR-0043 §7）。**成败都发**：
+    /// 失败时 `total_rows` 为 `null` 且带上原因，运行照常继续——
+    /// 为了一个进度条把整次搬运判死，是拿主功能换装饰。
+    PrecountFinished,
     RunOpened,
     BatchPushed,
     CommitDiagnosed,
@@ -139,7 +143,7 @@ pub enum LogEvent {
 }
 
 impl LogEvent {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::CliFailed,
         Self::SourceStarted,
         Self::BusinessDateInvalid,
@@ -150,6 +154,7 @@ impl LogEvent {
         Self::StageChanged,
         Self::MappingPrecheckFailed,
         Self::RangeCheckExecuted,
+        Self::PrecountFinished,
         Self::RunOpened,
         Self::BatchPushed,
         Self::CommitDiagnosed,
@@ -172,6 +177,7 @@ impl LogEvent {
             Self::StageChanged => "stage_changed",
             Self::MappingPrecheckFailed => "mapping_precheck_failed",
             Self::RangeCheckExecuted => "range_check_executed",
+            Self::PrecountFinished => "precount_finished",
             Self::RunOpened => "run_opened",
             Self::BatchPushed => "batch_pushed",
             Self::CommitDiagnosed => "commit_diagnosed",

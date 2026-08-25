@@ -1,4 +1,4 @@
-import { Database, Pencil, Plus, Trash2 } from "lucide-react";
+import { Database, Pencil, Plus, PlugZap, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { FormEvent } from "react";
 
@@ -10,12 +10,15 @@ import {
   updateDatasource,
 } from "./api";
 import type {
+  Agent,
   Datasource,
   DatasourceInput,
   DatasourceKind,
   Task,
 } from "./api";
 import {
+  agentLabel,
+  agentStatusOf,
   canSaveDatasource,
   connectionFingerprint,
   connectionSummary,
@@ -25,6 +28,15 @@ import {
 } from "./datasource";
 import { messageFrom } from "./errors";
 import { ActionButton, FormField, Modal, ModalFooter } from "./ui";
+
+/**
+ * 一行「测试连接」的三态。与对话框里那份同形，但**各存各的**：
+ * 对话框那份还兼着「测通才让存」的门槛，行内这份纯粹是一次问答。
+ */
+type RowTestState =
+  | { kind: "testing" }
+  | { kind: "ok"; elapsedMs: number; label: string }
+  | { kind: "failed"; message: string };
 
 /**
  * 数据源管理屏（ADR-0039 §1~§4）。
@@ -47,18 +59,65 @@ type DatasourceDialogState =
 
 export function DatasourceScreen({
   datasources,
+  agents,
   tasks,
   loading,
   onChanged,
 }: {
   datasources: Datasource[];
+  /** 注册表里那几台 agent（ADR-0044 §6）：MySQL 那一列显示名字，表单里是必选项。 */
+  agents: Agent[];
   tasks: Task[];
   loading: boolean;
   onChanged: () => Promise<void>;
 }) {
   const [dialog, setDialog] = useState<DatasourceDialogState>(null);
+  /**
+   * 行内测连结果，按数据源 id 存（P1）。**瞬态**：不进库、不轮询、刷新即没。
+   *
+   * 这不是 ADR-0039 §2 判掉的那个「连接状态」列——那一条判的是**常驻**列，
+   * 它要么后台轮询所有库，要么显示一个过期的绿点。这里显示的是**你刚才亲手问的那一次**，
+   * 有明确的提问时刻，不会替一分钟前的事实背书。
+   */
+  const [rowTests, setRowTests] = useState<Record<string, RowTestState>>({});
 
   const counts = useMemo(() => referenceCounts(tasks), [tasks]);
+
+  function clearRowTest(datasourceId: string) {
+    setRowTests((current) => {
+      if (!(datasourceId in current)) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[datasourceId];
+      return next;
+    });
+  }
+
+  /**
+   * 行内测连走的是**草稿测连那条端点**，不是按 id 那条。
+   *
+   * 理由只有一个：按 id 那条只回 `{ ok: true }`，凑不出「连接成功 · 186 ms · dw_stage」
+   * 这一行——耗时与库名都在草稿那条里。口令传空串，服务端按「留空 = 去库里取那一份」
+   * 解释（ADR-0037 §5），与保存面同一条规则，界面仍然一个字的口令都没回读。
+   */
+  async function testRow(datasource: Datasource) {
+    const id = datasource.datasource_id;
+    setRowTests((current) => ({ ...current, [id]: { kind: "testing" } }));
+    try {
+      const result = await testDatasourceDraft(draftFrom(datasource), id);
+      setRowTests((current) => ({
+        ...current,
+        [id]: { kind: "ok", elapsedMs: result.elapsed_ms, label: result.label },
+      }));
+    } catch (testError) {
+      // 原样回显驱动报错，**不出错误码标签**——测连不属于任何 run（ADR-0039 §3）。
+      setRowTests((current) => ({
+        ...current,
+        [id]: { kind: "failed", message: messageFrom(testError) },
+      }));
+    }
+  }
 
   return (
     <section className="card" id="datasources" aria-labelledby="datasources-title">
@@ -106,7 +165,10 @@ export function DatasourceScreen({
       {datasources.length > 0 && (
         <DatasourceTable
           datasources={datasources}
+          agents={agents}
           referenceCounts={counts}
+          rowTests={rowTests}
+          onTest={testRow}
           onAction={setDialog}
         />
       )}
@@ -115,6 +177,7 @@ export function DatasourceScreen({
         <DatasourceFormDialog
           title="新建数据源"
           existing={null}
+          agents={agents}
           onClose={() => setDialog(null)}
           onChanged={onChanged}
         />
@@ -123,15 +186,23 @@ export function DatasourceScreen({
         <DatasourceFormDialog
           title={`编辑 · ${dialog.datasource.name}`}
           existing={dialog.datasource}
+          agents={agents}
           onClose={() => setDialog(null)}
-          onChanged={onChanged}
+          onChanged={async () => {
+            // 连接字段可能刚被改过，上一次的行内结果当场作废。
+            clearRowTest(dialog.datasource.datasource_id);
+            await onChanged();
+          }}
         />
       )}
       {dialog?.kind === "delete" && (
         <DatasourceDeleteDialog
           datasource={dialog.datasource}
           onClose={() => setDialog(null)}
-          onChanged={onChanged}
+          onChanged={async () => {
+            clearRowTest(dialog.datasource.datasource_id);
+            await onChanged();
+          }}
         />
       )}
     </section>
@@ -145,11 +216,17 @@ const KIND_LABELS: Record<DatasourceKind, string> = {
 
 function DatasourceTable({
   datasources,
+  agents,
   referenceCounts,
+  rowTests,
+  onTest,
   onAction,
 }: {
   datasources: Datasource[];
+  agents: Agent[];
   referenceCounts: Map<string, number>;
+  rowTests: Record<string, RowTestState>;
+  onTest: (datasource: Datasource) => void;
   onAction: (dialog: DatasourceDialogState) => void;
 }) {
   return (
@@ -160,8 +237,14 @@ function DatasourceTable({
             <th>名称</th>
             <th>类型</th>
             <th>连接</th>
+            {/* 「目标端 Agent」列（ADR-0044 §6）：这条库经哪台 agent 访问，此刻通不通。
+                它回答的是现场那句「我把 agent 停了，为什么还在同步」——现在停了就看得见。 */}
+            <th>目标端 Agent</th>
             <th>用户</th>
-            <th>口令</th>
+            {/* 「口令」列退役（ADR-0046 §3）：数据源要测通才存得下（ADR-0039 §3），
+                存下来的每一条口令都是设过的，这一列因此恒为「已设置」——一列常量，
+                占着一格宽度却答不了任何问题。表单里那个「已设置 · 留空 = 不改」的徽标
+                照旧留着，它答的是「这次留空会怎样」，是另一回事。 */}
             <th>被引用</th>
             <th className="action-column">操作</th>
           </tr>
@@ -169,6 +252,7 @@ function DatasourceTable({
         <tbody>
           {datasources.map((datasource) => {
             const count = referenceCounts.get(datasource.datasource_id) ?? 0;
+            const test = rowTests[datasource.datasource_id];
             return (
               <tr key={datasource.datasource_id}>
                 <td>
@@ -177,23 +261,53 @@ function DatasourceTable({
                 </td>
                 <td>{KIND_LABELS[datasource.kind]}</td>
                 <td className="mono">{connectionSummary(datasource)}</td>
-                <td className="mono">{datasource.username}</td>
-                <td>{datasource.has_password ? "已设置" : "未设置"}</td>
-                <td>{count === 0 ? "未被引用" : `${count} 个任务`}</td>
                 <td>
+                  <AgentCell datasource={datasource} agents={agents} />
+                </td>
+                <td className="mono">{datasource.username}</td>
+                <td>{count === 0 ? "未被引用" : `${count} 个任务`}</td>
+                <td className="action-column">
+                  {/* 行内动作**全用图标**、靠 `title` 认（ADR-0043 §5；ADR-0042 §6 已作废）。
+                      「正在连接」这一态不再靠按钮文字自陈——它挂在 `title` / `aria-label` 上，
+                      图标同时转起来，禁用的只有这一行自己。 */}
                   <div className="row-actions">
                     <ActionButton
+                      label={
+                        test?.kind === "testing" ? "正在连接" : "测试连接"
+                      }
+                      icon={
+                        <PlugZap
+                          className={test?.kind === "testing" ? "is-spinning" : ""}
+                          size={16}
+                        />
+                      }
+                      disabled={test?.kind === "testing"}
+                      onClick={() => onTest(datasource)}
+                    />
+                    <span className="divider" />
+                    <ActionButton
                       label="编辑数据源"
-                      icon={<Pencil size={15} />}
+                      icon={<Pencil size={16} />}
                       onClick={() => onAction({ kind: "edit", datasource })}
                     />
+                    <span className="divider" />
                     <ActionButton
                       label="删除数据源"
                       danger
-                      icon={<Trash2 size={15} />}
+                      icon={<Trash2 size={16} />}
                       onClick={() => onAction({ kind: "delete", datasource })}
                     />
                   </div>
+                  {test?.kind === "ok" && (
+                    <span className="inline-result row-test-result" role="status">
+                      连接成功 · {test.elapsedMs} ms · {test.label}
+                    </span>
+                  )}
+                  {test?.kind === "failed" && (
+                    <span className="row-test-result is-failed" role="alert">
+                      {test.message}
+                    </span>
+                  )}
                 </td>
               </tr>
             );
@@ -201,6 +315,37 @@ function DatasourceTable({
         </tbody>
       </table>
     </div>
+  );
+}
+
+/**
+ * 「目标端 Agent」格。Oracle 行是**空的**——源库由 source 直连，这一栏对它没有含义，
+ * 写「不适用」会让人以为这里少配了一样东西。
+ *
+ * MySQL 行显示 agent 名字；不在线 / 身份不符时跟一个状态标签，因为**此刻这条数据源不能用**：
+ * 点测试连接会失败、发起运行会被拒。把它藏起来只会让人在发起那一刻才发现。
+ */
+function AgentCell({
+  datasource,
+  agents,
+}: {
+  datasource: Datasource;
+  agents: Agent[];
+}) {
+  if (datasource.kind === "oracle") {
+    return null;
+  }
+  const label = agentLabel(datasource, agents);
+  const status = agentStatusOf(datasource, agents);
+  return (
+    <>
+      <span>{label}</span>
+      {status !== null && status !== "online" && (
+        <span className={`state ${status === "mismatch" ? "is-failed" : "is-unknown"}`}>
+          {status === "mismatch" ? "身份不符" : "不在线"}
+        </span>
+      )}
+    </>
   );
 }
 
@@ -223,11 +368,13 @@ type TestState =
 function DatasourceFormDialog({
   title,
   existing,
+  agents,
   onClose,
   onChanged,
 }: {
   title: string;
   existing: Datasource | null;
+  agents: Agent[];
   onClose: () => void;
   onChanged: () => Promise<void>;
 }) {
@@ -265,6 +412,9 @@ function DatasourceFormDialog({
         : {
             name: current.name,
             kind: "mysql",
+            // 只有一台 agent 时直接预选它：现场绝大多数部署就是一台，
+            // 让人在一个只有一个选项的下拉里再点一次没有任何意义。
+            agent_id: agents.length === 1 ? agents[0].agent_id : "",
             host: "",
             port: 3306,
             database: "",
@@ -356,6 +506,27 @@ function DatasourceFormDialog({
             </FormField>
           ) : (
             <>
+              <FormField label="目标端 Agent">
+                <select
+                  required
+                  value={draft.agent_id}
+                  onChange={(event) => patch({ agent_id: event.target.value })}
+                >
+                  <option value="">请选择</option>
+                  {agents.map((agent) => (
+                    <option key={agent.agent_id} value={agent.agent_id}>
+                      {agent.name}
+                      {agent.status === "online" ? "" : "（不可用）"}
+                    </option>
+                  ))}
+                </select>
+              </FormField>
+              {agents.length === 0 && (
+                <p className="drawer-note">
+                  还没有注册任何目标端 agent。目标库只能经 agent 访问，
+                  请先到「目标端 Agent」屏注册一台。
+                </p>
+              )}
               <FormField label="主机">
                 <input
                   required
@@ -441,7 +612,7 @@ function DatasourceFormDialog({
             <div className="form-error" role="alert">
               {test.message}
               <br />
-              连不上就存不进来：先确认地址、账号与网络放行，再回来测一次。
+              请确认地址、账号和网络放行后重新测试。
             </div>
           )}
           {error !== null && (
@@ -451,7 +622,7 @@ function DatasourceFormDialog({
           )}
           {!canSave && test.kind !== "failed" && (
             <p className="card-subtitle">
-              保存前必须先测试连接通过——库里存着的每一条都曾经真的连通过。
+              保存前请先测试连接。
             </p>
           )}
         </div>

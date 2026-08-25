@@ -81,12 +81,23 @@ done
 grep -q '不要写 `oracle_connect_string`' "$MANUAL" \
   || { echo "手册没点名「别写那三个退役字段」" >&2; exit 1; }
 
-# 8. 产品零改动那三处内容，本票同样不许动（与 test-rehearsal-tunnel.sh 第 9 条同一条判据，
-#    这里只守手册这一侧：手册填的端口必须还是示例配置里的那两个值）。
-grep -qx 'sink_base_url = "http://127.0.0.1:8080"' "$ROOT/config/source.toml.example" \
-  || { echo "source.toml.example 的 sink_base_url 变了，手册第 7 步跟着就得改" >&2; exit 1; }
-grep -q 'sink_base_url = "http://127.0.0.1:8080"' "$MANUAL" \
-  || { echo "手册第 7 步的 sink_base_url 与示例配置对不上" >&2; exit 1; }
+# 7.5 `sink_base_url` 同样退役（ADR-0044 §5），手册不许把它写进新装机器的 source.toml——
+#     写了会凭空多出一条名叫「默认」的 agent，而那条迁移路径是给**升级**的老部署准备的。
+grep -qE '^sink_base_url *=' "$MANUAL" && { echo "手册把已退役的 sink_base_url 写进了配置" >&2; exit 1; }
+grep -q '不要写 `sink_base_url`' "$MANUAL" \
+  || { echo "手册没点名「别写 sink_base_url」" >&2; exit 1; }
+
+# 8. 目标端 agent 的注册那一步，手册与回放脚本都要有，且填的地址是**本机隧道入口**
+#    （ADR-0044 §3：注册要求对方活着，所以这一步转绿等于隧道 + agent 两段一起验过了）。
+for f in "$MANUAL" "$DRILL"; do
+  grep -q '/api/agents' "$f" \
+    || { echo "$f 少了注册目标端 agent 那一步（MySQL 数据源会无处可选）" >&2; exit 1; }
+  grep -qF 'http://127.0.0.1:8080' "$f" \
+    || { echo "$f 里 agent 的地址不是本机隧道入口 http://127.0.0.1:8080" >&2; exit 1; }
+done
+# 端口与隧道模板必须是同一个值：填不一致的话 source 会去连一个没人听的口。
+grep -qF '@@SINK_LOCAL_PORT@@' "$ROOT/packaging/stunnel/source-side/stunnel-sink.conf" \
+  || { echo "源端隧道模板的 accept 占位符没了，手册第 6 步跟着就得改" >&2; exit 1; }
 
 # 9. vault 换源那一段与构建镜像里的必须指同一个存档、同一批后备镜像。
 #    这段现在有四份实现（Dockerfile / build.sh / rehearsal-tunnel-up.sh / 手册），

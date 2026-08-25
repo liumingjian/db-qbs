@@ -18,11 +18,9 @@ def observe_run_screen(page, width, label):
     """W1 / W2 / W6：映射预检失败态的运行详情屏。"""
     page.set_viewport_size({"width": width, "height": 1000})
     page.goto(BASE, wait_until="networkidle")
-    page.wait_for_selector("#tasks tbody tr")
+    page.wait_for_selector("#jobs tbody tr")
+    # 发起没有对话框了：点了就跑，直接落到运行详情。
     page.click('button[aria-label="发起运行"]')
-    page.wait_for_selector(".run-params input")
-    page.fill(".run-params input", "2026-08-18")
-    page.click('button[type="submit"]')
     page.wait_for_selector(".precheck-reports")
 
     reports = page.query_selector(".precheck-reports")
@@ -68,20 +66,47 @@ def open_builder(page, target_table):
     """
     page.set_viewport_size({"width": 1440, "height": 1200})
     page.goto(BASE, wait_until="networkidle")
-    page.wait_for_selector("#tasks tbody tr")
+    page.wait_for_selector("#jobs tbody tr")
     page.click('button[aria-label="编辑任务定义"]')
     page.wait_for_selector(".builder-guide")
-    page.fill('input[list="target-table-options"]', target_table)
+    # 2026-08-24：目标表输入框**又换了一次形态**。`f371935`（"Refine task builder
+    # table selection"，2026-08-21）把 `<input list="target-table-options">` 换成了
+    # 目标端那棵树上的搜索框，于是这一行从那天起就选不中任何东西——W1–W6 整份
+    # 一跑就 30s 超时。那一票没有触发 W 系列，中间几票也没有，所以没人发现。
+    # 这与 `47a2fed` 摘掉建表 SQL 区块是同一种事故：**判据还在，跑它的手断了**。
+    # 认 `.target-tree-shell .tree-search input`——它是目标端那半边唯一的输入框；
+    # 填完要 blur，`loadTargetColumns` 挂在 onBlur 上（与 X 走查的 X6 同一处坑）。
+    target_input = page.wait_for_selector(".target-tree-shell .tree-search input")
+    target_input.fill(target_table)
+    target_input.evaluate("(el) => el.blur()")
     page.wait_for_timeout(500)
     button = page.query_selector('section[aria-labelledby="column-fetch-title"] header button')
+    if button is None:
+        # 2026-08-21：这一卡在界面上**已经不存在**了。它不是被本次改动删的——
+        # `47a2fed`（"Prepare x2doris P1 frontend handoff"）把整段
+        # 「目标表建表 SQL / 拿建表 SQL / .fetch-ready」从构建器里摘掉了，
+        # 而那一票没有跑 W1–W6（`CLAUDE.md` 规则 1 挡的正是这个），于是没人发现。
+        # 所有者 2026-08-21 裁定按有意的收窄对待，W3 / W4 / W5 就此判废（ADR-0043）。
+        # 探针**只观察不断言**：这里不抛错，如实回一条「对象不存在」，让走查记录看得见。
+        return False
     button.scroll_into_view_if_needed()
     button.evaluate("(el) => el.click()")
     page.wait_for_selector(".fetch-ready")
+    return True
 
 
 def observe_column_fetch(page):
     """W3 / W4：取列态 —— 三档标记与建表 SQL 占位符。"""
-    open_builder(page, "M3_B1")
+    if not open_builder(page, "M3_B1"):
+        return {
+            "object_missing": "构建器里没有「目标表建表 SQL」卡（`column-fetch-title`）——"
+                              "整段在 47a2fed 被摘掉；所有者 2026-08-21 裁定判废（ADR-0043），"
+                              "W3 / W4 已写 N/A",
+            "column_fetch_sections_on_screen": page.evaluate(
+                "() => [...document.querySelectorAll('.column-fetch-section')]"
+                ".map(el => el.getAttribute('aria-labelledby'))"),
+            "fetch_ready_present": page.query_selector(".fetch-ready") is not None,
+        }
     type_cells = page.query_selector_all(".fetch-ready tbody tr td:nth-child(2)")
     marks = []
     for cell in type_cells:
@@ -115,7 +140,10 @@ def observe_column_fetch(page):
 
 def observe_rejected_fetch(page):
     """W5：白名单外的列 —— 列表照给，只有 DDL 区块换成「整份不给」。"""
-    open_builder(page, "REJECTED")
+    if not open_builder(page, "REJECTED"):
+        return {
+            "object_missing": "同 W3 / W4：取列卡不存在，W5 的第四态无从制造；判据已判废",
+        }
     listed = [c.inner_text() for c in page.query_selector_all(".fetch-ready tbody tr td:nth-child(1)")]
     crit = page.query_selector(".row-size-warning.is-crit")
     if crit is not None:
@@ -129,11 +157,21 @@ def observe_rejected_fetch(page):
     }
 
 
+def text_or_absent(page, selector):
+    """取一格的文字；这一格不在场就如实回一条缺席，**不抛**。
+
+    走查记录要看得见「它没了」，而不是看见一个堆栈——一个 `AttributeError`
+    会把后面所有判据一起带走，那才是最贵的失败方式。
+    """
+    node = page.query_selector(selector)
+    return node.inner_text() if node is not None else {"object_missing": selector}
+
+
 def observe_builder_surface(page):
     """本票新增的构建器面（条件 / 排序 / 只读 SQL），走查清单之外的旁证。"""
     page.set_viewport_size({"width": 1440, "height": 1400})
     page.goto(BASE, wait_until="networkidle")
-    page.wait_for_selector("#tasks tbody tr")
+    page.wait_for_selector("#jobs tbody tr")
     page.click('button[aria-label="编辑任务定义"]')
     page.wait_for_selector(".generated-sql pre")
     page.screenshot(path=f"{SHOTS}/builder.png", full_page=True)
@@ -149,12 +187,18 @@ def observe_builder_surface(page):
             }
             for select in datasource_selects
         ],
+        # 过滤条件已改成一个自由 WHERE 文本框（ADR-0047 §1）——原来那套四格表单的
+        # `.condition-row` 恒为 0，量的是「旧控件真的一个不剩」。
         "condition_rows": len(page.query_selector_all(".condition-row")),
+        "where_clause": text_or_absent(page, ".where-clause-editor textarea"),
         "sql_is_readonly": page.query_selector(".generated-sql textarea") is None,
         "sql_text": page.query_selector(".generated-sql pre").inner_text(),
-        "run_parameters": page.query_selector(".run-parameter-list").inner_text(),
+        # 这一格可能**合法地缺席**，缺席时不许抛：探针只观察不断言（ADR-0028 §1）。
+        # `.run-parameter-list` 整块已随运行参数链退役（ADR-0047 §3），恒为缺席。
+        # 抛出去的话，整份 W1–W6 会以一个 AttributeError 收场，而判据一条都没跑。
+        "run_parameters": text_or_absent(page, ".run-parameter-list"),
         "primary_key_boxes": len(page.query_selector_all('.builder-columns input[aria-label*="主键"]')),
-        "key_note": page.query_selector(".builder-key-note").inner_text(),
+        "key_note": text_or_absent(page, ".builder-key-note"),
     }
 
 

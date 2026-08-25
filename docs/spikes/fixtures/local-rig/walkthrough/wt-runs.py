@@ -2,7 +2,7 @@
 """M2 渲染面走查 · 运行详情屏（RunScreen）的机器观察。
 
 RunScreen 只在「从 UI 发起一个 run」之后才到得了（App.tsx 里 setActiveRun 的唯一调用点在
-StartRunDialog 的 onStarted），所以这支脚本自己发起 run。
+`handleStart` 里），所以这支脚本自己发起 run。发起没有对话框了：点了就跑。
 
 按 ADR-0028 §1：只观察，不断言；一行 DOM 断言都不进验收套件。
 
@@ -17,7 +17,6 @@ import sys
 from playwright.sync_api import sync_playwright
 
 BASE = "http://127.0.0.1:18088"
-BIZ_DATE = "2026-08-14"
 
 STYLE_PROBE = """
 (el) => {
@@ -61,12 +60,9 @@ def open_tasks(page):
 
 
 def start_run(page, task_name):
-    """从任务列表发起一个 run，停在 RunScreen 上。"""
+    """从任务列表发起一个 run，停在 RunScreen 上。**点了就跑，没有对话框。**"""
     row = page.locator("#tasks tbody tr").filter(has_text=task_name).first
     row.locator("button[aria-label='发起运行']").click()
-    page.wait_for_selector(".modal.is-narrow", timeout=10000)
-    page.fill(".modal.is-narrow input[type=date]", BIZ_DATE)
-    page.click(".modal.is-narrow button[type=submit]")
     page.wait_for_selector(".run-card", timeout=20000)
 
 
@@ -117,23 +113,22 @@ def live_walk(page, out):
     )
     page.screenshot(path="/tmp/m2-v1-live.png", full_page=True)
 
-    # ---- V16：同任务同日期再打开发起对话框 ----
+    # ---- V16：同一个任务再点一次「发起运行」，服务端当场 409 ----
+    # 并跑拦截原来长在发起对话框里（`.stale-run-hint`）；对话框随运行参数链退役之后，
+    # 那句话只剩屏顶的 `.notice.is-error` 一个落点。
     page.click(".back-button")
     page.wait_for_selector("#tasks tbody tr", timeout=15000)
     row = page.locator("#tasks tbody tr").filter(has_text="A10 并发").first
     row.locator("button[aria-label='发起运行']").click()
-    page.wait_for_selector(".modal.is-narrow", timeout=10000)
-    page.fill(".modal.is-narrow input[type=date]", BIZ_DATE)
-    page.wait_for_selector(".stale-run-hint", timeout=15000)
-    out["V16_hint"] = probe_all(page, ".stale-run-hint")
-    out["V16_hint_left_border"] = page.eval_on_selector(
-        ".stale-run-hint",
+    page.wait_for_selector(".notice.is-error", timeout=15000)
+    out["V16_notice"] = probe_all(page, ".notice.is-error")
+    out["V16_notice_colors"] = page.eval_on_selector(
+        ".notice.is-error",
         "el => { const cs = getComputedStyle(el);"
-        " return { borderLeft: cs.borderLeftWidth + ' ' + cs.borderLeftStyle + ' ' + cs.borderLeftColor,"
-        " bg: cs.backgroundColor }; }",
+        " return { color: cs.color, bg: cs.backgroundColor,"
+        " borderLeft: cs.borderLeftColor }; }",
     )
-    out["V16_submit"] = probe_all(page, ".modal.is-narrow button[type=submit]")
-    page.click(".modal.is-narrow button.is-ghost")
+    page.click(".notice.is-error .text-button")
 
     # ---- V17：取消按钮常亮；点下去当场如实回话 ----
     start_run(page, "A14 生命周期")

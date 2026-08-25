@@ -1,4 +1,4 @@
-import type { Datasource, DatasourceInput, Task } from "./api";
+import type { Agent, Datasource, DatasourceInput, Task } from "./api";
 
 /**
  * 数据源屏的纯判定（ADR-0039 §2/§3/§4）。
@@ -16,6 +16,37 @@ export function connectionSummary(datasource: Datasource): string {
 }
 
 /**
+ * 「目标端 Agent」一栏（ADR-0044 §6）。
+ *
+ * Oracle 那半边**是空的，不是「无」**：源库由 source 直连，那一栏对它没有含义，
+ * 写个「不适用」只会让人以为这里少配了一样东西。
+ *
+ * MySQL 那半边显示 agent 的名字；绑的 agent 已经不在注册表里时**点名说出来**——
+ * 这条数据源此刻是不能用的，含糊成一个 id 片段会让人以为只是显示问题。
+ */
+export function agentLabel(datasource: Datasource, agents: Agent[]): string {
+  if (datasource.kind === "oracle") {
+    return "";
+  }
+  const agent = agents.find((candidate) => candidate.agent_id === datasource.agent_id);
+  return agent === undefined ? "已失效的 agent" : agent.name;
+}
+
+/** 那一栏的状态标记：agent 不在线 / 身份不符时，这条数据源现在就是不能用的。 */
+export function agentStatusOf(
+  datasource: Datasource,
+  agents: Agent[],
+): Agent["status"] | null {
+  if (datasource.kind === "oracle") {
+    return null;
+  }
+  return (
+    agents.find((candidate) => candidate.agent_id === datasource.agent_id)?.status ??
+    "offline"
+  );
+}
+
+/**
  * 表单里那组**连接字段**的指纹。
  *
  * **名称不在里面**——只改名称免测连是 ADR-0039 §3 的唯一例外，而它正是靠「名称不进指纹」
@@ -27,6 +58,10 @@ export function connectionFingerprint(input: DatasourceInput): string {
       ? [input.kind, input.connect_string, input.username, input.password]
       : [
           input.kind,
+          // agent 进指纹：换一台 agent 就是换了一条到目标库的路，上一次的测连结果
+          // 与新路没关系（ADR-0044 §6）。不进指纹的话，改完 agent 能直接存，
+          // 而那条路可能根本不通。
+          input.agent_id,
           input.host,
           input.port,
           input.database,
@@ -83,6 +118,7 @@ export function draftFrom(existing: Datasource | null): DatasourceInput {
     : {
         name: existing.name,
         kind: "mysql",
+        agent_id: existing.agent_id,
         host: existing.host,
         port: existing.port,
         database: existing.database,

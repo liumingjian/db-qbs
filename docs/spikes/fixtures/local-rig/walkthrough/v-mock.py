@@ -8,8 +8,9 @@
 
 **它不是验收替身**：只回答「渲染出来没有」，一个数据正确性问题都不回答。
 
-**造态入口是发起对话框里的业务日期**：`2026-01-0X` 一个日期对应一个 run 态，
-见 `RUNS_BY_DATE`。这样走查不必改产品代码，也不必起真库。
+**造态入口是点哪一行的「发起运行」**：一个任务对应一个 run 态，见 `RUNS_BY_TASK`。
+（发起不再有对话框可以往里填日期——运行参数链已经退役，点了就跑。）
+这样走查不必改产品代码，也不必起真库。
 
 用法：python3 docs/spikes/fixtures/local-rig/walkthrough/v-mock.py [port]
 """
@@ -36,9 +37,18 @@ DATASOURCES = [
     {"datasource_id": "ds-ora-core", "name": "生产核心库", "kind": "oracle",
      "connect_string": "//oracle-core:1521/ORCLPDB", "username": "app_reader",
      "has_password": True},
-    {"datasource_id": "ds-my-dw", "name": "数仓 MySQL", "kind": "mysql",
+    {"datasource_id": "ds-my-dw", "name": "数仓 MySQL", "kind": "mysql", "agent_id": "agent-a",
      "host": "10.0.0.12", "port": 3306, "username": "sink", "database": "dw_stage",
      "has_password": True},
+]
+
+# 目标端 agent 注册表（ADR-0044）。这份走查不判 agent 屏（那是 X19），
+# 但**外壳把数据源与 agent 当成同一次读取**——少了这个端点，数据源清单会一起被判成读不到，
+# 于是 V 系列里凡是要用到数据源的屏全都变成空态。
+AGENTS = [
+    {"agent_id": "agent-a", "name": "目标端 A", "base_url": "http://127.0.0.1:8080",
+     "instance_id": "6f1a9c2d4e8b47f0a1b2c3d4e5f60718", "version": "0.1.0",
+     "last_seen_at": "2026-08-24T02:00:00Z", "status": "online", "last_error": None},
 ]
 
 SPEC = {
@@ -48,17 +58,32 @@ SPEC = {
     "primary_key": ["ID"],
     "columns": [{"source": c, "target": c} for c in ("ID", "C_NAME", "LOAD_DATE")],
     "column_precision": {},
-    "conditions": [
-        {"column": "LOAD_DATE", "operator": "eq", "value_type": "date",
-         "parameter": "load_date", "value_source": "runtime", "constant": ""},
-    ],
-    "order_by": [],
+    "where_clause": "LOAD_DATE = DATE '2026-01-01'",
 }
 
+# 2026-08-21（ADR-0043 §2）：运行历史独立屏并进作业中心，**一行 = 一个任务 + 它最近一次运行**。
+# 于是「同一屏上同时看到 SWAPPED 与 DISCARDED」这件事不能再靠一个任务的多条历史，
+# 得靠**多个任务各一条**。每条运行记录因此各挂一个任务，见 `RUNS` 里的 `task_id`。
+# `task-holding` 留在第一位：它名下挂着一条进行中的 run，
+# 于是 V16 的「这个任务已有一次运行进行中」那句 409 有对象。
 TASKS = [
     {"task_id": "task-holding", "name": "持仓日明细",
      "source_datasource_id": "ds-ora-core", "target_datasource_id": "ds-my-dw",
      "spec": SPEC},
+    {"task_id": "task-accepted", "name": "刚受理那条", "source_datasource_id": "ds-ora-core",
+     "target_datasource_id": "ds-my-dw", "spec": SPEC},
+    {"task_id": "task-success", "name": "成功那条", "source_datasource_id": "ds-ora-core",
+     "target_datasource_id": "ds-my-dw", "spec": SPEC},
+    {"task_id": "task-verify", "name": "校验失败那条", "source_datasource_id": "ds-ora-core",
+     "target_datasource_id": "ds-my-dw", "spec": SPEC},
+    {"task_id": "task-mapping", "name": "映射预检失败那条", "source_datasource_id": "ds-ora-core",
+     "target_datasource_id": "ds-my-dw", "spec": SPEC},
+    {"task_id": "task-unknown", "name": "结局不明那条", "source_datasource_id": "ds-ora-core",
+     "target_datasource_id": "ds-my-dw", "spec": SPEC},
+    {"task_id": "task-escape", "name": "哨兵逃逸那条", "source_datasource_id": "ds-ora-core",
+     "target_datasource_id": "ds-my-dw", "spec": SPEC},
+    {"task_id": "task-not-started", "name": "未发起那条", "source_datasource_id": "ds-ora-core",
+     "target_datasource_id": "ds-my-dw", "spec": SPEC},
 ]
 
 SOURCE_SQL = (
@@ -66,7 +91,7 @@ SOURCE_SQL = (
     "       a.C_NAME AS C_NAME,\n"
     "       a.LOAD_DATE AS LOAD_DATE\n"
     "  FROM APP.T_HOLDING a\n"
-    " WHERE a.LOAD_DATE = TO_DATE(:load_date,'YYYY-MM-DD')"
+    " WHERE LOAD_DATE = DATE '2026-01-01'"
 )
 
 MAPPING_ISSUES = [
@@ -86,7 +111,6 @@ def base_run(**over):
         "run_record_id": "rec-x",
         "run_id": "20260819120000_aaaaaa",
         "task_id": "task-holding",
-        "run_params": {"load_date": "2026-01-01"},
         "source_sql": SOURCE_SQL,
         "staging_table": "HOLDING__stg_20260819120000",
         "started_at": "2026-08-19T12:00:00.000Z",
@@ -117,6 +141,8 @@ def base_run(**over):
         "bytes": 4589312,
         "last_ts": "2026-08-19T12:03:20.000Z",
         "ms": 9540,
+        "total_rows": 100000,
+        "precount_ms": 640,
         "mapping_issues": [],
         "live": False,
     }
@@ -126,36 +152,42 @@ def base_run(**over):
 
 # ---- 各态 -------------------------------------------------------------------
 # V1 / V17：进行中，停在 STREAMING。
+#
+# `total_rows` / `precount_ms` **必须给全**（哪怕给 None）：真接口的 `LiveRunDetail` 里
+# 它们是可空字段，字段整个缺席时前端拿到 `undefined`，「总行数」那一格会渲染成 `NaN`——
+# 那不是产品的样子，是桩少给了一个字段（2026-08-25 跑 V1 时发现，当场补上）。
 LIVE_STREAMING = {
-    "run_record_id": "rec-live", "run_id": "20260819120500_bbbbbb",
-    "run_params": {"load_date": "2026-01-01"}, "source_sql": SOURCE_SQL,
+    "run_record_id": "rec-live", "run_id": "20260819120500_bbbbbb", "source_sql": SOURCE_SQL,
     "staging_table": "HOLDING__stg_20260819120500", "stage": "STREAMING",
+    "total_rows": 100000, "precount_ms": 180,
     "seq": 1, "rows_pushed": 3, "bytes": 96, "ms": 940,
     "last_ts": "2026-08-19T12:05:01.000Z", "live": True,
 }
 # V17 第二态：已受理、子进程还没报到（阶段串三点全灰），取消当场如实拒绝。
+# 已受理那一态**开跑前的计数还没回来**，所以两个字段都是 None——这正是 `—` 那一格的对象。
 LIVE_ACCEPTED = dict(LIVE_STREAMING, run_record_id="rec-accepted", run_id=None,
                      stage=None, seq=0, rows_pushed=0, bytes=0, ms=0,
-                     staging_table=None, run_params={"load_date": "2026-01-02"})
+                     total_rows=None, precount_ms=None,
+                     staging_table=None)
+
+# 已经发起过的任务。V16 要的是「第二次点同一行」——第一次 202、第二次 409。
+STARTED: set[str] = set()
 
 RUNS = {
     "rec-live": LIVE_STREAMING,
     "rec-accepted": LIVE_ACCEPTED,
     # V2：成功，终态 SWAPPED。
-    "rec-success": base_run(run_record_id="rec-success",
-                            run_params={"load_date": "2026-01-03"}),
+    "rec-success": base_run(run_record_id="rec-success", task_id="task-success"),
     # V3：校验失败，终态 DISCARDED，错误码 4xx。
     "rec-verify": base_run(
-        run_record_id="rec-verify", run_id="20260819121000_cccccc",
-        run_params={"load_date": "2026-01-04"},
+        run_record_id="rec-verify", task_id="task-verify", run_id="20260819121000_cccccc",
         outcome="FAILED", target_table_effect="DISCARDED",
         sink_code="VERIFY_FAILED", failure_kind="VERIFY_FAILED",
         sink_reported_rows=99998,
         message="目标端：行数校验未通过：暂存 100,000 行、目标端点到 99,998 行，暂存表已丢弃。"),
     # V4 / V7 / V11 / V22 / V23：映射预检失败。
     "rec-mapping": base_run(
-        run_record_id="rec-mapping", run_id="20260819121500_dddddd",
-        run_params={"load_date": "2026-01-05"},
+        run_record_id="rec-mapping", task_id="task-mapping", run_id="20260819121500_dddddd",
         outcome="FAILED", target_table_effect=None, staging_table=None,
         sink_code="PRECHECK_FAILED", failure_kind="MAPPING_PRECHECK",
         source_rows=0, staged_rows=None, sink_reported_rows=None, purged_rows=None,
@@ -164,23 +196,20 @@ RUNS = {
         mapping_issues=MAPPING_ISSUES),
     # V8：结局不明（进程消失）。
     "rec-unknown": base_run(
-        run_record_id="rec-unknown", run_id="20260819122000_eeeeee",
-        run_params={"load_date": "2026-01-06"},
+        run_record_id="rec-unknown", task_id="task-unknown", run_id="20260819122000_eeeeee",
         outcome="FAILED", target_table_effect="UNKNOWN",
         unknown_reason="PROCESS_DISAPPEARED", failure_kind="UNKNOWN",
         sink_code=None, message=None, finished_at=None),
     # V13 / V4 的 5xx 一例：哨兵逃逸，报文里带业务列与业务值。
     "rec-escape": base_run(
-        run_record_id="rec-escape", run_id="20260819122500_ffffff",
-        run_params={"load_date": "2026-01-07"},
+        run_record_id="rec-escape", task_id="task-escape", run_id="20260819122500_ffffff",
         outcome="FAILED", target_table_effect="DISCARDED",
         sink_code="INTERNAL_PRECHECK_ESCAPE", failure_kind="DEFECT",
         column="C_NAME", value="张三丰·测试客户名·2026",
         message="目标端：内部断言失败：预检放行的值在写入时被拒，暂存表已丢弃。"),
     # V15：run 未发起 —— 目标端不知道这次运行（源端就失败了）。
     "rec-not-started": base_run(
-        run_record_id="rec-not-started", run_id=None,
-        run_params={"load_date": "2026-01-08"},
+        run_record_id="rec-not-started", task_id="task-not-started", run_id=None,
         outcome="FAILED", target_table_effect=None, staging_table=None,
         sink_code=None, failure_kind="SOURCE_CONNECT",
         source_code="ORA-12541",
@@ -189,15 +218,16 @@ RUNS = {
         message="源端：连接 Oracle 失败：ORA-12541: TNS:no listener，未向 sink 发出请求。"),
 }
 
-RUNS_BY_DATE = {
-    "2026-01-01": "rec-live",
-    "2026-01-02": "rec-accepted",
-    "2026-01-03": "rec-success",
-    "2026-01-04": "rec-verify",
-    "2026-01-05": "rec-mapping",
-    "2026-01-06": "rec-unknown",
-    "2026-01-07": "rec-escape",
-    "2026-01-08": "rec-not-started",
+# 一个任务一个 run 态。发起没有对话框了，所以造态开关只能是**点哪一行**。
+RUNS_BY_TASK = {
+    "task-holding": "rec-live",
+    "task-accepted": "rec-accepted",
+    "task-success": "rec-success",
+    "task-verify": "rec-verify",
+    "task-mapping": "rec-mapping",
+    "task-unknown": "rec-unknown",
+    "task-escape": "rec-escape",
+    "task-not-started": "rec-not-started",
 }
 
 # 历史列表的顺序：先摆两个块（V5 要在同一屏上量 SWAPPED 与 DISCARDED），
@@ -273,6 +303,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
+        if path == "/api/agents":
+            return self._send(200, AGENTS)
         if path == "/api/datasources":
             return self._send(200, DATASOURCES)
         if path == "/api/tasks":
@@ -284,7 +316,7 @@ class Handler(BaseHTTPRequestHandler):
                 # 进行中那条在列表里也要有一行（V9 的 `.live-summary`、V16 的并发提示）。
                 rows.append(run if not run.get("live") else base_run(
                     run_record_id=run["run_record_id"], run_id=run["run_id"],
-                    run_params=run["run_params"], staging_table=run["staging_table"],
+                    staging_table=run["staging_table"],
                     outcome=None, target_table_effect=None, stage=run["stage"],
                     finished_at=None, sink_code=None, message=None, failure_kind=None,
                     source_rows=run["rows_pushed"], staged_rows=None,
@@ -303,8 +335,14 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/api/runs":
             body = self._read()
-            date = (body.get("run_params") or {}).get("load_date", "")
-            return self._send(202, {"run_record_id": RUNS_BY_DATE.get(date, "rec-success")})
+            task_id = body.get("task_id", "")
+            # V16：这个任务名下已经挂着一条进行中的 run，服务端当场回 409——
+            # 发起面上没有对话框可以预警了，那句话由屏顶的横幅报出来。
+            if task_id == "task-holding" and STARTED:
+                return self._send(409, {
+                    "error": {"message": "该任务已有一次运行进行中"}})
+            STARTED.add(task_id)
+            return self._send(202, {"run_record_id": RUNS_BY_TASK.get(task_id, "rec-success")})
         if path.startswith("/api/runs/") and path.endswith("/cancel"):
             key = path.split("/")[3]
             run = RUNS.get(key)
@@ -322,13 +360,11 @@ class Handler(BaseHTTPRequestHandler):
             spec = self._read()
             projection = ",\n       ".join(
                 f"a.{c['source']} AS {c['target']}" for c in spec.get("columns", []))
-            return self._send(200, {
-                "source_sql": f"SELECT {projection}\n  FROM {spec.get('owner')}.{spec.get('table')} a",
-                "run_parameters": [
-                    {"parameter": c["parameter"], "column": c["column"],
-                     "value_type": c["value_type"]}
-                    for c in spec.get("conditions", []) if c["value_source"] == "runtime"],
-            })
+            built = f"SELECT {projection}\n  FROM {spec.get('owner')}.{spec.get('table')} a"
+            clause = (spec.get("where_clause") or "").strip()
+            if clause:
+                built += "\n WHERE " + clause
+            return self._send(200, {"source_sql": built})
         if path == "/api/columns":
             spec = self._read().get("spec", {})
             return self._send(200, {

@@ -1,10 +1,10 @@
 # stunnel 双端隧道（#153 / ADR-0041 §4）
 
-`source` 把**目标库的 MySQL 口令随每个 run 的请求明文过线**给 `sink`（[ADR-0037](../../docs/adr/0037-datasource-model-and-credential-boundary.md) §4）。
+`source` 把**目标库的 MySQL 口令随每个 run 的请求明文过线**给 `sink`（`ADR-0037` §4）。
 那条前提原文是「通道必须可信——同主机、可信内网，或部署者自建 TLS / 隧道」。
 第二版第一次让它落到实处：通道是**互联网**，兑现方式是这一套。
 
-同时它让 `sink` 那条兜底原样成立：[ADR-0024](../../docs/adr/0024-m2-unauthenticated-inbound-exposure.md)
+同时它让 `sink` 那条兜底原样成立：`ADR-0024`
 说 `sink` 不做鉴权、靠**只绑回环**兜底。隧道服务端就落在目标端主机的回环上，
 公网上露出来的只有那个要证书才进得来的隧道口——`sink` 的 `listen` 一个字都不用改。
 
@@ -23,9 +23,14 @@
  └───────────────────────────┘                        └───────────────────────────┘
 ```
 
-**产品代码零改动**：`sink_base_url` 仍是 `http://127.0.0.1:8080`（`config/source.toml.example`
-里本来就是这个值），scheme 仍是 `http`，`crates/source/src/protocol.rs` 那条「非 http 一律拒」
-的校验一个字不动。明文只在两端各自的回环上走一小段，出机器之前已经进了 TLS。
+**产品代码零改动**：源端填的仍是 `http://127.0.0.1:8080`，scheme 仍是 `http`，
+`crates/source/src/protocol.rs` 那条「非 http 一律拒」的校验一个字不动。
+明文只在两端各自的回环上走一小段，出机器之前已经进了 TLS。
+
+> **2026-08-24（ADR-0044 §5）**：那个地址不再写在 `source.toml::sink_base_url` 里
+> （该字段已退役），而是在界面「目标端 Agent」屏注册一台 agent 时填的 `base_url`。
+> **隧道形态一个字未改**，方向也没变（源端拨、目标端听）；改的只是「这个地址存在哪儿、
+> 归谁管」。下面凡提到 `sink_base_url` 的地方，读作「注册 agent 时填的地址」。
 
 **为什么不做产品内 TLS**：`source` 的 `ureq` 编译时没带 TLS，加上放开 scheme 校验、
 `sink` 侧终结 TLS、四份台架重跑——一周的预算里它挤掉的是装机演练本身。

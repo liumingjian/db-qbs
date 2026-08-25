@@ -199,15 +199,26 @@ MYSQL_HOST=$(docker inspect -f '{{index .NetworkSettings.Networks "qbs-dst-side"
 echo "  Oracle（源端那边看到的）= ${ORACLE_HOST}:1521/${ORACLE_SERVICE}"
 echo "  MySQL（目标端那边看到的）= ${MYSQL_HOST}:3306/${MYSQL_DATABASE}"
 
-sub "② 两条数据源：Oracle 与目标库（目标库那条的凭据随 run 过线，测连要经隧道走到 sink）"
+sub "①.5 注册目标端 Agent（手册第 10.5 步）——目标库只能经它访问（ADR-0044 §1）"
+api POST /api/agents '{"name":"演练目标端","base_url":"http://127.0.0.1:8080"}'
+echo "  POST /api/agents → $API_STATUS $(head -c 160 <<<"$API_BODY")"
+AGENT_ID=$(jq -r '.agent_id // empty' <<<"$API_BODY")
+if [[ -z "$AGENT_ID" ]]; then
+  # 注册**探不通就不落库**，所以这里空着只有一种可能：隧道或目标端 agent 没起来。
+  api GET /api/agents
+  AGENT_ID=$(jq -r '.[0].agent_id // empty' <<<"$API_BODY")
+fi
+[[ -n "$AGENT_ID" ]] || die "目标端 agent 没注册上——隧道或 sink 没起（ADR-0044 §3：探不通就不落库）"
+
+sub "② 两条数据源：Oracle 与目标库（目标库那条绑上面那台 agent，凭据随 run 过线，测连要经隧道走到它）"
 api POST /api/datasources "$(jq -nc --arg cs "//${ORACLE_HOST}:1521/${ORACLE_SERVICE}" \
   --arg u "$ORACLE_USER" --arg p "$ORACLE_PASSWORD" \
   '{name:"演练 Oracle", kind:"oracle", connect_string:$cs, username:$u, password:$p}')"
 echo "  POST /api/datasources (oracle) → $API_STATUS"
 ORACLE_DS=$(jq -r '.datasource_id // empty' <<<"$API_BODY")
 api POST /api/datasources "$(jq -nc --arg h "$MYSQL_HOST" --arg u "$MYSQL_USER" \
-  --arg p "$MYSQL_PASSWORD" --arg d "$MYSQL_DATABASE" \
-  '{name:"演练目标库", kind:"mysql", host:$h, port:3306, username:$u, password:$p, database:$d}')"
+  --arg p "$MYSQL_PASSWORD" --arg d "$MYSQL_DATABASE" --arg a "$AGENT_ID" \
+  '{name:"演练目标库", kind:"mysql", agent_id:$a, host:$h, port:3306, username:$u, password:$p, database:$d}')"
 echo "  POST /api/datasources (mysql)  → $API_STATUS"
 TARGET_DS=$(jq -r '.datasource_id // empty' <<<"$API_BODY")
 [[ -n "$ORACLE_DS" && -n "$TARGET_DS" ]] || die "数据源没建成：oracle=$ORACLE_DS target=$TARGET_DS"
@@ -227,9 +238,9 @@ cols_status=$API_STATUS
 echo "  POST /api/builder/columns → $cols_status"
 jq -r '[.[] | "\(.name) \(.data_type)"] | join("，")' <<<"$API_BODY" 2>/dev/null | sed 's/^/    /' 
 
-sub "④ 组任务定义：四列映射 + 一条**运行时填**的过滤条件（业务日期）"
+sub "④ 组任务定义：四列映射 + 一段过滤条件（按业务日期的 WHERE 文本）"
 SPEC=$(jq -nc --arg owner "$(echo "$ORACLE_USER" | tr '[:lower:]' '[:upper:]')" \
-  --arg table "$SOURCE_TABLE" --arg target "$TARGET_TABLE" '{
+  --arg table "$SOURCE_TABLE" --arg target "$TARGET_TABLE" --arg biz_date "$BIZ_DATE" '{
     owner:$owner, table:$table, target_table:$target,
     primary_key:["ROW_ID"],
     columns:[
@@ -238,14 +249,13 @@ SPEC=$(jq -nc --arg owner "$(echo "$ORACLE_USER" | tr '[:lower:]' '[:upper:]')" 
       {source:"AMOUNT",    target:"AMOUNT"},
       {source:"LOAD_DATE", target:"LOAD_DATE"}
     ],
-    conditions:[{column:"LOAD_DATE", operator:"eq", value_type:"date",
-                 parameter:"load_date", value_source:"runtime", constant:""}]
+    where_clause:("LOAD_DATE = DATE \u0027" + $biz_date + "\u0027")
   }')
 api POST /api/builder/sql "$SPEC"
 echo "  POST /api/builder/sql → $API_STATUS"
 BUILT_SQL=$(jq -r '.source_sql // empty' <<<"$API_BODY")
 echo "$BUILT_SQL" | sed 's/^/    /'
-where_ok=$(grep -c 'WHERE a.LOAD_DATE = TO_DATE(:load_date' <<<"$BUILT_SQL")
+where_ok=$(grep -c "WHERE LOAD_DATE = DATE '$BIZ_DATE'" <<<"$BUILT_SQL")
 
 sub "⑤ 生成建表 DDL，交给 DBA 在目标库上建表（v1：目标表手工建，产品不自动建）"
 api POST /api/columns "$(jq -nc --arg ds "$ORACLE_DS" --argjson spec "$SPEC" '{datasource_id:$ds, spec:$spec}')"
@@ -274,8 +284,8 @@ echo "  POST /api/tasks → $API_STATUS"
 TASK_ID=$(jq -r '.task_id // empty' <<<"$API_BODY")
 [[ -n "$TASK_ID" ]] || die "任务没建成：$API_STATUS $(head -c 300 <<<"$API_BODY")"
 
-sub "⑦ 发起：把过滤条件的值填进去（${BIZ_DATE}，这一天五行；前一天那两行不该被搬走）"
-api POST /api/runs "$(jq -nc --arg t "$TASK_ID" --arg d "$BIZ_DATE" '{task_id:$t, run_params:{load_date:$d}}')"
+sub "⑦ 发起：点了就跑（过滤条件写在任务定义里，${BIZ_DATE} 这一天五行；前一天那两行不该被搬走）"
+api POST /api/runs "$(jq -nc --arg t "$TASK_ID" '{task_id:$t}')"
 echo "  POST /api/runs → $API_STATUS"
 RUN_RECORD=$(jq -r '.run_record_id // empty' <<<"$API_BODY")
 [[ -n "$RUN_RECORD" ]] || die "发起失败：$API_STATUS $(head -c 300 <<<"$API_BODY")"

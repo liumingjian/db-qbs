@@ -85,14 +85,10 @@ columns = [
 ]
 # 主键必选（所有者 2026-08-18 裁定）：撤掉 DELETE 之后，幂等全靠它。
 primary_key = ["ROW_ID"]
+# 过滤是一段自由 WHERE 文本，原样拼进生成语句的 `WHERE` 后面。
+# 台架按日期造态时替换的就是这一行（见 run-m1-acceptance.sh 的 `materialize_task`）。
+where_clause = "D_BIZ = DATE '2026-08-14'"
 
-[[spec.conditions]]
-column = "D_BIZ"
-operator = "eq"
-value_type = "date"
-parameter = "d_biz"
-value_source = "runtime"
-constant = ""
 
 # 两端连接直接写在任务文件里（ADR-0037 §1/§8）：编排进程在发起时把数据源解成明文塞进
 # 临时任务文件，M1 的 run 子进程是直接调起来的，没有编排进程，所以这一份由台架自己写死。
@@ -111,5 +107,3 @@ username = "spike"
 password = "spike123"
 database = "qbs"
 
-[run_params]
-d_biz = "2026-08-14"
