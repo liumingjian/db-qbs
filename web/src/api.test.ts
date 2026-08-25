@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   ApiError,
+  copyTaskCurl,
   createTask,
   deleteTask,
   emptySpec,
@@ -241,6 +242,28 @@ describe("run history API", () => {
     }));
   });
 
+});
+
+describe("task cURL API", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("copies the complete server response without assembling it in the browser", async () => {
+    const command = "curl --request POST 'https://qbs.test/api/runs' --data '{\"task_id\":\"task/01\"}'";
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ command }), { status: 200 }),
+    );
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(copyTaskCurl("task/01", writeText)).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/tasks/task%2F01/curl", {
+      headers: { Accept: "application/json" },
+    });
+    expect(writeText).toHaveBeenCalledWith(command);
+  });
 });
 
 describe("SQL builder API", () => {

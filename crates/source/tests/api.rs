@@ -454,6 +454,13 @@ fn every_route_reaches_its_handler() {
             200,
         ),
         (
+            Method::Get,
+            "/api/tasks/{}/curl",
+            format!("/api/tasks/{task_id}/curl"),
+            String::new(),
+            200,
+        ),
+        (
             Method::Put,
             "/api/tasks/{}",
             format!("/api/tasks/{task_id}"),
@@ -496,6 +503,52 @@ fn every_route_reaches_its_handler() {
         );
     }
     assert_eq!(covered.len(), routes().len(), "表里有路由表上没有的行");
+}
+
+#[test]
+fn task_curl_is_complete_server_assembled_and_uses_the_public_request_origin() {
+    let rig = Rig::new();
+    let task_id = rig.create_task(
+        "搬一次",
+        "HOLDINGS",
+        &("source-id".to_owned(), "target-id".to_owned()),
+    );
+    let request = Request::new(
+        Method::Get,
+        &format!("/api/tasks/{task_id}/curl"),
+        Vec::new(),
+    )
+    .with_header("Host", "qbs.example.test:8443")
+    .with_header("X-Forwarded-Proto", "https");
+
+    let response = rig.api().handle(&request);
+
+    assert_eq!(response.status, 200, "{}", response.body_text());
+    assert_eq!(
+        rig.json(&response)["command"],
+        format!(
+            "curl --request POST 'https://qbs.example.test:8443/api/runs' --header 'Content-Type: application/json' --data '{{\"task_id\":\"{task_id}\"}}'"
+        )
+    );
+}
+
+#[test]
+fn task_curl_rejects_unknown_tasks_and_untrusted_origin_shapes() {
+    let rig = Rig::new();
+    assert_eq!(rig.get("/api/tasks/missing/curl").status, 404);
+
+    let task_id = rig.create_task(
+        "搬一次",
+        "HOLDINGS",
+        &("source-id".to_owned(), "target-id".to_owned()),
+    );
+    let request = Request::new(
+        Method::Get,
+        &format!("/api/tasks/{task_id}/curl"),
+        Vec::new(),
+    )
+    .with_header("Host", "qbs.example.test/'bad");
+    assert_eq!(rig.api().handle(&request).status, 400);
 }
 
 /// 表里的先后**不承重**：字面量样式永远压过带占位的样式。
