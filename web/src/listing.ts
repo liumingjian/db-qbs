@@ -204,6 +204,17 @@ export function paginate<T>(
   };
 }
 
+/** The client-side page containing a task that must be revealed after creation. */
+export function pageContainingTask(
+  tasks: readonly Pick<Task, "task_id">[],
+  taskId: string,
+  pageSize: number = DEFAULT_PAGE_SIZE,
+): number {
+  const index = tasks.findIndex((task) => task.task_id === taskId);
+  const size = Math.max(1, Math.floor(pageSize));
+  return index < 0 ? 1 : Math.floor(index / size) + 1;
+}
+
 /**
  * 任务屏「源端 / 目标端」两个下拉的选项：`[id, 显示名]`，按显示名排序。
  *

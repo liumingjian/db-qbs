@@ -18,7 +18,6 @@ import type { FormEvent } from "react";
 import {
   createTask,
   deleteTask,
-  emptySpec,
   fetchBuilderColumns,
   fetchBuilderDblinks,
   fetchBuilderSqlColumns,
@@ -64,11 +63,13 @@ import {
 import { DatasourceScreen } from "./DatasourceScreen";
 import { evaluateEntry } from "./entry";
 import { TaskEntryDialog } from "./TaskEntryDialog";
+import { TaskWizardScreen } from "./TaskWizardScreen";
 import { FormField, Modal, ModalFooter } from "./ui";
+import { openNew, taskName, toSpec } from "./wizard";
+import type { Draft } from "./wizard";
 
 type DialogState =
   | { kind: "entry" }
-  | { kind: "create"; initial: TaskInput }
   | { kind: "edit"; task: Task }
   | { kind: "rename"; task: Task }
   | { kind: "delete"; task: Task }
@@ -83,7 +84,8 @@ type DialogState =
  * 落地页本来也一直是作业中心（见 `pageFromHash` 的兜底），导航第一项是 agent 时，
  * 高亮的那一项和展开的那一屏对不上。
  */
-type Page = "jobs" | "datasources" | "agents" | "settings";
+type NavigationPage = "jobs" | "datasources" | "agents" | "settings";
+type Page = NavigationPage | "wizard";
 
 /** 旧的运行历史地址。**重定向而不是 404**：它还在旧链接与旧文档里流通，接住比让人撞墙便宜。 */
 const RETIRED_HISTORY_HASHES = ["#history", "#/history"];
@@ -97,6 +99,9 @@ function pageFromHash(hash: string): Page {
   }
   if (hash === "#settings") {
     return "settings";
+  }
+  if (hash === "#wizard") {
+    return "wizard";
   }
   return "jobs";
 }
@@ -125,14 +130,14 @@ function writeCollapsed(collapsed: boolean) {
   }
 }
 
-const NAV_ITEMS: readonly { page: Page; label: string }[] = [
+const NAV_ITEMS: readonly { page: NavigationPage; label: string }[] = [
   { page: "jobs", label: "作业中心" },
   { page: "datasources", label: "数据源" },
   { page: "agents", label: "目标端 Agent" },
   { page: "settings", label: "系统设置" },
 ];
 
-function navIcon(page: Page, size: number) {
+function navIcon(page: NavigationPage, size: number) {
   switch (page) {
     case "agents":
       return <Radio size={size} aria-hidden="true" />;
@@ -144,13 +149,6 @@ function navIcon(page: Page, size: number) {
       return <Settings size={size} aria-hidden="true" />;
   }
 }
-
-const emptyTask: TaskInput = {
-  name: "",
-  source_datasource_id: "",
-  target_datasource_id: "",
-  spec: emptySpec(),
-};
 
 export function App() {
   const [page, setPage] = useState<Page>(() =>
@@ -177,6 +175,8 @@ export function App() {
    */
   const [runHistory, setRunHistory] = useState<RunHistory[]>([]);
   const [dialog, setDialog] = useState<DialogState>(null);
+  const [wizardDraft, setWizardDraft] = useState<Draft | null>(null);
+  const [focusTaskId, setFocusTaskId] = useState<string | null>(null);
   const [activeRun, setActiveRun] = useState<{
     task: Task;
     runRecordId: string;
@@ -276,6 +276,8 @@ export function App() {
     }
   }, []);
 
+  const consumeTaskFocus = useCallback(() => setFocusTaskId(null), []);
+
   useEffect(() => {
     let requestInFlight = false;
     const poll = window.setInterval(() => {
@@ -304,6 +306,12 @@ export function App() {
     return () => window.removeEventListener("hashchange", handleHashChange);
   }, []);
 
+  useEffect(() => {
+    if (page === "wizard" && wizardDraft === null) {
+      window.location.replace("#jobs");
+    }
+  }, [page, wizardDraft]);
+
   const latestRuns = useMemo(() => latestRunByTask(runHistory), [runHistory]);
 
   function toggleSider() {
@@ -323,13 +331,29 @@ export function App() {
 
   function navigate(nextPage: Page) {
     setActiveRun(null);
+    if (nextPage !== "wizard") setWizardDraft(null);
     setPage(nextPage);
     window.location.hash = nextPage;
   }
 
-  async function handleCreate(input: TaskInput) {
-    const created = await createTask(input);
+  async function handleWizardSubmit(draft: Draft, action: "start" | "save-only") {
+    const created = await createTask({
+      name: taskName(draft),
+      source_datasource_id: draft.source.datasource_id,
+      target_datasource_id: draft.target.datasource_id,
+      spec: toSpec(draft),
+    });
     setTasks((currentTasks) => [...(currentTasks ?? []), created]);
+    if (action === "start") {
+      try {
+        await startRun(created.task_id);
+      } catch (error) {
+        setStartError(`${created.name} 已保存，但发起失败：${messageFrom(error)}`);
+      }
+    }
+    setFocusTaskId(created.task_id);
+    navigate("jobs");
+    void loadList();
   }
 
   async function handleUpdate(task: Task, input: TaskInput) {
@@ -376,7 +400,7 @@ export function App() {
   }
 
   // 运行详情不属于任何导航项——面包屑早就这么认了，导航高亮以前还停在上一页。
-  const navPage = activeRun !== null ? null : page;
+  const navPage = activeRun !== null || page === "wizard" ? null : page;
   const foldLabel = collapsed ? "展开侧边栏" : "折叠侧边栏";
 
   return (
@@ -448,7 +472,7 @@ export function App() {
           </span>
         </header>
 
-        <div className="content">
+        <div className={`content ${page === "wizard" ? "is-wizard" : ""}`}>
           {loadError !== null && page === "jobs" && (
             <div className="notice is-error" role="alert">
               <span>{loadError}</span>
@@ -505,6 +529,16 @@ export function App() {
                  上一次没有留下任何需要预填的取值，所以也没有第二条代码路径。 */
               onRerun={handleStart}
               onChanged={() => void loadList()}
+              focusTaskId={focusTaskId}
+              onFocusConsumed={consumeTaskFocus}
+            />
+          )}
+
+          {activeRun === null && page === "wizard" && wizardDraft !== null && (
+            <TaskWizardScreen
+              initial={wizardDraft}
+              onCancel={() => navigate("jobs")}
+              onSubmit={handleWizardSubmit}
             />
           )}
 
@@ -530,16 +564,6 @@ export function App() {
           {activeRun === null && page === "settings" && <SettingsScreen />}
         </div>
 
-        {page === "jobs" && dialog?.kind === "create" && (
-          <TaskFormDialog
-            title="新建任务"
-            initial={dialog.initial}
-            datasources={datasources}
-            submitLabel="新建"
-            onClose={closeDialog}
-            onSubmit={handleCreate}
-          />
-        )}
         {page === "jobs" && dialog?.kind === "entry" && (
           <TaskEntryDialog
             guard={evaluateEntry(datasources, agents, datasourcesLoading)}
@@ -548,17 +572,21 @@ export function App() {
               closeDialog();
               navigate(fix);
             }}
-            onContinue={(sourceDatasourceId, targetDatasourceId) =>
-              setDialog({
-                kind: "create",
-                initial: {
-                  ...emptyTask,
-                  spec: emptySpec(),
-                  source_datasource_id: sourceDatasourceId,
-                  target_datasource_id: targetDatasourceId,
-                },
-              })
-            }
+            onContinue={(sourceDatasourceId, targetDatasourceId) => {
+              const guard = evaluateEntry(datasources, agents, datasourcesLoading);
+              if (guard.kind !== "open") return;
+              const source = guard.sources.find((option) => option.datasource_id === sourceDatasourceId);
+              const target = guard.targets.find((option) => option.datasource_id === targetDatasourceId);
+              if (source === undefined || target === undefined) return;
+              setDialog(null);
+              setWizardDraft(openNew(
+                { datasource_id: source.datasource_id, name: source.name },
+                { datasource_id: target.datasource_id, name: target.name },
+                target.agentStatus === "online",
+              ));
+              setPage("wizard");
+              window.location.hash = "wizard";
+            }}
           />
         )}
         {page === "jobs" && dialog?.kind === "edit" && (
@@ -601,6 +629,8 @@ function pageLabel(page: Page): string {
       return "数据源";
     case "settings":
       return "系统设置";
+    case "wizard":
+      return "新建导入";
   }
 }
 

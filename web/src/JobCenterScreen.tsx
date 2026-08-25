@@ -10,7 +10,7 @@ import {
   Tag,
   Trash2,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { copyTaskCurl, deleteTask, startRun } from "./api";
 import type { Datasource, RunHistory, Task } from "./api";
@@ -24,6 +24,7 @@ import {
   LATEST_RUN_ORDER,
   latestRunStatus,
   paginate,
+  pageContainingTask,
   taskMatchesFilters,
 } from "./listing";
 import type { LatestRunStatus, TaskFilters } from "./listing";
@@ -63,6 +64,8 @@ export interface JobCenterProps {
   onRerun: (task: Task) => void;
   /** 批量删除跑完之后要重读清单——本屏不改 `App` 的 state。 */
   onChanged: () => void;
+  focusTaskId: string | null;
+  onFocusConsumed: () => void;
 }
 
 export function JobCenterScreen({
@@ -79,6 +82,8 @@ export function JobCenterScreen({
   onStart,
   onRerun,
   onChanged,
+  focusTaskId,
+  onFocusConsumed,
 }: JobCenterProps) {
   // 筛选条上**正在填**的那一组与**已生效**的那一组分开存：查询是显式的，
   // 改一下下拉不重筛（ADR-0042 §1 的既有裁定，走查 X10）。
@@ -95,6 +100,16 @@ export function JobCenterScreen({
     taskId: string;
     error: string | null;
   } | null>(null);
+  const focusedRow = useRef<HTMLTableRowElement | null>(null);
+
+  useEffect(() => {
+    if (focusTaskId === null || !(tasks ?? []).some((task) => task.task_id === focusTaskId)) {
+      return;
+    }
+    setDraft(EMPTY_TASK_FILTERS);
+    setFilters(EMPTY_TASK_FILTERS);
+    setPage(pageContainingTask(tasks ?? [], focusTaskId, pageSize));
+  }, [focusTaskId, pageSize, tasks]);
 
   const filtered = useMemo(
     () =>
@@ -224,6 +239,22 @@ export function JobCenterScreen({
   const pageIds = slice.rows.map((task) => task.task_id);
   const allOnPageSelected =
     pageIds.length > 0 && pageIds.every((id) => selected.has(id));
+  const focusedOnPage =
+    focusTaskId !== null && slice.rows.some((task) => task.task_id === focusTaskId);
+
+  useEffect(() => {
+    if (!focusedOnPage) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      focusedRow.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+    const timeout = window.setTimeout(onFocusConsumed, 1800);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(timeout);
+    };
+  }, [focusTaskId, focusedOnPage, onFocusConsumed]);
 
   return (
     <>
@@ -416,6 +447,8 @@ export function JobCenterScreen({
           onOpen={setOpenTaskId}
           copiedTaskId={copyStatus?.error === null ? copyStatus.taskId : null}
           onCopyCurl={(task) => void copyCurl(task)}
+          focusTaskId={focusTaskId}
+          focusedRow={focusedRow}
         />
 
         {hasTasks && (
@@ -530,6 +563,8 @@ function JobResults({
   onOpen,
   copiedTaskId,
   onCopyCurl,
+  focusTaskId,
+  focusedRow,
 }: {
   tasks: Task[] | null;
   filtered: Task[];
@@ -550,6 +585,8 @@ function JobResults({
   onOpen: (taskId: string) => void;
   copiedTaskId: string | null;
   onCopyCurl: (task: Task) => void;
+  focusTaskId: string | null;
+  focusedRow: React.RefObject<HTMLTableRowElement | null>;
 }) {
   if (tasks === null) {
     return (
@@ -621,7 +658,11 @@ function JobResults({
             const progress = progressOf(run);
             const source = sourceSummary(task.spec);
             return (
-              <tr key={task.task_id}>
+              <tr
+                className={task.task_id === focusTaskId ? "is-new-task" : undefined}
+                key={task.task_id}
+                ref={task.task_id === focusTaskId ? focusedRow : undefined}
+              >
                 <td className="check-column">
                   <input
                     type="checkbox"
