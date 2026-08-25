@@ -34,6 +34,27 @@ export interface TaskSpec {
   where_clause?: string;
 }
 
+export type TargetCheckKind =
+  | "missing_column"
+  | "nullability_mismatch"
+  | "insufficient_length_or_precision"
+  | "primary_key_mismatch"
+  | "type_not_whitelisted";
+
+export interface CheckFinding {
+  column: string | null;
+  kind: TargetCheckKind;
+  expected: string;
+  actual: string;
+  message: string;
+}
+
+export interface TargetCheckResult {
+  ok: boolean;
+  findings: CheckFinding[];
+  suggested_ddl: string | null;
+}
+
 /**
  * 数据源（ADR-0037）。**响应里永远没有 `password`，连密文都没有**（§5）——
  * 界面上只看得到 `has_password` 的「已设置 / 未设置」。
@@ -652,6 +673,24 @@ export async function fetchTargetColumns(
     "/api/target/columns",
     { datasource_id: datasourceId, target_table: targetTable },
     "读取目标列失败",
+  );
+}
+
+export async function checkTargetTable(
+  sourceDatasourceId: string,
+  targetDatasourceId: string,
+  targetTable: string,
+  spec: TaskSpec,
+): Promise<TargetCheckResult> {
+  return postJson<TargetCheckResult>(
+    "/api/target/check",
+    {
+      source_datasource_id: sourceDatasourceId,
+      target_datasource_id: targetDatasourceId,
+      target_table: targetTable,
+      spec,
+    },
+    "检查目标表失败",
   );
 }
 

@@ -8,7 +8,7 @@ use db_qbs_sink::{
     build_staging_ddl, check_connection_settings, precheck, precheck_with_primary_key,
     CreateStagingError, DropStagingError, FixedDestination, OpenOutcome, OpenRunRequest,
     PrecheckMode, RangeCheckColumn, RangeCheckResult, SinkConfig, SinkService, SourceColumn,
-    TargetColumn, TargetConnection, TargetKey,
+    TargetCheckKind, TargetCheckRequest, TargetColumn, TargetConnection, TargetKey,
 };
 
 const RUN_ID: &str = "20260814091530_a3f19c";
@@ -654,6 +654,132 @@ fn open_request(source_columns: Vec<SourceColumn>) -> OpenRunRequest {
         source_columns,
         range_check_results: None,
     }
+}
+
+fn check_request(source_columns: Vec<SourceColumn>, primary_key: Vec<&str>) -> TargetCheckRequest {
+    let open = open_request(Vec::new());
+    TargetCheckRequest {
+        target: open.target,
+        target_table: open.target_table,
+        source_columns,
+        primary_key: primary_key.into_iter().map(str::to_owned).collect(),
+    }
+}
+
+fn check_kinds(
+    source_columns: Vec<SourceColumn>,
+    target_columns: Vec<TargetColumn>,
+    target_keys: Vec<TargetKey>,
+    primary_key: Vec<&str>,
+) -> Vec<TargetCheckKind> {
+    let destination = Arc::new(InMemoryDestination {
+        columns: target_columns,
+        keys: target_keys,
+        ..InMemoryDestination::default()
+    });
+    SinkService::new("qbs", destination)
+        .check_target(check_request(source_columns, primary_key))
+        .unwrap()
+        .findings
+        .into_iter()
+        .map(|finding| finding.kind)
+        .collect()
+}
+
+#[test]
+fn target_check_has_one_typed_case_for_every_public_finding_kind() {
+    let varchar = || source_column("C_NAME", "VARCHAR2", None, None, Some(10));
+    let target_varchar = |length, nullable| {
+        target_column(
+            "C_NAME",
+            "varchar",
+            "varchar",
+            None,
+            None,
+            Some(length),
+            None,
+            nullable,
+            Some("utf8mb4"),
+            1,
+        )
+    };
+
+    assert_eq!(
+        check_kinds(vec![varchar()], vec![], vec![], vec![]),
+        vec![TargetCheckKind::MissingColumn]
+    );
+    assert_eq!(
+        check_kinds(
+            vec![varchar()],
+            vec![target_varchar(10, false)],
+            vec![],
+            vec![]
+        ),
+        vec![TargetCheckKind::NullabilityMismatch]
+    );
+    assert_eq!(
+        check_kinds(
+            vec![varchar()],
+            vec![target_varchar(3, true)],
+            vec![],
+            vec![]
+        ),
+        vec![TargetCheckKind::InsufficientLengthOrPrecision]
+    );
+
+    let id = source_column("ID", "NUMBER", Some(10), Some(0), None);
+    let target_id = target_column(
+        "ID",
+        "decimal(10,0)",
+        "decimal",
+        Some(10),
+        Some(0),
+        None,
+        None,
+        false,
+        None,
+        1,
+    );
+    assert_eq!(
+        check_kinds(vec![id], vec![target_id], vec![], vec!["ID"]),
+        vec![TargetCheckKind::PrimaryKeyMismatch]
+    );
+
+    let blob = source_column("PAYLOAD", "BLOB", None, None, None);
+    let target_blob = target_column(
+        "PAYLOAD", "blob", "blob", None, None, None, None, true, None, 1,
+    );
+    assert_eq!(
+        check_kinds(vec![blob], vec![target_blob], vec![], vec![]),
+        vec![TargetCheckKind::TypeNotWhitelisted]
+    );
+}
+
+#[test]
+fn target_check_reuses_the_run_precheck_conclusion_and_never_invents_ddl() {
+    let (sources, targets) = valid_columns();
+    let destination = Arc::new(InMemoryDestination {
+        columns: targets.clone(),
+        ..InMemoryDestination::default()
+    });
+    let result = SinkService::new("qbs", destination)
+        .check_target(check_request(sources.clone(), vec!["D_BIZ"]))
+        .unwrap();
+
+    assert!(precheck_with_primary_key(
+        "T_POSITION",
+        &["D_BIZ".to_owned()],
+        &sources,
+        &targets,
+        &[TargetKey {
+            name: "PRIMARY".to_owned(),
+            columns: vec!["D_BIZ".to_owned()]
+        }],
+    )
+    .is_empty());
+    assert!(result.ok);
+    assert!(result.findings.is_empty());
+    assert_eq!(result.suggested_ddl, None);
 }
 
 #[test]

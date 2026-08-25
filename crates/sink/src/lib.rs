@@ -19,7 +19,8 @@ use serde_json::Value;
 pub use db_qbs_shared::{
     AbortResponse, BatchPayload, BatchResponse, ColumnSupport, CommitRequest, CommitResponse,
     ErrorBody, ErrorEnvelope, OpenOutcome, OpenRunRequest, OpenRunResponse, PrecheckIssue,
-    RangeCheckColumn, RangeCheckResult, RunResponse, SourceColumn, TargetConnection, Terminal,
+    RangeCheckColumn, RangeCheckResult, RunResponse, SourceColumn, TargetCheckFinding,
+    TargetCheckKind, TargetCheckRequest, TargetCheckResult, TargetConnection, Terminal,
 };
 // 九行形态的推导也只有一份定义（#125）——判定式仍两端各一份。
 pub use agent::load_or_create as load_agent_identity;
@@ -31,7 +32,7 @@ pub use http::serve;
 pub use mysql_destination::{check_connection_settings, MysqlDestination, MysqlFactory};
 // `precheck` 是不带主键那一支，只给「生成的表喂回预检必过」那道漂移闸用；
 // 带主键那一支同样导出，因为漂移闸现在还要守「生成的 DDL 带主键，ADR-0035 §2 三条得过」。
-pub use precheck::{precheck, precheck_with_primary_key};
+pub use precheck::{precheck, precheck_with_primary_key, target_check_findings};
 pub use service::build_staging_ddl;
 pub use service::PrecheckMode;
 

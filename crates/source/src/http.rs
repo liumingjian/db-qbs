@@ -33,7 +33,8 @@ use crate::{
     embedded_web_asset, fetch_agent_info, generate_target_ddl, validate_builder_dblink,
     validate_source_sql, Agent, AgentEndpoint, AgentInput, AgentStore, ColumnPrecision,
     DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess, OracleRowSource,
-    RunHistory, SourceConfig, TargetConnection, Task, TaskConfig, TaskInput, TaskSpec, TaskStore,
+    RunHistory, SourceColumn, SourceConfig, SourceReadError, TargetCheckRequest,
+    TargetCheckResult, TargetConnection, Task, TaskConfig, TaskInput, TaskSpec, TaskStore,
     UnknownReason,
 };
 
@@ -127,6 +128,15 @@ struct TargetMetadataInput {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct TargetCheckInput {
+    source_datasource_id: String,
+    target_datasource_id: String,
+    target_table: String,
+    spec: TaskSpec,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BuilderColumnsInput {
     datasource_id: String,
     dblink: Option<String>,
@@ -157,6 +167,7 @@ pub struct Api<'a> {
     pub agents: &'a AgentRegistry,
     pub history: &'a HistoryStore,
     pub runs: &'a RunRegistry,
+    pub describe_source: fn(&OracleAccess, &TaskSpec) -> Result<Vec<SourceColumn>, SourceReadError>,
 }
 
 /// HTTP 方法。认不出来的方法落进 `Other`，而路由表里只有前四种，所以它必然 404——
@@ -363,6 +374,9 @@ pub fn routes() -> &'static [Route] {
             }),
             Route::new(Post, "/api/target/columns", |state, request, _id| {
                 handle_target_columns(request, state)
+            }),
+            Route::new(Post, "/api/target/check", |state, request, _id| {
+                handle_target_check(request, state)
             }),
             Route::new(Post, "/api/runs", |state, request, _id| {
                 handle_start_run(request, state)
@@ -1418,6 +1432,80 @@ fn handle_target_columns(request: &Request, state: &Api<'_>) -> HttpResponse {
         Ok(body) => json_response(200, &body),
         Err(error) => json_response(502, &json!({ "kind": "sink", "message": error })),
     }
+}
+
+fn handle_target_check(request: &Request, state: &Api<'_>) -> HttpResponse {
+    let input: TargetCheckInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    if let Err(error) = input.spec.validate() {
+        return bad_request(error);
+    }
+    if input.target_table.trim().is_empty() {
+        return bad_request("target_table 不能为空".to_owned());
+    }
+    if !input
+        .target_table
+        .eq_ignore_ascii_case(&input.spec.target_table)
+    {
+        return bad_request("target_table 必须与 spec.target_table 一致".to_owned());
+    }
+
+    let access = match oracle_access(state, &input.source_datasource_id) {
+        Ok(access) => access,
+        Err(error) => return bad_request(error),
+    };
+    let source_columns = match (state.describe_source)(&access, &input.spec) {
+        Ok(columns) => columns,
+        Err(error) => return oracle_failure(error),
+    };
+    let target = match state
+        .datasources
+        .target_connection(&input.target_datasource_id)
+    {
+        Ok(target) => target,
+        Err(error) => return bad_request(error),
+    };
+    let agent = match resolve_target_agent(state, &input.target_datasource_id) {
+        Ok(agent) => agent,
+        Err(error) => return json_response(502, &json!({ "kind": "agent", "message": error })),
+    };
+    let sink_body = match post_to_sink(
+        &agent.base_url,
+        "/v1/target/check",
+        &serde_json::to_value(TargetCheckRequest {
+            target,
+            target_table: input.target_table.clone(),
+            source_columns: source_columns.clone(),
+            primary_key: input.spec.primary_key.clone(),
+        })
+        .expect("target check request must serialize"),
+    ) {
+        Ok(body) => body,
+        Err(error) => return json_response(502, &json!({ "kind": "sink", "message": error })),
+    };
+    let mut result: TargetCheckResult = match serde_json::from_value(sink_body) {
+        Ok(result) => result,
+        Err(error) => {
+            return json_response(
+                502,
+                &json!({ "kind": "sink", "message": format!("目标端检查回话形状无效：{error}") }),
+            )
+        }
+    };
+    result.suggested_ddl = if result.ok {
+        None
+    } else {
+        generate_target_ddl(
+            &source_columns,
+            &input.target_table,
+            &input.spec.primary_key,
+            None,
+        )
+        .ok()
+    };
+    json_response(200, &result)
 }
 
 /// 往 sink 发一个「不属于任何 run」的元数据请求，把 JSON 回话原样带回来。

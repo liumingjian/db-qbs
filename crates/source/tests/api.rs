@@ -15,7 +15,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use db_qbs_source::http::{routes, Api, Method, Request, Response, RunState};
-use db_qbs_source::{AgentStore, DatasourceStore, HistoryStore, SourceConfig, TaskStore};
+use db_qbs_source::{
+    AgentStore, DatasourceStore, HistoryStore, OracleAccess, OracleRowSource, SourceColumn,
+    SourceConfig, SourceReadError, TaskSpec, TaskStore,
+};
 use serde_json::Value;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -122,6 +125,16 @@ impl Rig {
     }
 
     fn api(&self) -> Api<'_> {
+        self.api_with_describer(OracleRowSource::describe)
+    }
+
+    fn api_with_describer(
+        &self,
+        describe_source: fn(
+            &OracleAccess,
+            &TaskSpec,
+        ) -> Result<Vec<SourceColumn>, SourceReadError>,
+    ) -> Api<'_> {
         Api {
             config: &self.config,
             config_path: &self.config_path,
@@ -130,6 +143,7 @@ impl Rig {
             agents: &self.agents,
             history: &self.history,
             runs: &self.runs,
+            describe_source,
         }
     }
 
@@ -144,6 +158,22 @@ impl Rig {
 
     fn post(&self, url: &str, body: &str) -> Response {
         self.send(Method::Post, url, body)
+    }
+
+    fn post_with_describer(
+        &self,
+        url: &str,
+        body: &str,
+        describe_source: fn(
+            &OracleAccess,
+            &TaskSpec,
+        ) -> Result<Vec<SourceColumn>, SourceReadError>,
+    ) -> Response {
+        self.api_with_describer(describe_source).handle(&Request::new(
+            Method::Post,
+            url,
+            body.as_bytes().to_vec(),
+        ))
     }
 
     fn put(&self, url: &str, body: &str) -> Response {
@@ -420,6 +450,13 @@ fn every_route_reaches_its_handler() {
             "/api/target/columns",
             "/api/target/columns".into(),
             format!(r#"{{"datasource_id":"{target_id}","target_table":"HOLDINGS"}}"#),
+            502,
+        ),
+        (
+            Method::Post,
+            "/api/target/check",
+            "/api/target/check".into(),
+            format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"primary_key":["ID"]}}}}"#),
             502,
         ),
         (
@@ -1226,6 +1263,59 @@ fn recording_agent() -> (String, Arc<Mutex<Vec<String>>>) {
     (url, seen)
 }
 
+fn target_check_agent(check_body: Value) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut head = [0_u8; 4096];
+            let read = stream.read(&mut head).unwrap_or(0);
+            let request_line = String::from_utf8_lossy(&head[..read])
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            let body = if request_line.contains("/v1/agent/info") {
+                r#"{"agent_id":"check-agent","name":"检查桩","version":"0.0.0-test"}"#.to_owned()
+            } else if request_line.contains("/v1/target/check") {
+                serde_json::to_string(&check_body).unwrap()
+            } else {
+                r#"{"error":{"code":"BAD_REQUEST","message":"unexpected path","run_id":null,"details":{}}}"#.to_owned()
+            };
+            let status = if request_line.contains("/v1/agent/info")
+                || request_line.contains("/v1/target/check")
+            {
+                "200 OK"
+            } else {
+                "404 Not Found"
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.flush();
+        }
+    });
+    url
+}
+
+fn described_id(
+    _access: &OracleAccess,
+    _spec: &TaskSpec,
+) -> Result<Vec<SourceColumn>, SourceReadError> {
+    Ok(vec![SourceColumn {
+        name: "ID".to_owned(),
+        data_type: "NUMBER".to_owned(),
+        precision: Some(10),
+        scale: Some(0),
+        length: None,
+        fsp: None,
+        support: None,
+    }])
+}
+
 /// 一台**可以停掉**的 agent 桩：注册时它活着，`stop()` 之后端口上没人应答。
 struct StoppableAgent {
     url: String,
@@ -1452,6 +1542,118 @@ fn the_target_metadata_proxy_resolves_credentials_and_writes_nothing() {
 
     // 不进任务定义、不进 SQLite、不留临时文件——目录里一个新条目都没有。
     assert_eq!(directory_entries(&rig.directory), files_before);
+}
+
+#[test]
+fn target_check_proxies_every_typed_kind_and_attaches_ddl_only_when_failed() {
+    let rig = Rig::new();
+    let source_id = rig.create_oracle_datasource("源库");
+    let findings = [
+        "missing_column",
+        "nullability_mismatch",
+        "insufficient_length_or_precision",
+        "primary_key_mismatch",
+        "type_not_whitelisted",
+    ]
+    .into_iter()
+    .map(|kind| {
+        serde_json::json!({
+            "column": "ID",
+            "kind": kind,
+            "expected": "DECIMAL(10,0)",
+            "actual": "<missing>",
+            "message": format!("{kind} finding"),
+        })
+    })
+    .collect::<Vec<_>>();
+    let agent_url = target_check_agent(serde_json::json!({
+        "ok": false,
+        "findings": findings,
+        "suggested_ddl": null,
+    }));
+    let registered = rig.post(
+        "/api/agents",
+        &format!(r#"{{"name":"目标检查","base_url":"{agent_url}"}}"#),
+    );
+    let agent_id = rig.json(&registered)["agent_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let request = format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"primary_key":["ID"]}}}}"#);
+
+    let response = rig.post_with_describer("/api/target/check", &request, described_id);
+    assert_eq!(response.status, 200, "{}", response.body_text());
+    let body = rig.json(&response);
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["findings"].as_array().unwrap().len(), 5);
+    for kind in [
+        "missing_column",
+        "nullability_mismatch",
+        "insufficient_length_or_precision",
+        "primary_key_mismatch",
+        "type_not_whitelisted",
+    ] {
+        assert!(body["findings"].as_array().unwrap().iter().any(|finding| finding["kind"] == kind));
+    }
+    assert!(body["suggested_ddl"]
+        .as_str()
+        .unwrap()
+        .contains("CREATE TABLE `HOLDINGS`"));
+
+    let ok_url = target_check_agent(serde_json::json!({
+        "ok": true,
+        "findings": [],
+        "suggested_ddl": "must be discarded",
+    }));
+    let ok_agent = rig.post(
+        "/api/agents",
+        &format!(r#"{{"name":"目标检查通过","base_url":"{ok_url}"}}"#),
+    );
+    let ok_agent_id = rig.json(&ok_agent)["agent_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let ok_target_id = rig.create_mysql_datasource("目标库通过", &ok_agent_id);
+    let ok_request = request.replace(&target_id, &ok_target_id);
+    let ok = rig.post_with_describer("/api/target/check", &ok_request, described_id);
+    assert_eq!(ok.status, 200, "{}", ok.body_text());
+    assert_eq!(rig.json(&ok)["suggested_ddl"], Value::Null);
+}
+
+#[test]
+fn target_check_maps_request_datasource_agent_and_sink_failures_at_their_boundaries() {
+    let rig = Rig::new();
+    assert_eq!(rig.post("/api/target/check", "{}").status, 400);
+
+    let source_id = rig.create_oracle_datasource("源库");
+    let check_body = |target_id: &str| format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"primary_key":["ID"]}}}}"#);
+    let invalid_target = check_body(&source_id);
+    let wrong_kind = rig.post_with_describer("/api/target/check", &invalid_target, described_id);
+    assert_eq!(wrong_kind.status, 400, "{}", wrong_kind.body_text());
+
+    let agent_id = rig.register_agent("拒绝检查的目标端");
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let sink_failure = check_body(&target_id);
+    let sink = rig.post_with_describer("/api/target/check", &sink_failure, described_id);
+    assert_eq!(sink.status, 502, "{}", sink.body_text());
+    assert_eq!(rig.json(&sink)["kind"], "sink");
+
+    let mut stopped = StoppableAgent::start();
+    let registered = rig.post(
+        "/api/agents",
+        &format!(r#"{{"name":"会停的目标端","base_url":"{}"}}"#, stopped.url),
+    );
+    let stopped_id = rig.json(&registered)["agent_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let stopped_target = rig.create_mysql_datasource("已离线目标库", &stopped_id);
+    stopped.stop();
+    let agent_failure = check_body(&stopped_target);
+    let agent = rig.post_with_describer("/api/target/check", &agent_failure, described_id);
+    assert_eq!(agent.status, 502, "{}", agent.body_text());
+    assert_eq!(rig.json(&agent)["kind"], "agent");
 }
 
 /// 草稿测连吃的是**表单里当前填的那组值**，不是库里存的那条，而且一个字节都不落盘。

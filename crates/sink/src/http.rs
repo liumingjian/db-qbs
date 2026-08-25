@@ -10,7 +10,7 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use crate::{
     load_agent_identity, ApiError, BatchPayload, CommitRequest, Destination, DestinationFactory,
     MysqlDestination, MysqlFactory, OpenRunRequest, PrecheckMode, SinkConfig, SinkService,
-    TargetConnection,
+    TargetCheckRequest, TargetConnection,
 };
 
 const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
@@ -122,6 +122,8 @@ fn handle_request<F: DestinationFactory>(
         handle_target_tables(&mut request)
     } else if method == Method::Post && path == "/v1/target/columns" {
         handle_target_columns(&mut request)
+    } else if method == Method::Post && path == "/v1/target/check" {
+        handle_target_check(&mut request, service)
     } else if method == Method::Post {
         match run_action(&path) {
             Some((run_id, "batches")) => handle_batch(&mut request, service, run_id),
@@ -326,6 +328,23 @@ fn handle_target_columns(request: &mut Request) -> HttpResponse {
         Err(message) => return error_response(target_environment(message)),
     };
     json_response(200, &json!({ "columns": columns, "keys": keys }))
+}
+
+fn handle_target_check<F: DestinationFactory>(
+    request: &mut Request,
+    service: &SinkService<F>,
+) -> HttpResponse {
+    if !has_json_content_type(request) {
+        return error_response(unsupported_media_type(None));
+    }
+    let payload: TargetCheckRequest = match read_json(request) {
+        Ok(payload) => payload,
+        Err(error) => return error_response(error),
+    };
+    match service.check_target(payload) {
+        Ok(result) => json_response(200, &result),
+        Err(error) => error_response(error),
+    }
 }
 
 /// 错误码闭集不增（ADR-0010 十五码，ADR-0038 §9）：目标端连不上或查不动，
@@ -591,6 +610,20 @@ mod tests {
             &format!(r#"{{"target":{target}}}"#),
         );
         assert_eq!(status, 400, "{missing_table}");
+    }
+
+    #[test]
+    fn target_check_endpoint_returns_the_typed_precheck_result() {
+        let service = Arc::new(SinkService::new("qbs", Arc::new(d_biz_destination())));
+        let body = format!(
+            r#"{{{TARGET_JSON}"target_table":"T_POSITION","primary_key":["D_BIZ"],"source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
+        );
+
+        let (status, result) = exchange(service, "/v1/target/check", &body);
+        assert_eq!(status, 200, "{result}");
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["findings"], json!([]));
+        assert!(result["suggested_ddl"].is_null());
     }
 
     /// 夹具的身份。**不落盘**：这一层测的是路由与报文，身份怎么来的由

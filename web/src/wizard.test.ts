@@ -15,7 +15,8 @@ import {
   toSpec,
   view,
 } from "./wizard";
-import type { Applied, Change, Draft, PreviewResult, TargetCheckResult } from "./wizard";
+import type { TargetCheckResult } from "./api";
+import type { Applied, Change, Draft, PreviewResult } from "./wizard";
 
 const SOURCE = { datasource_id: "ds-oracle", name: "生产 Oracle" };
 const TARGET = { datasource_id: "ds-mysql", name: "报表 MySQL" };
@@ -312,6 +313,30 @@ describe("the advance gate", () => {
     expect(canAdvance(draft, 3)).toEqual([]);
     draft = done(apply(draft, { type: "toggle-column", source: "D_BIZ" }));
     expect(canAdvance(draft, 3).map((blocker) => blocker.message)).toEqual(["请先运行目标表检查"]);
+  });
+
+  it("blocks step 3 when the fresh server check reports a finding", () => {
+    let draft = withTargetColumns(workedDraft());
+    draft = done(apply(draft, {
+      type: "check-arrived",
+      check: {
+        ok: false,
+        findings: [{
+          column: "C_NAME",
+          kind: "insufficient_length_or_precision",
+          expected: "VARCHAR(90)",
+          actual: "varchar(30)",
+          message: "目标 VARCHAR 长度不足",
+        }],
+        suggested_ddl: "CREATE TABLE `t_customer` (...) ",
+      },
+    }));
+
+    expect(canAdvance(draft, 3)).toEqual([{
+      step: 3,
+      column: null,
+      message: "目标表检查未通过（1 项）",
+    }]);
   });
 
   it("excuses the check when editing against an offline agent", () => {

@@ -490,6 +490,19 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .wizard-confirm-grid dt { color: var(--mute); font-size: var(--size-cap); }
 .wizard-confirm-grid dd { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0; overflow-wrap: anywhere; }
 .mapping-chip { padding: 3px 7px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--mute-bg); font-family: var(--font-num); font-size: var(--size-cap); }
+.target-check-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); background: var(--mute-bg); }
+.target-check-toolbar > strong { font-size: var(--size-body); font-weight: var(--weight-em); }
+.target-check-findings { display: flex; flex-direction: column; border: 1px solid var(--crit-bd); }
+.target-check-findings article { padding: 11px 13px; border-bottom: 1px solid var(--crit-bd); background: var(--crit-bg); }
+.target-check-findings article:last-child { border-bottom: 0; }
+.target-check-findings article > header { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 12px; }
+.target-check-findings article > header strong { font-family: var(--font-num); }
+.target-check-findings article > header span { color: var(--crit); font-size: var(--size-meta); }
+.target-check-findings dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 18px; margin: 9px 0 0; }
+.target-check-findings dl > div { min-width: 0; }
+.target-check-findings dt { color: var(--mute); font-size: var(--size-cap); }
+.target-check-findings dd { margin: 2px 0 0; overflow-wrap: anywhere; font-family: var(--font-num); font-size: var(--size-meta); }
+.target-check-ddl > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .wizard-footer { min-height: 60px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px var(--pad); border-top: 1px solid var(--line); background: var(--panel); }
 .wizard-footer-actions { display: flex; align-items: center; gap: 8px; }
 .job-grid tr.is-new-task td { animation: new-task-highlight 1.8s ease-out; }
@@ -655,6 +668,7 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
   .wizard-rail li > strong { display: none; }
   .wizard-confirm-grid { grid-template-columns: minmax(0, 1fr); }
   .wizard-confirm-grid > div.is-wide { grid-column: auto; }
+  .target-check-findings dl { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (max-width: 480px) {

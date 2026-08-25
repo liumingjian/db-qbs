@@ -13,6 +13,7 @@ import {
   fetchColumns,
   fetchTargetColumns,
   fetchTargetTables,
+  checkTargetTable,
   generateBuilderSql,
   cancelRun,
   fetchRun,
@@ -409,6 +410,38 @@ describe("SQL builder API", () => {
     expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/target/columns", expect.objectContaining({
       method: "POST",
       body: JSON.stringify({ datasource_id: "ds-mysql", target_table: "T_POSITION" }),
+    }));
+  });
+
+  it("checks the target table with both datasource identities and the current spec", async () => {
+    const result = {
+      ok: false,
+      findings: [{
+        column: "C_NAME",
+        kind: "insufficient_length_or_precision",
+        expected: "VARCHAR(90)",
+        actual: "varchar(30)",
+        message: "目标 VARCHAR 长度不足",
+      }],
+      suggested_ddl: "CREATE TABLE `T_POSITION` (...) ",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(result), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const input = spec();
+
+    await expect(
+      checkTargetTable("ds-oracle", "ds-mysql", "T_POSITION", input),
+    ).resolves.toEqual(result);
+    expect(fetchMock).toHaveBeenCalledWith("/api/target/check", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({
+        source_datasource_id: "ds-oracle",
+        target_datasource_id: "ds-mysql",
+        target_table: "T_POSITION",
+        spec: input,
+      }),
     }));
   });
 

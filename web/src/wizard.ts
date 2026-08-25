@@ -23,6 +23,8 @@ import type {
   ColumnMapping,
   Task,
   TargetColumn,
+  CheckFinding,
+  TargetCheckResult,
   TargetKey,
   TaskSpec,
 } from "./api";
@@ -38,31 +40,12 @@ export interface DraftBinding {
   name: string;
 }
 
-/**
- * The ten-row data preview and the target-table check.
- *
- * Declared here rather than in `api.ts` because neither endpoint exists yet;
- * they move to `api.ts` with the fetch functions when they land.
- */
+/** The ten-row data preview. */
 export interface PreviewResult {
   columns: string[];
   rows: unknown[][];
   truncated: boolean;
   elapsed_ms: number;
-}
-
-export interface CheckFinding {
-  column: string | null;
-  kind: string;
-  expected: string;
-  actual: string;
-  message: string;
-}
-
-export interface TargetCheckResult {
-  ok: boolean;
-  findings: CheckFinding[];
-  suggested_ddl: string | null;
 }
 
 /** A fetched result, pinned to the inputs it was fetched for. */

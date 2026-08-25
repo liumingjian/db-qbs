@@ -154,6 +154,7 @@ fn precheck_issue_shape_with_suggestion() {
             target: "DECIMAL(8,2)".to_owned(),
             rule: "precision_shrink".to_owned(),
             suggestion: Some("把目标列改成 DECIMAL(10,2)".to_owned()),
+            check: None,
         },
         json!({
             "column": "AMT",
@@ -174,6 +175,7 @@ fn precheck_issue_shape_omits_absent_suggestion() {
             target: "DECIMAL(65,30)".to_owned(),
             rule: "bare_number".to_owned(),
             suggestion: None,
+            check: None,
         },
         json!({
             "column": "AMT",
