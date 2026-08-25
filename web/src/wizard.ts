@@ -1167,6 +1167,7 @@ function stepView(draft: Draft, step: Step, blockers: Blocker[]): StepView {
           targetTable: draft.spec.target_table,
           findings: checkIsFresh(draft) ? draft.check!.value.findings : [],
           preview: previewIsFresh(draft) ? draft.preview!.value : null,
+          // The owner's #168 follow-up explicitly keeps save-only as the offline/fallback path.
           actions:
             draft.mode === "edit"
               ? ["save"]

@@ -784,22 +784,7 @@ function JobResults({
                       onClick={() => onCopyCurl(task)}
                     />
                     <span className="divider" />
-                    {run === undefined ? (
-                      // 尚未运行的任务开不了抽屉——**禁用而不是消失**，原因挂在外层
-                      // `span` 的 `title` 上（浏览器不给 `disabled` 控件派发指针事件，
-                      // 挂在按钮自己的 `title` 上等于没写）与按钮的 `aria-label` 上。
-                      <span
-                        className="row-actions"
-                        title="运行详情（不可用）：这个任务尚未运行过，没有可看的运行记录。"
-                      >
-                        <ActionButton
-                          label="运行详情（不可用）：这个任务尚未运行过，没有可看的运行记录。"
-                          icon={<Clock3 size={16} />}
-                          disabled
-                          onClick={() => {}}
-                        />
-                      </span>
-                    ) : (
+                    {run !== undefined && (
                       <ActionButton
                         label="运行详情"
                         icon={<Clock3 size={16} />}
