@@ -62,10 +62,13 @@ import {
   targetFieldOf,
 } from "./spec";
 import { DatasourceScreen } from "./DatasourceScreen";
+import { evaluateEntry } from "./entry";
+import { TaskEntryDialog } from "./TaskEntryDialog";
 import { FormField, Modal, ModalFooter } from "./ui";
 
 type DialogState =
-  | { kind: "create" }
+  | { kind: "entry" }
+  | { kind: "create"; initial: TaskInput }
   | { kind: "edit"; task: Task }
   | { kind: "rename"; task: Task }
   | { kind: "delete"; task: Task }
@@ -311,7 +314,7 @@ export function App() {
   }
 
   function openCreateDialog() {
-    setDialog({ kind: "create" });
+    setDialog({ kind: "entry" });
   }
 
   function closeDialog() {
@@ -530,11 +533,32 @@ export function App() {
         {page === "jobs" && dialog?.kind === "create" && (
           <TaskFormDialog
             title="新建任务"
-            initial={emptyTask}
+            initial={dialog.initial}
             datasources={datasources}
             submitLabel="新建"
             onClose={closeDialog}
             onSubmit={handleCreate}
+          />
+        )}
+        {page === "jobs" && dialog?.kind === "entry" && (
+          <TaskEntryDialog
+            guard={evaluateEntry(datasources, agents, datasourcesLoading)}
+            onClose={closeDialog}
+            onFix={(fix) => {
+              closeDialog();
+              navigate(fix);
+            }}
+            onContinue={(sourceDatasourceId, targetDatasourceId) =>
+              setDialog({
+                kind: "create",
+                initial: {
+                  ...emptyTask,
+                  spec: emptySpec(),
+                  source_datasource_id: sourceDatasourceId,
+                  target_datasource_id: targetDatasourceId,
+                },
+              })
+            }
           />
         )}
         {page === "jobs" && dialog?.kind === "edit" && (
@@ -622,12 +646,8 @@ function TaskFormDialog({
   onSubmit: (input: TaskInput) => Promise<void>;
 }) {
   const [name, setName] = useState(initial.name);
-  const [sourceDatasourceId, setSourceDatasourceId] = useState(
-    initial.source_datasource_id,
-  );
-  const [targetDatasourceId, setTargetDatasourceId] = useState(
-    initial.target_datasource_id,
-  );
+  const sourceDatasourceId = initial.source_datasource_id;
+  const targetDatasourceId = initial.target_datasource_id;
   const [sourceQueryMode, setSourceQueryMode] = useState<SourceQueryMode>(
     initial.spec.source_sql?.trim() === "" || initial.spec.source_sql === undefined
       ? "table"
@@ -661,12 +681,6 @@ function TaskFormDialog({
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const oracleDatasources = datasources.filter(
-    (datasource) => datasource.kind === "oracle",
-  );
-  const mysqlDatasources = datasources.filter(
-    (datasource) => datasource.kind === "mysql",
-  );
   const tableKey = spec.owner === "" ? "" : tableKeyFor({ owner: spec.owner, name: spec.table });
   const sourceTableGroups = useMemo(
     () => groupSourceTables(tables, sourceTableFilter),
@@ -678,7 +692,7 @@ function TaskFormDialog({
   );
   const sourceTableLabel =
     spec.owner === "" ? "" : `${spec.owner}.${spec.table}`;
-  const selectedTargetDatasource = mysqlDatasources.find(
+  const selectedTargetDatasource = datasources.find(
     (datasource) => datasource.datasource_id === targetDatasourceId,
   );
   const dictionary = useMemo(
@@ -1145,139 +1159,6 @@ function TaskFormDialog({
             </FormField>
           )}
 
-          <section className="builder-guide" aria-labelledby="builder-datasource-title">
-            <header>
-              <div>
-                <strong id="builder-datasource-title">数据源</strong>
-                <span>选择本任务使用的源端和目标端连接</span>
-              </div>
-            </header>
-            <div className="builder-controls">
-              <FormField label="源端（Oracle）">
-                <select
-                  required
-                  value={sourceDatasourceId}
-                  onChange={(event) => {
-                    setSourceDatasourceId(event.target.value);
-                    // 换源端等于换一个库：表清单与列字典都是上一个库的，留着会选出不存在的表。
-                    setTables([]);
-                    setColumns([]);
-                    setDblinks([]);
-                    setSourceTableFilter("");
-                    setSourceExpandedOwners(new Set());
-                    updateSpec({
-                      source_sql: sourceQueryMode === "sql" ? "" : undefined,
-                      dblink: undefined,
-                      owner: "",
-                      table: "",
-                      columns: [],
-                      primary_key: [],
-                      where_clause: "",
-                    });
-                  }}
-                >
-                  <option value="">
-                    {oracleDatasources.length === 0 ? "尚无 Oracle 数据源" : "请选择"}
-                  </option>
-                  {oracleDatasources.map((datasource) => (
-                    <option
-                      key={datasource.datasource_id}
-                      value={datasource.datasource_id}
-                    >
-                      {datasource.name}
-                    </option>
-                  ))}
-                </select>
-                {oracleDatasources.length === 0 && <DatasourceHint />}
-              </FormField>
-              {/* 徽标原来写「4 个可选」并右对齐——两处都误导：它飘到「目标端（MySQL）」
-                  标签旁边，而「（可选）」说的是这个字段可以不填、「可选」说的是有几个
-                  可以挑，同一行里两个「可选」不是一个意思。改成「发现 4 个」并贴回标签。 */}
-              {sourceQueryMode === "table" && (
-                <FormField
-                  label="源端 DBLINK（可选）"
-                  badge={
-                    dblinksLoading
-                      ? "读取中"
-                      : dblinks.length > 0
-                        ? `发现 ${dblinks.length} 个`
-                        : undefined
-                  }
-                  neutralBadge
-                  inlineBadge
-                >
-                  {/* 自动发现是这一版新加的能力，可它长得和普通文本框一模一样，
-                      没人知道点下去有东西。补一个可见的 ▾——仍然可以直接手打。 */}
-                  <span className="combo-input">
-                    <input
-                      list="source-dblinks"
-                      value={spec.dblink ?? ""}
-                      disabled={sourceDatasourceId === ""}
-                      placeholder={
-                        dblinksLoading ? "正在读取" : "不走 dblink 就留空"
-                      }
-                      onChange={(event) => {
-                        const dblink = event.target.value.trim();
-                        setTables([]);
-                        setColumns([]);
-                        setSourceTableFilter("");
-                        setSourceExpandedOwners(new Set());
-                        updateSpec({
-                          dblink: dblink === "" ? undefined : dblink,
-                          owner: "",
-                          table: "",
-                          columns: [],
-                          primary_key: [],
-                          where_clause: "",
-                        });
-                      }}
-                    />
-                    <ChevronDown size={15} aria-hidden="true" />
-                  </span>
-                  <datalist id="source-dblinks">
-                    {dblinks.map((dblink) => (
-                      <option key={dblink} value={dblink} />
-                    ))}
-                  </datalist>
-                </FormField>
-              )}
-              <FormField label="目标端（MySQL）">
-                <select
-                  required
-                  value={targetDatasourceId}
-                  onChange={(event) => {
-                    setTargetDatasourceId(event.target.value);
-                    updateSpec({
-                      target_table: "",
-                      columns: spec.columns.map((mapping) => ({
-                        ...mapping,
-                        target: "",
-                      })),
-                      primary_key: [],
-                    });
-                    setTargetTableFilter("");
-                    setTargetTables([]);
-                    setTargetTablesError(null);
-                    setTargetMeta({ kind: "idle" });
-                  }}
-                >
-                  <option value="">
-                    {mysqlDatasources.length === 0 ? "尚无 MySQL 数据源" : "请选择"}
-                  </option>
-                  {mysqlDatasources.map((datasource) => (
-                    <option
-                      key={datasource.datasource_id}
-                      value={datasource.datasource_id}
-                    >
-                      {datasource.name}
-                    </option>
-                  ))}
-                </select>
-                {mysqlDatasources.length === 0 && <DatasourceHint />}
-              </FormField>
-            </div>
-          </section>
-
           <section className="builder-guide" aria-labelledby="builder-source-title">
             <header>
               <div>
@@ -1351,6 +1232,51 @@ function TaskFormDialog({
                 </button>
               </div>
             </header>
+            {sourceQueryMode === "table" && (
+              <div className="builder-controls">
+                <FormField
+                  label="源端 DBLINK（可选）"
+                  badge={
+                    dblinksLoading
+                      ? "读取中"
+                      : dblinks.length > 0
+                        ? `发现 ${dblinks.length} 个`
+                        : undefined
+                  }
+                  neutralBadge
+                  inlineBadge
+                >
+                  <span className="combo-input">
+                    <input
+                      list="source-dblinks"
+                      value={spec.dblink ?? ""}
+                      placeholder={dblinksLoading ? "正在读取" : "不走 dblink 就留空"}
+                      onChange={(event) => {
+                        const dblink = event.target.value.trim();
+                        setTables([]);
+                        setColumns([]);
+                        setSourceTableFilter("");
+                        setSourceExpandedOwners(new Set());
+                        updateSpec({
+                          dblink: dblink === "" ? undefined : dblink,
+                          owner: "",
+                          table: "",
+                          columns: [],
+                          primary_key: [],
+                          where_clause: "",
+                        });
+                      }}
+                    />
+                    <ChevronDown size={15} aria-hidden="true" />
+                  </span>
+                  <datalist id="source-dblinks">
+                    {dblinks.map((dblink) => (
+                      <option key={dblink} value={dblink} />
+                    ))}
+                  </datalist>
+                </FormField>
+              </div>
+            )}
             {sourceQueryMode === "sql" ? (
               <SqlEditor
                 value={spec.source_sql ?? ""}
@@ -2189,21 +2115,6 @@ function constraintsOf(data: TargetTableMetadata, column: TargetColumn): string 
  *
  * 一条条件都没有时明写「整表」——留空会被读成「没配好」，而整表取数是允许的形态。
  */
-/**
- * 一个数据源都没有时给一条路，而不是一个空下拉（ADR-0039 §8）。
- *
- * **不做「就地弹出新建数据源」**：对话框套对话框会让同一套表单有两个入口，
- * 两处的「测通才让存」行为一旦分岔就是最难查的一类不一致。代价是建任务被打断一次，
- * 但按所有者裁定 1（现场 3~5 个数据源）这件事一共只发生几次。
- */
-function DatasourceHint() {
-  return (
-    <a className="text-button" href="#datasources">
-      去「数据源」建一个 →
-    </a>
-  );
-}
-
 function tableKeyFor(table: BuilderTable): string {
   return `${table.owner}\u0000${table.name}`;
 }

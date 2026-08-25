@@ -279,6 +279,27 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 /* 批量删除的二次确认把要删的任务名**逐条列全**，不是「确定删除 3 个任务？」（ADR-0043 §6）。 */
 .delete-copy ul { max-height: 220px; overflow: auto; margin: 6px 0 0; padding-left: 20px; color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-prose); }
 .modal-context { display: block; margin-top: 2px; color: var(--mute); font-size: var(--size-cap); }
+.entry-loading { display: flex; align-items: center; gap: 10px; color: var(--dim); }
+.entry-blocked { display: flex; flex-direction: column; gap: 6px; }
+.entry-blocked strong { color: var(--crit); font-size: var(--size-body); }
+.entry-blocked span { color: var(--dim); font-size: var(--size-meta); }
+.entry-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.entry-options { min-width: 0; margin: 0; padding: 0; border: 0; }
+.entry-options legend { margin-bottom: 7px; color: var(--dim); font-size: var(--size-body); font-weight: var(--weight-em); }
+.entry-option { min-height: 62px; display: flex; align-items: center; gap: 9px; margin-top: -1px; padding: 9px 10px; border: 1px solid var(--line-strong); background: var(--panel); cursor: pointer; }
+.entry-option:first-of-type { margin-top: 0; border-radius: var(--radius) var(--radius) 0 0; }
+.entry-option:last-of-type { border-radius: 0 0 var(--radius) var(--radius); }
+.entry-option:only-of-type { border-radius: var(--radius); }
+.entry-option.is-selected { position: relative; z-index: 1; border-color: var(--brand); background: var(--brand-dim); }
+.entry-option.is-disabled { background: var(--mute-bg); color: var(--mute); cursor: not-allowed; }
+.entry-option input { width: 15px; height: 15px; flex: none; accent-color: var(--brand); }
+.entry-option-copy { min-width: 0; display: flex; flex: 1; flex-direction: column; gap: 2px; }
+.entry-option-copy strong { overflow-wrap: anywhere; font-size: var(--size-body); font-weight: var(--weight-em); }
+.entry-option-copy > span { overflow-wrap: anywhere; color: var(--mute); font-family: var(--font-num); font-size: var(--size-cap); }
+.entry-agent-status { max-width: 42%; flex: none; overflow-wrap: anywhere; color: var(--mute); font-size: var(--size-cap); text-align: right; }
+.entry-agent-status.is-online { color: var(--ok); }
+.entry-agent-status.is-offline { color: var(--crit); }
+.entry-reason { grid-column: 1 / -1; margin: 0; color: var(--crit); font-size: var(--size-meta); }
 
 /* ADR-0039 §9 第 1 条：表格内的目标字段输入框，与单元格同高、不撑破行。 */
 .data-grid .cell-input { width: 100%; min-width: 90px; height: 26px; padding: 0 7px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-size: var(--size-cap); }
@@ -536,7 +557,7 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
   .card-header { padding-inline: 12px; }
   .modal-backdrop { align-items: start; padding: 12px; }
   .modal { max-height: calc(100vh - 24px); }
-  .builder-controls { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
+  .builder-controls, .entry-form { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
   .builder-guide > header > .builder-mode-switch { align-items: stretch; flex-direction: column; width: 100%; }
   .builder-mode-buttons { width: 100%; }
   .builder-mode-buttons .button { width: 50%; }
