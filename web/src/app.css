@@ -55,6 +55,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .mobile-brand { display: none; font-weight: var(--weight-em); }
 .mobile-nav { display: none; }
 .content { flex: 1; padding: var(--pad); }
+.content.is-wizard { min-height: 0; padding: 0; }
 
 /* 折叠：256 ⇄ 48。折叠后图标**居中**——参照物这里没跟着改 padding-left，选中的蓝块被
    48px 切成一条竖边，那是它的渲染瑕疵不是它的设计（ADR-0043 文末自决 2）。 */
@@ -432,6 +433,64 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .column-fetch-hint { margin: 0; padding: 14px 12px; color: var(--mute); font-size: var(--size-meta); }
 .ddl-output { max-height: 280px; overflow: auto; margin: 0; padding: 12px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--mute-bg); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 
+/* ---------------------------------------------------------------- 新建导入向导 */
+.task-wizard { height: calc(100vh - var(--topbar-h)); min-height: 560px; display: grid; grid-template-columns: 300px minmax(0, 1fr); overflow: hidden; background: var(--panel); }
+.wizard-context { min-width: 0; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--line); background: var(--mute-bg); }
+.wizard-context > header { height: 48px; flex: none; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; border-bottom: 1px solid var(--line); }
+.wizard-mode { flex: none; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 12px 12px 0; }
+.wizard-mode button { height: var(--ctl-h); border: 1px solid var(--line-strong); background: var(--panel); color: var(--dim); cursor: pointer; }
+.wizard-mode button + button { margin-left: -1px; }
+.wizard-mode button.is-active { position: relative; border-color: var(--brand); background: var(--brand-dim); color: var(--brand); font-weight: var(--weight-em); }
+.wizard-context-scroll { min-height: 0; flex: 1; overflow: auto; padding: 12px; }
+.wizard-context-section { display: flex; flex-direction: column; gap: 9px; padding: 12px 0; border-top: 1px solid var(--line); }
+.wizard-context-section:first-child { padding-top: 0; border-top: 0; }
+.wizard-context-title { min-height: 28px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.wizard-context-title strong, .wizard-summary > strong { font-size: var(--size-meta); font-weight: var(--weight-em); }
+.wizard-context .source-sql-editor { padding: 0; }
+.wizard-context .source-sql-editor .spec-note { display: none; }
+.wizard-context .source-sql-editor .sql-editor-toolbar { justify-content: flex-end; }
+.wizard-context .source-sql-editor .sql-text-input { min-height: 145px; }
+.wizard-select-label, .wizard-name { display: flex; flex-direction: column; gap: 6px; color: var(--dim); font-size: var(--size-meta); }
+.wizard-select-label select, .wizard-name input, .wizard-mapping select { height: var(--ctl-h); padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); }
+.wizard-context .schema-tree { max-height: 230px; }
+.wizard-context .schema-tree.is-target { max-height: 180px; }
+.wizard-summary { display: flex; flex-direction: column; gap: 6px; padding: 11px; border-left: 3px solid var(--brand); background: var(--panel); color: var(--mute); font-size: var(--size-cap); line-height: var(--lh-prose); }
+.wizard-summary > strong { color: var(--text); }
+.wizard-main { min-width: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--panel); }
+.wizard-rail { min-height: 68px; flex: none; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; padding: 12px var(--pad); border-bottom: 1px solid var(--line); list-style: none; }
+.wizard-rail li { min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--mute); }
+.wizard-rail li::after { height: 1px; flex: 1; margin: 0 8px; background: var(--line-strong); content: ""; }
+.wizard-rail li:last-child::after { display: none; }
+.wizard-rail li > span { width: 24px; height: 24px; flex: none; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 50%; background: var(--panel); font-family: var(--font-num); font-size: var(--size-cap); }
+.wizard-rail li > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--size-meta); font-weight: var(--weight-em); }
+.wizard-rail li.is-current, .wizard-rail li.is-done { color: var(--brand); }
+.wizard-rail li.is-current > span, .wizard-rail li.is-done > span { border-color: var(--brand); background: var(--brand); color: #fff; }
+.wizard-step-scroll { min-height: 0; flex: 1; overflow: auto; padding: var(--pad); background: var(--bg); }
+.wizard-step { max-width: 1120px; display: flex; flex-direction: column; gap: 16px; margin: 0 auto; }
+.wizard-step > header h1 { margin: 0; font-size: 20px; letter-spacing: 0; }
+.wizard-step > header p { margin: 6px 0 0; color: var(--mute); line-height: var(--lh-prose); }
+.wizard-empty, .wizard-placeholder, .wizard-readonly { margin: 0; padding: 18px; border: 1px solid var(--line); background: var(--panel); color: var(--mute); }
+.wizard-placeholder { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; }
+.wizard-placeholder strong { color: var(--text); }
+.wizard-placeholder.is-prominent { min-height: 180px; justify-content: center; }
+.wizard-mapping { min-width: 680px; }
+.wizard-mapping tr.is-problem td { background: var(--crit-bg); }
+.wizard-mapping td small { display: block; max-width: 260px; margin-top: 3px; color: var(--crit); font-size: var(--size-cap); white-space: normal; }
+.wizard-mapping .auto-mark { display: inline; margin-left: 5px; color: var(--ok); }
+.wizard-mapping select { width: 100%; min-width: 140px; }
+.wizard-blockers { margin: 0; padding: 10px 10px 10px 30px; border-left: 3px solid var(--crit); background: var(--crit-bg); color: var(--crit); line-height: var(--lh-prose); }
+.wizard-name { max-width: 520px; color: var(--text); font-weight: var(--weight-em); }
+.wizard-confirm-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; margin: 0; padding: 1px; background: var(--line); }
+.wizard-confirm-grid > div { min-width: 0; padding: 13px; background: var(--panel); }
+.wizard-confirm-grid > div.is-wide { grid-column: 1 / -1; }
+.wizard-confirm-grid dt { color: var(--mute); font-size: var(--size-cap); }
+.wizard-confirm-grid dd { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0; overflow-wrap: anywhere; }
+.mapping-chip { padding: 3px 7px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--mute-bg); font-family: var(--font-num); font-size: var(--size-cap); }
+.wizard-footer { min-height: 60px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px var(--pad); border-top: 1px solid var(--line); background: var(--panel); }
+.wizard-footer-actions { display: flex; align-items: center; gap: 8px; }
+.job-grid tr.is-new-task td { animation: new-task-highlight 1.8s ease-out; }
+@keyframes new-task-highlight { 0%, 45% { background: var(--info-bg); } 100% { background: var(--panel); } }
+
 /* ---------------------------------------------------------------- 运行详情页（发起后的实时屏） */
 .run-card { overflow: hidden; }
 .run-header > div { min-width: 0; }
@@ -554,6 +613,12 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
   .mobile-nav button.is-active { background: var(--brand-dim); color: var(--brand); font-weight: var(--weight-em); }
   .topbar .breadcrumb, .topbar .environment { display: none; }
   .content { padding: 12px; }
+  .content.is-wizard { padding: 0; }
+  .task-wizard { grid-template-columns: 240px minmax(0, 1fr); }
+  .wizard-rail { padding-inline: 12px; }
+  .wizard-rail li { gap: 4px; }
+  .wizard-rail li::after { margin-inline: 4px; }
+  .wizard-step-scroll, .wizard-footer { padding-inline: 12px; }
   .card-header { padding-inline: 12px; }
   .modal-backdrop { align-items: start; padding: 12px; }
   .modal { max-height: calc(100vh - 24px); }
@@ -577,6 +642,15 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
   .run-header { align-items: flex-start; }
   .run-content { padding: 12px; }
   .run-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 620px) {
+  .task-wizard { height: calc(100vh - var(--topbar-h)); min-height: 560px; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(180px, 38%) minmax(0, 1fr); overflow: hidden; }
+  .wizard-context { border-right: 0; border-bottom: 1px solid var(--line); }
+  .wizard-main { min-height: 0; }
+  .wizard-rail li > strong { display: none; }
+  .wizard-confirm-grid { grid-template-columns: minmax(0, 1fr); }
+  .wizard-confirm-grid > div.is-wide { grid-column: auto; }
 }
 
 @media (max-width: 480px) {
