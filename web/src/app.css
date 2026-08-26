@@ -660,7 +660,7 @@ select, .page-size {
 .wizard-context .schema-tree.is-target { max-height: 180px; }
 .wizard-summary { display: flex; flex-direction: column; gap: 6px; padding: 11px; border-left: 3px solid var(--brand); background: var(--panel); color: var(--mute); font-size: var(--size-cap); line-height: var(--lh-prose); }
 .wizard-summary > strong { color: var(--text); }
-.wizard-main { min-width: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--panel); }
+.wizard-main { min-width: 0; margin: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--panel); }
 .wizard-rail { min-height: 68px; flex: none; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; padding: 12px var(--pad); border-bottom: 1px solid var(--line); list-style: none; }
 .wizard-rail li { min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--mute); }
 .wizard-rail li::after { height: 1px; flex: 1; margin: 0 8px; background: var(--line-strong); content: ""; }
