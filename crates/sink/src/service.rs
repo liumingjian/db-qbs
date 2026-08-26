@@ -20,61 +20,20 @@ use crate::{
 static RUN_ID_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[0-9]{14}_[0-9a-f]{6}$").expect("run id regex must compile"));
 
-const POC_RELAXED_PRECHECK_ENV: &str = "DB_QBS_POC_RELAXED_PRECHECK";
-
-/// 映射预检是开着还是关着。
-///
-/// `Relaxed` **把映射预检整条关掉**——类型白名单、可空性、唯一约束、值域校核，一个都不跑，
-/// 预检从 `CONTEXT.md` 说的那道 hard gate 变成不存在。它由 `DB_QBS_POC_RELAXED_PRECHECK`
-/// 打开，是 `CONTEXT.md` Known gap 第 8 条，不是一项能力。
-///
-/// 之所以是个型别而不是一个 `bool`：`bool` 在调用处读不出哪一头是「关着的」，而这个开关
-/// 关掉的恰好是唯一挡住静默值损坏的东西。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PrecheckMode {
-    Enforced,
-    Relaxed,
-}
-
-impl PrecheckMode {
-    /// **环境变量只在这里读**。以前 `serve` 与构造函数各读一次，中间没有任何东西保证两次
-    /// 读到的是同一个答案——启动日志因此可能与实际生效的模式不一致。
-    pub fn from_env() -> Self {
-        let relaxed = std::env::var(POC_RELAXED_PRECHECK_ENV)
-            .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-            .unwrap_or(false);
-        if relaxed {
-            Self::Relaxed
-        } else {
-            Self::Enforced
-        }
-    }
-
-    const fn skips_every_check(self) -> bool {
-        matches!(self, Self::Relaxed)
-    }
-}
-
 impl<D: Destination> SinkService<FixedDestination<D>> {
     /// 固定一份目的地的服务：请求里的连接信息被忽略。测试与夹具走这条。
-    ///
-    /// **预检恒为 `Enforced`**，不看环境变量：夹具的行为不该随谁的 shell 而变。
     pub fn new(database: impl Into<String>, destination: Arc<D>) -> Self {
-        Self::with_factory(
-            FixedDestination::new(database, destination),
-            PrecheckMode::Enforced,
-        )
+        Self::with_factory(FixedDestination::new(database, destination))
     }
 }
 
 impl<F: DestinationFactory> SinkService<F> {
     /// 生产路径：每个 run 按请求里的连接信息现建目的地（ADR-0037 §2）。
-    pub fn with_factory(factory: F, precheck: PrecheckMode) -> Self {
+    pub fn with_factory(factory: F) -> Self {
         Self {
             factory,
             active_runs: Mutex::new(HashMap::new()),
             tombstones: Mutex::new(VecDeque::new()),
-            precheck,
         }
     }
 
@@ -151,22 +110,14 @@ impl<F: DestinationFactory> SinkService<F> {
                 run_id: Some(request.run_id.clone()),
                 details: json!({ "kind": "OTHER" }),
             })?;
-        let mut issues = if self.precheck.skips_every_check() {
-            Vec::new()
-        } else {
-            precheck_with_primary_key(
-                &request.target_table,
-                &request.primary_key,
-                &request.source_columns,
-                &target_columns,
-                &target_keys,
-            )
-        };
-        let range_columns = if self.precheck.skips_every_check() {
-            Vec::new()
-        } else {
-            range_check_columns(&request.source_columns, &target_columns)
-        };
+        let mut issues = precheck_with_primary_key(
+            &request.target_table,
+            &request.primary_key,
+            &request.source_columns,
+            &target_columns,
+            &target_keys,
+        );
+        let range_columns = range_check_columns(&request.source_columns, &target_columns);
         if !range_columns.is_empty() {
             let Some(results) = request.range_check_results.as_deref() else {
                 return Ok(OpenOutcome::RangeCheckNeeded {

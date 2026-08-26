@@ -9,8 +9,8 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::{
     load_agent_identity, ApiError, BatchPayload, CommitRequest, Destination, DestinationFactory,
-    MysqlDestination, MysqlFactory, OpenRunRequest, PrecheckMode, SinkConfig, SinkService,
-    TargetCheckRequest, TargetConnection,
+    MysqlDestination, MysqlFactory, OpenRunRequest, SinkConfig, SinkService, TargetCheckRequest,
+    TargetConnection,
 };
 
 const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
@@ -21,9 +21,6 @@ pub fn serve(config: SinkConfig) -> Result<(), String> {
     if config.listen.is_empty() {
         return Err("sink 配置 listen 不能为空".to_owned());
     }
-    let precheck = PrecheckMode::from_env();
-    // 两条警告**并存**。以前预检一关就顶掉了「无鉴权」那条，于是部署者要么知道这台没鉴权、
-    // 要么知道这台没预检，永远不会同时知道——而它们是两件互不相干的事。
     {
         let stdout = io::stdout();
         let mut writer = stdout.lock();
@@ -41,19 +38,6 @@ pub fn serve(config: SinkConfig) -> Result<(), String> {
                 ),
             }),
         );
-        if precheck == PrecheckMode::Relaxed {
-            let _ = write_log_line_with_fields(
-                &mut writer,
-                LogLevel::Warn,
-                LogEvent::SinkStarted,
-                None,
-                None,
-                json!({
-                    "relaxed_precheck": true,
-                    "message": "POC 宽松预检查已开启：映射类型、可空性、唯一键与值域校核全部不跑。超出值域的数据会怎样改由目标库的 sql_mode 决定——严格模式下运行推批次时失败，非严格模式下被截断后静默写入（CONTEXT.md Known gap 8）",
-                }),
-            );
-        }
     }
     // 退役字段仍能解析，但一个字都不读（ADR-0037 §2）。留一条 warn，
     // 否则部署者会以为 `sink.toml` 里那份凭据仍然是生效的那一份。
@@ -95,7 +79,7 @@ pub fn serve(config: SinkConfig) -> Result<(), String> {
         );
     }
     // sink 启动**不再连 MySQL**：连接按 run 建，连不上的失败点在 POST /v1/runs。
-    let service = Arc::new(SinkService::with_factory(MysqlFactory, precheck));
+    let service = Arc::new(SinkService::with_factory(MysqlFactory));
     let server = Server::http(&config.listen)
         .map_err(|error| format!("监听 {} 失败：{error}", config.listen))?;
 
