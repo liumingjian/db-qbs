@@ -10,7 +10,7 @@ import {
   X,
 } from "lucide-react";
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { FormEvent, ReactNode } from "react";
 
 import {
   checkTargetTable,
@@ -505,6 +505,20 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
     requestChange({ type: "advance" });
   }
 
+  /**
+   * 步骤主体就是一张表单（#240）：在输入框里敲回车，等于按了这一步的主操作——
+   * 前三步是「下一步」，最后一步是「保存」或「开始导入」。这一步不让走时主按钮
+   * 是禁用的，浏览器不会替禁用的默认按钮提交；这里再挡一道，回车便越不过拒绝理由。
+   */
+  function submitStep(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (draft.step < 4) {
+      if (!advanceBlocked) advance();
+      return;
+    }
+    if (submitRefusal === null) void submit(draft.mode === "edit" ? "save-only" : "start");
+  }
+
   async function submit(action: "start" | "save-only") {
     setBusy("submit");
     setError(null);
@@ -681,7 +695,7 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
         </div>
       </aside>
 
-      <div className="wizard-main">
+      <form className="wizard-main" noValidate onSubmit={submitStep}>
         <ol className="wizard-rail" aria-label="导入步骤">
           {model.rail.map((entry) => (
             <li className={`is-${entry.state}`} aria-current={entry.state === "current" ? "step" : undefined} key={entry.step}>
@@ -715,13 +729,13 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
           <span className="wizard-footer-actions">
             {draft.step < 4 ? (
               <Refusable reason={advanceBlocked ? "请先处理当前步骤中的问题" : null}>
-                <button className="button is-primary" type="button" disabled={advanceBlocked} onClick={advance}>
+                <button className="button is-primary" type="submit" disabled={advanceBlocked}>
                   {draft.step === 3 ? "查看确认页" : "下一步"}
                 </button>
               </Refusable>
             ) : draft.mode === "edit" ? (
               <Refusable reason={submitRefusal}>
-                <button className="button is-primary" type="button" disabled={submitRefusal !== null} onClick={() => void submit("save-only")}>
+                <button className="button is-primary" type="submit" disabled={submitRefusal !== null}>
                   {busy === "submit" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : null}保存
                 </button>
               </Refusable>
@@ -731,7 +745,7 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
                   <button className="button" type="button" disabled={submitRefusal !== null} onClick={() => void submit("save-only")}>只保存</button>
                 </Refusable>
                 <Refusable reason={submitRefusal}>
-                  <button className="button is-primary" type="button" disabled={submitRefusal !== null} onClick={() => void submit("start")}>
+                  <button className="button is-primary" type="submit" disabled={submitRefusal !== null}>
                     {busy === "submit" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : null}开始导入
                   </button>
                 </Refusable>
@@ -739,7 +753,7 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
             )}
           </span>
         </footer>
-      </div>
+      </form>
       {pending !== null && (
         <WizardConfirmDialog
           loss={pending.loses}

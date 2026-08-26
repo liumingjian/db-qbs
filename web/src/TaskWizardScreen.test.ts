@@ -154,6 +154,14 @@ describe("the mapping step UI", () => {
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>下一步<\/button>/);
   });
 
+  it("makes the step body a form whose submit action is the primary advance", () => {
+    const html = renderWizard(mappingDraft());
+    // 回车就该进下一步（#240）：主操作是这张表单的提交动作，其余按钮仍旧不提交。
+    expect(html).toContain('<form class="wizard-main"');
+    expect(html).toMatch(/<button[^>]*type="submit"[^>]*>下一步<\/button>/);
+    expect(html).toMatch(/<button[^>]*type="button"[^>]*>取消<\/button>/);
+  });
+
   it("does not delegate wizard-entry validation to the browser", () => {
     const sqlDraft = done(apply(openNew(SOURCE, TARGET), { type: "fetch-mode", fetchMode: "sql" }));
     expect(renderWizard(sqlDraft)).not.toContain("required");
