@@ -1,5 +1,6 @@
 import { LoaderCircle } from "lucide-react";
 import { useEffect, useState } from "react";
+import { ICON } from "./components/DesignSystem";
 
 import {
   continueBlockReason,
@@ -41,7 +42,7 @@ export function TaskEntryDialog({
     return (
       <Modal title="检查新建任务条件" onClose={onClose} busy={false} narrow>
         <div className="modal-body entry-loading">
-          <LoaderCircle className="is-spinning" size={18} aria-hidden="true" />
+          <LoaderCircle className="is-spinning" size={ICON.lg} aria-hidden="true" />
           正在检查数据源和目标端 Agent
         </div>
       </Modal>

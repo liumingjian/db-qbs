@@ -12,10 +12,12 @@ import {
   Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ICON } from "./components/DesignSystem";
 
 import { copyTaskCurl, deleteTask, startRun } from "./api";
 import type { Datasource, RunHistory, Task } from "./api";
 import { messageFrom } from "./errors";
+import { qualifiedTargetTable } from "./datasource";
 import { formatTimestamp, historyPresentation } from "./history";
 import {
   datasourceFilterOptions,
@@ -30,6 +32,7 @@ import {
 } from "./listing";
 import type { LatestRunStatus, TaskFilters } from "./listing";
 import { progressOf } from "./progress";
+import { runHash } from "./routes";
 import { RunDrawer } from "./RunDrawer";
 import { sourceSummary } from "./spec";
 import { rowRunAction } from "./troubleshooting";
@@ -42,9 +45,14 @@ import { ActionButton, Modal, Pagination } from "./ui";
  * 一行 = **一个任务 + 它最近一次运行**。这条合并是所有者 2026-08-21 裁定 2 的直接后果：
  * 「运行历史」独立屏取消，同一个任务的多次历史本版不做（原话「另说」）。
  *
- * 列序逐字（裁定 3）：**☐ · 任务名 · 源表 · 目标表 · 迁移进度 · 运行状态 · 启动时间 ·
- * 运行时长 · 操作**。主键 / 条件 / 错误码 / 目标表效果**一个都不在这张表上**——
- * 它们是任务属性或三轴的东西，收进详情抽屉（`RunDrawer`）。
+ * 列序（2026-08 UX 评审 P1-1 改，原裁定 3 的顺序作废）：**☐ · 任务名 · 运行状态 ·
+ * 迁移进度 · 目标表 · 源表 · 启动时间 · 运行时长 · 操作**。主键 / 条件 / 错误码 /
+ * 目标表效果**一个都不在这张表上**——它们是任务属性或三轴的东西，收进详情抽屉（`RunDrawer`）。
+ *
+ * 改序的理由只有一条：**这一屏存在的理由是「跑了没有、跑成什么样」**。原来它排在第 5、6 列，
+ * 1440 下要横滚 507px 才看得见，而占着最前面两格的是源表与目标表——任务属性，一天看一次
+ * 就够，一次运行也不会变。现在前四格答完「哪个任务 / 跑成什么样 / 到哪儿了 / 写进哪张表」，
+ * 后面才是它的定义。
  *
  * 「运行状态」列是**一维索引，不是轴二**：五个词都是同一种实心方角标签，齐是对的。
  * 轴二 / 轴三整体在抽屉里，形状一个没变（ADR-0043 §4，走查 X17）。
@@ -100,7 +108,11 @@ export function JobCenterScreen({
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
-  const [bulkConfirm, setBulkConfirm] = useState(false);
+  /**
+   * 哪一个批量动作正等着二次确认。**发起和删除共用这一格**：两者互斥
+   * （同一批勾选，同一颗按钮群），分成两个布尔会多出「两个框同时开着」这种不可能态。
+   */
+  const [bulkConfirm, setBulkConfirm] = useState<"start" | "delete" | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkSummary, setBulkSummary] = useState<BulkSummary | null>(null);
   const [copyStatus, setCopyStatus] = useState<{
@@ -195,6 +207,8 @@ export function JobCenterScreen({
    *
    * **没有「这条任务要先填参数」这一支了**：发起的全部输入就是任务身份，
    * 所以批量发起与单条发起打的是同一个端点、走的是同一条路。
+   *
+   * 进来之前先过 `BulkStartDialog` 的二次确认（2026-08 UX 评审 P0-2）。
    */
   async function runBulkStart() {
     setBulkBusy(true);
@@ -209,6 +223,7 @@ export function JobCenterScreen({
       }
     }
     setBulkBusy(false);
+    setBulkConfirm(null);
     setBulkSummary({ verb: "发起", total: selectedTasks.length, ok, failures });
     onChanged();
   }
@@ -227,7 +242,7 @@ export function JobCenterScreen({
       }
     }
     setBulkBusy(false);
-    setBulkConfirm(false);
+    setBulkConfirm(null);
     setSelected(new Set());
     setBulkSummary({ verb: "删除", total: selectedTasks.length, ok, failures });
     onChanged();
@@ -386,13 +401,19 @@ export function JobCenterScreen({
       )}
 
       <section className="card table-card" id="jobs" aria-labelledby="jobs-title">
-        <div className="table-title-row">
-          <h1 className="table-title" id="jobs-title">
-            作业中心
-          </h1>
-          <span className="table-count">
-            {countLabel(tasks, filtered, refreshing)}
-          </span>
+        {/* 与数据源屏、Agent 屏**同一个卡头**（UX 评审 P2）：这里原来是另一套
+            （`.table-title-row` + `.table-count`），两套只在结构上不同，长得却几乎一样——
+            于是三屏的卡头高度、内边距、标题与副标题的间距各差一点，谁也说不清哪个是对的。
+            那块灰底标题是照参照物量的，留着，但改成三屏共有。 */}
+        <header className="card-header">
+          <div>
+            <h1 id="jobs-title">
+              作业中心
+            </h1>
+            <span className="card-subtitle">
+              {countLabel(tasks, filtered, refreshing)}
+            </span>
+          </div>
           <div className="table-toolbar">
             <span className="toolbar-icons">
               <button
@@ -405,13 +426,13 @@ export function JobCenterScreen({
               >
                 <RefreshCw
                   className={refreshing ? "is-spinning" : ""}
-                  size={17}
+                  size={ICON.md}
                   aria-hidden="true"
                 />
               </button>
             </span>
             <button className="button is-primary" type="button" onClick={onCreate}>
-              <Plus size={15} aria-hidden="true" />
+              <Plus size={ICON.sm} aria-hidden="true" />
               新建任务
             </button>
             {/* 未选中时**禁用**，不是能点了才报错（ADR-0043 §6，走查 X15）。 */}
@@ -419,20 +440,22 @@ export function JobCenterScreen({
               className="button"
               type="button"
               disabled={selectedTasks.length === 0 || bulkBusy}
-              onClick={() => void runBulkStart()}
+              onClick={() => setBulkConfirm("start")}
             >
               {bulkBusy ? "正在发起" : "批量发起"}
             </button>
+            {/* 只是打开确认框，此刻一行都还没删——所以是最轻的那一档
+                （2026-08 UX 评审 P0-2.4）。落锤那颗在 `BulkDeleteDialog` 里。 */}
             <button
-              className="button is-danger"
+              className="button is-danger is-ghost"
               type="button"
               disabled={selectedTasks.length === 0 || bulkBusy}
-              onClick={() => setBulkConfirm(true)}
+              onClick={() => setBulkConfirm("delete")}
             >
               批量删除
             </button>
           </div>
-        </div>
+        </header>
 
         <JobResults
           tasks={tasks}
@@ -453,6 +476,7 @@ export function JobCenterScreen({
           onStart={onStart}
           onStop={onStop}
           onOpen={setOpenTaskId}
+          onClearFilters={() => applyFilters(EMPTY_TASK_FILTERS)}
           copiedTaskId={copyStatus?.error === null ? copyStatus.taskId : null}
           onCopyCurl={(task) => void copyCurl(task)}
           focusTaskId={focusTaskId}
@@ -482,6 +506,7 @@ export function JobCenterScreen({
           task={openTask}
           run={openRun}
           tasks={tasks}
+          datasources={datasources}
           onClose={() => setOpenTaskId(null)}
           onRerun={(task) => {
             setOpenTaskId(null);
@@ -498,11 +523,21 @@ export function JobCenterScreen({
         />
       )}
 
-      {bulkConfirm && (
+      {bulkConfirm === "start" && (
+        <BulkStartDialog
+          tasks={selectedTasks}
+          datasources={datasources}
+          busy={bulkBusy}
+          onClose={() => setBulkConfirm(null)}
+          onConfirm={() => void runBulkStart()}
+        />
+      )}
+
+      {bulkConfirm === "delete" && (
         <BulkDeleteDialog
           tasks={selectedTasks}
           busy={bulkBusy}
-          onClose={() => setBulkConfirm(false)}
+          onClose={() => setBulkConfirm(null)}
           onConfirm={() => void runBulkDelete()}
         />
       )}
@@ -578,6 +613,7 @@ function JobResults({
   onStart,
   onStop,
   onOpen,
+  onClearFilters,
   copiedTaskId,
   onCopyCurl,
   focusTaskId,
@@ -601,6 +637,7 @@ function JobResults({
   onStart: (task: Task) => void;
   onStop: (runRecordId: string) => void;
   onOpen: (taskId: string) => void;
+  onClearFilters: () => void;
   copiedTaskId: string | null;
   onCopyCurl: (task: Task) => void;
   focusTaskId: string | null;
@@ -617,12 +654,12 @@ function JobResults({
     return (
       <div className="empty-state">
         <div className="empty-icon">
-          <Database size={22} aria-hidden="true" />
+          <Database size={ICON.empty} aria-hidden="true" />
         </div>
         <h2>还没有任务</h2>
         <p>新建第一个 Oracle → MySQL 导入任务。</p>
         <button className="button is-primary" type="button" onClick={onCreate}>
-          <Plus size={15} aria-hidden="true" />
+          <Plus size={ICON.sm} aria-hidden="true" />
           新建任务
         </button>
       </div>
@@ -630,7 +667,16 @@ function JobResults({
   }
   if (filtered.length === 0) {
     // 空表格加一个孤零零的分页条不算回答（走查 X10）。
-    return <div className="no-results">没有匹配的任务</div>;
+    // **但也不能只说「没有」**（UX 评审 P2）：筛出零条的时候，人下一步一定是想把筛选
+    // 去掉，而唯一的路是回到上面那条筛选栏逐个还原。这里直接给一颗。
+    return (
+      <div className="no-results">
+        <span>没有匹配的任务</span>
+        <button className="text-button" type="button" onClick={onClearFilters}>
+          清除筛选
+        </button>
+      </div>
+    );
   }
 
   // 源 / 目标那两行下挂的是**数据源名字**，`datasource_id` 只在数据源屏出现（ADR-0039 §8）。
@@ -655,15 +701,15 @@ function JobResults({
               />
             </th>
             <th>任务名</th>
-            <th>源表</th>
-            <th>目标表</th>
-            <th>迁移进度</th>
             <th>
               运行状态
               <span className="visually-hidden">
                 有进行中任务时会自动刷新。
               </span>
             </th>
+            <th>迁移进度</th>
+            <th>目标表</th>
+            <th>源表</th>
             <th>启动时间</th>
             <th>运行时长</th>
             <th className="action-column">操作</th>
@@ -697,27 +743,30 @@ function JobResults({
                   />
                 </td>
                 <td>
-                  <span className="task-name">{task.name}</span>
-                  <span className="task-id">{task.task_id}</span>
-                </td>
-                <td>
-                  {/* 自定义 SQL 的任务没有 owner / table——直接拼这两个字段会渲染成
-                      一个孤零零的 `.`。这一列改成「徽标 + 截断的一行」，全文进 title。 */}
-                  <span className="table-cell" title={source.full}>
-                    {source.kind === "sql" && (
-                      <span className="source-kind">自定义 SQL</span>
-                    )}
-                    {source.label}
-                  </span>
-                  <span className="table-side">
-                    {nameOf(task.source_datasource_id)}
+                  {/* `task_id` 不再占第二行（2026-08 UX 评审 P1-1）：每一行都摆一串
+                      32 位十六进制，是把**九列里最没人读的那一样**放进了每一行的视线
+                      正中。它没消失，挂在任务名的 title 上，要用的时候悬停一下就有。 */}
+                  <span className="task-name" title={`任务 ID ${task.task_id}`}>
+                    {task.name}
                   </span>
                 </td>
                 <td>
-                  <span className="table-cell">{task.spec.target_table}</span>
-                  <span className="table-side">
-                    {nameOf(task.target_datasource_id)}
-                  </span>
+                  {/* 状态是**一条链接**（UX 评审 P1-6）：运行详情整屏现在有地址了，
+                      而这一格正是人看完状态之后想点进去的那一格。旁边那颗时钟图标
+                      照旧开抽屉——快速看一眼与摊开细看是两件事。 */}
+                  {run === undefined ? (
+                    <span className={`state is-${status}`}>
+                      {LATEST_RUN_LABELS[status]}
+                    </span>
+                  ) : (
+                    <a
+                      className={`state is-${status}`}
+                      href={runHash(run.run_record_id)}
+                      title={conclusionOf(run)}
+                    >
+                      {LATEST_RUN_LABELS[status]}
+                    </a>
+                  )}
                 </td>
                 <td>
                   {progress.kind === "value" ? (
@@ -737,11 +786,26 @@ function JobResults({
                   )}
                 </td>
                 <td>
-                  <span
-                    className={`state is-${status}`}
-                    title={run === undefined ? undefined : conclusionOf(run)}
-                  >
-                    {LATEST_RUN_LABELS[status]}
+                  <span className="table-cell" title={task.spec.target_table}>
+                    {task.spec.target_table}
+                  </span>
+                  <span className="table-side">
+                    {nameOf(task.target_datasource_id)}
+                  </span>
+                </td>
+                <td>
+                  {/* 自定义 SQL 的任务这里**只给一枚徽标**，不给语句片段：截断到一行的
+                      SQL 认不出是哪一条（几十个任务的开头都是 `SELECT a.ID AS ID,`），
+                      却要吃掉这一列大半的宽度。全文照旧在 title 上，完整语句在详情里。 */}
+                  <span className="table-cell" title={source.full}>
+                    {source.kind === "sql" ? (
+                      <span className="source-kind">自定义 SQL</span>
+                    ) : (
+                      source.label
+                    )}
+                  </span>
+                  <span className="table-side">
+                    {nameOf(task.source_datasource_id)}
                   </span>
                 </td>
                 <td className="time-cell">
@@ -761,14 +825,21 @@ function JobResults({
                     {runAction.kind === "start" ? (
                       <ActionButton
                         label={runAction.disabled ? "正在发起" : "发起运行"}
-                        icon={<Play size={16} />}
+                        icon={<Play size={ICON.md} />}
                         disabled={runAction.disabled}
                         onClick={() => onStart(task)}
                       />
                     ) : (
+                      // 停不停得了与运行详情屏读同一条规则（UX 评审 P1-11）：
+                      // 这一颗过去无条件亮着，人只有吃一个 409 才知道封口点已经过了。
                       <ActionButton
-                        label={`停止运行 ${runAction.runRecordId}`}
-                        icon={<Ban size={16} />}
+                        label={
+                          runAction.refusal === null
+                            ? `停止运行 ${runAction.runRecordId}`
+                            : `停止运行（不可用）：${runAction.refusal}`
+                        }
+                        icon={<Ban size={ICON.md} />}
+                        disabled={runAction.refusal !== null}
                         onClick={() => onStop(runAction.runRecordId)}
                       />
                     )}
@@ -776,36 +847,40 @@ function JobResults({
                       label={copiedTaskId === task.task_id ? "cURL 已复制" : "复制 cURL"}
                       icon={
                         copiedTaskId === task.task_id ? (
-                          <Check size={16} />
+                          <Check size={ICON.md} />
                         ) : (
-                          <Copy size={16} />
+                          <Copy size={ICON.md} />
                         )
                       }
                       onClick={() => onCopyCurl(task)}
                     />
                     <span className="divider" />
-                    {run !== undefined && (
-                      <ActionButton
-                        label="运行详情"
-                        icon={<Clock3 size={16} />}
-                        onClick={() => onOpen(task.task_id)}
-                      />
-                    )}
+                    {/* 位子占住不撤（2026-08 UX 评审 P2-15）：从没跑过的任务原来这一颗
+                        直接消失，于是同一列动作在相邻两行里落在不同的横坐标上，
+                        照着肌肉记忆点下去点到的是隔壁那颗。按不动并说明为什么，
+                        比凭空少一颗好。 */}
+                    <ActionButton
+                      label="运行详情"
+                      icon={<Clock3 size={ICON.md} />}
+                      disabled={run === undefined}
+                      title={run === undefined ? "这个任务还没有跑过" : "运行详情"}
+                      onClick={() => onOpen(task.task_id)}
+                    />
                     <ActionButton
                       label="编辑任务定义"
-                      icon={<Pencil size={16} />}
+                      icon={<Pencil size={ICON.md} />}
                       onClick={() => onEdit(task)}
                     />
                     <ActionButton
                       label="改名"
-                      icon={<Tag size={16} />}
+                      icon={<Tag size={ICON.md} />}
                       onClick={() => onRename(task)}
                     />
                     <span className="divider" />
                     <ActionButton
                       label="删除"
                       danger
-                      icon={<Trash2 size={16} />}
+                      icon={<Trash2 size={ICON.md} />}
                       onClick={() => onDelete(task)}
                     />
                   </span>
@@ -863,6 +938,77 @@ function formatDuration(milliseconds: number): string {
 }
 
 /**
+ * 批量发起的二次确认（2026-08 UX 评审 P0-2）。
+ *
+ * 单条「发起运行」照旧一按就跑——那是这屏最高频的动作，它当着人的面只动一张表，
+ * 而那张表就写在同一行上。**批量不是它的复数**：一颗按钮同时改写 N 张生产表，
+ * 而勾是分几页、隔几分钟点下的，按之前根本没有一处地方把「这批到底要写哪几张表」摆齐过。
+ * 这层不对称是故意的——摩擦要加在**看不清后果**的那一侧，不是加在每一次动作上。
+ *
+ * 列的是**任务名与它要写的那张表**，不是任务名加 id：这一步要核对的是「会被改写的是
+ * 哪几张表」。目标表带库名（`qualifiedTargetTable`）——同名表在几个库里都可能有一张。
+ *
+ * 两者之间写「写入」而不是一个箭头：自动生成的任务名**本身**就长成「源表 → 目标表」，
+ * 再夹一个箭头，一行里会出现两个方向不同的箭头，读起来像一条三段的链路。
+ */
+function BulkStartDialog({
+  tasks,
+  datasources,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  tasks: Task[];
+  datasources: Datasource[];
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const byId = new Map(datasources.map((datasource) => [datasource.datasource_id, datasource]));
+  return (
+    <Modal title={`发起 ${tasks.length} 个任务`} onClose={onClose} busy={busy}>
+      <div className="modal-body delete-copy">
+        <p>
+          将<strong>逐个发起</strong>下面这些任务，按主键写进各自的目标表。
+          一条失败不中断后面的，跑完给一行汇总。
+        </p>
+        <ul className="bulk-targets">
+          {tasks.map((task) => (
+            <li key={task.task_id}>
+              <span className="bulk-task-name">{task.name}</span>
+              <span className="bulk-task-target">
+                写入{" "}
+                <span className="mono">
+                  {qualifiedTargetTable(byId.get(task.target_datasource_id), task.spec.target_table)}
+                </span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <footer className="modal-footer">
+        <button
+          className="button is-ghost"
+          type="button"
+          onClick={onClose}
+          disabled={busy}
+        >
+          取消
+        </button>
+        <button
+          className="button is-primary"
+          type="button"
+          onClick={onConfirm}
+          disabled={busy}
+        >
+          {busy ? "正在发起" : `发起 ${tasks.length} 个任务`}
+        </button>
+      </footer>
+    </Modal>
+  );
+}
+
+/**
  * 批量删除的二次确认。**把要删的任务名逐条列全**（ADR-0043 §6，走查 X15）——
  * 「确定删除 3 个任务？」这句话让人无从核对自己勾中的到底是哪三个。
  */
@@ -902,12 +1048,12 @@ function BulkDeleteDialog({
           取消
         </button>
         <button
-          className="button is-danger"
+          className="button is-danger is-solid"
           type="button"
           onClick={onConfirm}
           disabled={busy}
         >
-          {busy ? "正在删除" : "确认删除"}
+          {busy ? "正在删除" : `删除这 ${tasks.length} 个任务`}
         </button>
       </footer>
     </Modal>

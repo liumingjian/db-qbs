@@ -1,5 +1,6 @@
 import { Database, Pencil, Plus, PlugZap, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
+import { ICON } from "./components/DesignSystem";
 import type { FormEvent } from "react";
 
 import {
@@ -133,7 +134,7 @@ export function DatasourceScreen({
           type="button"
           onClick={() => setDialog({ kind: "create" })}
         >
-          <Plus size={15} aria-hidden="true" />
+          <Plus size={ICON.sm} aria-hidden="true" />
           新建数据源
         </button>
       </header>
@@ -147,7 +148,7 @@ export function DatasourceScreen({
       {!loading && datasources.length === 0 && (
         <div className="empty-state">
           <div className="empty-icon">
-            <Database size={22} aria-hidden="true" />
+            <Database size={ICON.empty} aria-hidden="true" />
           </div>
           <h2>还没有数据源</h2>
           <p>先录一条 Oracle 源库与一条 MySQL 目标库，任务才有得选。</p>
@@ -156,7 +157,7 @@ export function DatasourceScreen({
             type="button"
             onClick={() => setDialog({ kind: "create" })}
           >
-            <Plus size={15} aria-hidden="true" />
+            <Plus size={ICON.sm} aria-hidden="true" />
             新建数据源
           </button>
         </div>
@@ -278,7 +279,7 @@ function DatasourceTable({
                       icon={
                         <PlugZap
                           className={test?.kind === "testing" ? "is-spinning" : ""}
-                          size={16}
+                          size={ICON.md}
                         />
                       }
                       disabled={test?.kind === "testing"}
@@ -287,14 +288,14 @@ function DatasourceTable({
                     <span className="divider" />
                     <ActionButton
                       label="编辑数据源"
-                      icon={<Pencil size={16} />}
+                      icon={<Pencil size={ICON.md} />}
                       onClick={() => onAction({ kind: "edit", datasource })}
                     />
                     <span className="divider" />
                     <ActionButton
                       label="删除数据源"
                       danger
-                      icon={<Trash2 size={16} />}
+                      icon={<Trash2 size={ICON.md} />}
                       onClick={() => onAction({ kind: "delete", datasource })}
                     />
                   </div>

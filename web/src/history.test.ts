@@ -135,7 +135,7 @@ describe("run history presentation", () => {
       ),
     ).toEqual({
       kind: "succeeded",
-      conclusion: "目标端：运行成功：已推送 100,000 行，暂存表已切换为目标表。",
+      conclusion: "目标端：运行成功：已推送 100,000 行，已按主键合并进目标表。",
       terminalEffect: "SWAPPED",
       error: null,
     });

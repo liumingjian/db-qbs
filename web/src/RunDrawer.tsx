@@ -1,18 +1,27 @@
 import { Play, Trash2, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useRef, useState } from "react";
 
 import { cleanupRun } from "./api";
-import type { RunHistory, Task } from "./api";
+import type { Datasource, RunHistory, Task } from "./api";
+import { qualifiedTargetTable } from "./datasource";
+import { useDialogFocus } from "./dialogFocus";
 import { messageFrom } from "./errors";
 import { FailureEvidence } from "./FailureEvidence";
 import {
   ErrorCodeTag,
+  ICON,
   SensitiveValue,
   TerminalBlock,
+  UnknownConclusion,
+  UpsertNote,
+  UPSERT_NOTE_DONE,
 } from "./components/DesignSystem";
 import { formatTimestamp, historyPresentation, runIdPresentation } from "./history";
+import { PrecheckReports } from "./PrecheckReports";
+import { HighlightedSql } from "./SqlEditor";
 import { rerunAction } from "./rerun";
 import { sourceSummary, whereSummary } from "./spec";
+import { Modal } from "./ui";
 import type { Step } from "./wizard";
 
 /**
@@ -35,6 +44,7 @@ export function RunDrawer({
   task,
   run,
   tasks,
+  datasources,
   onClose,
   onRerun,
   onEditTask,
@@ -44,28 +54,25 @@ export function RunDrawer({
   run: RunHistory;
   /** 传给 `rerunAction` 判「任务还在不在」；`null` = 任务清单没读到。 */
   tasks: Task[] | null;
+  /** 只为把清理确认框里那张目标表写成全限定的 `库.表`。 */
+  datasources: Datasource[];
   onClose: () => void;
   onRerun: (task: Task) => void;
   onEditTask: (task: Task, step: Step) => void;
   onCleaned: () => void;
 }) {
   const [cleaning, setCleaning] = useState(false);
+  const [cleanupConfirm, setCleanupConfirm] = useState(false);
   const [cleanupError, setCleanupError] = useState<string | null>(null);
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    }
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+  const dialog = useRef<HTMLElement | null>(null);
+  // 焦点陷阱、初始焦点与关闭后的焦点归位，与对话框共用同一份实现（UX 评审 P0-5）。
+  // 清理确认框叠在这层上面时，按键归最上面那一层管——`useDialogFocus` 自己排的队。
+  useDialogFocus(dialog, { onEscape: onClose, escapable: !cleaning });
 
   const presentation = historyPresentation(run);
   const rerun = rerunAction(run, tasks);
 
   async function cleanWrittenRows() {
-    if (!window.confirm("确定清理这一次运行写入的数据？此操作不可撤销。")) return;
     setCleaning(true);
     setCleanupError(null);
     try {
@@ -73,6 +80,7 @@ export function RunDrawer({
       onCleaned();
     } catch (error) {
       setCleanupError(messageFrom(error));
+      setCleanupConfirm(false);
     } finally {
       setCleaning(false);
     }
@@ -83,9 +91,11 @@ export function RunDrawer({
       <div className="drawer-scrim" role="presentation" onMouseDown={onClose} />
       <aside
         className="drawer"
+        ref={dialog}
         role="dialog"
         aria-modal="true"
         aria-labelledby="drawer-title"
+        tabIndex={-1}
       >
         <header className="drawer-header">
           <button
@@ -95,7 +105,7 @@ export function RunDrawer({
             aria-label="关闭"
             onClick={onClose}
           >
-            <X size={18} aria-hidden="true" />
+            <X size={ICON.lg} aria-hidden="true" />
           </button>
           <h2 id="drawer-title">运行详情 · {task.name}</h2>
           <span className="sub">{run.run_record_id}</span>
@@ -105,13 +115,10 @@ export function RunDrawer({
           <section className="panel">
             <h3>结论</h3>
             {presentation.kind === "unknown" ? (
-              <div
-                className={`unknown-conclusion is-${run.unknown_reason?.toLowerCase()}`}
-              >
-                <strong>结局不明</strong>
-                <span>{presentation.conclusion}</span>
-                <small>无法确认目标表是否被修改，请到目标库核对。</small>
-              </div>
+              <UnknownConclusion
+                reason={run.unknown_reason}
+                conclusion={presentation.conclusion}
+              />
             ) : (
               <div className="panel-body">
                 <div className="detail-status">
@@ -150,6 +157,9 @@ export function RunDrawer({
                 {presentation.kind === "succeeded" && (
                   <div className="success-conclusion">{presentation.conclusion}</div>
                 )}
+                {presentation.terminalEffect === "SWAPPED" && (
+                  <UpsertNote text={UPSERT_NOTE_DONE} />
+                )}
                 {presentation.kind === "live" && (
                   <div className="drawer-note">{presentation.conclusion}</div>
                 )}
@@ -157,16 +167,21 @@ export function RunDrawer({
             )}
           </section>
 
-          {presentation.kind === "failed" && (
+          {/* 映射预检的诊断表也摆在抽屉里（UX 评审 P1-6）：它原来只长在整屏详情上，
+              而那一屏唯一的入口是刚点完发起的那一次，刷新一下就再也找不到了。 */}
+          {run.mapping_issues.length > 0 && <PrecheckReports detail={run} />}
+
+          {(presentation.kind === "failed" || presentation.kind === "unknown") && (
             <FailureEvidence
               run={run}
+              variant={presentation.kind === "unknown" ? "unknown" : "failure"}
               onEditTask={(step) => onEditTask(task, step)}
             />
           )}
 
           <section className="panel">
             <h3>行数核对</h3>
-            <div className="panel-body kv">
+            <div className="panel-body kv is-numeric">
               <Value label="源端读取" value={optionalCount(run.source_rows)} />
               <Value label="暂存写入" value={optionalCount(run.staged_rows)} />
               <Value
@@ -180,7 +195,7 @@ export function RunDrawer({
 
           <section className="panel">
             <h3>分段耗时</h3>
-            <div className="panel-body kv">
+            <div className="panel-body kv is-numeric">
               {/* 「开跑前计数」**单独一栏，不混进取数**（ADR-0043 §7）：把它揉进取数里，
                   下一个人看到的「取数慢」会是两件事的和。 */}
               <Value label="开跑前计数" value={milliseconds(run.precount_ms)} />
@@ -227,7 +242,7 @@ export function RunDrawer({
 
           <section className="panel">
             <h3>当次执行的源端 SQL</h3>
-            <pre className="drawer-sql">{run.source_sql}</pre>
+            <pre className="drawer-sql"><HighlightedSql sql={run.source_sql} /></pre>
           </section>
 
           {(run.column !== null || run.value !== null) &&
@@ -246,13 +261,15 @@ export function RunDrawer({
           <span className="spacer" />
           {cleanupError !== null && <span className="form-error">{cleanupError}</span>}
           {run.cleanup_status === "available" && (
+            // 入口只是**打开确认框**，此刻一行都还没删——所以它是最轻的那一档，
+            // 落锤那颗在 `CleanupDialog` 里（2026-08 UX 评审 P0-2）。
             <button
-              className="button is-danger"
+              className="button is-danger is-ghost"
               type="button"
               disabled={cleaning}
-              onClick={() => void cleanWrittenRows()}
+              onClick={() => setCleanupConfirm(true)}
             >
-              <Trash2 size={14} aria-hidden="true" />
+              <Trash2 size={ICON.sm} aria-hidden="true" />
               {cleaning ? "正在清理" : "清理本次写入"}
             </button>
           )}
@@ -269,7 +286,7 @@ export function RunDrawer({
               title="重跑：按这个任务当前的定义再跑一次"
               onClick={() => onRerun(rerun.task)}
             >
-              <Play size={14} aria-hidden="true" />
+              <Play size={ICON.sm} aria-hidden="true" />
               重跑
             </button>
           )}
@@ -283,14 +300,96 @@ export function RunDrawer({
                 aria-label={`重跑（不可用）：${rerun.reason}`}
                 disabled
               >
-                <Play size={14} aria-hidden="true" />
+                <Play size={ICON.sm} aria-hidden="true" />
                 重跑
               </button>
             </span>
           )}
         </footer>
       </aside>
+
+      {cleanupConfirm && (
+        <CleanupDialog
+          targetTable={qualifiedTargetTable(
+            datasources.find(
+              (datasource) => datasource.datasource_id === task.target_datasource_id,
+            ),
+            task.spec.target_table,
+          )}
+          rows={run.sink_reported_rows ?? run.staged_rows}
+          busy={cleaning}
+          onClose={() => setCleanupConfirm(false)}
+          onConfirm={() => void cleanWrittenRows()}
+        />
+      )}
     </>
+  );
+}
+
+/**
+ * 「清理本次写入」的二次确认（2026-08 UX 评审 P0-2）。
+ *
+ * 原来这里是一句 `window.confirm`。那是这个界面上**唯一一处直接删生产数据**的动作，
+ * 而系统弹框给不出它必须给出的三样东西：删的是哪张表、大概多少行、以及删完是什么状态。
+ *
+ * 「清理是删除，不是还原」这句要单独立着：`cleanup` 打的是 `DELETE`
+ * （`crates/sink/src/mysql_destination.rs` 的 `build_cleanup_delete_statement`）。
+ * 这次 upsert 覆盖掉的那些**本来就存在的行**，清理会把它们整行删掉，
+ * **不会**把它们恢复成运行前的样子——「清理」这个词天生读着像撤销，所以得当面否掉。
+ *
+ * 行数是**上界**：后来的运行又写过的那些键会被跳过（写入台账 `write_seq` 判的）。
+ */
+function CleanupDialog({
+  targetTable,
+  rows,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  targetTable: string;
+  /** 本次写入的行数；`null` = 两端都没回报，那就不摆一个假的数。 */
+  rows: number | null;
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Modal title="清理本次写入" onClose={onClose} busy={busy} narrow>
+      <div className="modal-body delete-copy">
+        <p>
+          将从 <span className="mono">{targetTable}</span> 删除这一次运行写进去的行
+          {rows === null ? "" : `，最多 ${countFormatter.format(rows)} 行`}
+          ；已被后来的运行覆盖过的键会跳过。
+        </p>
+        <p className="cleanup-warning">
+          <strong>清理是删除，不是还原。</strong>
+          这次写入覆盖掉的那些原有的行会被整行删掉，不会恢复成运行前的样子。
+        </p>
+      </div>
+      <footer className="modal-footer">
+        <button
+          className="button is-ghost"
+          type="button"
+          onClick={onClose}
+          disabled={busy}
+        >
+          取消
+        </button>
+        <button
+          className="button is-danger is-solid"
+          type="button"
+          onClick={onConfirm}
+          disabled={busy}
+        >
+          <Trash2 size={ICON.sm} aria-hidden="true" />
+          {busy
+            ? "正在清理"
+            : rows === null
+              ? "删除本次写入的行"
+              : `删除这 ${countFormatter.format(rows)} 行`}
+        </button>
+      </footer>
+    </Modal>
   );
 }
 

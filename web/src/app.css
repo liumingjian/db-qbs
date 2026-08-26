@@ -40,7 +40,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .app-shell { display: grid; grid-template-columns: var(--sider-w) minmax(0, 1fr); min-height: 100vh; background: var(--bg); }
 .sidebar { background: var(--sider-bg); }
 .product-brand { height: var(--topbar-h); margin-top: 10px; display: flex; align-items: center; gap: 10px; padding: 10px 4px 10px 20px; color: var(--sider-text-active); font-size: 16px; font-weight: var(--weight-em); }
-.brand-mark { width: 24px; height: 24px; flex: none; display: grid; place-items: center; border-radius: var(--radius); background: var(--brand); color: #fff; font-family: var(--font-num); font-size: var(--size-cap); }
+.brand-mark { width: 24px; height: 24px; flex: none; display: grid; place-items: center; border-radius: var(--radius); background: var(--brand); color: var(--on-solid); font-family: var(--font-num); font-size: var(--size-cap); }
 .sidebar nav { display: flex; flex-direction: column; padding: 8px 0; }
 .nav-item { height: var(--sider-item-h); margin: 0 10px; display: flex; align-items: center; gap: 10px; padding: 14px 24px 14px 20px; border-radius: var(--sider-item-radius); color: var(--sider-text); text-decoration: none; }
 .nav-item:hover { color: var(--sider-text-active); }
@@ -51,11 +51,23 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .breadcrumb { display: flex; gap: 7px; }
 .breadcrumb strong { color: var(--text); font-weight: var(--weight-em); }
 .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
-.environment { padding: 1px 7px; border: 1px solid var(--line-strong); border-radius: var(--radius); color: var(--mute); font-family: var(--font-num); font-size: var(--size-meta); }
+/* 「关于」浮层（P1-12）：顶栏右上角，不是导航的一格。 */
+.about-wrap { position: relative; display: inline-flex; }
+.about-trigger { height: 30px; padding: 0 10px; font-size: var(--size-meta); }
+.about-popover { position: absolute; z-index: 45; top: calc(100% + 8px); right: 0; width: min(520px, calc(100vw - 32px)); max-height: min(70vh, 620px); overflow: auto; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); box-shadow: var(--shadow-pop); }
+.about-popover:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+.about-popover > header { position: sticky; top: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 11px var(--pad); border-bottom: 1px solid var(--line); background: var(--panel); }
+.about-popover > header strong { font-size: var(--size-body); font-weight: var(--weight-em); }
+.about-popover > header span { color: var(--mute); font-size: var(--size-cap); }
+.about-panel { padding: var(--pad); }
 .mobile-brand { display: none; font-weight: var(--weight-em); }
 .mobile-nav { display: none; }
-.content { flex: 1; padding: var(--pad); }
-.content.is-wizard { min-height: 0; padding: 0; }
+/* 宽屏是混合规则（评审 §2）：**表格屏居中收在 1800px 内**——27" 通栏时任务名在最左、
+   操作在最右，读一行要横扫 2000px 以上，而九列里真正有信息的部分只占中间一段。
+   **向导与运行详情通栏**：映射表、SQL、证据栅格都是越宽越好读的东西。 */
+.content { flex: 1; width: 100%; max-width: 1800px; margin: 0 auto; padding: var(--pad); }
+.content.is-wide { max-width: none; }
+.content.is-wizard { min-height: 0; max-width: none; padding: 0; }
 
 /* 折叠：256 ⇄ 48。折叠后图标**居中**——参照物这里没跟着改 padding-left，选中的蓝块被
    48px 切成一条竖边，那是它的渲染瑕疵不是它的设计（ADR-0043 文末自决 2）。 */
@@ -72,9 +84,18 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .card { border-radius: var(--radius); background: var(--panel); }
 .card-header { min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: var(--gap); padding: 12px var(--pad); border-bottom: 1px solid var(--line); }
 .card-header > div { display: flex; align-items: baseline; gap: 10px; }
-.card-header h1 { margin: 0; font-size: var(--size-body); font-weight: var(--weight-em); letter-spacing: 0; }
+/* 卡头的标题**统一带那块灰底**（UX 评审 P2）。它是照参照物量出来的处理（--title-bg，
+   x2doris 的「Job Center」那一块），原来只有作业中心有，于是三屏的卡头一眼就是两套。
+   要么三屏都有、要么都没有；分家是唯一不该有的选项。 */
+.card-header h1 { margin: 0; padding: 6px 12px; background: var(--title-bg); color: var(--text); font-size: var(--size-title); font-weight: var(--weight-em); line-height: 28px; letter-spacing: 0; }
+.card-header h2, .card-header h3 { margin: 0; font-size: var(--size-section); font-weight: var(--weight-em); }
+/* 运行详情那一张是**详情卡不是列表卡**：标题旁边还站着「返回任务」与运行记录号，
+   再加一块灰底会把那一行挤成三段互不相干的东西。 */
+.run-header h1 { padding: 0; background: transparent; }
 .card-subtitle { color: var(--mute); font-size: var(--size-meta); }
-.table-card { padding: var(--card-pad); }
+/* 卡头自己带内边距，这里只管表体那一圈。 */
+.table-card { padding: 0 var(--card-pad) var(--card-pad); }
+.table-card > .card-header { padding-inline: 6px; }
 
 /* 筛选条独立成卡，摆在表格卡上方（参照物的形态）。 */
 .filter-card { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: var(--gap); padding: 12px var(--card-pad) 6px; border-radius: var(--radius); background: var(--panel); }
@@ -85,22 +106,34 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .filter-field select:focus, .filter-field input:focus { border-color: var(--brand); outline: 0; box-shadow: 0 0 0 2px var(--brand-dim); }
 .filter-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 
-/* 卡内标题块 + 工具条。 */
-.table-title-row { min-height: 48px; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding-bottom: 8px; }
-.table-title { margin: 0 32px 0 0; padding: 8px 12px; background: var(--title-bg); color: var(--text); font-size: var(--size-body); font-weight: var(--weight-em); line-height: 24px; }
-.table-count { color: var(--mute); font-size: var(--size-meta); }
-.table-toolbar { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+/* 卡内工具条。`.table-title-row` / `.table-title` / `.table-count` 三个类已并入
+   `.card-header`（UX 评审 P2）：三屏一套结构、一套间距、一种标题处理。 */
+.table-toolbar { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .toolbar-icons { display: flex; gap: 2px; padding-right: 12px; margin-right: 4px; border-right: 1px solid var(--line); }
 .toolbar-icons .icon-button { width: var(--ctl-h); height: var(--ctl-h); }
 
 /* ---------------------------------------------------------------- 按钮 */
 .button { height: var(--ctl-h); display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 4px 15px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); box-shadow: var(--btn-shadow); cursor: pointer; font-size: var(--size-body); font-family: inherit; white-space: nowrap; }
-.button.is-primary { border-color: var(--brand); background: var(--brand); color: #fff; }
+.button.is-primary { border-color: var(--brand); background: var(--brand); color: var(--on-solid); }
 .button.is-ghost:hover { border-color: var(--brand); color: var(--brand); }
+/* `<a class="button">`：按钮的样子，链接的行为。 */
+a.button { text-decoration: none; }
+/* 危险动作分两档（2026-08 UX 评审 P0-2）：
+   **描边的是入口**——它只是打开确认框，此刻还什么都没发生；
+   **实心的是落锤**——确认框里那一颗，按下去数据就变了。
+   两档长得一样时，工具条上那颗按钮看着比它实际的分量重，而确认框里那颗看着比它轻。 */
 .button.is-danger { border-color: var(--crit-bd); background: var(--panel); color: var(--crit); }
+.button.is-danger.is-solid { border-color: var(--crit); background: var(--crit); color: var(--on-solid); }
+/* 危险三档（2026-08 UX 评审 P0-2.4）。分档依据是**按下去当场会发生什么**：
+   ghost 只打开一个确认框，一行都还没动；solid 是落锤那一颗，按下去就真删。
+   中间的描边档留给「已经在对话框里、但还要再点一次」之类的场合。
+   ghost 保留 .button 的盒子（内边距与高度不变），只把那圈边和底色收成透明，
+   所以它跟工具条里其他按钮仍然对得齐，不会看着像掉了一块。 */
+.button.is-danger.is-ghost { border-color: transparent; background: transparent; box-shadow: none; }
+.button.is-danger.is-ghost:hover:not(:disabled) { border-color: var(--crit-bd); background: var(--crit-bg); color: var(--crit); }
 .button:disabled, .icon-button:disabled { cursor: not-allowed; opacity: .55; }
 /* 行内动作是**无边框图标位**（ADR-0043 §5：全图标，ADR-0042 §6 已作废）。 */
-.icon-button { height: 24px; display: inline-grid; place-items: center; padding: 0 7px; border: 1px solid transparent; border-radius: var(--radius); background: transparent; color: var(--brand); cursor: pointer; }
+.icon-button { height: var(--action-h); min-width: var(--action-h); display: inline-grid; place-items: center; padding: 0 7px; border: 1px solid transparent; border-radius: var(--radius); background: transparent; color: var(--brand); cursor: pointer; }
 .icon-button:hover { background: var(--brand-dim); }
 .icon-button.is-danger { color: var(--crit); }
 .icon-button.is-danger:hover { background: var(--crit-bg); }
@@ -108,6 +141,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .icon-button.is-tool:hover { color: var(--brand); }
 .icon-button:disabled { color: var(--mute); }
 .icon-button:disabled:hover { background: transparent; }
+/* 禁用按钮的悬停提示挂在这一层：浏览器不给 disabled 控件派发指针事件。 */
+.disabled-action { display: inline-flex; }
 .text-button { padding: 0; border: 0; background: transparent; color: var(--brand); cursor: pointer; }
 
 /* ---------------------------------------------------------------- 数据表 */
@@ -116,13 +151,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .data-grid th { height: var(--head-h); padding: var(--cell-pad); border-bottom: 1px solid var(--line); background: var(--mute-bg); color: var(--text); font-weight: var(--weight-em); text-align: left; white-space: nowrap; }
 .data-grid td { height: var(--row-h); padding: var(--cell-pad); border-bottom: 1px solid var(--line); background: var(--panel); vertical-align: middle; }
 .data-grid tbody tr:hover td { background: var(--mute-bg); }
-.job-grid { min-width: 1080px; }
+.job-grid { min-width: 1000px; }
 .job-grid td { white-space: nowrap; }
-.task-name, .task-id { display: block; }
-.task-name { white-space: nowrap; }
-.task-id { color: var(--mute); font-family: var(--font-num); font-size: var(--size-cap); }
+.task-name { display: block; max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 源表 / 目标表一格两行：上行表名（等宽），下行数据源**名字**，不是 id（ADR-0039 §8）。 */
 .table-cell { display: block; font-family: var(--font-num); font-size: var(--size-meta); }
+/* 这两列**封顶**（P1-1）：一个长表名或一句自定义 SQL 原来可以把这一列撑到 450px 以上，
+   而它撑走的宽度是从右边那几列——运行状态、时间、操作——身上拿的。全文进 title。 */
+.job-grid .table-cell { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
 /* ── 连字一律关掉 ──────────────────────────────────────────────────────────
    --font-num 排在最前的是 JetBrains Mono / Cascadia Mono（tokens.css），两者默认把
    `>=` 画成 `≥`、`!=` 画成 `≠`、`->` 画成 `→`。这些地方摆的是**将要执行的语句**
@@ -164,7 +200,9 @@ pre.drawer-sql,
 .error-code,
 .sensitive-value dl,
 .settings-copy dd { font-variant-ligatures: none; }
-.table-side { display: block; color: var(--mute); font-size: var(--size-cap); }
+/* 数据源名字**不是装饰**：一眼看出这行搬到哪个库，靠的就是它。--mute 对白底约 3.5:1，
+   过不了 WCAG AA 的正文档，而这一格是要读的（P2）。 */
+.table-side { display: block; color: var(--dim); font-size: var(--size-cap); }
 .time-cell { font-family: var(--font-num); font-size: var(--size-meta); font-variant-numeric: tabular-nums; }
 .mono, .sql-cell { font-family: var(--font-num); font-size: var(--size-meta); }
 /* tokens.css 把 tabular-nums 挂在 .num / td.n 上，应用里用的却是 .mono / .numeric-column，
@@ -179,11 +217,15 @@ pre.drawer-sql,
 /* 操作列吸附右侧（参照物的 `ant-table-cell-fix-right`）：1024 下横滚时它始终在。
    只给作业中心那张宽表——数据源屏一屏放得下，吸附只会在没有溢出时白留一道阴影。 */
 .action-column { width: 1%; white-space: nowrap; }
-.job-grid .action-column { position: sticky; right: 0; box-shadow: -6px 0 6px -6px rgba(0, 0, 0, .12); }
+.job-grid .action-column { position: sticky; right: 0; box-shadow: var(--shadow-edge); }
+/* 吸附的格子必须**自己**是不透明的，而且要跟着行悬停走：底色继承自通用规则时，
+   横滚经过它下面的那些字会从它身上透出来。这两条写死，不靠继承。 */
+.job-grid td.action-column { background: var(--panel); }
+.job-grid tbody tr:hover td.action-column { background: var(--mute-bg); }
 .job-grid th.action-column { z-index: 2; }
 .row-actions { display: flex; align-items: center; }
 /* 两道分隔线把「跑」｜「看 / 改 / 改名」｜「删」分成三组——位置因此是有结构的，不是硬记。 */
-.row-actions .divider { width: 1px; height: 14px; margin: 0 4px; background: #E8E8E8; }
+.row-actions .divider { width: 1px; height: 14px; margin: 0 4px; background: var(--line-mid); }
 
 /* ---------------------------------------------------------------- 迁移进度
    只有一个整数百分比 + 一条细条：向下取整、不带小数、不附行数（ADR-0043 §7）。 */
@@ -196,25 +238,30 @@ pre.drawer-sql,
 
 /* ---------------------------------------------------------------- 运行状态
    一维索引，**不是轴二**：五个词齐是对的（ADR-0043 §4）。实心方角标签。 */
-.state { display: inline-block; height: 22px; padding: 0 7px; border: 1px solid transparent; border-radius: var(--badge-radius); color: #fff; font-size: var(--size-meta); line-height: 20px; white-space: nowrap; }
+.state { display: inline-block; height: 22px; padding: 0 7px; border: 1px solid transparent; border-radius: var(--badge-radius); color: var(--on-solid); font-size: var(--size-meta); line-height: 20px; white-space: nowrap; }
 .state.is-succeeded { background: var(--ok); }
 .state.is-failed { background: var(--crit); }
 .state.is-live { background: var(--brand); }
 .state.is-unknown { background: var(--mute); }
 .state.is-none { border-color: var(--line-strong); background: var(--panel); color: var(--mute); }
+/* 状态标签是链接（P1-6）：不加下划线、不改颜色——它先是一枚状态标签，才是一条路。
+   悬停时给一圈描边把「可点」说出来。 */
+a.state { text-decoration: none; cursor: pointer; }
+a.state:hover { box-shadow: 0 0 0 2px var(--brand-dim); }
+a.state:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
 
 /* ---------------------------------------------------------------- 分页
    客户端分页且**不装成服务端分页**（ADR-0042 §2 原样有效）；形态照参照物。 */
 .list-pagination { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 10px; min-height: 24px; color: var(--text); }
 .pagination-total { margin-right: auto; color: var(--mute); font-family: var(--font-num); font-size: var(--size-meta); }
 .page-btn { min-width: 24px; height: 24px; padding: 0 4px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); font-weight: var(--weight-em); line-height: 22px; cursor: pointer; }
-.page-btn.is-active { border-color: var(--brand); background: var(--brand); color: #fff; }
+.page-btn.is-active { border-color: var(--brand); background: var(--brand); color: var(--on-solid); }
 .page-btn:disabled { color: var(--mute); cursor: not-allowed; }
 .page-size { height: 24px; padding: 0 4px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-size: var(--size-meta); font-family: inherit; }
 
 /* ---------------------------------------------------------------- 详情抽屉
    顶替整个「运行历史」屏：右侧 760px，不是新页也不是居中模态（ADR-0043 §4）。 */
-.drawer-scrim { position: fixed; z-index: 40; inset: 0; background: rgba(0, 0, 0, .45); }
+.drawer-scrim { position: fixed; z-index: 40; inset: 0; background: var(--scrim); }
 .drawer { position: fixed; z-index: 41; top: 0; right: 0; bottom: 0; width: 760px; max-width: 92vw; display: flex; flex-direction: column; background: var(--bg); }
 .drawer-header { min-height: 56px; display: flex; align-items: center; gap: 12px; padding: 0 var(--pad); border-bottom: 1px solid var(--line); background: var(--panel); }
 .drawer-header h2 { margin: 0; font-size: var(--size-body); font-weight: var(--weight-em); }
@@ -226,16 +273,25 @@ pre.drawer-sql,
 .panel { border-radius: var(--radius); background: var(--panel); }
 .panel > h3 { margin: 0; padding: 11px var(--pad); border-bottom: 1px solid var(--line); font-size: var(--size-body); font-weight: var(--weight-em); }
 .panel > .panel-body { padding: 14px var(--pad); }
-.kv { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px 18px; }
-.kv.is-pairs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+/* 列数**跟着宽度走**，不是写死四栏：抽屉在窄屏上会被压到 92vw，四栏那时每栏 120px，
+   一个 `TEST_SOURCE_001__stg_20260824` 要折三行。 */
+.kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px 18px; }
+.kv.is-pairs { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
 .kv > div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.kv .k { color: var(--mute); font-size: var(--size-cap); }
+.kv .k { color: var(--mute); font-family: var(--font-cn); font-size: var(--size-cap); }
 .kv .v { overflow-wrap: anywhere; font-family: var(--font-num); font-size: var(--size-meta); font-variant-numeric: tabular-nums; }
+/* 「行数核对」「分段耗时」这两块摆的全是数：**右对齐**才比得出位数。
+   左对齐时 500,000 与 12,281 的个位差着三格，一眼看不出哪个大（P2）。 */
+.kv.is-numeric .v { text-align: right; }
+.kv.is-numeric .k { text-align: right; }
 .kv .v.is-bad { color: var(--crit); }
 pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height: 240px; border-top: 1px solid var(--line); background: var(--mute-bg); color: var(--dim); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ---------------------------------------------------------------- 空态与提示 */
 .loading-state, .no-results { padding: 44px var(--pad); color: var(--mute); text-align: center; }
+/* 筛出零条时**同时给一条出路**（P2）：只说「没有匹配的任务」，下一步只能回到筛选栏
+   把刚填的东西逐个还原。 */
+.no-results { display: flex; align-items: baseline; justify-content: center; gap: 12px; }
 .empty-state { min-height: 280px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 44px var(--pad); text-align: center; }
 .empty-icon { width: 48px; height: 48px; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--mute-bg); color: var(--mute); }
 .empty-state h2 { margin: 14px 0 4px; font-size: var(--size-body); font-weight: var(--weight-em); letter-spacing: 0; }
@@ -244,21 +300,37 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 /* 批量动作跑完的那一行汇总（ADR-0043 §6）：串行跑完一次说清成败，不是只报最后一条。 */
 .bulk-summary { display: flex; align-items: center; justify-content: space-between; gap: var(--gap); margin-bottom: var(--gap); padding: 10px 14px; border-left: 3px solid var(--brand); border-radius: 0 var(--radius) var(--radius) 0; background: var(--brand-dim); color: var(--dim); line-height: var(--lh-prose); }
 .bulk-summary.is-failed { border-left-color: var(--crit); background: var(--crit-bg); }
+/* 「还有一份没做完的草稿」那一条（P1-5）。它**不是错误**——默认的 .notice 着 --crit，
+   而这条说的是「你有件事没做完」，所以换成品牌色的那一档。 */
+.notice.is-draft { border-left-color: var(--brand); background: var(--brand-dim); color: var(--dim); }
+.notice.is-draft strong { color: var(--text); }
+/* 「地址点名的那条运行不在」。也不是错误——没人做错什么，只是那条记录没了，
+   所以走 --warn 而不是默认的 --crit。 */
+.notice.is-warn { border-left-color: var(--warn); background: var(--warn-bg); color: var(--dim); }
+.notice.is-warn strong { color: var(--text); }
+.notice-side { margin-left: 8px; color: var(--mute); font-size: var(--size-meta); }
+.notice-actions { flex: none; display: flex; align-items: center; gap: 14px; }
+.text-button.is-quiet { color: var(--mute); }
+.text-button.is-quiet:hover { color: var(--crit); }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
 
 /* ---------------------------------------------------------------- 对话框与表单 */
-.modal-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; overflow-y: auto; padding: 24px; background: color-mix(in srgb, var(--text) 34%, transparent); }
+.modal-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; overflow-y: auto; padding: 24px; background: var(--scrim); }
 .modal { width: min(680px, 100%); max-height: calc(100vh - 48px); overflow-y: auto; border-radius: var(--radius); background: var(--panel); }
 .modal.is-narrow { width: min(460px, 100%); }
 .modal.is-wide { width: min(980px, 100%); }
 .modal-header { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: var(--gap); padding: 10px var(--pad); border-bottom: 1px solid var(--line); }
-.modal-header h2 { margin: 0; font-size: var(--size-body); font-weight: var(--weight-em); letter-spacing: 0; }
+.modal-header h2 { margin: 0; font-size: var(--size-section); font-weight: var(--weight-em); letter-spacing: 0; }
 .modal-header .icon-button { width: var(--ctl-h); height: var(--ctl-h); color: var(--dim); }
 .modal-body { padding: var(--pad); }
-.modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px var(--pad); border-top: 1px solid var(--line); }
+/* 页脚**吸底**：对话框是可滚的，长清单（批量删除、批量发起）会把「确认 / 取消」
+   推到看不见的地方，于是那个决定必须先滚一段才做得了。 */
+.modal-footer { position: sticky; bottom: 0; z-index: 1; display: flex; justify-content: flex-end; gap: 8px; padding: 12px var(--pad); border-top: 1px solid var(--line); background: var(--panel); }
 .form-stack { display: flex; flex-direction: column; gap: 14px; }
 .form-field { display: flex; flex-direction: column; gap: 5px; color: var(--dim); font-size: var(--size-body); }
-.form-field > span { font-family: var(--font-num); font-size: var(--size-meta); }
+/* 字段名是中文，**不进等宽栈**：--font-num 里一个中文字形都没有，整条栈会一路回退到
+   浏览器默认字体，于是同一屏上出现两种中文字形（P2）。等宽只留给值。 */
+.form-field > span { font-family: var(--font-cn); font-size: var(--size-meta); }
 .field-label { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 /* 徽标共用一份底子。`.source-kind`（作业中心「源表」列里自定义 SQL 任务的类别标）
    与表单里的中性徽标长得一模一样，各写一遍会各自漂。 */
@@ -279,6 +351,26 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .delete-copy strong { font-weight: var(--weight-em); }
 /* 批量删除的二次确认把要删的任务名**逐条列全**，不是「确定删除 3 个任务？」（ADR-0043 §6）。 */
 .delete-copy ul { max-height: 220px; overflow: auto; margin: 6px 0 0; padding-left: 20px; color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-prose); }
+/* 批量发起的确认清单：一条一行任务名，目标表缩进在它下面另起一行。
+   **不并成一行**：自动生成的任务名本身就是「源表 → 目标表」，任何横向分隔符
+   （箭头、竖线）都会被读成那条链路的第三段。目标表是要核对的那一列，所以它齐头。 */
+.bulk-targets { max-height: 260px; overflow: auto; margin: 6px 0 0; padding: 0; list-style: none; line-height: var(--lh-prose); }
+.bulk-targets li { padding: 7px 0; border-bottom: 1px solid var(--line); }
+.bulk-targets li:last-child { border-bottom: 0; }
+.bulk-task-name { display: block; color: var(--text); overflow-wrap: anywhere; }
+.bulk-task-target { display: block; margin-top: 1px; padding-left: 14px; color: var(--mute); font-size: var(--size-meta); }
+.bulk-task-target .mono { color: var(--dim); overflow-wrap: anywhere; }
+/* 「清理是删除，不是还原」——这句是**否定一个天然的误读**，不是提示，所以着告警色
+   而不是中性色：读的人此刻正准备按下一颗真的会删生产数据的按钮。 */
+.cleanup-warning { margin: 10px 0 0; padding: 9px 12px; border-left: 3px solid var(--crit); background: var(--crit-bg); color: var(--crit); line-height: var(--lh-prose); }
+/* 确认屏那一格「目标表检查」的三态（P0-3）。「尚未检查」不是失败，所以它着 --warn 而不是
+   --crit：还没做的事和做过没通过的事，在最后一屏上必须能一眼分开。 */
+.confirm-check.is-passed { color: var(--ok-ink); }
+.confirm-check.is-findings { color: var(--crit); }
+.confirm-check.is-unchecked { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.confirm-check.is-unchecked strong { color: var(--warn); font-weight: var(--weight-em); }
+.confirm-check-reason { color: var(--dim); font-size: var(--size-meta); }
+.confirm-check.is-unchecked .button { height: 26px; padding: 0 10px; font-size: var(--size-meta); }
 .modal-context { display: block; margin-top: 2px; color: var(--mute); font-size: var(--size-cap); }
 .entry-loading { display: flex; align-items: center; gap: 10px; color: var(--dim); }
 .entry-blocked { display: flex; flex-direction: column; gap: 6px; }
@@ -297,8 +389,11 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .entry-option-copy { min-width: 0; display: flex; flex: 1; flex-direction: column; gap: 2px; }
 .entry-option-copy strong { overflow-wrap: anywhere; font-size: var(--size-body); font-weight: var(--weight-em); }
 .entry-option-copy > span { overflow-wrap: anywhere; color: var(--mute); font-family: var(--font-num); font-size: var(--size-cap); }
-.entry-agent-status { max-width: 42%; flex: none; overflow-wrap: anywhere; color: var(--mute); font-size: var(--size-cap); text-align: right; }
-.entry-agent-status.is-online { color: var(--ok); }
+.entry-agent-status { max-width: 42%; flex: none; overflow-wrap: anywhere; color: var(--dim); font-size: var(--size-cap); text-align: right; }
+/* P2-6：这两条原来直接用语义色当**文字色**。--ok (#52C41A) 压白底只有约 2:1，
+   12px 的字根本读不出来——语义四色是给实心底和边框用的，不是给小字用的。
+   --ok-ink 就是为此存在的配套墨色（tokens.css §语义四色），--crit 压白底本就够。 */
+.entry-agent-status.is-online { color: var(--ok-ink); }
 .entry-agent-status.is-offline { color: var(--crit); }
 .entry-reason { grid-column: 1 / -1; margin: 0; color: var(--crit); font-size: var(--size-meta); }
 
@@ -352,7 +447,11 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .sql-editor-toolbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .sql-editor-toolbar .spec-note { margin: 0; }
 .sql-editor-toolbar .button { flex: none; }
-.sql-input-shell { position: relative; }
+.sql-editor-tools { flex: none; display: flex; align-items: center; gap: 6px; }
+.sql-editor-tools .button { height: 28px; padding: 0 10px; font-size: var(--size-meta); }
+/* 开着的开关要看得出是开着的：`aria-pressed` 只说给辅助技术听。 */
+.sql-editor-tools .button.is-on { border-color: var(--brand); background: var(--brand-dim); color: var(--brand); }
+.sql-input-shell { position: relative; min-height: 0; flex: 1; }
 .sql-highlight, .sql-text-input { padding: 9px 10px; border: 1px solid transparent; border-radius: var(--radius); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.55; white-space: pre; tab-size: 2; }
 /* 着色层在下、只读、不吃事件；滚动由 textarea 的 onScroll 同步过来（见 SqlEditor.tsx）。 */
 .sql-highlight { position: absolute; inset: 0; overflow: hidden; margin: 0; background: var(--panel); color: var(--text); pointer-events: none; }
@@ -366,9 +465,30 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
    `!=` 画成 `≠`。这一格是该模式下唯一能看到查询的地方，显示的字符串必须**就是**执行的那个。
    两层都要关——只关一层，飘的就不只是字形，还有光标位置。 */
 .sql-text-input { position: relative; display: block; width: 100%; resize: vertical; overflow: auto; border-color: var(--line-strong); background: transparent; color: transparent; caret-color: var(--text); }
-/* 自定义 SQL 要写整条语句，WHERE 片段只写条件——两格的起始高度因此不同。 */
-.source-sql-editor .sql-text-input { min-height: 170px; }
-.where-clause-editor .sql-text-input { min-height: 92px; }
+/* 自定义 SQL 要写整条语句，WHERE 片段只写条件——两格的起始高度因此不同。
+   两个数都来自 UX 评审 P1-3。自定义 SQL 那格的**真实高度由行数定**（见 SqlEditor.tsx
+   的 `visibleRows`），这里的 220px 只是地板：粘进来之前它得看着像个能写东西的地方，
+   而不是一条缝。WHERE 从 92px 抬到 160px，因为它常常是三四行 AND 串起来的。 */
+.source-sql-editor .sql-text-input { min-height: 220px; }
+.where-clause-editor .sql-text-input { min-height: 160px; }
+
+/* ── 行号槽 ──────────────────────────────────────────────────────────────
+   第三层，**不进那两层里的任何一层**：塞进 `<pre>` 会让两层的字符流不同，
+   而两层字符流相同正是光标不飘的全部依据。它只跟着竖向滚动（同步在 SqlEditor.tsx）。 */
+.sql-gutter { position: absolute; z-index: 1; top: 1px; bottom: 1px; left: 1px; width: calc(var(--sql-gutter) + 20px); overflow: hidden; margin: 0; padding: 9px 8px 9px 0; border-right: 1px solid var(--line); background: var(--mute-bg); color: var(--mute); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.55; text-align: right; white-space: pre; pointer-events: none; user-select: none; }
+.sql-input-shell.has-gutter .sql-highlight,
+.sql-input-shell.has-gutter .sql-text-input { padding-left: calc(var(--sql-gutter) + 30px); }
+/* ── 软换行 ──────────────────────────────────────────────────────────────
+   两层用**同一套**换行属性，并且都写死 `scrollbar-gutter: stable`——滚动条那一条宽度
+   是唯一会让两层内容宽度分家的东西，两边都预留就再次相等，光标不飘这条不变式照旧成立。 */
+.sql-input-shell.is-wrapped .sql-highlight,
+.sql-input-shell.is-wrapped .sql-text-input { white-space: pre-wrap; overflow-wrap: anywhere; scrollbar-gutter: stable; }
+
+/* ── 全屏 ────────────────────────────────────────────────────────────────
+   Escape 退出，拦在向导那个「退出向导」监听之前（见 SqlEditor.tsx）。 */
+.source-sql-editor.is-fullscreen { position: fixed; z-index: 60; inset: 0; padding: 16px 20px 20px; background: var(--panel); }
+.source-sql-editor.is-fullscreen .sql-text-input { height: 100%; min-height: 0; resize: none; }
+.source-sql-editor.is-fullscreen .sql-highlight { inset: 0; }
 /* 字透明了，占位符和选区得单独交代，否则前者跟着一起消失、后者选中即看不见。 */
 .sql-text-input::placeholder { color: var(--mute); }
 .sql-text-input::selection { background: var(--brand-dim); }
@@ -454,12 +574,38 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .wizard-context-section:first-child { padding-top: 0; border-top: 0; }
 .wizard-context-title { min-height: 28px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .wizard-context-title strong, .wizard-summary > strong { font-size: var(--size-meta); font-weight: var(--weight-em); }
-.wizard-context .source-sql-editor { padding: 0; }
-.wizard-context .source-sql-editor .spec-note { display: none; }
-.wizard-context .source-sql-editor .sql-editor-toolbar { justify-content: flex-end; }
-.wizard-context .source-sql-editor .sql-text-input { min-height: 145px; }
+/* 自定义 SQL 编辑器已经搬进主区（P1-3），左栏这一格改放结果列。 */
+.wizard-side-empty { margin: 0; padding: 12px 0; color: var(--mute); font-size: var(--size-meta); line-height: var(--lh-prose); }
+.result-columns { display: flex; flex-direction: column; gap: 6px; }
+.result-columns-count { color: var(--mute); font-size: var(--size-cap); }
+.result-columns ul { max-height: 280px; overflow: auto; margin: 0; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.result-columns li { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 5px 9px; border-bottom: 1px solid var(--line); }
+.result-columns li:last-child { border-bottom: 0; }
+.result-columns li .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.result-columns li small { flex: none; color: var(--mute); font-family: var(--font-num); font-size: var(--size-cap); }
+/* 目标表还不存在时的那一行交底（P1-4）。是**事实陈述**不是错误：这条路是允许走的。 */
+.target-missing-note { display: flex; align-items: baseline; gap: 6px; margin: 0; color: var(--mute); font-size: var(--size-cap); line-height: var(--lh-prose); }
+.target-missing-note .field-badge { flex: none; margin-left: 0; }
 .wizard-select-label, .wizard-name { display: flex; flex-direction: column; gap: 6px; color: var(--dim); font-size: var(--size-meta); }
 .wizard-select-label select, .wizard-name input, .wizard-mapping select { height: var(--ctl-h); padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); }
+.wizard-select-label input, .wizard-select-label select { width: 100%; font-size: var(--size-body); }
+.wizard-select-label input { height: var(--ctl-h); padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); }
+.wizard-select-label input:focus, .wizard-select-label select:focus { border-color: var(--brand); outline: 0; box-shadow: 0 0 0 2px var(--brand-dim); }
+
+/* ---- 下拉的统一外观（UX 评审 P2）----
+   `<select>` 原来一个都没管，于是**新建任务这条主路上最显眼的两个控件**是浏览器原生的：
+   macOS 上是圆角带阴影的胶囊，Windows 上是方角灰框，跟旁边照着 Ant Design 4 量出来的
+   输入框对不上。这里只做三件事——收掉原生外观、补一支和边框同色的箭头、留出箭头的位置。 */
+select, .page-size {
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--mute) 50%),
+    linear-gradient(135deg, var(--mute) 50%, transparent 50%);
+  background-position: right 13px center, right 8px center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 26px;
+}
 .wizard-context .schema-tree { max-height: 230px; }
 .wizard-context .schema-tree.is-target { max-height: 180px; }
 .wizard-summary { display: flex; flex-direction: column; gap: 6px; padding: 11px; border-left: 3px solid var(--brand); background: var(--panel); color: var(--mute); font-size: var(--size-cap); line-height: var(--lh-prose); }
@@ -471,11 +617,16 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .wizard-rail li:last-child::after { display: none; }
 .wizard-rail li > span { width: 24px; height: 24px; flex: none; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 50%; background: var(--panel); font-family: var(--font-num); font-size: var(--size-cap); }
 .wizard-rail li > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--size-meta); font-weight: var(--weight-em); }
-.wizard-rail li.is-current, .wizard-rail li.is-done { color: var(--brand); }
-.wizard-rail li.is-current > span, .wizard-rail li.is-done > span { border-color: var(--brand); background: var(--brand); color: #fff; }
+/* 三态必须**看得出是三态**（P1-7）：走过的是描边加勾，当前那一步是实心加一圈光晕，
+   没到的是灰。原来 is-current 与 is-done 是同一条规则，于是这条轨道说不出「我在哪儿」。 */
+.wizard-rail li.is-done { color: var(--brand); }
+.wizard-rail li.is-done > span { border-color: var(--brand); background: var(--panel); color: var(--brand); }
+.wizard-rail li.is-current { color: var(--brand); }
+.wizard-rail li.is-current > strong { font-weight: var(--weight-em); }
+.wizard-rail li.is-current > span { border-color: var(--brand); background: var(--brand); color: var(--on-solid); box-shadow: 0 0 0 3px var(--brand-dim); }
 .wizard-step-scroll { min-height: 0; flex: 1; overflow: auto; padding: var(--pad); background: var(--bg); }
 .wizard-step { max-width: 1120px; display: flex; flex-direction: column; gap: 16px; margin: 0 auto; }
-.wizard-step > header h1 { margin: 0; font-size: 20px; letter-spacing: 0; }
+.wizard-step > header h1 { margin: 0; font-size: var(--size-title); letter-spacing: 0; }
 .wizard-step > header p { margin: 6px 0 0; color: var(--mute); line-height: var(--lh-prose); }
 .wizard-empty, .wizard-placeholder, .wizard-readonly { margin: 0; padding: 18px; border: 1px solid var(--line); background: var(--panel); color: var(--mute); }
 .wizard-placeholder { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; }
@@ -485,12 +636,28 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .wizard-mapping tr.is-problem td { background: var(--crit-bg); }
 .wizard-mapping tr.is-problem select { border-color: var(--crit); }
 .wizard-mapping td small { display: block; max-width: 260px; margin-top: 3px; color: var(--crit); font-size: var(--size-cap); white-space: normal; }
+/* 主键为什么按不动**不是错误**——是目标表自己定了主键。跟着 --crit 走的话，
+   一张配得完全正确的映射表会有一整列红字。 */
+.wizard-mapping td small.lock-note { color: var(--mute); }
 .wizard-mapping .auto-mark { display: inline; margin-left: 5px; color: var(--ok); }
+/* 目标表还不存在时，目标列是**打出来的**（P1-4）：没有列清单可挑，这里打的名字
+   就是建表语句里的那个列名。标成「将新建」，不冒充一次匹配。 */
+.new-target-field { display: flex; align-items: center; gap: 7px; }
+.new-target-field input { min-width: 0; max-width: 260px; flex: 1; height: var(--ctl-h); padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); }
+.new-target-field input:focus { border-color: var(--brand); outline: 0; box-shadow: 0 0 0 2px var(--brand-dim); }
+.wizard-mapping .new-mark { display: inline; flex: none; margin: 0; color: var(--warn); white-space: nowrap; }
+/* 主区的 SQL 编辑卡：它是这一步的主角，不是一张附注卡。 */
+.wizard-sql-card .source-sql-editor { padding: 12px; }
 .wizard-mapping select { width: 100%; min-width: 140px; }
 .wizard-mapping-problems { display: flex; align-items: baseline; gap: 10px; padding: 10px 12px; border-left: 3px solid var(--crit); background: var(--crit-bg); color: var(--crit); }
 .wizard-mapping-problems strong { flex: none; font-size: var(--size-meta); }
 .wizard-mapping-problems ul { margin: 0; padding-left: 18px; line-height: var(--lh-prose); }
 .wizard-blockers { margin: 0; padding: 10px 10px 10px 30px; border-left: 3px solid var(--crit); background: var(--crit-bg); color: var(--crit); line-height: var(--lh-prose); }
+/* 「还没填」那一档（P1-2）：中性清单，不是告警。方块标记而不是圆点，跟错误那档的
+   项目符号区分开；颜色一律 --mute。 */
+.wizard-todos { margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); color: var(--mute); list-style: none; line-height: var(--lh-prose); }
+.wizard-todos li { display: flex; align-items: baseline; gap: 8px; }
+.wizard-todos li::before { flex: none; color: var(--line-strong); content: "\25A2"; }
 .wizard-loss ul { margin: 0; padding-left: 20px; color: var(--dim); line-height: var(--lh-prose); }
 .wizard-name { max-width: 520px; color: var(--text); font-weight: var(--weight-em); }
 .wizard-confirm-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; margin: 0; padding: 1px; background: var(--line); }
@@ -551,9 +718,17 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .run-result { display: flex; flex-direction: column; gap: 12px; }
 .run-result-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
 .failure-evidence { display: flex; flex-direction: column; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+/* 结局不明那一档（P0-4）：同一个组件、同一份栅格，只换标题与左边那道色——
+   它不是失败，是**待核对**，所以着告警色不着危险色。 */
+.failure-evidence.is-clues { border-left: 3px solid var(--warn); }
+/* 「重跑是安全的」着成功色：这句要压住的正是「不知道发生了什么所以不敢动」。 */
+.clue-safety { margin: 0; padding: 9px 12px; border-left: 3px solid var(--ok); background: var(--ok-bg); color: var(--ok-ink); line-height: var(--lh-prose); }
+.clue-safety strong { font-weight: var(--weight-em); }
 .failure-evidence-heading { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
-.failure-evidence-heading h3 { margin: 0; font-size: var(--size-body); }
+.failure-evidence-heading h3 { margin: 0; font-size: var(--size-section); }
 .failure-evidence-heading p { margin: 3px 0 0; color: var(--mute); font-size: var(--size-meta); }
+/* 「这一类没有可改的地方」——它占的是按钮那一格，所以宽度要收住，别把标题挤成两行。 */
+.remediation-none { max-width: 42ch; margin: 0; color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-prose); text-align: right; }
 .evidence-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0; border: 1px solid var(--line); background: var(--line); gap: 1px; }
 .evidence-grid > div { min-width: 0; padding: 9px 11px; background: var(--panel); }
 .evidence-grid dt { color: var(--mute); font-size: var(--size-cap); }
@@ -610,6 +785,9 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
    后者灰度下只比白底深 3.1%，「实心」这半边等于没画。 */
 .terminal-block.is-discarded { background: transparent; border-color: var(--line-strong); color: var(--dim); }
 .terminal-copy { color: var(--dim); font-family: var(--font-cn); }
+/* 轴二后面那句写入语义（P0-1）。语义常驻，不是错误也不是告警：只用中性色 + 一道左边线，
+   不着 --crit / --warn，否则每一次成功的运行都会看着像出了事。 */
+.upsert-note { margin: 8px 0 0; padding-left: 10px; border-left: 2px solid var(--line-strong); color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-prose); }
 .error-summary { flex-wrap: wrap; gap: 8px; }
 .error-code { display: inline-flex; align-items: center; gap: 8px; padding: 2px 8px; border: 1px dashed var(--crit-bd); border-radius: var(--badge-radius); background: var(--crit-bg); color: var(--crit); font-family: var(--font-num); font-size: var(--size-meta); }
 .error-code.is-internal { border-color: var(--warn-bd); border-style: solid; background: var(--warn-bg); color: var(--warn); }
@@ -636,6 +814,14 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+}
+
+/* 1280 一档（P2）：原来只有 760 / 620 / 480，全是手机档，而这个产品实际跑在
+   笔记本与台式机上。这一档只做一件事——把左右内边距收一收，让那张宽表少滚一点。 */
+@media (max-width: 1280px) {
+  .content { padding: 12px; }
+  .kv { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
+  .drawer { width: 680px; }
 }
 
 @media (max-width: 760px) {
@@ -698,3 +884,4 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
   .evidence-grid { grid-template-columns: minmax(0, 1fr); }
   .live-progress-row { grid-template-columns: minmax(0, 1fr); }
 }
+

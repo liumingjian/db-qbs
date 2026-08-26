@@ -21,7 +21,10 @@ const NEVER_RUN_TASK: Task = {
 };
 
 describe("job row actions", () => {
-  it("omits run details when a task has never run", () => {
+  // The slot is held open rather than dropped (UX review P2-15): a vanishing button
+  // puts the same action at a different x on neighbouring rows, so muscle memory
+  // lands on whichever button slid into its place.
+  it("keeps the run-details slot, disabled, when a task has never run", () => {
     const html = renderToStaticMarkup(createElement(JobCenterScreen, {
       tasks: [NEVER_RUN_TASK],
       datasources: [],
@@ -43,6 +46,8 @@ describe("job row actions", () => {
     }));
 
     expect(html).toContain("发起运行");
-    expect(html).not.toContain("运行详情");
+    expect(html).toContain("运行详情");
+    expect(html).toContain('title="这个任务还没有跑过"');
+    expect(html).toContain('aria-label="运行详情" disabled=""');
   });
 });

@@ -152,8 +152,14 @@ function failureConclusion(history: RunHistory): string {
  *
  * source 回的 `message` 是英文原文（`run completed successfully`，属于 API 语义，不动），
  * 直接拿来当结论条会让同一个位置一半中文一半英文——映射预检失败那条是中文。
- * 这里照那条的句式在 web 侧成文，只说已核实的事：推了多少行、暂存表切没切。
- * 目标端没报出 `SWAPPED` 时不提切换，别替它下结论。
+ * 这里照那条的句式在 web 侧成文，只说已核实的事：推了多少行、目标端认没认这次写入。
+ * 目标端没报出 `SWAPPED` 时什么都不多说，别替它下结论。
+ *
+ * **`SWAPPED` 不是「整表换过」**（2026-08 UX 评审 P0-1）。sink 打的是
+ * `INSERT ... ON DUPLICATE KEY UPDATE`（`crates/sink/src/mysql_destination.rs`），
+ * 按主键合并：新增和变更进目标表，**源端删掉的行不会跟着消失**（CONTEXT.md「刻意欠的债」）。
+ * 原话「暂存表已切换为目标表」描述的是一次没发生过的切换——照字面读会以为目标表此刻
+ * 等于源端那一份，于是拿它当全量快照用。措辞改成合并，债照旧记在 CONTEXT.md 上。
  */
 function succeededConclusion(
   history: RunHistory,
@@ -161,9 +167,9 @@ function succeededConclusion(
 ): string {
   const rows =
     history.sink_reported_rows ?? history.staged_rows ?? history.rows_pushed;
-  const swapped =
-    terminalEffect === "SWAPPED" ? "，暂存表已切换为目标表" : "";
-  return `目标端：运行成功：已推送 ${countFormatter.format(rows)} 行${swapped}。`;
+  const merged =
+    terminalEffect === "SWAPPED" ? "，已按主键合并进目标表" : "";
+  return `目标端：运行成功：已推送 ${countFormatter.format(rows)} 行${merged}。`;
 }
 
 function sinkTerminalEffect(

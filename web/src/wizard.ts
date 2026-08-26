@@ -86,6 +86,20 @@ export interface Draft {
   sourceColumns: readonly BuilderColumn[];
   targetColumns: readonly TargetColumn[];
   targetKeys: readonly TargetKey[];
+  /**
+   * Whether the last metadata read found the target table.
+   *
+   * `/api/target/columns` answers an empty list for a table that is not there —
+   * that is a fact, not an error (ADR-0038 §9) — and until this flag existed the
+   * wizard could not tell "not there" from "not read yet". A name typed for a
+   * table that does not exist yet is a legitimate way to work: the check on step
+   * 3 answers with a complete `CREATE TABLE`, which the person runs themselves.
+   * Auto-creation stays out of V1 (CONTEXT.md); this only stops the wizard from
+   * being a dead end before you get to the DDL.
+   *
+   * `true` until proven otherwise, so nothing changes before the read lands.
+   */
+  targetTableExists: boolean;
   preview: Fetched<PreviewResult> | null;
   check: Fetched<TargetCheckResult> | null;
 }
@@ -150,6 +164,20 @@ export type Applied =
 /** One reason the next step is out of reach, located to a column where it can be. */
 export interface Blocker {
   step: Step;
+  /**
+   * Whether this is something still to do, or something actually wrong.
+   *
+   * The wizard used to open on three red alerts — 请先选一张源表 / 请先选目标表 /
+   * 至少要选一列 — before anyone had taken a single step. Nothing had gone wrong;
+   * those are simply the fields, unfilled. Rendering them the same as
+   * "目标字段 ID 重复" spends the alert colour on the empty state, which leaves
+   * nothing louder for the case that has to be louder (UX review P1-2).
+   *
+   * `todo` — a field is empty. Neutral checklist, no live region.
+   * `error` — a value conflicts with another value, or with what the target
+   *   database will accept. Red, and announced.
+   */
+  kind: "todo" | "error";
   /** The source column the problem belongs to, or `null` for a whole-step one. */
   column: string | null;
   message: string;
@@ -204,6 +232,7 @@ export function openNew(
     sourceColumns: [],
     targetColumns: [],
     targetKeys: [],
+    targetTableExists: true,
     preview: null,
     check: null,
   };
@@ -240,6 +269,7 @@ export function openExisting(
     sourceColumns: [],
     targetColumns: [],
     targetKeys: [],
+    targetTableExists: true,
     preview: null,
     check: null,
   };
@@ -425,6 +455,10 @@ function reduce(draft: Draft, change: Change): Reduced {
           hand: { ...draft.hand, targetTable: true },
           targetColumns: [],
           targetKeys: [],
+          // Nothing is known about the new name yet, and "does not exist" is a
+          // claim: carrying the previous table's verdict over would put a
+          // 尚不存在 chip on a table nobody has looked for.
+          targetTableExists: true,
           check: null,
         },
         cleared: [],
@@ -586,7 +620,15 @@ function reduce(draft: Draft, change: Change): Reduced {
       const inferred = inferPrimaryKey(change.keys, matched.columns);
       return {
         draft: withColumns(
-          { ...draft, targetColumns: change.columns, targetKeys: change.keys },
+          {
+            ...draft,
+            targetColumns: change.columns,
+            targetKeys: change.keys,
+            // An empty column list for a named table means the table is not
+            // there. With no name asked for, it means nothing.
+            targetTableExists:
+              draft.spec.target_table === "" || change.columns.length > 0,
+          },
           matched.columns,
           draft.hand.primaryKey || inferred === null ? matched.primary_key : inferred,
         ),
@@ -610,15 +652,24 @@ function reduce(draft: Draft, change: Change): Reduced {
       if (draft.step === 4 || canAdvance(draft, draft.step).length > 0) {
         return { draft, cleared: [] };
       }
-      return { draft: { ...draft, step: (draft.step + 1) as Step }, cleared: [] };
+      const next = (draft.step + 1) as Step;
+      return {
+        draft: { ...draft, step: next === 3 && checkIsSilent(draft) ? 4 : next },
+        cleared: [],
+      };
     }
 
     // Going back is free and lossless. Nothing on the step just left is discarded.
-    case "back":
+    case "back": {
+      if (draft.step === 1) {
+        return { draft, cleared: [] };
+      }
+      const previous = (draft.step - 1) as Step;
       return {
-        draft: draft.step === 1 ? draft : { ...draft, step: (draft.step - 1) as Step },
+        draft: { ...draft, step: previous === 3 && checkIsSilent(draft) ? 2 : previous },
         cleared: [],
       };
+    }
 
     case "leave":
       return { draft, cleared: ["draft"] };
@@ -711,6 +762,23 @@ function withColumns(
   };
 }
 
+/**
+ * Whether step 3 has anything to say.
+ *
+ * The check runs itself the moment step 1 is complete, so by the time anyone
+ * walks up to step 3 it has usually already passed — and the step is then one
+ * sentence and a button, in the middle of the flow, between the filter and the
+ * confirmation (UX review P1-7). When it passed, the step folds: the answer is
+ * carried on the confirmation page, where P0-3 now states it in three states.
+ *
+ * It unfolds again the moment it has something to say — findings, never run, or
+ * gone stale under a changed mapping. Skipping it is a shortcut past a step with
+ * no content, never past a step with a verdict.
+ */
+function checkIsSilent(draft: Draft): boolean {
+  return checkIsFresh(draft) && draft.check!.value.ok;
+}
+
 /** The target table's own PRIMARY KEY, when every one of its columns is mapped. */
 function inferPrimaryKey(
   keys: readonly TargetKey[],
@@ -756,7 +824,11 @@ function lossOf(draft: Draft, cleared: readonly Cleared[]): Loss | null {
       .map((kind) => LOSS_LINES[kind](draft));
     return lines.length === 0
       ? null
-      : { headline: "离开会清掉这份还没保存的任务草稿：", lines };
+      // The draft is written to sessionStorage on the way out (UX review P1-5), so
+      // this is no longer a warning. The dialog stays in order to *say what is in the
+      // draft* — it is a receipt for "you still have something unfinished", not a
+      // gate; anyone who really wants it gone has a separate button right here.
+      : { headline: "离开后这份还没保存的草稿会留着，回来接着改：", lines };
   }
   const lines = cleared
     .filter((kind): kind is Exclude<Cleared, "draft"> => kind !== "draft")
@@ -849,29 +921,33 @@ const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_$#]*$/;
  */
 export function canAdvance(draft: Draft, step: Step): Blocker[] {
   const blockers: Blocker[] = [];
+  /** Something actually wrong. */
   const at = (message: string, column: string | null = null) =>
-    blockers.push({ step, column, message });
+    blockers.push({ step, kind: "error", column, message });
+  /** Something still to do: a field that is empty, and nothing more than that. */
+  const todo = (message: string, column: string | null = null) =>
+    blockers.push({ step, kind: "todo", column, message });
 
   if (step === 1) {
     if (draft.fetchMode === "sql") {
       if ((draft.spec.source_sql ?? "").trim() === "") {
-        at("自定义 SQL 不能为空");
+        todo("自定义 SQL 不能为空");
       }
       if (draft.spec.dblink !== undefined) {
         at("自定义 SQL 已包含源端查询路径，不能同时设置 dblink");
       }
     } else {
       if (draft.spec.owner === "" || draft.spec.table === "") {
-        at("请先选一张源表");
+        todo("请先选一张源表");
       } else if (!IDENTIFIER.test(draft.spec.owner) || !IDENTIFIER.test(draft.spec.table)) {
         at("源表名必须是未加引号的 Oracle 标识符");
       }
     }
     if (draft.spec.target_table.trim() === "") {
-      at("请先选目标表——字段映射要对着它才有意义");
+      todo("请先选目标表——字段映射要对着它才有意义");
     }
     if (draft.spec.columns.length === 0) {
-      at("至少要选一列");
+      todo("至少要选一列");
     }
 
     const sources = new Map<string, number>();
@@ -891,7 +967,7 @@ export function canAdvance(draft: Draft, step: Step): Blocker[] {
     const orphans = new Set(orphanSources(draft));
     for (const mapping of draft.spec.columns) {
       if (mapping.target.trim() === "") {
-        at("还没映射到目标字段", mapping.source);
+        todo("还没映射到目标字段", mapping.source);
         continue;
       }
       if (!IDENTIFIER.test(mapping.target)) {
@@ -934,7 +1010,7 @@ export function canAdvance(draft: Draft, step: Step): Blocker[] {
     const excused = draft.mode === "edit" && !draft.targetAgentOnline;
     if (!excused) {
       if (!checkIsFresh(draft)) {
-        at("请先运行目标表检查");
+        todo("请先运行目标表检查");
       } else if (!draft.check!.value.ok) {
         at(`目标表检查未通过（${draft.check!.value.findings.length} 项）`);
       }
@@ -942,7 +1018,7 @@ export function canAdvance(draft: Draft, step: Step): Blocker[] {
   }
 
   if (step === 4 && taskName(draft).trim() === "") {
-    at("任务名不能为空");
+    todo("任务名不能为空");
   }
 
   return blockers;
@@ -987,8 +1063,14 @@ export interface MappingRow {
   source: string;
   target: string;
   selected: boolean;
-  /** Read-only text plus the 自动匹配 mark, or a dropdown to be filled in. */
-  control: "auto" | "manual";
+  /**
+   * `auto` — read-only text plus the 自动匹配 mark.
+   * `manual` — a dropdown over the target table's real columns.
+   * `new` — a free-text box: the target table does not exist yet, so there is no
+   *   column list to pick from and the name typed here is the one the generated
+   *   `CREATE TABLE` will carry.
+   */
+  control: "auto" | "manual" | "new";
   primaryKey: boolean;
   /** Why the primary-key tick cannot be moved, or `null`. */
   primaryKeyLock: string | null;
@@ -1039,10 +1121,28 @@ export interface ConfirmView {
   mappings: ColumnMapping[];
   primaryKey: string[];
   targetTable: string;
-  findings: CheckFinding[];
+  targetCheck: ConfirmTargetCheck;
   preview: PreviewResult | null;
   /** What the bottom of the last step offers. Creating may run; editing saves. */
   actions: ("start" | "save-only" | "save")[];
+}
+
+/**
+ * The target-table check as the **last** screen has to state it: three states, not two.
+ *
+ * The confirmation page used to read `findings` alone, and an empty `findings` is what
+ * both "passed" and "never ran" look like. So the one screen standing between a draft
+ * and a production write reported a check that had not happened as a check that passed
+ * — on the exact path (`canAdvance` excuses step 3 while the target's agent is down)
+ * that guarantees it did not happen. Naming the state separately makes that
+ * indistinguishable pair distinguishable.
+ */
+export interface ConfirmTargetCheck {
+  /** `unchecked` = never ran, or ran against inputs that have since changed. */
+  state: "passed" | "findings" | "unchecked";
+  findings: CheckFinding[];
+  /** Why it could not run, when that is the reason. Only ever set on `unchecked`. */
+  excused: string | null;
 }
 
 export interface WizardView {
@@ -1122,7 +1222,11 @@ function stepView(draft: Draft, step: Step, blockers: Blocker[]): StepView {
           source,
           target,
           selected: mapping !== undefined,
-          control: auto ? "auto" : "manual",
+          // A table that is not there yet has no column list to pick from, and
+          // the name in this box is the one the generated CREATE TABLE carries.
+          // Calling it 自动匹配 would claim a match against a table that has no
+          // columns to match; a dropdown would be empty.
+          control: draft.targetTableExists ? (auto ? "auto" : "manual") : "new",
           primaryKey: target !== "" && draft.spec.primary_key.includes(target),
           primaryKeyLock: locked,
           problem: problems.get(source) ?? null,
@@ -1148,10 +1252,7 @@ function stepView(draft: Draft, step: Step, blockers: Blocker[]): StepView {
           state: draft.check === null ? "none" : checkIsFresh(draft) ? "fresh" : "stale",
           value: checkIsFresh(draft) ? draft.check!.value : null,
         },
-        excused:
-          draft.mode === "edit" && !draft.targetAgentOnline
-            ? `目标端 Agent「${draft.target.name}」不在线，这一步查不了；保存不受影响，运行要等它回来`
-            : null,
+        excused: agentOfflineExcuse(draft),
         blockers,
       };
     case 4:
@@ -1165,7 +1266,7 @@ function stepView(draft: Draft, step: Step, blockers: Blocker[]): StepView {
           mappings: draft.spec.columns,
           primaryKey: draft.spec.primary_key,
           targetTable: draft.spec.target_table,
-          findings: checkIsFresh(draft) ? draft.check!.value.findings : [],
+          targetCheck: confirmTargetCheck(draft),
           preview: previewIsFresh(draft) ? draft.preview!.value : null,
           // The owner's #168 follow-up explicitly keeps save-only as the offline/fallback path.
           actions:
@@ -1178,6 +1279,31 @@ function stepView(draft: Draft, step: Step, blockers: Blocker[]): StepView {
         blockers,
       };
   }
+}
+
+/**
+ * Why the target-table check could not be run, or `null`.
+ *
+ * Editing ends in 保存, not a run, and the check cannot even be attempted while the
+ * target's agent is down — so `canAdvance` lets that case through step 3. Both step 3
+ * and the confirmation page state the same reason, from here, so they cannot drift.
+ */
+function agentOfflineExcuse(draft: Draft): string | null {
+  return draft.mode === "edit" && !draft.targetAgentOnline
+    ? `目标端 Agent「${draft.target.name}」不在线，这一步查不了；保存不受影响，运行要等它回来`
+    : null;
+}
+
+function confirmTargetCheck(draft: Draft): ConfirmTargetCheck {
+  if (!checkIsFresh(draft)) {
+    return { state: "unchecked", findings: [], excused: agentOfflineExcuse(draft) };
+  }
+  const result = draft.check!.value;
+  return {
+    state: result.ok ? "passed" : "findings",
+    findings: result.findings,
+    excused: null,
+  };
 }
 
 /**

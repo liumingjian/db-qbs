@@ -69,9 +69,36 @@
   --sql-quoted:  #1D6FA5;  /* 双引号标识符——与字面量必须不同色，Oracle 上两者天差地别 */
   --title-bg: #F5F5F5;  /* 卡内标题块底（实测；x2doris 的「Job Center」那一块） */
 
+  /* ---- 2026-08 UX 评审 P2 补的几条 ----
+     都是**已经在用、只是没有名字**的值：原来它们各处硬写，于是同一个概念在不同屏上
+     取到不同的数。补名字不改形态，唯一被拉齐的是列表行内动作位的高度（24 → 28）。
+     暗色主题本版不做，但每一条都得能被换掉——所以纯白与那道分隔灰也收成令牌，
+     `tokens.css` 之外不再出现字面色值。 */
+  --scrim:    rgba(0, 0, 0, .45);  /* 遮罩。原来对话框 .45、抽屉约 .29，同一层两个值 */
+  --on-solid: #FFFFFF;             /* 压在实心主色 / 危险色上的字 */
+  --line-mid: #E8E8E8;             /* 行内动作分组的那道竖线，比 --line 深一档 */
+  --action-h: 28px;                /* 表格行内的图标动作位。24px 低于可点目标下限 */
+  /* 投影。卡片**不投影**（见上），下面两条只给脱离文档流、压在别的内容上的东西。
+     颜色单列一条：暗色主题下要换的是它，而不是每一处的偏移量。
+     `--shadow-pop` 给顶栏那颗「关于」的浮层，`--shadow-edge` 给横向滚动时
+     粘在右缘的操作列——一个往下压，一个往左推，偏移量不通用，颜色通用。 */
+  --shadow-color: rgba(0, 0, 0, .12);
+  --shadow-pop:  0 6px 24px var(--shadow-color);
+  --shadow-edge: -6px 0 6px -6px var(--shadow-color);
+  /* 图标四档。lucide 的 `size` 是 JS 数字，进不了 CSS 变量——这四个数的另一份
+     在 `components/DesignSystem.tsx` 的 `ICON` 里，改这里就要改那里。
+     `empty` 不是控件是插图，所以没有配套的 `--icon-empty`：CSS 侧没人用得上它。 */
+  --icon-sm: 14px;
+  --icon-md: 16px;
+  --icon-lg: 18px;
+
   /* ---- 形状与密度：全部实测 ---- */
   --radius:       4px;   /* 卡片、控件、按钮、页码 */
-  --badge-radius: 0px;   /* 状态标签是**方角**（实测 border-radius: 0），不是胶囊也不是圆角 */
+  /* 状态标签是**方角**（实测 border-radius: 0），不是胶囊也不是圆角。
+     2026-08 UX 评审 P2-11 提议把它并到 --radius；不采纳，理由记在这里：方角是这套
+     语言里唯一把「状态」与「可点」分开的形状信号——按钮、输入、卡片全是 4px 圆角，
+     标签一圆，它就长得像一颗按不动的按钮。所有者已裁定不换视觉语言，这一条是实测值。 */
+  --badge-radius: 0px;
   --row-h:        41px;  /* 数据行（实测） */
   --head-h:       39px;  /* 表头行（实测） */
   --ctl-h:        32px;  /* 按钮、下拉、输入（实测） */
@@ -92,6 +119,11 @@
               "Noto Sans CJK SC", "Microsoft YaHei", "Noto Sans", sans-serif;
   --font-num: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono",
               Menlo, Consolas, "Liberation Mono", monospace;
+  /* 字号是**一把梯子**（P2）：原来五个 token 只有 14 与 12 两个值，于是屏标题、
+     卡标题、正文、表格全是 14px——层级只能靠字重和位置暗示。补上 20 / 16 两档，
+     四档一路 20 / 16 / 14 / 12，每一档都与相邻档差得开。 */
+  --size-title:   20px;  /* 屏标题：一屏一个 */
+  --size-section: 16px;  /* 卡标题、面板小标题 */
   --size-body:  14px;    /* 正文 */
   --size-table: 14px;    /* 表格单元格（实测 14，不再降到 13.5） */
   --size-num:   14px;    /* 键值区数字 */

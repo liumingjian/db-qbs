@@ -274,6 +274,23 @@ describe("when a change is worth asking about", () => {
 });
 
 describe("the advance gate", () => {
+  it("opens on a checklist, not on three red errors", () => {
+    // 刚进向导时什么都还没填，于是三条阻塞同时成立。把它们和「目标字段重复」摆成
+    // 同一种红色告警，等于开屏就宣布出了三件事——而人一步都还没走（UX 评审 P1-2）。
+    const fresh = openNew(SOURCE, TARGET);
+    const blockers = canAdvance(fresh, 1);
+    expect(blockers.length).toBeGreaterThan(0);
+    expect(blockers.every((blocker) => blocker.kind === "todo")).toBe(true);
+  });
+
+  it("still calls a real conflict an error", () => {
+    let draft = withTargetColumns(workedDraft());
+    draft = done(apply(draft, { type: "rename-target", source: "C_NAME", target: "ID" }));
+    const errors = canAdvance(draft, 1).filter((blocker) => blocker.kind === "error");
+    expect(errors.map((blocker) => blocker.message).join(" ")).toContain("重复");
+  });
+
+
   it("locates a duplicate target field to both rows", () => {
     let draft = withTargetColumns(workedDraft());
     draft = done(apply(draft, { type: "rename-target", source: "C_NAME", target: "ID" }));
@@ -293,6 +310,7 @@ describe("the advance gate", () => {
     draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
     expect(canAdvance(draft, 1)).toContainEqual({
       step: 1,
+      kind: "error",
       column: null,
       message: "主键必选：至少要勾一列作为 upsert 的去重键",
     });
@@ -360,6 +378,7 @@ describe("the advance gate", () => {
 
     expect(canAdvance(draft, 3)).toEqual([{
       step: 3,
+      kind: "error",
       column: null,
       message: "目标表检查未通过（1 项）",
     }]);
@@ -511,8 +530,115 @@ describe("derived values", () => {
     expect(editing.confirm.actions).toEqual(["save"]);
   });
 
+  it("does not report a check that never ran as 已通过", () => {
+    // 编辑态 + 目标端 agent 离线是 `canAdvance` 明确放行的一条路（不放行等于「先去把
+    // agent 救活才准改一行 WHERE」）。于是最后一屏会在**一次检查都没跑过**的情况下
+    // 被读到——原来它照样写「已通过」，因为空的 findings 与通过的 findings 长得一样。
+    const offline = view(openExisting(savedTask(), SOURCE, TARGET, false), 4).step;
+    if (offline.step !== 4) throw new Error("expected step 4");
+    expect(offline.confirm.targetCheck.state).toBe("unchecked");
+    expect(offline.confirm.targetCheck.excused).toContain("不在线");
+  });
+
+  it("reports a fresh passing check as passed, with no excuse attached", () => {
+    const checked = passingCheck(withTargetColumns(workedDraft()));
+    const step = view(checked, 4).step;
+    if (step.step !== 4) throw new Error("expected step 4");
+    expect(step.confirm.targetCheck).toEqual({
+      state: "passed",
+      findings: [],
+      excused: null,
+    });
+  });
+
+  it("goes back to 尚未检查 once the check the mapping changed under it goes stale", () => {
+    let draft = passingCheck(withTargetColumns(workedDraft()));
+    expect(view(draft, 4).step).toMatchObject({
+      confirm: { targetCheck: { state: "passed" } },
+    });
+    draft = done(apply(draft, { type: "toggle-column", source: "C_NAME" }));
+    const step = view(draft, 4).step;
+    if (step.step !== 4) throw new Error("expected step 4");
+    expect(step.confirm.targetCheck.state).toBe("unchecked");
+  });
+
+  it("treats a target table that does not exist yet as one made of the source columns", () => {
+    // `/api/target/columns` 对不存在的表回空清单而不是错误（ADR-0038 §9）。
+    // 原来这里等于死路：目标列一个都没有，映射那一列的下拉是空的，谁也走不下去。
+    let draft = done(apply(workedDraft(), { type: "target-table", table: "t_brand_new" }));
+    draft = done(apply(draft, { type: "target-columns-arrived", columns: [], keys: [] }));
+    expect(draft.targetTableExists).toBe(false);
+    expect(draft.spec.columns).toEqual([
+      { source: "ID", target: "ID" },
+      { source: "C_NAME", target: "C_NAME" },
+    ]);
+    const step = view(draft, 1).step;
+    if (step.step !== 1) throw new Error("expected step 1");
+    expect(step.rows.every((row) => row.control === "new")).toBe(true);
+  });
+
+  it("goes back to a known table the moment the target table changes", () => {
+    let draft = done(apply(workedDraft(), { type: "target-table", table: "t_brand_new" }));
+    draft = done(apply(draft, { type: "target-columns-arrived", columns: [], keys: [] }));
+    expect(draft.targetTableExists).toBe(false);
+    draft = done(apply(draft, { type: "target-table", table: "t_customer" }));
+    expect(draft.targetTableExists).toBe(true);
+  });
+
+  it("walks past the target-table check when it has nothing to say", () => {
+    // 第 3 步在检查通过时是一屏一句话，而检查在第 1 步做完就自动跑了（UX 评审 P1-7）。
+    const passed = passingCheck(withTargetColumns(workedDraft()));
+    const at2 = { ...passed, step: 2 as const };
+    expect(done(apply(at2, { type: "advance" })).step).toBe(4);
+    expect(done(apply({ ...passed, step: 4 as const }, { type: "back" })).step).toBe(2);
+  });
+
+  it("stops at the check when it has something to say", () => {
+    let draft = withTargetColumns(workedDraft());
+    draft = done(apply(draft, {
+      type: "check-arrived",
+      check: {
+        ok: false,
+        findings: [{
+          column: "C_NAME",
+          kind: "insufficient_length_or_precision",
+          expected: "VARCHAR(90)",
+          actual: "varchar(30)",
+          message: "目标 VARCHAR 长度不足",
+        }],
+        suggested_ddl: null,
+      },
+    }));
+    expect(done(apply({ ...draft, step: 2 as const }, { type: "advance" })).step).toBe(3);
+  });
+
+  it("stops at the check when it has not run", () => {
+    const unchecked = { ...withTargetColumns(workedDraft()), step: 2 as const };
+    expect(done(apply(unchecked, { type: "advance" })).step).toBe(3);
+  });
+
+  it("marks a folded check step done on the rail, not skipped over silently", () => {
+    const passed = passingCheck(withTargetColumns(workedDraft()));
+    const rail = view({ ...passed, step: 4 }, 4).rail;
+    expect(rail.find((entry) => entry.step === 3)?.state).toBe("done");
+  });
+
   it("never offers a jump on the rail", () => {
     expect(view(workedDraft(), 1).rail.every((entry) => entry.jumpable === false)).toBe(true);
+  });
+});
+
+describe("leaving the wizard", () => {
+  it("says the draft is kept, because it now is", () => {
+    // 草稿离开时写进 sessionStorage（UX 评审 P1-5），所以「离开会清掉」这句话不再成立。
+    const loss = leaving(workedDraft());
+    expect(loss).not.toBeNull();
+    expect(loss!.headline).toContain("留着");
+    expect(loss!.headline).not.toContain("清掉");
+  });
+
+  it("stays silent when there is nothing hand-made to keep", () => {
+    expect(leaving(openNew(SOURCE, TARGET))).toBeNull();
   });
 });
 
