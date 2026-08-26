@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { BuilderColumn, TargetColumn } from "./api";
+import { SqlEditorPanel } from "./SqlEditor";
 import { TaskEntryDialog } from "./TaskEntryDialog";
 import { TaskWizardScreen, WizardConfirmDialog } from "./TaskWizardScreen";
 import { apply, canAdvance, openNew, view } from "./wizard";
@@ -190,6 +191,37 @@ describe("the mapping step UI", () => {
     }));
     expect(entry).toContain('<form noValidate="">');
     expect(entry).not.toContain("required");
+  });
+});
+
+describe("the fullscreen SQL editor", () => {
+  function renderEditor(fullscreen: boolean): string {
+    return renderToStaticMarkup(createElement(SqlEditorPanel, {
+      value: "select ID from APP.T_CUSTOMER",
+      placeholder: "SELECT ID, NAME FROM APP.T_CUSTOMER",
+      fullscreen,
+      onFullscreen: () => undefined,
+      onChange: () => undefined,
+      onFormat: () => undefined,
+    }));
+  }
+
+  it("claims dialog semantics only while it covers the page", () => {
+    const full = renderEditor(true);
+    expect(full).toContain('role="dialog"');
+    expect(full).toContain('aria-modal="true"');
+    expect(full).toContain('aria-label="自定义 SQL 全屏编辑"');
+    expect(full).toContain('tabindex="-1"');
+    expect(full).toContain('aria-label="退出全屏"');
+
+    const inline = renderEditor(false);
+    expect(inline).not.toContain('role="dialog"');
+    expect(inline).not.toContain("aria-modal");
+  });
+
+  it("does not claim it inside the wizard, where the editor starts inline", () => {
+    const sqlDraft = done(apply(openNew(SOURCE, TARGET), { type: "fetch-mode", fetchMode: "sql" }));
+    expect(renderWizard(sqlDraft)).not.toContain("aria-modal");
   });
 });
 

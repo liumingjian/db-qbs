@@ -535,7 +535,8 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .sql-input-shell.is-wrapped .sql-text-input { white-space: pre-wrap; overflow-wrap: anywhere; scrollbar-gutter: stable; }
 
 /* ── 全屏 ────────────────────────────────────────────────────────────────
-   Escape 退出，拦在向导那个「退出向导」监听之前（见 SqlEditor.tsx）。 */
+   盖住整页，因此按对话框报（`role="dialog"` + `aria-modal`），焦点陷阱与焦点归位
+   走 `useDialogFocus`，与对话框、运行详情抽屉同一份实现（见 SqlEditor.tsx）。 */
 .source-sql-editor.is-fullscreen { position: fixed; z-index: 60; inset: 0; padding: 16px 20px 20px; background: var(--panel); }
 .source-sql-editor.is-fullscreen .sql-text-input { height: 100%; min-height: 0; resize: none; }
 .source-sql-editor.is-fullscreen .sql-highlight { inset: 0; }
