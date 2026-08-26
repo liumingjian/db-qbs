@@ -1,5 +1,8 @@
 import {
+  Ban,
+  Check,
   Clock3,
+  Copy,
   Database,
   Pencil,
   Play,
@@ -8,9 +11,9 @@ import {
   Tag,
   Trash2,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-import { deleteTask, startRun } from "./api";
+import { copyTaskCurl, deleteTask, startRun } from "./api";
 import type { Datasource, RunHistory, Task } from "./api";
 import { messageFrom } from "./errors";
 import { formatTimestamp, historyPresentation } from "./history";
@@ -22,12 +25,15 @@ import {
   LATEST_RUN_ORDER,
   latestRunStatus,
   paginate,
+  pageContainingTask,
   taskMatchesFilters,
 } from "./listing";
 import type { LatestRunStatus, TaskFilters } from "./listing";
 import { progressOf } from "./progress";
 import { RunDrawer } from "./RunDrawer";
 import { sourceSummary } from "./spec";
+import { rowRunAction } from "./troubleshooting";
+import type { Step } from "./wizard";
 import { ActionButton, Modal, Pagination } from "./ui";
 
 /**
@@ -57,10 +63,14 @@ export interface JobCenterProps {
   /** 正在发起的那个任务的 id——**只有它那一行**的发起键在这段时间里按不动。 */
   startingTaskId: string | null;
   onStart: (task: Task) => void;
+  onStop: (runRecordId: string) => void;
   /** 重跑就是按这个任务当前的定义再跑一次；上一次那条记录不再带进来（没有可预填的东西）。 */
   onRerun: (task: Task) => void;
+  onEditFailure: (task: Task, step: Step) => void;
   /** 批量删除跑完之后要重读清单——本屏不改 `App` 的 state。 */
   onChanged: () => void;
+  focusTaskId: string | null;
+  onFocusConsumed: () => void;
 }
 
 export function JobCenterScreen({
@@ -75,8 +85,12 @@ export function JobCenterScreen({
   onDelete,
   startingTaskId,
   onStart,
+  onStop,
   onRerun,
+  onEditFailure,
   onChanged,
+  focusTaskId,
+  onFocusConsumed,
 }: JobCenterProps) {
   // 筛选条上**正在填**的那一组与**已生效**的那一组分开存：查询是显式的，
   // 改一下下拉不重筛（ADR-0042 §1 的既有裁定，走查 X10）。
@@ -89,6 +103,20 @@ export function JobCenterScreen({
   const [bulkConfirm, setBulkConfirm] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkSummary, setBulkSummary] = useState<BulkSummary | null>(null);
+  const [copyStatus, setCopyStatus] = useState<{
+    taskId: string;
+    error: string | null;
+  } | null>(null);
+  const focusedRow = useRef<HTMLTableRowElement | null>(null);
+
+  useEffect(() => {
+    if (focusTaskId === null || !(tasks ?? []).some((task) => task.task_id === focusTaskId)) {
+      return;
+    }
+    setDraft(EMPTY_TASK_FILTERS);
+    setFilters(EMPTY_TASK_FILTERS);
+    setPage(pageContainingTask(tasks ?? [], focusTaskId, pageSize));
+  }, [focusTaskId, pageSize, tasks]);
 
   const filtered = useMemo(
     () =>
@@ -205,10 +233,35 @@ export function JobCenterScreen({
     onChanged();
   }
 
+  async function copyCurl(task: Task) {
+    try {
+      await copyTaskCurl(task.task_id);
+      setCopyStatus({ taskId: task.task_id, error: null });
+    } catch (error) {
+      setCopyStatus({ taskId: task.task_id, error: messageFrom(error) });
+    }
+  }
+
   const hasTasks = tasks !== null && tasks.length > 0;
   const pageIds = slice.rows.map((task) => task.task_id);
   const allOnPageSelected =
     pageIds.length > 0 && pageIds.every((id) => selected.has(id));
+  const focusedOnPage =
+    focusTaskId !== null && slice.rows.some((task) => task.task_id === focusTaskId);
+
+  useEffect(() => {
+    if (!focusedOnPage) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      focusedRow.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+    const timeout = window.setTimeout(onFocusConsumed, 1800);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(timeout);
+    };
+  }, [focusTaskId, focusedOnPage, onFocusConsumed]);
 
   return (
     <>
@@ -319,6 +372,19 @@ export function JobCenterScreen({
         </div>
       )}
 
+      {copyStatus !== null && copyStatus.error !== null && (
+        <div className="bulk-summary is-failed" role="alert">
+          <span>复制 cURL 失败：{copyStatus.error}</span>
+          <button
+            className="text-button"
+            type="button"
+            onClick={() => setCopyStatus(null)}
+          >
+            知道了
+          </button>
+        </div>
+      )}
+
       <section className="card table-card" id="jobs" aria-labelledby="jobs-title">
         <div className="table-title-row">
           <h1 className="table-title" id="jobs-title">
@@ -385,7 +451,12 @@ export function JobCenterScreen({
           onDelete={onDelete}
           startingTaskId={startingTaskId}
           onStart={onStart}
+          onStop={onStop}
           onOpen={setOpenTaskId}
+          copiedTaskId={copyStatus?.error === null ? copyStatus.taskId : null}
+          onCopyCurl={(task) => void copyCurl(task)}
+          focusTaskId={focusTaskId}
+          focusedRow={focusedRow}
         />
 
         {hasTasks && (
@@ -415,6 +486,14 @@ export function JobCenterScreen({
           onRerun={(task) => {
             setOpenTaskId(null);
             onRerun(task);
+          }}
+          onEditTask={(task, step) => {
+            setOpenTaskId(null);
+            onEditFailure(task, step);
+          }}
+          onCleaned={() => {
+            setOpenTaskId(null);
+            onChanged();
           }}
         />
       )}
@@ -497,7 +576,12 @@ function JobResults({
   onDelete,
   startingTaskId,
   onStart,
+  onStop,
   onOpen,
+  copiedTaskId,
+  onCopyCurl,
+  focusTaskId,
+  focusedRow,
 }: {
   tasks: Task[] | null;
   filtered: Task[];
@@ -515,7 +599,12 @@ function JobResults({
   onDelete: (task: Task) => void;
   startingTaskId: string | null;
   onStart: (task: Task) => void;
+  onStop: (runRecordId: string) => void;
   onOpen: (taskId: string) => void;
+  copiedTaskId: string | null;
+  onCopyCurl: (task: Task) => void;
+  focusTaskId: string | null;
+  focusedRow: React.RefObject<HTMLTableRowElement | null>;
 }) {
   if (tasks === null) {
     return (
@@ -586,8 +675,16 @@ function JobResults({
             const status = latestRunStatus(run);
             const progress = progressOf(run);
             const source = sourceSummary(task.spec);
+            const runAction = rowRunAction(
+              run,
+              startingTaskId === task.task_id,
+            );
             return (
-              <tr key={task.task_id}>
+              <tr
+                className={task.task_id === focusTaskId ? "is-new-task" : undefined}
+                key={task.task_id}
+                ref={task.task_id === focusTaskId ? focusedRow : undefined}
+              >
                 <td className="check-column">
                   <input
                     type="checkbox"
@@ -659,34 +756,35 @@ function JobResults({
                 </td>
                 <td className="action-column">
                   <span className="row-actions">
-                    {/* 点了就跑：没有对话框，也没有要填的参数。**只锁这一行**的按钮，
-                        免得连点两下换回一个「已有一次运行进行中」的 409；
-                        别的行照常按得动，一条在飞不构成拦住其余每一行的理由。 */}
+                    {/* 发起与停止共用这一格：进行中只给停止，终局或从未运行只给发起。
+                        发起请求在途时只锁这一行，别的任务仍然可以操作。 */}
+                    {runAction.kind === "start" ? (
+                      <ActionButton
+                        label={runAction.disabled ? "正在发起" : "发起运行"}
+                        icon={<Play size={16} />}
+                        disabled={runAction.disabled}
+                        onClick={() => onStart(task)}
+                      />
+                    ) : (
+                      <ActionButton
+                        label={`停止运行 ${runAction.runRecordId}`}
+                        icon={<Ban size={16} />}
+                        onClick={() => onStop(runAction.runRecordId)}
+                      />
+                    )}
                     <ActionButton
-                      label={
-                        startingTaskId === task.task_id ? "正在发起" : "发起运行"
+                      label={copiedTaskId === task.task_id ? "cURL 已复制" : "复制 cURL"}
+                      icon={
+                        copiedTaskId === task.task_id ? (
+                          <Check size={16} />
+                        ) : (
+                          <Copy size={16} />
+                        )
                       }
-                      icon={<Play size={16} />}
-                      disabled={startingTaskId === task.task_id}
-                      onClick={() => onStart(task)}
+                      onClick={() => onCopyCurl(task)}
                     />
                     <span className="divider" />
-                    {run === undefined ? (
-                      // 尚未运行的任务开不了抽屉——**禁用而不是消失**，原因挂在外层
-                      // `span` 的 `title` 上（浏览器不给 `disabled` 控件派发指针事件，
-                      // 挂在按钮自己的 `title` 上等于没写）与按钮的 `aria-label` 上。
-                      <span
-                        className="row-actions"
-                        title="运行详情（不可用）：这个任务尚未运行过，没有可看的运行记录。"
-                      >
-                        <ActionButton
-                          label="运行详情（不可用）：这个任务尚未运行过，没有可看的运行记录。"
-                          icon={<Clock3 size={16} />}
-                          disabled
-                          onClick={() => {}}
-                        />
-                      </span>
-                    ) : (
+                    {run !== undefined && (
                       <ActionButton
                         label="运行详情"
                         icon={<Clock3 size={16} />}

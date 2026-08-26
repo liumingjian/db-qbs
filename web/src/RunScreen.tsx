@@ -1,4 +1,4 @@
-import { ArrowLeft, Ban, Pencil, Play, RefreshCw } from "lucide-react";
+import { ArrowLeft, Ban, Play, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { cancelRun, fetchRun } from "./api";
@@ -10,12 +10,14 @@ import {
   TerminalBlock,
 } from "./components/DesignSystem";
 import { messageFrom } from "./errors";
+import { FailureEvidence } from "./FailureEvidence";
 import { runIdPresentation } from "./history";
 import { mappingSuggestion } from "./m3";
 import { progressOfLiveRun } from "./progress";
 import { runPresentation } from "./run";
 import type { RunPresentation } from "./run";
 import { abortRefusal } from "./runStage";
+import type { Step } from "./wizard";
 
 const RUN_POLL_INTERVAL_MS = 1000;
 const countFormatter = new Intl.NumberFormat("zh-CN");
@@ -31,7 +33,7 @@ export function RunScreen({
   runRecordId: string;
   onBack: () => void;
   onRelaunch: () => void;
-  onEditTask: () => void;
+  onEditTask: (step: Step) => void;
 }) {
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -260,7 +262,7 @@ function FinishedRun({
 }: {
   detail: RunDetail & { live: false };
   presentation: RunPresentation;
-  onEditTask: () => void;
+  onEditTask: (step: Step) => void;
 }) {
   const mappingFailed = presentation.kind === "mapping-failed";
   return (
@@ -277,19 +279,11 @@ function FinishedRun({
         <RunConclusion detail={detail} presentation={presentation} />
       </section>
 
-      {mappingFailed && <PrecheckReports detail={detail} />}
-
-      {mappingFailed && (
-        <div className="precheck-exit">
-          <span>
-            目标表结构与本次取数的列对不上。请在目标库中调整目标表，或回到任务编辑修改字段映射。
-          </span>
-          <button className="button is-ghost" type="button" onClick={onEditTask}>
-            <Pencil size={15} aria-hidden="true" />
-            编辑任务
-          </button>
-        </div>
+      {(presentation.kind === "failed" || presentation.kind === "mapping-failed") && (
+        <FailureEvidence run={detail} onEditTask={onEditTask} />
       )}
+
+      {mappingFailed && <PrecheckReports detail={detail} />}
 
       <dl className="run-metrics is-finished">
         <Metric label="已推行数" value={formatCount(detail.rows_pushed)} />

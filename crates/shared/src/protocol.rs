@@ -90,6 +90,47 @@ pub struct PrecheckIssue {
     /// 动作型建议。永久可选。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggestion: Option<String>,
+    /// Typed target-check presentation. It is deliberately not part of the
+    /// legacy run-precheck wire shape.
+    #[serde(skip)]
+    pub check: Option<TargetCheckFinding>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetCheckKind {
+    MissingColumn,
+    NullabilityMismatch,
+    InsufficientLengthOrPrecision,
+    PrimaryKeyMismatch,
+    TypeNotWhitelisted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetCheckFinding {
+    pub column: Option<String>,
+    pub kind: TargetCheckKind,
+    pub expected: String,
+    pub actual: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetCheckRequest {
+    pub target: TargetConnection,
+    pub target_table: String,
+    pub source_columns: Vec<SourceColumn>,
+    pub primary_key: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetCheckResult {
+    pub ok: bool,
+    pub findings: Vec<TargetCheckFinding>,
+    pub suggested_ddl: Option<String>,
 }
 
 /// 目标端 MySQL 的连接信息。**由 source 侧的数据源库读出、随请求过线**（ADR-0037 §1）——
@@ -183,6 +224,23 @@ pub struct CommitResponse {
     pub purged_rows: u64,
     pub swapped_rows: u64,
     pub count_ms: u64,
+}
+
+/// Delete the target rows whose latest successful writer is this run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanupRunRequest {
+    pub run_id: String,
+    pub target_table: String,
+    pub target: TargetConnection,
+    pub primary_key: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanupRunResponse {
+    pub run_id: String,
+    pub deleted_rows: u64,
 }
 
 /// `POST /v1/runs/{run_id}/abort` 的响应体。请求体是空对象 `{}`。

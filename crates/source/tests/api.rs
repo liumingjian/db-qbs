@@ -5,7 +5,7 @@
 //! 对外真的在服务」；判断怎么回，归这里。
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -15,7 +15,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use db_qbs_source::http::{routes, Api, Method, Request, Response, RunState};
-use db_qbs_source::{AgentStore, DatasourceStore, HistoryStore, SourceConfig, TaskStore};
+use db_qbs_source::{
+    AgentStore, DatasourceStore, HistoryStore, OracleAccess, OracleRowSource, SourceColumn,
+    SourceConfig, SourceReadError, TaskSpec, TaskStore,
+};
 use serde_json::Value;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -122,6 +125,16 @@ impl Rig {
     }
 
     fn api(&self) -> Api<'_> {
+        self.api_with_describer(OracleRowSource::describe)
+    }
+
+    fn api_with_describer(
+        &self,
+        describe_source: fn(
+            &OracleAccess,
+            &TaskSpec,
+        ) -> Result<Vec<SourceColumn>, SourceReadError>,
+    ) -> Api<'_> {
         Api {
             config: &self.config,
             config_path: &self.config_path,
@@ -130,6 +143,7 @@ impl Rig {
             agents: &self.agents,
             history: &self.history,
             runs: &self.runs,
+            describe_source,
         }
     }
 
@@ -144,6 +158,22 @@ impl Rig {
 
     fn post(&self, url: &str, body: &str) -> Response {
         self.send(Method::Post, url, body)
+    }
+
+    fn post_with_describer(
+        &self,
+        url: &str,
+        body: &str,
+        describe_source: fn(
+            &OracleAccess,
+            &TaskSpec,
+        ) -> Result<Vec<SourceColumn>, SourceReadError>,
+    ) -> Response {
+        self.api_with_describer(describe_source).handle(&Request::new(
+            Method::Post,
+            url,
+            body.as_bytes().to_vec(),
+        ))
     }
 
     fn put(&self, url: &str, body: &str) -> Response {
@@ -348,6 +378,13 @@ fn every_route_reaches_its_handler() {
             r#"{"datasource_id":"x","source_sql":"select 1 from dual"}"#.into(),
             400,
         ),
+        (
+            Method::Post,
+            "/api/builder/preview",
+            "/api/builder/preview".into(),
+            r#"{"source_datasource_id":"missing","spec":{},"limit":10}"#.into(),
+            400,
+        ),
         (Method::Get, "/api/agents", "/api/agents".into(), String::new(), 200),
         (Method::Post, "/api/agents", "/api/agents".into(), "{}".into(), 400),
         (
@@ -424,6 +461,13 @@ fn every_route_reaches_its_handler() {
         ),
         (
             Method::Post,
+            "/api/target/check",
+            "/api/target/check".into(),
+            format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"primary_key":["ID"]}}}}"#),
+            502,
+        ),
+        (
+            Method::Post,
             "/api/runs",
             "/api/runs".into(),
             format!(r#"{{"task_id":"{task_id}"}}"#),
@@ -433,6 +477,13 @@ fn every_route_reaches_its_handler() {
             Method::Post,
             "/api/runs/{}/cancel",
             format!("/api/runs/{run_record_id}/cancel"),
+            String::new(),
+            409,
+        ),
+        (
+            Method::Post,
+            "/api/runs/{}/cleanup",
+            format!("/api/runs/{run_record_id}/cleanup"),
             String::new(),
             409,
         ),
@@ -450,6 +501,13 @@ fn every_route_reaches_its_handler() {
             Method::Get,
             "/api/tasks/{}",
             format!("/api/tasks/{task_id}"),
+            String::new(),
+            200,
+        ),
+        (
+            Method::Get,
+            "/api/tasks/{}/curl",
+            format!("/api/tasks/{task_id}/curl"),
             String::new(),
             200,
         ),
@@ -496,6 +554,52 @@ fn every_route_reaches_its_handler() {
         );
     }
     assert_eq!(covered.len(), routes().len(), "表里有路由表上没有的行");
+}
+
+#[test]
+fn task_curl_is_complete_server_assembled_and_uses_the_public_request_origin() {
+    let rig = Rig::new();
+    let task_id = rig.create_task(
+        "搬一次",
+        "HOLDINGS",
+        &("source-id".to_owned(), "target-id".to_owned()),
+    );
+    let request = Request::new(
+        Method::Get,
+        &format!("/api/tasks/{task_id}/curl"),
+        Vec::new(),
+    )
+    .with_header("Host", "qbs.example.test:8443")
+    .with_header("X-Forwarded-Proto", "https");
+
+    let response = rig.api().handle(&request);
+
+    assert_eq!(response.status, 200, "{}", response.body_text());
+    assert_eq!(
+        rig.json(&response)["command"],
+        format!(
+            "curl --request POST 'https://qbs.example.test:8443/api/runs' --header 'Content-Type: application/json' --data '{{\"task_id\":\"{task_id}\"}}'"
+        )
+    );
+}
+
+#[test]
+fn task_curl_rejects_unknown_tasks_and_untrusted_origin_shapes() {
+    let rig = Rig::new();
+    assert_eq!(rig.get("/api/tasks/missing/curl").status, 404);
+
+    let task_id = rig.create_task(
+        "搬一次",
+        "HOLDINGS",
+        &("source-id".to_owned(), "target-id".to_owned()),
+    );
+    let request = Request::new(
+        Method::Get,
+        &format!("/api/tasks/{task_id}/curl"),
+        Vec::new(),
+    )
+    .with_header("Host", "qbs.example.test/'bad");
+    assert_eq!(rig.api().handle(&request).status, 400);
 }
 
 /// 表里的先后**不承重**：字面量样式永远压过带占位的样式。
@@ -684,6 +788,38 @@ fn builder_dblinks_and_columns_reject_before_reaching_oracle() {
     assert_eq!(bad_dblink.status, 400, "{}", bad_dblink.body_text());
 }
 
+#[test]
+fn builder_preview_validates_spec_and_limit_before_reaching_oracle() {
+    let rig = Rig::new();
+    let incomplete = rig.post(
+        "/api/builder/preview",
+        r#"{"source_datasource_id":"missing","spec":{"owner":"","table":"","target_table":"","primary_key":[],"columns":[]},"limit":10}"#,
+    );
+    assert_eq!(incomplete.status, 400);
+    assert!(incomplete.body_text().contains("owner"));
+
+    let invalid_sql = rig.post(
+        "/api/builder/preview",
+        r#"{"source_datasource_id":"missing","spec":{"source_sql":"DELETE FROM APP.T","owner":"","table":"","target_table":"T","primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":10}"#,
+    );
+    assert_eq!(invalid_sql.status, 400);
+    assert!(invalid_sql.body_text().contains("SELECT"));
+
+    let zero = rig.post(
+        "/api/builder/preview",
+        r#"{"source_datasource_id":"missing","spec":{"source_sql":"SELECT ID FROM APP.T","owner":"","table":"","target_table":"T","primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":0}"#,
+    );
+    assert_eq!(zero.status, 400);
+    assert!(zero.body_text().contains("limit 必须大于 0"));
+
+    let custom_sql = rig.post(
+        "/api/builder/preview",
+        r#"{"source_datasource_id":"missing","spec":{"source_sql":"SELECT ID FROM APP.T","owner":"","table":"","target_table":"T","primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":1000}"#,
+    );
+    assert_eq!(custom_sql.status, 400);
+    assert!(custom_sql.body_text().contains("数据源 missing 不存在"));
+}
+
 /// 请求体超过 1 MiB 时的那句话，判定只有一处。
 #[test]
 fn oversized_request_bodies_are_refused() {
@@ -813,9 +949,11 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
         .unwrap()
         .to_owned();
 
-    let detail = wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+    let mut detail = wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
         body["rows_pushed"] == 7
     });
+    assert!(detail["evidence"].is_object());
+    detail.as_object_mut().unwrap().remove("evidence");
     assert_eq!(
         detail,
         serde_json::json!({
@@ -961,8 +1099,12 @@ while [ ! -f '{}' ]; do sleep 0.02; done
         emit.display(),
         release.display(),
     ));
-    let (_agent_id, source_id, target_id) = rig.seed();
-    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+    let (agent_id, source_id, target_id) = rig.seed();
+    let task_id = rig.create_task(
+        "holdings",
+        "HOLDINGS",
+        &(source_id.clone(), target_id.clone()),
+    );
 
     let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
     assert_eq!(started.status, 202, "{}", started.body_text());
@@ -974,12 +1116,48 @@ while [ ! -f '{}' ]; do sleep 0.02; done
     assert_eq!(accepted["stage"], Value::Null);
     assert_eq!(accepted["run_id"], Value::Null);
     assert_eq!(accepted["source_sql"], EXPECTED_SOURCE_SQL);
+    assert_eq!(accepted["evidence"]["source"]["datasource_id"], source_id);
+    assert_eq!(
+        accepted["evidence"]["source"]["connect_string"],
+        "//oracle:1521/XE"
+    );
+    assert_eq!(accepted["evidence"]["source"]["username"], "source");
+    assert_eq!(
+        accepted["evidence"]["source"]["client_lib_dir"],
+        "/db-qbs-missing-oracle-client"
+    );
+    assert_eq!(accepted["evidence"]["target"]["datasource_id"], target_id);
+    assert_eq!(accepted["evidence"]["target"]["host"], "127.0.0.1");
+    assert_eq!(accepted["evidence"]["target"]["port"], 3306);
+    assert_eq!(accepted["evidence"]["target"]["database"], "qbs");
+    assert_eq!(accepted["evidence"]["target"]["username"], "sink");
+    assert_eq!(accepted["evidence"]["agent"]["agent_id"], agent_id);
+    assert_eq!(accepted["evidence"]["agent"]["name"], "目标端");
+    assert_eq!(accepted["evidence"]["agent"]["base_url"], agent_stub_url());
+    assert_eq!(accepted["evidence"]["agent"]["instance_id"], "stub-agent");
+    assert_eq!(accepted["evidence"]["parameters"]["target_table"], "HOLDINGS");
+    assert_eq!(accepted["evidence"]["parameters"]["primary_key"], serde_json::json!(["ID"]));
+    assert_eq!(accepted["evidence"]["parameters"]["source_sql"], EXPECTED_SOURCE_SQL);
+    assert!(!serde_json::to_string(&accepted).unwrap().contains("change-me"));
+    assert!(!serde_json::to_string(&accepted).unwrap().contains("secret"));
     assert_eq!(accepted["seq"], 0);
     assert_eq!(accepted["rows_pushed"], 0);
     assert_eq!(accepted["bytes"], 0);
     assert_eq!(accepted["ms"], 0);
     assert_eq!(accepted["last_ts"], Value::Null);
     assert_eq!(accepted["live"], true);
+
+    let changed = rig.put(
+        &format!("/api/datasources/{source_id}"),
+        r#"{"name":"源库（改）","kind":"oracle","connect_string":"//changed:1521/NEW","username":"changed","password":"new-secret"}"#,
+    );
+    assert_eq!(changed.status, 200, "{}", changed.body_text());
+    let still_original = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(
+        still_original["evidence"]["source"]["connect_string"],
+        "//oracle:1521/XE"
+    );
+    assert_eq!(still_original["evidence"]["source"]["username"], "source");
 
     fs::write(emit, "").unwrap();
     let partial = wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
@@ -1171,6 +1349,70 @@ fn recording_agent() -> (String, Arc<Mutex<Vec<String>>>) {
         }
     });
     (url, seen)
+}
+
+fn target_check_agent(check_body: Value) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(&mut stream);
+            let mut request_line = String::new();
+            let _ = reader.read_line(&mut request_line);
+            let mut content_length = 0;
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = header.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        content_length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+            }
+            let mut request_body = vec![0; content_length];
+            let _ = reader.read_exact(&mut request_body);
+            drop(reader);
+            let body = if request_line.contains("/v1/agent/info") {
+                r#"{"agent_id":"check-agent","name":"检查桩","version":"0.0.0-test"}"#.to_owned()
+            } else if request_line.contains("/v1/target/check") {
+                serde_json::to_string(&check_body).unwrap()
+            } else {
+                r#"{"error":{"code":"BAD_REQUEST","message":"unexpected path","run_id":null,"details":{}}}"#.to_owned()
+            };
+            let status = if request_line.contains("/v1/agent/info")
+                || request_line.contains("/v1/target/check")
+            {
+                "200 OK"
+            } else {
+                "404 Not Found"
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.flush();
+        }
+    });
+    url
+}
+
+fn described_id(
+    _access: &OracleAccess,
+    _spec: &TaskSpec,
+) -> Result<Vec<SourceColumn>, SourceReadError> {
+    Ok(vec![SourceColumn {
+        name: "ID".to_owned(),
+        data_type: "NUMBER".to_owned(),
+        precision: Some(10),
+        scale: Some(0),
+        length: None,
+        fsp: None,
+        support: None,
+    }])
 }
 
 /// 一台**可以停掉**的 agent 桩：注册时它活着，`stop()` 之后端口上没人应答。
@@ -1399,6 +1641,118 @@ fn the_target_metadata_proxy_resolves_credentials_and_writes_nothing() {
 
     // 不进任务定义、不进 SQLite、不留临时文件——目录里一个新条目都没有。
     assert_eq!(directory_entries(&rig.directory), files_before);
+}
+
+#[test]
+fn target_check_proxies_every_typed_kind_and_attaches_ddl_only_when_failed() {
+    let rig = Rig::new();
+    let source_id = rig.create_oracle_datasource("源库");
+    let findings = [
+        "missing_column",
+        "nullability_mismatch",
+        "insufficient_length_or_precision",
+        "primary_key_mismatch",
+        "type_not_whitelisted",
+    ]
+    .into_iter()
+    .map(|kind| {
+        serde_json::json!({
+            "column": "ID",
+            "kind": kind,
+            "expected": "DECIMAL(10,0)",
+            "actual": "<missing>",
+            "message": format!("{kind} finding"),
+        })
+    })
+    .collect::<Vec<_>>();
+    let agent_url = target_check_agent(serde_json::json!({
+        "ok": false,
+        "findings": findings,
+        "suggested_ddl": null,
+    }));
+    let registered = rig.post(
+        "/api/agents",
+        &format!(r#"{{"name":"目标检查","base_url":"{agent_url}"}}"#),
+    );
+    let agent_id = rig.json(&registered)["agent_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let request = format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"primary_key":["ID"]}}}}"#);
+
+    let response = rig.post_with_describer("/api/target/check", &request, described_id);
+    assert_eq!(response.status, 200, "{}", response.body_text());
+    let body = rig.json(&response);
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["findings"].as_array().unwrap().len(), 5);
+    for kind in [
+        "missing_column",
+        "nullability_mismatch",
+        "insufficient_length_or_precision",
+        "primary_key_mismatch",
+        "type_not_whitelisted",
+    ] {
+        assert!(body["findings"].as_array().unwrap().iter().any(|finding| finding["kind"] == kind));
+    }
+    assert!(body["suggested_ddl"]
+        .as_str()
+        .unwrap()
+        .contains("CREATE TABLE `HOLDINGS`"));
+
+    let ok_url = target_check_agent(serde_json::json!({
+        "ok": true,
+        "findings": [],
+        "suggested_ddl": "must be discarded",
+    }));
+    let ok_agent = rig.post(
+        "/api/agents",
+        &format!(r#"{{"name":"目标检查通过","base_url":"{ok_url}"}}"#),
+    );
+    let ok_agent_id = rig.json(&ok_agent)["agent_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let ok_target_id = rig.create_mysql_datasource("目标库通过", &ok_agent_id);
+    let ok_request = request.replace(&target_id, &ok_target_id);
+    let ok = rig.post_with_describer("/api/target/check", &ok_request, described_id);
+    assert_eq!(ok.status, 200, "{}", ok.body_text());
+    assert_eq!(rig.json(&ok)["suggested_ddl"], Value::Null);
+}
+
+#[test]
+fn target_check_maps_request_datasource_agent_and_sink_failures_at_their_boundaries() {
+    let rig = Rig::new();
+    assert_eq!(rig.post("/api/target/check", "{}").status, 400);
+
+    let source_id = rig.create_oracle_datasource("源库");
+    let check_body = |target_id: &str| format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"primary_key":["ID"]}}}}"#);
+    let invalid_target = check_body(&source_id);
+    let wrong_kind = rig.post_with_describer("/api/target/check", &invalid_target, described_id);
+    assert_eq!(wrong_kind.status, 400, "{}", wrong_kind.body_text());
+
+    let agent_id = rig.register_agent("拒绝检查的目标端");
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let sink_failure = check_body(&target_id);
+    let sink = rig.post_with_describer("/api/target/check", &sink_failure, described_id);
+    assert_eq!(sink.status, 502, "{}", sink.body_text());
+    assert_eq!(rig.json(&sink)["kind"], "sink");
+
+    let mut stopped = StoppableAgent::start();
+    let registered = rig.post(
+        "/api/agents",
+        &format!(r#"{{"name":"会停的目标端","base_url":"{}"}}"#, stopped.url),
+    );
+    let stopped_id = rig.json(&registered)["agent_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let stopped_target = rig.create_mysql_datasource("已离线目标库", &stopped_id);
+    stopped.stop();
+    let agent_failure = check_body(&stopped_target);
+    let agent = rig.post_with_describer("/api/target/check", &agent_failure, described_id);
+    assert_eq!(agent.status, 502, "{}", agent.body_text());
+    assert_eq!(rig.json(&agent)["kind"], "agent");
 }
 
 /// 草稿测连吃的是**表单里当前填的那组值**，不是库里存的那条，而且一个字节都不落盘。

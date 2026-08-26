@@ -1,7 +1,10 @@
-import { Play, X } from "lucide-react";
-import { useEffect } from "react";
+import { Play, Trash2, X } from "lucide-react";
+import { useEffect, useState } from "react";
 
+import { cleanupRun } from "./api";
 import type { RunHistory, Task } from "./api";
+import { messageFrom } from "./errors";
+import { FailureEvidence } from "./FailureEvidence";
 import {
   ErrorCodeTag,
   SensitiveValue,
@@ -10,6 +13,7 @@ import {
 import { formatTimestamp, historyPresentation, runIdPresentation } from "./history";
 import { rerunAction } from "./rerun";
 import { sourceSummary, whereSummary } from "./spec";
+import type { Step } from "./wizard";
 
 /**
  * 运行详情抽屉——**顶替整个「运行历史」屏**（ADR-0043 §2 §4）。
@@ -33,6 +37,8 @@ export function RunDrawer({
   tasks,
   onClose,
   onRerun,
+  onEditTask,
+  onCleaned,
 }: {
   task: Task;
   run: RunHistory;
@@ -40,7 +46,11 @@ export function RunDrawer({
   tasks: Task[] | null;
   onClose: () => void;
   onRerun: (task: Task) => void;
+  onEditTask: (task: Task, step: Step) => void;
+  onCleaned: () => void;
 }) {
+  const [cleaning, setCleaning] = useState(false);
+  const [cleanupError, setCleanupError] = useState<string | null>(null);
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
@@ -53,6 +63,20 @@ export function RunDrawer({
 
   const presentation = historyPresentation(run);
   const rerun = rerunAction(run, tasks);
+
+  async function cleanWrittenRows() {
+    if (!window.confirm("确定清理这一次运行写入的数据？此操作不可撤销。")) return;
+    setCleaning(true);
+    setCleanupError(null);
+    try {
+      await cleanupRun(run.run_record_id);
+      onCleaned();
+    } catch (error) {
+      setCleanupError(messageFrom(error));
+    } finally {
+      setCleaning(false);
+    }
+  }
 
   return (
     <>
@@ -133,6 +157,13 @@ export function RunDrawer({
             )}
           </section>
 
+          {presentation.kind === "failed" && (
+            <FailureEvidence
+              run={run}
+              onEditTask={(step) => onEditTask(task, step)}
+            />
+          )}
+
           <section className="panel">
             <h3>行数核对</h3>
             <div className="panel-body kv">
@@ -162,9 +193,8 @@ export function RunDrawer({
           </section>
 
           <section className="panel">
-            <h3>任务定义</h3>
-            {/* 主键与条件从列表挪进来（ADR-0043 §4）：它们是**任务**的属性，
-                每次运行都一样，占着列表一整列换不来任何区分度。 */}
+            <h3>当前任务定义（可能已修改）</h3>
+            {/* 这是任务当前定义，可能已在运行后修改；当次实际值只读上面的运行证据。 */}
             <div className="panel-body kv is-pairs">
               {/* 自定义 SQL 的任务 owner / table 都是空串，直接拼会打出一个裸点。
                   与作业中心同一口径（sourceSummary）：这里给截断的一行，
@@ -214,6 +244,21 @@ export function RunDrawer({
             这一条已是最近一次运行；同一个任务的多次历史本版不展示。
           </span>
           <span className="spacer" />
+          {cleanupError !== null && <span className="form-error">{cleanupError}</span>}
+          {run.cleanup_status === "available" && (
+            <button
+              className="button is-danger"
+              type="button"
+              disabled={cleaning}
+              onClick={() => void cleanWrittenRows()}
+            >
+              <Trash2 size={14} aria-hidden="true" />
+              {cleaning ? "正在清理" : "清理本次写入"}
+            </button>
+          )}
+          {run.cleanup_status === "cleaned" && (
+            <span className="drawer-note">已清理 {run.cleaned_rows ?? 0} 行</span>
+          )}
           <button className="button is-ghost" type="button" onClick={onClose}>
             关闭
           </button>

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     classify_column, ColumnShape, PrecheckIssue, RangeCheckColumn, ShapeRejection, SourceColumn,
-    TargetColumn, TargetKey, TargetShape,
+    TargetCheckFinding, TargetCheckKind, TargetColumn, TargetKey, TargetShape,
 };
 
 pub fn precheck(
@@ -27,6 +27,25 @@ pub fn precheck_with_primary_key(
         target_columns,
         target_keys,
     )
+}
+
+pub fn target_check_findings(
+    target_table: &str,
+    primary_key: &[String],
+    source_columns: &[SourceColumn],
+    target_columns: &[TargetColumn],
+    target_keys: &[TargetKey],
+) -> Vec<TargetCheckFinding> {
+    precheck_inner(
+        target_table,
+        primary_key,
+        source_columns,
+        target_columns,
+        target_keys,
+    )
+    .into_iter()
+    .filter_map(|issue| issue.check)
+    .collect()
 }
 
 pub(crate) fn range_check_columns(
@@ -73,6 +92,15 @@ fn precheck_inner(
             rule: "目标表名最多 37 个字符，否则暂存表名会超过 MySQL 64 字符上限；请缩短目标表名"
                 .to_owned(),
             suggestion: Some("缩短目标表名".to_owned()),
+            check: Some(TargetCheckFinding {
+                column: None,
+                kind: TargetCheckKind::TypeNotWhitelisted,
+                expected: "目标表名不超过 37 个字符".to_owned(),
+                actual: format!("{} 个字符", target_table.chars().count()),
+                message:
+                    "目标表名最多 37 个字符，否则暂存表名会超过 MySQL 64 字符上限；请缩短目标表名"
+                        .to_owned(),
+            }),
         });
     }
 
@@ -85,21 +113,31 @@ fn precheck_inner(
     for source in source_columns {
         let normalized_name = source.name.to_uppercase();
         if !source_names.insert(normalized_name.clone()) {
-            issues.push(issue_with_suggestion(
-                source,
-                targets.get(&normalized_name).copied(),
-                "源端列名重复，按名字无法唯一对齐",
-                Some("改源 SQL 使列名唯一".to_owned()),
+            issues.push(checked_issue(
+                issue_with_suggestion(
+                    source,
+                    targets.get(&normalized_name).copied(),
+                    "源端列名重复，按名字无法唯一对齐",
+                    Some("改源 SQL 使列名唯一".to_owned()),
+                ),
+                TargetCheckKind::TypeNotWhitelisted,
+                "源端列名唯一".to_owned(),
+                source.name.clone(),
             ));
         }
 
         let target = targets.get(&normalized_name).copied();
         let Some(target) = target else {
-            issues.push(issue_with_suggestion(
-                source,
-                None,
-                "目标表缺少同名列",
-                Some(missing_target_suggestion(source)),
+            issues.push(checked_issue(
+                issue_with_suggestion(
+                    source,
+                    None,
+                    "目标表缺少同名列",
+                    Some(missing_target_suggestion(source)),
+                ),
+                TargetCheckKind::MissingColumn,
+                source_expected_shape(source),
+                "<missing>".to_owned(),
             ));
             validate_source_type(source, None, &mut issues);
             continue;
@@ -110,11 +148,16 @@ fn precheck_inner(
         // 正面冲突，且不可能同时满足——MySQL 的 `PRIMARY KEY` 列按定义就是 NOT NULL。
         // 主键列因此从这条里豁免，改由 `validate_primary_key` 反向判。
         if !target.nullable && !key_columns.contains(&normalized_name) {
-            issues.push(issue_with_suggestion(
-                source,
-                Some(target),
-                "目标列必须可空，不能是 NOT NULL",
-                Some("改为 NULL".to_owned()),
+            issues.push(checked_issue(
+                issue_with_suggestion(
+                    source,
+                    Some(target),
+                    "目标列必须可空，不能是 NOT NULL",
+                    Some("改为 NULL".to_owned()),
+                ),
+                TargetCheckKind::NullabilityMismatch,
+                "NULL".to_owned(),
+                "NOT NULL".to_owned(),
             ));
         }
     }
@@ -147,6 +190,16 @@ fn precheck_inner(
                 target.name
             ),
             suggestion: Some("映射这一列，或在目标表上给它一个默认值".to_owned()),
+            check: Some(TargetCheckFinding {
+                column: Some(target.name.clone()),
+                kind: TargetCheckKind::NullabilityMismatch,
+                expected: "允许 NULL、具有默认值或 auto_increment".to_owned(),
+                actual: "NOT NULL 且无默认值、非 auto_increment".to_owned(),
+                message: format!(
+                    "目标表的 {} 列未被映射且不允许留空，请映射它或给它默认值",
+                    target.name
+                ),
+            }),
         });
     }
 
@@ -166,10 +219,7 @@ fn precheck_inner(
 /// `information_schema.COLUMNS.EXTRA` 里带 `auto_increment` —— 这一列由数据库自己填，
 /// 未映射也写得进去（ADR-0038 §5 第 3 分支）。MySQL 给的是小写，这里仍按大小写无关判。
 fn is_auto_increment(target: &TargetColumn) -> bool {
-    target
-        .extra
-        .to_ascii_lowercase()
-        .contains("auto_increment")
+    target.extra.to_ascii_lowercase().contains("auto_increment")
 }
 
 /// ADR-0035 §2 的三条，任一不满足即拒跑。
@@ -195,6 +245,13 @@ fn validate_primary_key(
                     .unwrap_or_else(|| "<missing>".to_owned()),
                 rule: "主键列必须落在本次选中的列里，否则 upsert 无从比对".to_owned(),
                 suggestion: Some("把该列选进来，或改主键".to_owned()),
+                check: Some(TargetCheckFinding {
+                    column: Some(column.clone()),
+                    kind: TargetCheckKind::PrimaryKeyMismatch,
+                    expected: "主键列包含在映射列中".to_owned(),
+                    actual: "<missing>".to_owned(),
+                    message: "主键列必须落在本次选中的列里，否则 upsert 无从比对".to_owned(),
+                }),
             });
             continue;
         }
@@ -209,6 +266,13 @@ fn validate_primary_key(
                 rule: "主键列必须 NOT NULL：MySQL 的 UNIQUE 允许多个 NULL，可空会让 upsert 静默退化成纯 INSERT"
                     .to_owned(),
                 suggestion: Some("把目标列改成 NOT NULL".to_owned()),
+                check: Some(TargetCheckFinding {
+                    column: Some(column.clone()),
+                    kind: TargetCheckKind::NullabilityMismatch,
+                    expected: "NOT NULL".to_owned(),
+                    actual: "NULL".to_owned(),
+                    message: "主键列必须 NOT NULL：MySQL 的 UNIQUE 允许多个 NULL，可空会让 upsert 静默退化成纯 INSERT".to_owned(),
+                }),
             });
         }
     }
@@ -238,10 +302,17 @@ fn validate_primary_key(
         issues.push(PrecheckIssue {
             column: "<primary_key>".to_owned(),
             source: primary_key.join(","),
-            target: existing,
+            target: existing.clone(),
             rule: "目标表上必须有一条 PRIMARY KEY 或 UNIQUE 约束，其列集合与勾选的主键完全一致；否则 ON DUPLICATE KEY UPDATE 会静默退化成纯 INSERT，重跑就出重复行"
                 .to_owned(),
             suggestion: Some("在目标表上建对应的主键或唯一索引，或改勾主键列".to_owned()),
+            check: Some(TargetCheckFinding {
+                column: None,
+                kind: TargetCheckKind::PrimaryKeyMismatch,
+                expected: format!("PRIMARY KEY 或 UNIQUE ({})", primary_key.join(",")),
+                actual: existing,
+                message: "目标表上必须有一条 PRIMARY KEY 或 UNIQUE 约束，其列集合与勾选的主键完全一致；否则 ON DUPLICATE KEY UPDATE 会静默退化成纯 INSERT，重跑就出重复行".to_owned(),
+            }),
         });
     }
 }
@@ -256,11 +327,11 @@ fn validate_source_type(
     match classify_column(source) {
         ColumnShape::Rejected(rejection) => {
             let (rule, suggestion) = rejection_issue(rejection);
-            issues.push(issue_with_suggestion(
-                source,
-                target,
-                &rule,
-                Some(suggestion),
+            issues.push(checked_issue(
+                issue_with_suggestion(source, target, &rule, Some(suggestion)),
+                TargetCheckKind::TypeNotWhitelisted,
+                "白名单内的可迁移类型".to_owned(),
+                source_display(source),
             ));
         }
         ColumnShape::NeedsPrecision => validate_unshaped_number(source, target, issues),
@@ -315,25 +386,40 @@ fn validate_unshaped_number(
 ) {
     match target {
         Some(target) if !target.data_type.eq_ignore_ascii_case("decimal") => {
-            issues.push(issue_with_suggestion(
+            issues.push(checked_issue(
+                issue_with_suggestion(
                 source,
                 Some(target),
                 "NUMBER 的目标类型必须是 DECIMAL",
                 Some("在任务定义为该列配 (p,s)，并将目标列改为对应 DECIMAL".to_owned()),
+                ),
+                TargetCheckKind::TypeNotWhitelisted,
+                "DECIMAL".to_owned(),
+                target_display(target),
             ));
         }
-        Some(target) if target_decimal_shape(target).is_none() => issues.push(issue_with_suggestion(
-            source,
-            Some(target),
-            "裸 NUMBER / 数值表达式列的目标 DECIMAL 必须具有有效的 precision 和 scale",
-            Some("将目标列改为具有有效 (p,s) 的 DECIMAL".to_owned()),
+        Some(target) if target_decimal_shape(target).is_none() => issues.push(checked_issue(
+            issue_with_suggestion(
+                source,
+                Some(target),
+                "裸 NUMBER / 数值表达式列的目标 DECIMAL 必须具有有效的 precision 和 scale",
+                Some("将目标列改为具有有效 (p,s) 的 DECIMAL".to_owned()),
+            ),
+            TargetCheckKind::InsufficientLengthOrPrecision,
+            "具有有效 precision 和 scale 的 DECIMAL".to_owned(),
+            target_display(target),
         )),
         Some(_) => {}
-        None => issues.push(issue_with_suggestion(
-            source,
-            target,
-            "NUMBER 必须同时具有可判定的 precision 和 scale，裸 NUMBER 与表达式列需要目标 DECIMAL 形状",
-            Some("在任务定义为该列配 (p,s)，再在目标表补出对应 DECIMAL 列".to_owned()),
+        None => issues.push(checked_issue(
+            issue_with_suggestion(
+                source,
+                target,
+                "NUMBER 必须同时具有可判定的 precision 和 scale，裸 NUMBER 与表达式列需要目标 DECIMAL 形状",
+                Some("在任务定义为该列配 (p,s)，再在目标表补出对应 DECIMAL 列".to_owned()),
+            ),
+            TargetCheckKind::TypeNotWhitelisted,
+            "可判定的 DECIMAL(p,s)".to_owned(),
+            source_display(source),
         )),
     }
 }
@@ -351,22 +437,32 @@ fn validate_number(
     };
 
     if !target.data_type.eq_ignore_ascii_case("decimal") {
-        issues.push(issue_with_suggestion(
-            source,
-            Some(target),
-            "NUMBER 的目标类型必须是 DECIMAL",
-            Some(format!("改为 DECIMAL({target_precision},{target_scale})")),
+        issues.push(checked_issue(
+            issue_with_suggestion(
+                source,
+                Some(target),
+                "NUMBER 的目标类型必须是 DECIMAL",
+                Some(format!("改为 DECIMAL({target_precision},{target_scale})")),
+            ),
+            TargetCheckKind::TypeNotWhitelisted,
+            format!("DECIMAL({target_precision},{target_scale})"),
+            target_display(target),
         ));
     } else if !target_satisfies_number_lower_bound(
         target,
         target_precision as u64,
         target_scale as u64,
     ) {
-        issues.push(issue_with_suggestion(
-            source,
-            Some(target),
-            &number_lower_bound_rule(target, target_precision as u64, target_scale as u64),
-            Some(format!("改为 DECIMAL({target_precision},{target_scale})")),
+        issues.push(checked_issue(
+            issue_with_suggestion(
+                source,
+                Some(target),
+                &number_lower_bound_rule(target, target_precision as u64, target_scale as u64),
+                Some(format!("改为 DECIMAL({target_precision},{target_scale})")),
+            ),
+            TargetCheckKind::InsufficientLengthOrPrecision,
+            format!("DECIMAL({target_precision},{target_scale})"),
+            target_display(target),
         ));
     }
 }
@@ -397,29 +493,44 @@ fn validate_varchar(
 ) {
     if let Some(target) = target {
         if !target.data_type.eq_ignore_ascii_case("varchar") {
-            issues.push(issue_with_suggestion(
-                source,
-                Some(target),
-                "字符族目标类型必须是 VARCHAR",
-                Some(format!("改为 VARCHAR({length})")),
+            issues.push(checked_issue(
+                issue_with_suggestion(
+                    source,
+                    Some(target),
+                    "字符族目标类型必须是 VARCHAR",
+                    Some(format!("改为 VARCHAR({length})")),
+                ),
+                TargetCheckKind::TypeNotWhitelisted,
+                format!("VARCHAR({length})"),
+                target_display(target),
             ));
         } else if target
             .length
             .map_or(true, |target_length| target_length < length)
         {
-            issues.push(issue_with_suggestion(
-                source,
-                Some(target),
-                "目标 VARCHAR 长度不足",
-                Some(format!("改为 VARCHAR({length})")),
+            issues.push(checked_issue(
+                issue_with_suggestion(
+                    source,
+                    Some(target),
+                    "目标 VARCHAR 长度不足",
+                    Some(format!("改为 VARCHAR({length})")),
+                ),
+                TargetCheckKind::InsufficientLengthOrPrecision,
+                format!("VARCHAR({length})"),
+                target_display(target),
             ));
         }
         if target.character_set.as_deref() != Some("utf8mb4") {
-            issues.push(issue_with_suggestion(
-                source,
-                Some(target),
-                "VARCHAR 目标列的字符集必须是 utf8mb4",
-                Some("改为 utf8mb4".to_owned()),
+            issues.push(checked_issue(
+                issue_with_suggestion(
+                    source,
+                    Some(target),
+                    "VARCHAR 目标列的字符集必须是 utf8mb4",
+                    Some("改为 utf8mb4".to_owned()),
+                ),
+                TargetCheckKind::TypeNotWhitelisted,
+                "utf8mb4 VARCHAR".to_owned(),
+                target_display(target),
             ));
         }
     }
@@ -442,18 +553,28 @@ fn validate_datetime(
     let family = if fsp == 0 { "DATE" } else { "TIMESTAMP" };
 
     if !target.data_type.eq_ignore_ascii_case("datetime") {
-        issues.push(issue_with_suggestion(
-            source,
-            Some(target),
-            &format!("{family} 的目标类型必须是 DATETIME"),
-            Some(format!("改为 DATETIME({fsp})")),
+        issues.push(checked_issue(
+            issue_with_suggestion(
+                source,
+                Some(target),
+                &format!("{family} 的目标类型必须是 DATETIME"),
+                Some(format!("改为 DATETIME({fsp})")),
+            ),
+            TargetCheckKind::TypeNotWhitelisted,
+            format!("DATETIME({fsp})"),
+            target_display(target),
         ));
     } else if target.datetime_precision != Some(u64::from(fsp)) {
-        issues.push(issue_with_suggestion(
-            source,
-            Some(target),
-            &format!("{family} 的目标 DATETIME 小数秒精度必须严格等于 {fsp}"),
-            Some(format!("改为 DATETIME({fsp})")),
+        issues.push(checked_issue(
+            issue_with_suggestion(
+                source,
+                Some(target),
+                &format!("{family} 的目标 DATETIME 小数秒精度必须严格等于 {fsp}"),
+                Some(format!("改为 DATETIME({fsp})")),
+            ),
+            TargetCheckKind::InsufficientLengthOrPrecision,
+            format!("DATETIME({fsp})"),
+            target_display(target),
         ));
     }
 }
@@ -472,6 +593,31 @@ fn issue_with_suggestion(
             .unwrap_or_else(|| "<missing>".to_owned()),
         rule: rule.to_owned(),
         suggestion,
+        check: None,
+    }
+}
+
+fn checked_issue(
+    mut issue: PrecheckIssue,
+    kind: TargetCheckKind,
+    expected: String,
+    actual: String,
+) -> PrecheckIssue {
+    issue.check = Some(TargetCheckFinding {
+        column: Some(issue.column.clone()),
+        kind,
+        expected,
+        actual,
+        message: issue.rule.clone(),
+    });
+    issue
+}
+
+fn source_expected_shape(source: &SourceColumn) -> String {
+    match classify_column(source) {
+        ColumnShape::Resolved(shape) => shape.to_string(),
+        ColumnShape::NeedsPrecision => "DECIMAL(p,s)".to_owned(),
+        ColumnShape::Rejected(_) => "白名单内的可迁移类型".to_owned(),
     }
 }
 

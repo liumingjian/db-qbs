@@ -17,9 +17,11 @@ use serde_json::Value;
 // 报文形状的唯一定义在 `db-qbs-shared`（#124）。这里只保留门面，
 // crate 内部与既有测试的引用路径一个字不变。
 pub use db_qbs_shared::{
-    AbortResponse, BatchPayload, BatchResponse, ColumnSupport, CommitRequest, CommitResponse,
-    ErrorBody, ErrorEnvelope, OpenOutcome, OpenRunRequest, OpenRunResponse, PrecheckIssue,
-    RangeCheckColumn, RangeCheckResult, RunResponse, SourceColumn, TargetConnection, Terminal,
+    AbortResponse, BatchPayload, BatchResponse, CleanupRunRequest, CleanupRunResponse,
+    ColumnSupport, CommitRequest, CommitResponse, ErrorBody, ErrorEnvelope, OpenOutcome,
+    OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn, RangeCheckResult,
+    RunResponse, SourceColumn, TargetCheckFinding,
+    TargetCheckKind, TargetCheckRequest, TargetCheckResult, TargetConnection, Terminal,
 };
 // 九行形态的推导也只有一份定义（#125）——判定式仍两端各一份。
 pub use agent::load_or_create as load_agent_identity;
@@ -31,7 +33,7 @@ pub use http::serve;
 pub use mysql_destination::{check_connection_settings, MysqlDestination, MysqlFactory};
 // `precheck` 是不带主键那一支，只给「生成的表喂回预检必过」那道漂移闸用；
 // 带主键那一支同样导出，因为漂移闸现在还要守「生成的 DDL 带主键，ADR-0035 §2 三条得过」。
-pub use precheck::{precheck, precheck_with_primary_key};
+pub use precheck::{precheck, precheck_with_primary_key, target_check_findings};
 pub use service::build_staging_ddl;
 pub use service::PrecheckMode;
 
@@ -121,6 +123,7 @@ pub struct TargetColumn {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AtomicSwapRequest {
+    pub run_id: String,
     pub staging_table: String,
     pub target_table: String,
     /// upsert 的去重键（ADR-0035 §1）。`ON DUPLICATE KEY UPDATE` 的更新列
@@ -162,6 +165,11 @@ pub enum DropStagingError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CleanupRunError {
+    Environment(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteBatchError {
     DataValue {
         mysql_code: u16,
@@ -193,6 +201,12 @@ pub trait Destination: Send + Sync {
     fn atomic_swap(&self, request: &AtomicSwapRequest)
         -> Result<AtomicSwapResult, AtomicSwapError>;
     fn drop_staging(&self, staging_table: &str) -> Result<(), DropStagingError>;
+    fn cleanup_run(
+        &self,
+        run_id: &str,
+        target_table: &str,
+        primary_key: &[String],
+    ) -> Result<u64, CleanupRunError>;
 }
 
 /// 一条按 run 建起来的目标端连接：库名 + 目的地。
@@ -249,6 +263,7 @@ impl<D: Destination> DestinationFactory for FixedDestination<D> {
 }
 
 struct ActiveRun<D> {
+    run_id: String,
     staging_table: String,
     source_columns: Vec<String>,
     swap_columns: Vec<String>,
@@ -267,6 +282,7 @@ struct ActiveRun<D> {
 impl<D> Clone for ActiveRun<D> {
     fn clone(&self) -> Self {
         Self {
+            run_id: self.run_id.clone(),
             staging_table: self.staging_table.clone(),
             source_columns: self.source_columns.clone(),
             swap_columns: self.swap_columns.clone(),

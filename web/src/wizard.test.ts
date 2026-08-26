@@ -15,7 +15,8 @@ import {
   toSpec,
   view,
 } from "./wizard";
-import type { Applied, Change, Draft, PreviewResult, TargetCheckResult } from "./wizard";
+import type { PreviewResult, TargetCheckResult } from "./api";
+import type { Applied, Change, Draft } from "./wizard";
 
 const SOURCE = { datasource_id: "ds-oracle", name: "生产 Oracle" };
 const TARGET = { datasource_id: "ds-mysql", name: "报表 MySQL" };
@@ -154,12 +155,15 @@ describe("the clearing rules", () => {
     expect(next.targetColumns).toEqual([]);
   });
 
-  it("changing the target table clears nothing at all", () => {
+  it("changing the target table preserves decisions and invalidates only old metadata", () => {
     // #173 的缺陷：目标表输入框每次按键都清空全部映射与主键。
-    const draft = withTargetColumns(workedDraft());
+    const draft = passingCheck(withTargetColumns(workedDraft()));
     const next = done(apply(draft, { type: "target-table", table: "t_customer_v2" }));
     expect(next.spec.columns).toEqual(draft.spec.columns);
     expect(next.spec.primary_key).toEqual(draft.spec.primary_key);
+    expect(next.targetColumns).toEqual([]);
+    expect(next.targetKeys).toEqual([]);
+    expect(next.check).toBeNull();
   });
 
   it("going back keeps everything on the step just left", () => {
@@ -177,6 +181,21 @@ describe("when a change is worth asking about", () => {
     expect(apply(draft, { type: "source-datasource", datasource: { datasource_id: "x", name: "X" } }).kind).toBe("done");
     expect(apply(draft, { type: "fetch-mode", fetchMode: "sql" }).kind).toBe("done");
     expect(leaving(draft)).toBeNull();
+  });
+
+  it("does not ask or clear when a destructive selector keeps its current value", () => {
+    const draft = workedDraft();
+    const source = apply(draft, { type: "source-datasource", datasource: draft.source });
+    const target = apply(draft, {
+      type: "target-datasource",
+      datasource: draft.target,
+      online: draft.targetAgentOnline,
+    });
+    const mode = apply(draft, { type: "fetch-mode", fetchMode: draft.fetchMode });
+
+    expect(source).toEqual({ kind: "done", draft });
+    expect(target).toEqual({ kind: "done", draft });
+    expect(mode).toEqual({ kind: "done", draft });
   });
 
   it("does not ask about values the machine put there", () => {
@@ -210,8 +229,19 @@ describe("when a change is worth asking about", () => {
   });
 
   it("asks before deleting a column even though nothing else is cleared", () => {
-    const { lines } = agreed(workedDraft(), { type: "remove-column", source: "ID" });
-    expect(lines).toEqual(["已选的 2 列"]);
+    const { draft, lines } = agreed(workedDraft(), { type: "remove-column", source: "ID" });
+    expect(lines).toEqual(["源列 ID 将不再参与同步"]);
+    expect(draft.sourceColumns.map((column) => column.name)).not.toContain("ID");
+    expect(draft.spec.columns.map((column) => column.source)).not.toContain("ID");
+  });
+
+  it("asks before deleting a machine-selected column", () => {
+    let draft = done(apply(openNew(SOURCE, TARGET), { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
+    draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
+    expect(apply(draft, { type: "remove-column", source: "ID" })).toMatchObject({
+      kind: "needs-confirm",
+      loses: { headline: "确认删除这一列？" },
+    });
   });
 
   it("asks before a refresh only when there is hand work to overwrite", () => {
@@ -249,15 +279,23 @@ describe("the advance gate", () => {
     draft = done(apply(draft, { type: "rename-target", source: "C_NAME", target: "ID" }));
     const blockers = canAdvance(draft, 1).filter((blocker) => blocker.message.includes("重复"));
     expect(blockers.map((blocker) => blocker.column).sort()).toEqual(["C_NAME", "ID"]);
+    const step = view(draft, 1).step;
+    if (step.step !== 1) throw new Error("expected step 1");
+    expect(step.rows.filter((row) => row.problem?.includes("目标字段 ID 重复")).map((row) => row.source).sort()).toEqual([
+      "C_NAME",
+      "ID",
+    ]);
   });
 
   it("blocks on a missing primary key and says so", () => {
     let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t" }));
     draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
     draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
-    expect(canAdvance(draft, 1).map((blocker) => blocker.message)).toContain(
-      "主键必选：至少要勾一列作为 upsert 的去重键",
-    );
+    expect(canAdvance(draft, 1)).toContainEqual({
+      step: 1,
+      column: null,
+      message: "主键必选：至少要勾一列作为 upsert 的去重键",
+    });
   });
 
   it("catches the target field shapes the server would reject", () => {
@@ -303,6 +341,30 @@ describe("the advance gate", () => {
     expect(canAdvance(draft, 3).map((blocker) => blocker.message)).toEqual(["请先运行目标表检查"]);
   });
 
+  it("blocks step 3 when the fresh server check reports a finding", () => {
+    let draft = withTargetColumns(workedDraft());
+    draft = done(apply(draft, {
+      type: "check-arrived",
+      check: {
+        ok: false,
+        findings: [{
+          column: "C_NAME",
+          kind: "insufficient_length_or_precision",
+          expected: "VARCHAR(90)",
+          actual: "varchar(30)",
+          message: "目标 VARCHAR 长度不足",
+        }],
+        suggested_ddl: "CREATE TABLE `t_customer` (...) ",
+      },
+    }));
+
+    expect(canAdvance(draft, 3)).toEqual([{
+      step: 3,
+      column: null,
+      message: "目标表检查未通过（1 项）",
+    }]);
+  });
+
   it("excuses the check when editing against an offline agent", () => {
     // 编辑以「保存」收尾，不跑；拦在这里等于「先去把 Agent 弄活，才准改一行 WHERE」。
     const editing = { ...openExisting(savedTask(), SOURCE, TARGET, false), step: 3 as const };
@@ -340,6 +402,21 @@ describe("staleness follows the inputs, not the clock", () => {
 });
 
 describe("derived values", () => {
+  it.each(["table", "sql"] as const)("selects every returned column in %s mode", (fetchMode) => {
+    let draft = openNew(SOURCE, TARGET);
+    if (fetchMode === "sql") {
+      draft = done(apply(draft, { type: "fetch-mode", fetchMode }));
+    }
+    draft = done(apply(draft, {
+      type: "source-columns-arrived",
+      columns: [sourceColumn("ID"), sourceColumn("C_NAME")],
+    }));
+    expect(draft.spec.columns).toEqual([
+      { source: "ID", target: "ID" },
+      { source: "C_NAME", target: "C_NAME" },
+    ]);
+  });
+
   it("generates the task name and stops the moment one is typed", () => {
     let draft = withTargetColumns(workedDraft());
     expect(taskName(draft)).toBe("APP.T_CUSTOMER → t_customer");
@@ -382,6 +459,38 @@ describe("derived values", () => {
     if (step.step !== 1) throw new Error("expected step 1");
     expect(step.rows.find((row) => row.source === "ID")?.control).toBe("auto");
     expect(step.rows.find((row) => row.source === "C_NAME")?.control).toBe("manual");
+  });
+
+  it("settles target names without caring about case", () => {
+    let draft = done(apply(openNew(SOURCE, TARGET), {
+      type: "source-columns-arrived",
+      columns: [sourceColumn("ID"), sourceColumn("C_NAME")],
+    }));
+    draft = done(apply(draft, {
+      type: "target-columns-arrived",
+      columns: [targetColumn("id"), targetColumn("c_name", 2)],
+      keys: [],
+    }));
+    const step = view(draft, 1).step;
+    if (step.step !== 1) throw new Error("expected step 1");
+    expect(step.rows.find((row) => row.source === "ID")).toMatchObject({
+      target: "ID",
+      control: "auto",
+    });
+  });
+
+  it("leaves the primary key unlocked when not every target key column is mapped", () => {
+    let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t_customer" }));
+    draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
+    draft = done(apply(draft, {
+      type: "target-columns-arrived",
+      columns: [targetColumn("ID")],
+      keys: [{ name: "PRIMARY", columns: ["ID", "TENANT_ID"] }],
+    }));
+    const step = view(draft, 1).step;
+    if (step.step !== 1) throw new Error("expected step 1");
+    expect(draft.spec.primary_key).toEqual([]);
+    expect(step.rows[0].primaryKeyLock).toBeNull();
   });
 
   it("drops a primary-key entry whose target field stops existing", () => {
@@ -444,12 +553,22 @@ describe("what goes out", () => {
 });
 
 describe("opening a saved task", () => {
-  it("lands on the earliest step that needs attention", () => {
+  it("opens ordinary editing at the mapping step", () => {
+    expect(openExisting(savedTask(), SOURCE, TARGET).step).toBe(1);
+  });
+
+  it("honours a remediation step when its prerequisites pass", () => {
+    expect(openExisting(savedTask(), SOURCE, TARGET, true, 3).step).toBe(3);
+  });
+
+  it("falls back to the earliest failed prerequisite", () => {
     const broken = savedTask();
     broken.spec.primary_key = [];
-    expect(openExisting(broken, SOURCE, TARGET).step).toBe(1);
-    // 一份四步都通得过的任务落在第 1 步，因为上下文在那里。
-    expect(openExisting(savedTask(), SOURCE, TARGET, false).step).toBe(1);
+    expect(openExisting(broken, SOURCE, TARGET, true, 3).step).toBe(1);
+  });
+
+  it("stops a confirmation-page request at the missing target check", () => {
+    expect(openExisting(savedTask(), SOURCE, TARGET, true, 4).step).toBe(3);
   });
 });
 
@@ -471,7 +590,7 @@ function passingCheck(draft: Draft): Draft {
 }
 
 function preview(): PreviewResult {
-  return { columns: ["ID"], rows: [[1]], truncated: false, elapsed_ms: 12 };
+  return { columns: ["ID"], rows: [["1"]], truncated: false, elapsed_ms: 12 };
 }
 
 function savedTask(): Task {

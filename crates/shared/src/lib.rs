@@ -14,9 +14,11 @@ mod verification;
 
 pub use open_outcome::OpenOutcome;
 pub use protocol::{
-    AbortResponse, AgentInfo, BatchPayload, BatchResponse, ColumnSupport, CommitRequest,
-    CommitResponse, ErrorBody, ErrorEnvelope, OpenRunRequest, OpenRunResponse, PrecheckIssue,
-    RangeCheckColumn, RangeCheckResult, RunResponse, SourceColumn, TargetConnection, Terminal,
+    AbortResponse, AgentInfo, BatchPayload, BatchResponse, CleanupRunRequest, CleanupRunResponse,
+    ColumnSupport, CommitRequest, CommitResponse, ErrorBody, ErrorEnvelope, OpenRunRequest,
+    OpenRunResponse, PrecheckIssue, RangeCheckColumn, RangeCheckResult, RunResponse, SourceColumn,
+    TargetCheckKind, TargetCheckRequest, TargetCheckResult, TargetConnection, Terminal,
+    TargetCheckFinding,
 };
 pub use run_stage::RunStage;
 pub use target_shape::{

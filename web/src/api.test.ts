@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   ApiError,
+  copyTaskCurl,
   createTask,
   deleteTask,
   emptySpec,
@@ -12,8 +13,12 @@ import {
   fetchColumns,
   fetchTargetColumns,
   fetchTargetTables,
+  checkTargetTable,
   generateBuilderSql,
+  previewBuilderRows,
+  previewErrorMessage,
   cancelRun,
+  cleanupRun,
   fetchRun,
   listRunHistory,
   listTasks,
@@ -217,16 +222,19 @@ describe("run history API", () => {
       live: true,
     };
     const canceled = { message: "已发送 SIGTERM" };
+    const cleaned = { deleted_rows: 3 };
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(accepted), { status: 202 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(live), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify(canceled), { status: 202 }));
+      .mockResolvedValueOnce(new Response(JSON.stringify(canceled), { status: 202 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(cleaned), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(startRun("task-01")).resolves.toEqual(accepted);
     await expect(fetchRun(accepted.run_record_id)).resolves.toEqual(live);
     await expect(cancelRun(accepted.run_record_id)).resolves.toEqual(canceled);
+    await expect(cleanupRun(accepted.run_record_id)).resolves.toEqual(cleaned);
 
     expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/runs", expect.objectContaining({
       method: "POST",
@@ -239,8 +247,33 @@ describe("run history API", () => {
     expect(fetchMock).toHaveBeenNthCalledWith(3, "/api/runs/record%2F01/cancel", expect.objectContaining({
       method: "POST",
     }));
+    expect(fetchMock).toHaveBeenNthCalledWith(4, "/api/runs/record%2F01/cleanup", expect.objectContaining({
+      method: "POST",
+    }));
   });
 
+});
+
+describe("task cURL API", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("copies the complete server response without assembling it in the browser", async () => {
+    const command = "curl --request POST 'https://qbs.test/api/runs' --data '{\"task_id\":\"task/01\"}'";
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ command }), { status: 200 }),
+    );
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(copyTaskCurl("task/01", writeText)).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/tasks/task%2F01/curl", {
+      headers: { Accept: "application/json" },
+    });
+    expect(writeText).toHaveBeenCalledWith(command);
+  });
 });
 
 describe("SQL builder API", () => {
@@ -389,6 +422,38 @@ describe("SQL builder API", () => {
     }));
   });
 
+  it("checks the target table with both datasource identities and the current spec", async () => {
+    const result = {
+      ok: false,
+      findings: [{
+        column: "C_NAME",
+        kind: "insufficient_length_or_precision",
+        expected: "VARCHAR(90)",
+        actual: "varchar(30)",
+        message: "目标 VARCHAR 长度不足",
+      }],
+      suggested_ddl: "CREATE TABLE `T_POSITION` (...) ",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(result), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const input = spec();
+
+    await expect(
+      checkTargetTable("ds-oracle", "ds-mysql", "T_POSITION", input),
+    ).resolves.toEqual(result);
+    expect(fetchMock).toHaveBeenCalledWith("/api/target/check", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({
+        source_datasource_id: "ds-oracle",
+        target_datasource_id: "ds-mysql",
+        target_table: "T_POSITION",
+        spec: input,
+      }),
+    }));
+  });
+
   it("exchanges a spec for the read-only SQL and its run parameters", async () => {
     const output = {
       source_sql:
@@ -406,6 +471,36 @@ describe("SQL builder API", () => {
       method: "POST",
       body: JSON.stringify(input),
     }));
+  });
+
+  it("requests an explicit ten-row preview with source binding and spec", async () => {
+    const output = {
+      columns: ["ID", "D_BIZ"],
+      rows: [["1", "2026-08-14"], ["2", null]],
+      truncated: true,
+      elapsed_ms: 18,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(output), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const input = spec({ source_sql: "SELECT ID, D_BIZ FROM APP.HOLDINGS" });
+
+    await expect(previewBuilderRows("ds-oracle", input)).resolves.toEqual(output);
+    expect(fetchMock).toHaveBeenCalledWith("/api/builder/preview", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ source_datasource_id: "ds-oracle", spec: input, limit: 10 }),
+    }));
+  });
+
+  it("labels preview validation, source, and timeout failures distinctly", () => {
+    expect(previewErrorMessage(new ApiError("owner 不能为空", 400, {})))
+      .toBe("预览请求无效：owner 不能为空");
+    expect(previewErrorMessage(new ApiError("源端：ORA-00942", 502, {
+      failure_kind: "SOURCE_QUERY",
+    }))).toBe("源数据库预览失败（SOURCE_QUERY）：源端：ORA-00942");
+    expect(previewErrorMessage(new ApiError("源端数据预览超时", 504, {})))
+      .toBe("数据预览超时：源端数据预览超时");
   });
 
   it("fetches columns from the spec, with column precision kept off the task definition", async () => {

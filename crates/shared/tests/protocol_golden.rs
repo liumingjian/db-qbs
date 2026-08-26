@@ -8,10 +8,10 @@
 //! 附带作用：以后谁再把定义抄回两端，这组测试会立刻变成两份、自己暴露出来。
 
 use db_qbs_shared::{
-    AbortResponse, AgentInfo, BatchPayload, BatchResponse, ColumnSupport, CommitRequest,
-    CommitResponse, ErrorBody, ErrorEnvelope, OpenOutcome, OpenRunRequest, OpenRunResponse,
-    PrecheckIssue, RangeCheckColumn, RangeCheckResult, RunResponse, SourceColumn, TargetConnection,
-    Terminal,
+    AbortResponse, AgentInfo, BatchPayload, BatchResponse, CleanupRunRequest, CleanupRunResponse,
+    ColumnSupport, CommitRequest, CommitResponse, ErrorBody, ErrorEnvelope, OpenOutcome,
+    OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn, RangeCheckResult, RunResponse,
+    SourceColumn, TargetConnection, Terminal,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -154,6 +154,7 @@ fn precheck_issue_shape_with_suggestion() {
             target: "DECIMAL(8,2)".to_owned(),
             rule: "precision_shrink".to_owned(),
             suggestion: Some("把目标列改成 DECIMAL(10,2)".to_owned()),
+            check: None,
         },
         json!({
             "column": "AMT",
@@ -174,6 +175,7 @@ fn precheck_issue_shape_omits_absent_suggestion() {
             target: "DECIMAL(65,30)".to_owned(),
             rule: "bare_number".to_owned(),
             suggestion: None,
+            check: None,
         },
         json!({
             "column": "AMT",
@@ -378,6 +380,37 @@ fn commit_request_and_response_shapes() {
             "swapped_rows": 2000,
             "count_ms": 42
         }),
+    );
+}
+
+#[test]
+fn cleanup_request_and_response_shapes() {
+    round_trip(
+        CleanupRunRequest {
+            run_id: "20260814091530_a3f19c".to_owned(),
+            target_table: "T_POSITION".to_owned(),
+            target: target(),
+            primary_key: vec!["ID".to_owned(), "TENANT".to_owned()],
+        },
+        json!({
+            "run_id": "20260814091530_a3f19c",
+            "target_table": "T_POSITION",
+            "target": {
+                "host": "10.0.0.9",
+                "port": 3306,
+                "username": "sink",
+                "password": "change-me",
+                "database": "qbs"
+            },
+            "primary_key": ["ID", "TENANT"]
+        }),
+    );
+    round_trip(
+        CleanupRunResponse {
+            run_id: "20260814091530_a3f19c".to_owned(),
+            deleted_rows: 7,
+        },
+        json!({ "run_id": "20260814091530_a3f19c", "deleted_rows": 7 }),
     );
 }
 

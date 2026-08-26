@@ -78,6 +78,7 @@ pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
         agents: &agent_store,
         history: &history_store,
         runs: &runs,
+        describe_source: crate::OracleRowSource::describe,
     };
 
     while !terminated.load(Ordering::Relaxed) {

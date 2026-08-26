@@ -34,6 +34,27 @@ export interface TaskSpec {
   where_clause?: string;
 }
 
+export type TargetCheckKind =
+  | "missing_column"
+  | "nullability_mismatch"
+  | "insufficient_length_or_precision"
+  | "primary_key_mismatch"
+  | "type_not_whitelisted";
+
+export interface CheckFinding {
+  column: string | null;
+  kind: TargetCheckKind;
+  expected: string;
+  actual: string;
+  message: string;
+}
+
+export interface TargetCheckResult {
+  ok: boolean;
+  findings: CheckFinding[];
+  suggested_ddl: string | null;
+}
+
 /**
  * 数据源（ADR-0037）。**响应里永远没有 `password`，连密文都没有**（§5）——
  * 界面上只看得到 `has_password` 的「已设置 / 未设置」。
@@ -176,6 +197,13 @@ export interface BuilderSql {
   source_sql: string;
 }
 
+export interface PreviewResult {
+  columns: string[];
+  rows: (string | null)[][];
+  truncated: boolean;
+  elapsed_ms: number;
+}
+
 export interface MappingIssue {
   column: string | null;
   source: string | null;
@@ -223,6 +251,34 @@ export interface ColumnFetchResult {
   target_ddl: string;
 }
 
+export interface RunEvidence {
+  source?: {
+    datasource_id: string;
+    connect_string: string;
+    username: string;
+    client_lib_dir: string;
+  } | null;
+  target?: {
+    datasource_id: string;
+    host: string;
+    port: number;
+    database: string;
+    username: string;
+  } | null;
+  agent?: {
+    agent_id: string;
+    name: string;
+    base_url: string;
+    instance_id: string;
+  } | null;
+  parameters?: {
+    target_table: string;
+    columns: ColumnMapping[];
+    primary_key: string[];
+    source_sql: string;
+  } | null;
+}
+
 export interface RunHistory {
   run_record_id: string;
   run_id: string | null;
@@ -232,6 +288,7 @@ export interface RunHistory {
    * 过滤条件就在这条语句里，没有另一半取值需要对照着读。
    */
   source_sql: string;
+  evidence?: RunEvidence;
   staging_table: string | null;
   started_at: string;
   finished_at: string | null;
@@ -279,12 +336,15 @@ export interface RunHistory {
   ms: number;
   last_ts: string | null;
   mapping_issues: MappingIssue[];
+  cleanup_status?: "pending" | "available" | "cleaned" | null;
+  cleaned_rows?: number | null;
 }
 
 export interface LiveRunDetail {
   run_record_id: string;
   run_id: string | null;
   source_sql: string;
+  evidence?: RunEvidence;
   staging_table: string | null;
   stage: string | null;
   total_rows: number | null;
@@ -497,6 +557,19 @@ export async function listTasks(): Promise<Task[]> {
   return readJson<Task[]>(response, "加载任务失败");
 }
 
+/** 服务端给出完整命令；前端不重建请求形状，只把返回值原样写进剪贴板。 */
+export async function copyTaskCurl(
+  taskId: string,
+  writeText: (command: string) => Promise<void> = (command) =>
+    navigator.clipboard.writeText(command),
+): Promise<void> {
+  const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/curl`, {
+    headers: { Accept: "application/json" },
+  });
+  const result = await readJson<{ command: string }>(response, "读取 cURL 命令失败");
+  await writeText(result.command);
+}
+
 export async function listRunHistory(
   filters: RunHistoryFilters = {},
 ): Promise<RunHistory[]> {
@@ -541,6 +614,16 @@ export async function cancelRun(
     `/api/runs/${encodeURIComponent(runRecordId)}/cancel`,
     {},
     "取消运行失败",
+  );
+}
+
+export async function cleanupRun(
+  runRecordId: string,
+): Promise<{ deleted_rows: number }> {
+  return postJson<{ deleted_rows: number }>(
+    `/api/runs/${encodeURIComponent(runRecordId)}/cleanup`,
+    {},
+    "清理运行写入的数据失败",
   );
 }
 
@@ -642,8 +725,50 @@ export async function fetchTargetColumns(
   );
 }
 
+export async function checkTargetTable(
+  sourceDatasourceId: string,
+  targetDatasourceId: string,
+  targetTable: string,
+  spec: TaskSpec,
+): Promise<TargetCheckResult> {
+  return postJson<TargetCheckResult>(
+    "/api/target/check",
+    {
+      source_datasource_id: sourceDatasourceId,
+      target_datasource_id: targetDatasourceId,
+      target_table: targetTable,
+      spec,
+    },
+    "检查目标表失败",
+  );
+}
+
 export async function generateBuilderSql(spec: TaskSpec): Promise<BuilderSql> {
   return postJson<BuilderSql>("/api/builder/sql", spec, "生成 SQL 失败");
+}
+
+export async function previewBuilderRows(
+  sourceDatasourceId: string,
+  spec: TaskSpec,
+  limit = 10,
+): Promise<PreviewResult> {
+  return postJson<PreviewResult>(
+    "/api/builder/preview",
+    { source_datasource_id: sourceDatasourceId, spec, limit },
+    "预览源端数据失败",
+  );
+}
+
+export function previewErrorMessage(error: unknown): string {
+  if (!(error instanceof ApiError)) return "数据预览失败，请稍后重试";
+  if (error.status === 400) return `预览请求无效：${error.message}`;
+  if (error.status === 504) return `数据预览超时：${error.message}`;
+  if (error.status === 502) {
+    const body = error.body as { failure_kind?: unknown } | null;
+    const kind = typeof body?.failure_kind === "string" ? `（${body.failure_kind}）` : "";
+    return `源数据库预览失败${kind}：${error.message}`;
+  }
+  return error.message;
 }
 
 /**

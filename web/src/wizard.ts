@@ -21,8 +21,11 @@ import { emptySpec } from "./api";
 import type {
   BuilderColumn,
   ColumnMapping,
+  PreviewResult,
   Task,
   TargetColumn,
+  CheckFinding,
+  TargetCheckResult,
   TargetKey,
   TaskSpec,
 } from "./api";
@@ -36,33 +39,6 @@ export type FetchMode = "table" | "sql";
 export interface DraftBinding {
   datasource_id: string;
   name: string;
-}
-
-/**
- * The ten-row data preview and the target-table check.
- *
- * Declared here rather than in `api.ts` because neither endpoint exists yet;
- * they move to `api.ts` with the fetch functions when they land.
- */
-export interface PreviewResult {
-  columns: string[];
-  rows: unknown[][];
-  truncated: boolean;
-  elapsed_ms: number;
-}
-
-export interface CheckFinding {
-  column: string | null;
-  kind: string;
-  expected: string;
-  actual: string;
-  message: string;
-}
-
-export interface TargetCheckResult {
-  ok: boolean;
-  findings: CheckFinding[];
-  suggested_ddl: string | null;
 }
 
 /** A fetched result, pinned to the inputs it was fetched for. */
@@ -234,16 +210,20 @@ export function openNew(
 }
 
 /**
- * Editing lands on the step that needs attention, not always on the first one.
+ * Open a saved task at the caller's point of entry.
  *
- * "The relevant step" is the earliest one whose gate does not pass; a task that
- * is entirely sound opens on step 1, which is where its context is.
+ * A run failure can name the step that needs remediation, while ordinary editing
+ * starts at the mapping step. The requested step is still bounded by the gates
+ * before it, so an invalid saved mapping cannot be hidden by a request for a
+ * later step. Metadata is deliberately absent here and is fetched by the screen
+ * only when the chosen step needs it.
  */
 export function openExisting(
   task: Task,
   source: DraftBinding,
   target: DraftBinding,
   targetAgentOnline = true,
+  requestedStep: Step = 1,
 ): Draft {
   const sql = task.spec.source_sql?.trim() ?? "";
   const draft: Draft = {
@@ -263,9 +243,11 @@ export function openExisting(
     preview: null,
     check: null,
   };
-  const steps: Step[] = [1, 2, 3, 4];
-  const relevant = steps.find((step) => canAdvance(draft, step).length > 0);
-  return { ...draft, step: relevant ?? 1 };
+  const prerequisiteSteps: Step[] = [1, 2, 3, 4].filter(
+    (step): step is Step => step < requestedStep,
+  );
+  const blocked = prerequisiteSteps.find((step) => canAdvance(draft, step).length > 0);
+  return { ...draft, step: blocked ?? requestedStep };
 }
 
 // ---------------------------------------------------------------------------
@@ -275,12 +257,22 @@ export function openExisting(
 /**
  * Apply a change, or ask first.
  *
- * The confirmation is not a separate rule: the reducer reports what it cleared,
- * and anything hand-made in that report earns a question. That is why there is
- * no path by which "changing the source datasource" can start clearing silently
- * again — silence would require the reducer to stop reporting.
+ * The reducer reports what a cascading change clears, and anything hand-made in
+ * that report earns a question. Explicit irreversible gestures, such as deleting
+ * one source column, name their loss here and use the same confirmation result.
  */
 export function apply(draft: Draft, change: Change): Applied {
+  if (
+    change.type === "remove-column" &&
+    (draft.sourceColumns.some((column) => column.name === change.source) ||
+      draft.spec.columns.some((mapping) => mapping.source === change.source))
+  ) {
+    return {
+      kind: "needs-confirm",
+      intent: change,
+      loses: { headline: "确认删除这一列？", lines: [`源列 ${change.source} 将不再参与同步`] },
+    };
+  }
   const { draft: next, cleared } = reduce(draft, change);
   const loses = lossOf(draft, cleared);
   return loses === null
@@ -458,15 +450,20 @@ function reduce(draft: Draft, change: Change): Reduced {
       const columns = draft.spec.columns.filter(
         (mapping) => mapping.source !== change.source,
       );
-      if (columns.length === draft.spec.columns.length) {
-        return { draft, cleared: [] };
-      }
       return {
         draft: withColumns(
-          { ...draft, hand: { ...draft.hand, columns: true } },
+          {
+            ...draft,
+            hand: {
+              ...draft.hand,
+              columns: true,
+              mappings: draft.hand.mappings.filter((source) => source !== change.source),
+            },
+            sourceColumns: draft.sourceColumns.filter((column) => column.name !== change.source),
+          },
           columns,
         ),
-        cleared: ["columns"],
+        cleared: [],
       };
     }
 
@@ -1170,6 +1167,7 @@ function stepView(draft: Draft, step: Step, blockers: Blocker[]): StepView {
           targetTable: draft.spec.target_table,
           findings: checkIsFresh(draft) ? draft.check!.value.findings : [],
           preview: previewIsFresh(draft) ? draft.preview!.value : null,
+          // The owner's #168 follow-up explicitly keeps save-only as the offline/fallback path.
           actions:
             draft.mode === "edit"
               ? ["save"]

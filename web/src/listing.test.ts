@@ -8,6 +8,7 @@ import {
   EMPTY_TASK_FILTERS,
   latestRunByTask,
   latestRunStatus,
+  pageContainingTask,
   paginate,
   runStatus,
   taskMatchesFilters,
@@ -301,6 +302,20 @@ describe("paginate", () => {
   it("页大小非法时退回 1，不除以 0", () => {
     expect(paginate(items, 1, 0).pageSize).toBe(1);
     expect(paginate(items, 1, 0).pageCount).toBe(45);
+  });
+});
+
+describe("pageContainingTask", () => {
+  const tasks = Array.from({ length: 45 }, (_, index) =>
+    task({ task_id: `task-${index + 1}` }),
+  );
+
+  it("locates a newly appended task on its client-side page", () => {
+    expect(pageContainingTask(tasks, "task-45", 20)).toBe(3);
+  });
+
+  it("falls back to the first page when a refresh has not returned the task", () => {
+    expect(pageContainingTask(tasks, "missing", 20)).toBe(1);
   });
 });
 

@@ -18,25 +18,30 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel, RunStage};
+use db_qbs_shared::{write_log_line_with_fields, CleanupRunRequest, LogEvent, LogLevel, RunStage};
 use rand::RngCore;
 use signal_hook::consts::SIGTERM;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use url::Url;
 
 use crate::{
     embedded_web_asset, fetch_agent_info, generate_target_ddl, validate_builder_dblink,
-    validate_source_sql, Agent, AgentEndpoint, AgentInput, AgentStore, ColumnPrecision,
-    DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess, OracleRowSource,
-    RunHistory, SourceConfig, TargetConnection, Task, TaskConfig, TaskInput, TaskSpec, TaskStore,
-    UnknownReason,
+    validate_source_sql, Agent, AgentEndpoint, AgentEvidence, AgentInput, AgentStore,
+    ColumnPrecision, DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess,
+    OracleRowSource, RowSource, RunEvidence, RunHistory, RunParametersEvidence, SourceColumn,
+    SourceConfig, SourceEvidence, SourceReadError, TargetCheckRequest, TargetCheckResult,
+    TargetConnection, TargetEvidence, Task, TaskConfig, TaskInput, TaskSpec, TaskStore, UnknownReason,
 };
 
 const MAX_REQUEST_BODY_BYTES: u64 = 1024 * 1024;
+const DEFAULT_PREVIEW_LIMIT: usize = 10;
+const MAX_PREVIEW_LIMIT: usize = 100;
+const PREVIEW_CALL_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const RUN_TASKS_DIRECTORY: &str = "run-tasks";
 
 pub type RunRegistry = Arc<Mutex<RunState>>;
@@ -98,6 +103,22 @@ struct BuilderSqlInput {
     source_sql: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuilderPreviewInput {
+    source_datasource_id: String,
+    spec: TaskSpec,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct PreviewResult {
+    columns: Vec<String>,
+    rows: Vec<Vec<Option<String>>>,
+    truncated: bool,
+    elapsed_ms: u64,
+}
+
 /// 草稿测连的请求体（ADR-0039 §3）：吃的是**表单里当前填的那组值**，不是库里存的那条。
 ///
 /// `datasource_id` 只有编辑态才有，用途单一——口令留空时去库里取那一份
@@ -122,6 +143,17 @@ struct TargetMetadataInput {
     /// 只有取列面要它；取表清单不带。
     #[serde(default)]
     target_table: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetCheckInput {
+    // The task spec has names but no Oracle type/length metadata; target comparison must describe
+    // the selected source columns through the bound source datasource first.
+    source_datasource_id: String,
+    target_datasource_id: String,
+    target_table: String,
+    spec: TaskSpec,
 }
 
 #[derive(Deserialize)]
@@ -156,6 +188,7 @@ pub struct Api<'a> {
     pub agents: &'a AgentRegistry,
     pub history: &'a HistoryStore,
     pub runs: &'a RunRegistry,
+    pub describe_source: fn(&OracleAccess, &TaskSpec) -> Result<Vec<SourceColumn>, SourceReadError>,
 }
 
 /// HTTP 方法。认不出来的方法落进 `Other`，而路由表里只有前四种，所以它必然 404——
@@ -178,6 +211,7 @@ pub struct Request {
     method: Method,
     path: String,
     query: Option<String>,
+    headers: Vec<(String, String)>,
     body: Result<Vec<u8>, String>,
 }
 
@@ -192,8 +226,15 @@ impl Request {
             method,
             path,
             query,
+            headers: Vec::new(),
             body: Ok(body),
         }
+    }
+
+    /// 测试与桥接层共用：header 名大小写不敏感，与 HTTP 语义一致。
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
     }
 
     pub fn method(&self) -> Method {
@@ -206,6 +247,13 @@ impl Request {
 
     pub fn query(&self) -> Option<&str> {
         self.query.as_deref()
+    }
+
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
     }
 
     /// 请求体的字节。读失败时是 `Err`，超长时是一段比上限多一个字节的 `Ok`——
@@ -304,6 +352,9 @@ pub fn routes() -> &'static [Route] {
             Route::new(Post, "/api/builder/sql", |_state, request, _id| {
                 handle_builder_sql(request)
             }),
+            Route::new(Post, "/api/builder/preview", |state, request, _id| {
+                handle_builder_preview(request, state)
+            }),
             Route::new(Get, "/api/agents", |state, _request, _id| {
                 handle_list_agents(state)
             }),
@@ -348,11 +399,17 @@ pub fn routes() -> &'static [Route] {
             Route::new(Post, "/api/target/columns", |state, request, _id| {
                 handle_target_columns(request, state)
             }),
+            Route::new(Post, "/api/target/check", |state, request, _id| {
+                handle_target_check(request, state)
+            }),
             Route::new(Post, "/api/runs", |state, request, _id| {
                 handle_start_run(request, state)
             }),
             Route::new(Post, "/api/runs/{}/cancel", |state, _request, id| {
                 handle_cancel_run(state.runs, id)
+            }),
+            Route::new(Post, "/api/runs/{}/cleanup", |state, _request, id| {
+                handle_cleanup_run(state, id)
             }),
             Route::new(Get, "/api/runs", |state, request, _id| {
                 handle_list_history(state.runs, state.history, request.query())
@@ -368,6 +425,9 @@ pub fn routes() -> &'static [Route] {
             }),
             Route::new(Get, "/api/tasks/{}", |state, _request, id| {
                 handle_get_task(state.tasks, id)
+            }),
+            Route::new(Get, "/api/tasks/{}/curl", |state, request, id| {
+                handle_task_curl(request, state, id)
             }),
             Route::new(Put, "/api/tasks/{}", |state, request, id| {
                 handle_update_task(request, state.tasks, id)
@@ -527,6 +587,7 @@ fn handle_get_run(
                 "run_record_id": run_record_id,
                 "run_id": record.run_id,
                 "source_sql": record.source_sql,
+                "evidence": record.evidence,
                 "staging_table": record.staging_table,
                 "stage": record.stage,
                 "total_rows": record.total_rows,
@@ -541,7 +602,10 @@ fn handle_get_run(
         );
     }
     match history_store.get(run_record_id) {
-        Ok(Some(history)) => history_response(&history),
+        Ok(Some(history)) => history_response(
+            &history,
+            history_store.cleanup(run_record_id).ok().flatten(),
+        ),
         Ok(None) => not_found(),
         Err(error) => internal_error(error),
     }
@@ -560,7 +624,18 @@ fn handle_list_history(
     }
     match history_store.list(task_id.as_deref()) {
         Ok(history) => match merge_live_history(runs, history, task_id.as_deref()) {
-            Ok(merged) => json_response(200, &merged),
+            Ok(merged) => {
+                let values = merged
+                    .iter()
+                    .map(|history| {
+                        history_value(
+                            history,
+                            history_store.cleanup(&history.run_record_id).ok().flatten(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                json_response(200, &values)
+            }
             Err(error) => internal_error(error),
         },
         Err(error) => internal_error(error),
@@ -598,14 +673,99 @@ fn merge_live_history(
     Ok(history)
 }
 
-fn history_response(history: &RunHistory) -> HttpResponse {
+fn history_response(history: &RunHistory, cleanup: Option<crate::RunCleanup>) -> HttpResponse {
+    json_response(200, &history_value(history, cleanup))
+}
+
+fn history_value(history: &RunHistory, cleanup: Option<crate::RunCleanup>) -> Value {
     let mut value =
         serde_json::to_value(history).expect("serializing a run history response must succeed");
-    value
+    let object = value
         .as_object_mut()
-        .expect("run history serializes as an object")
-        .insert("live".to_owned(), Value::Bool(false));
-    json_response(200, &value)
+        .expect("run history serializes as an object");
+    object.insert("live".to_owned(), Value::Bool(false));
+    object.insert(
+        "cleanup_status".to_owned(),
+        cleanup.as_ref().map_or(Value::Null, |item| {
+            let status = if item.status == "pending"
+                && history.outcome.as_deref() == Some("SUCCEEDED")
+            {
+                "available"
+            } else {
+                &item.status
+            };
+            Value::String(status.to_owned())
+        }),
+    );
+    object.insert(
+        "cleaned_rows".to_owned(),
+        cleanup
+            .and_then(|item| item.deleted_rows)
+            .map_or(Value::Null, |rows| json!(rows)),
+    );
+    value
+}
+
+fn handle_cleanup_run(state: &Api<'_>, run_record_id: &str) -> HttpResponse {
+    let history = match state.history.get(run_record_id) {
+        Ok(Some(history)) => history,
+        Ok(None) => return not_found(),
+        Err(error) => return internal_error(error),
+    };
+    let cleanup = match state.history.cleanup(run_record_id) {
+        Ok(Some(cleanup)) => cleanup,
+        Ok(None) => {
+            return json_response(
+                409,
+                &json!({ "error": { "message": "这次运行没有可用的写入账本" } }),
+            )
+        }
+        Err(error) => return internal_error(error),
+    };
+    let cleanup_available = cleanup.status == "available"
+        || (cleanup.status == "pending" && history.outcome.as_deref() == Some("SUCCEEDED"));
+    if !cleanup_available {
+        return json_response(
+            409,
+            &json!({ "error": { "message": "这次运行已清理或尚未成功完成" } }),
+        );
+    }
+    let Some(run_id) = history.run_id else {
+        return json_response(
+            409,
+            &json!({ "error": { "message": "这次运行没有目标端运行号" } }),
+        );
+    };
+    let target = match state
+        .datasources
+        .target_connection(&cleanup.target_datasource_id)
+    {
+        Ok(target) => target,
+        Err(error) => return bad_request(error),
+    };
+    let agent = match resolve_target_agent(state, &cleanup.target_datasource_id) {
+        Ok(agent) => agent,
+        Err(error) => return json_response(502, &json!({ "kind": "agent", "message": error })),
+    };
+    let client = match crate::HttpSinkClient::new(&agent.base_url) {
+        Ok(client) => client,
+        Err(error) => return internal_error(error),
+    };
+    match client.cleanup(&CleanupRunRequest {
+        run_id,
+        target_table: cleanup.target_table,
+        target,
+        primary_key: cleanup.primary_key,
+    }) {
+        Ok(response) => match state
+            .history
+            .mark_cleaned(run_record_id, response.deleted_rows)
+        {
+            Ok(()) => json_response(200, &json!({ "deleted_rows": response.deleted_rows })),
+            Err(error) => internal_error(error),
+        },
+        Err(error) => json_response(502, &json!({ "error": { "message": error.message } })),
+    }
 }
 
 /// 把注册表里那条记录压成子进程要用的端点（ADR-0044 §4）。
@@ -638,8 +798,46 @@ fn start_run(
         &task.spec.source_sql(),
         Utc::now(),
     );
+    history.evidence = RunEvidence {
+        source: Some(SourceEvidence {
+            datasource_id: task.source_datasource_id.clone(),
+            connect_string: access.connect_string.clone(),
+            username: access.username.clone(),
+            client_lib_dir: access.client_lib_dir.clone(),
+        }),
+        target: Some(TargetEvidence {
+            datasource_id: task.target_datasource_id.clone(),
+            host: target.host.clone(),
+            port: target.port,
+            database: target.database.clone(),
+            username: target.username.clone(),
+        }),
+        agent: Some(AgentEvidence {
+            agent_id: agent.agent_id.clone(),
+            name: agent.name.clone(),
+            base_url: agent.base_url.clone(),
+            instance_id: agent.instance_id.clone(),
+        }),
+        parameters: Some(RunParametersEvidence {
+            target_table: task.spec.target_table.clone(),
+            columns: task.spec.columns.clone(),
+            primary_key: task.spec.primary_key.clone(),
+            source_sql: task.spec.source_sql(),
+        }),
+    };
     register_active_run(runs, &run_record_id, &task.task_id)?;
     if let Err(error) = history_store.insert(&history, Utc::now(), config.history_retention_days) {
+        remove_active_run(runs, &run_record_id);
+        return Err(StartRunError::Internal(error));
+    }
+    if let Err(error) = history_store.register_cleanup(
+        &run_record_id,
+        &task.target_datasource_id,
+        &task.spec.target_table,
+        &task.spec.primary_key,
+    ) {
+        history.mark_parent_failure(error.clone(), Utc::now());
+        let _ = history_store.save(&history, Utc::now(), config.history_retention_days);
         remove_active_run(runs, &run_record_id);
         return Err(StartRunError::Internal(error));
     }
@@ -785,6 +983,9 @@ fn supervise_run(
         {
             continue;
         }
+        if is_terminal && history.outcome.as_deref() == Some("SUCCEEDED") {
+            let _ = history_store.mark_cleanup_available(&run_record_id);
+        }
         if is_terminal {
             remove_live_history(&runs, &run_record_id);
         }
@@ -895,6 +1096,45 @@ fn handle_get_task(store: &TaskStore, task_id: &str) -> HttpResponse {
         Ok(None) => not_found(),
         Err(error) => internal_error(error),
     }
+}
+
+fn handle_task_curl(request: &Request, state: &Api<'_>, task_id: &str) -> HttpResponse {
+    match state.tasks.get(task_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => return not_found(),
+        Err(error) => return internal_error(error),
+    }
+
+    let origin = match request_origin(request, &state.config.listen) {
+        Ok(origin) => origin,
+        Err(error) => return bad_request(error),
+    };
+    let body = serde_json::to_string(&json!({ "task_id": task_id }))
+        .expect("serializing a task identity must succeed");
+    let command = format!(
+        "curl --request POST '{origin}/api/runs' --header 'Content-Type: application/json' --data '{body}'"
+    );
+    json_response(200, &json!({ "command": command }))
+}
+
+fn request_origin(request: &Request, fallback_listen: &str) -> Result<String, String> {
+    let scheme = request.header("X-Forwarded-Proto").unwrap_or("http");
+    if !matches!(scheme, "http" | "https") {
+        return Err("X-Forwarded-Proto 只允许 http 或 https".to_owned());
+    }
+    let authority = request.header("Host").unwrap_or(fallback_listen);
+    let origin = Url::parse(&format!("{scheme}://{authority}"))
+        .map_err(|_| "请求 Host 不是有效的 HTTP 地址".to_owned())?;
+    if origin.host_str().is_none()
+        || origin.path() != "/"
+        || origin.query().is_some()
+        || origin.fragment().is_some()
+        || !origin.username().is_empty()
+        || origin.password().is_some()
+    {
+        return Err("请求 Host 不是有效的 HTTP 地址".to_owned());
+    }
+    Ok(origin.as_str().trim_end_matches('/').to_owned())
 }
 
 fn handle_update_task(request: &Request, store: &TaskStore, task_id: &str) -> HttpResponse {
@@ -1362,6 +1602,80 @@ fn handle_target_columns(request: &Request, state: &Api<'_>) -> HttpResponse {
     }
 }
 
+fn handle_target_check(request: &Request, state: &Api<'_>) -> HttpResponse {
+    let input: TargetCheckInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    if let Err(error) = input.spec.validate() {
+        return bad_request(error);
+    }
+    if input.target_table.trim().is_empty() {
+        return bad_request("target_table 不能为空".to_owned());
+    }
+    if !input
+        .target_table
+        .eq_ignore_ascii_case(&input.spec.target_table)
+    {
+        return bad_request("target_table 必须与 spec.target_table 一致".to_owned());
+    }
+
+    let access = match oracle_access(state, &input.source_datasource_id) {
+        Ok(access) => access,
+        Err(error) => return bad_request(error),
+    };
+    let source_columns = match (state.describe_source)(&access, &input.spec) {
+        Ok(columns) => columns,
+        Err(error) => return oracle_failure(error),
+    };
+    let target = match state
+        .datasources
+        .target_connection(&input.target_datasource_id)
+    {
+        Ok(target) => target,
+        Err(error) => return bad_request(error),
+    };
+    let agent = match resolve_target_agent(state, &input.target_datasource_id) {
+        Ok(agent) => agent,
+        Err(error) => return json_response(502, &json!({ "kind": "agent", "message": error })),
+    };
+    let sink_body = match post_to_sink(
+        &agent.base_url,
+        "/v1/target/check",
+        &serde_json::to_value(TargetCheckRequest {
+            target,
+            target_table: input.target_table.clone(),
+            source_columns: source_columns.clone(),
+            primary_key: input.spec.primary_key.clone(),
+        })
+        .expect("target check request must serialize"),
+    ) {
+        Ok(body) => body,
+        Err(error) => return json_response(502, &json!({ "kind": "sink", "message": error })),
+    };
+    let mut result: TargetCheckResult = match serde_json::from_value(sink_body) {
+        Ok(result) => result,
+        Err(error) => {
+            return json_response(
+                502,
+                &json!({ "kind": "sink", "message": format!("目标端检查回话形状无效：{error}") }),
+            )
+        }
+    };
+    result.suggested_ddl = if result.ok {
+        None
+    } else {
+        generate_target_ddl(
+            &source_columns,
+            &input.target_table,
+            &input.spec.primary_key,
+            None,
+        )
+        .ok()
+    };
+    json_response(200, &result)
+}
+
 /// 往 sink 发一个「不属于任何 run」的元数据请求，把 JSON 回话原样带回来。
 ///
 /// 与 [`test_target_connection`] 同一条通道、同一条部署前提（ADR-0037 §4：通道必须可信），
@@ -1577,6 +1891,82 @@ fn handle_builder_sql(request: &Request) -> HttpResponse {
     json_response(200, &json!({ "source_sql": spec.source_sql() }))
 }
 
+fn handle_builder_preview(request: &Request, state: &Api<'_>) -> HttpResponse {
+    let input: BuilderPreviewInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    if let Err(error) = input.spec.validate() {
+        return bad_request(error);
+    }
+    let limit = match preview_limit(input.limit) {
+        Ok(limit) => limit,
+        Err(error) => return bad_request(error),
+    };
+    let access = match oracle_access(state, &input.source_datasource_id) {
+        Ok(access) => access,
+        Err(error) => return bad_request(error),
+    };
+    preview_response(collect_preview(&input.spec, limit, |source_sql| {
+        OracleRowSource::preview(&access, source_sql, PREVIEW_CALL_TIMEOUT)
+    }))
+}
+
+fn preview_response(result: Result<PreviewResult, SourceReadError>) -> HttpResponse {
+    match result {
+        Ok(preview) => json_response(200, &preview),
+        Err(error) if error.timed_out => {
+            json_response(504, &json!({ "error": { "message": "源端数据预览超时" } }))
+        }
+        Err(error) => oracle_failure(error),
+    }
+}
+
+fn preview_limit(requested: Option<usize>) -> Result<usize, String> {
+    match requested {
+        Some(0) => Err("limit 必须大于 0".to_owned()),
+        Some(limit) => Ok(limit.min(MAX_PREVIEW_LIMIT)),
+        None => Ok(DEFAULT_PREVIEW_LIMIT),
+    }
+}
+
+/// Generate once through `TaskSpec`, then feed that exact SQL to the reader.
+/// The extra read is only a truncation probe and is never returned.
+fn collect_preview<S, F>(
+    spec: &TaskSpec,
+    limit: usize,
+    open: F,
+) -> Result<PreviewResult, SourceReadError>
+where
+    S: RowSource,
+    F: FnOnce(&str) -> Result<S, SourceReadError>,
+{
+    let source_sql = spec.source_sql();
+    let started = Instant::now();
+    let mut source = open(&source_sql)?;
+    let columns = source
+        .columns()
+        .iter()
+        .map(|column| column.name.clone())
+        .collect();
+    let mut rows = Vec::with_capacity(limit);
+    let mut truncated = false;
+    for index in 0..=limit {
+        let Some(row) = source.next_row()? else { break };
+        if index == limit {
+            truncated = true;
+            break;
+        }
+        rows.push(row);
+    }
+    Ok(PreviewResult {
+        columns,
+        rows,
+        truncated,
+        elapsed_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+    })
+}
+
 fn oracle_failure(error: crate::SourceReadError) -> HttpResponse {
     json_response(
         502,
@@ -1680,6 +2070,16 @@ mod bridge {
         pub fn from_tiny_http(request: &mut tiny_http::Request) -> Self {
             let method = Method::from(request.method());
             let url = request.url().to_owned();
+            let headers = request
+                .headers()
+                .iter()
+                .map(|header| {
+                    (
+                        header.field.as_str().as_str().to_owned(),
+                        header.value.as_str().to_owned(),
+                    )
+                })
+                .collect();
             let mut body = Vec::new();
             let read = request
                 .as_reader()
@@ -1688,6 +2088,7 @@ mod bridge {
                 .map(|_| body)
                 .map_err(|error| error.to_string());
             let mut parsed = Request::new(method, &url, Vec::new());
+            parsed.headers = headers;
             parsed.body = read;
             parsed
         }
@@ -1705,5 +2106,114 @@ mod bridge {
             }
             response
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ColumnMapping, FailureKind, SourceColumn};
+
+    struct FakeSource {
+        columns: Vec<SourceColumn>,
+        rows: std::vec::IntoIter<Vec<Option<String>>>,
+    }
+
+    impl RowSource for FakeSource {
+        fn columns(&self) -> &[SourceColumn] {
+            &self.columns
+        }
+
+        fn next_row(&mut self) -> Result<Option<Vec<Option<String>>>, SourceReadError> {
+            Ok(self.rows.next())
+        }
+    }
+
+    fn source(rows: usize) -> FakeSource {
+        FakeSource {
+            columns: vec![SourceColumn {
+                name: "BIZ_ID".to_owned(),
+                data_type: "NUMBER".to_owned(),
+                precision: Some(10),
+                scale: Some(0),
+                length: None,
+                fsp: None,
+                support: None,
+            }],
+            rows: (0..rows)
+                .map(|value| vec![Some(value.to_string())])
+                .collect::<Vec<_>>()
+                .into_iter(),
+        }
+    }
+
+    fn spec(source_sql: Option<&str>, where_clause: &str) -> TaskSpec {
+        TaskSpec {
+            source_sql: source_sql.map(str::to_owned),
+            dblink: None,
+            owner: if source_sql.is_some() { "" } else { "APP" }.to_owned(),
+            table: if source_sql.is_some() { "" } else { "ORDERS" }.to_owned(),
+            target_table: "orders".to_owned(),
+            where_clause: Some(where_clause.to_owned()),
+            primary_key: vec!["BIZ_ID".to_owned()],
+            columns: vec![ColumnMapping {
+                source: "ID".to_owned(),
+                target: "BIZ_ID".to_owned(),
+            }],
+        }
+    }
+
+    #[test]
+    fn preview_defaults_caps_and_uses_one_extra_row_for_truncation() {
+        assert_eq!(preview_limit(None), Ok(10));
+        assert_eq!(preview_limit(Some(500)), Ok(100));
+        assert!(preview_limit(Some(0)).is_err());
+
+        let preview = collect_preview(&spec(None, ""), 2, |_| Ok(source(3))).unwrap();
+        assert_eq!(preview.columns, vec!["BIZ_ID"]);
+        assert_eq!(
+            preview.rows,
+            vec![vec![Some("0".to_owned())], vec![Some("1".to_owned())]]
+        );
+        assert!(preview.truncated);
+
+        let complete = collect_preview(&spec(None, ""), 2, |_| Ok(source(2))).unwrap();
+        assert!(!complete.truncated);
+    }
+
+    #[test]
+    fn preview_reader_receives_task_specs_exact_generated_sql() {
+        let table = spec(None, "STATUS = 1");
+        let expected_table = table.source_sql();
+        collect_preview(&table, 1, |actual| {
+            assert_eq!(actual, expected_table);
+            Ok(source(0))
+        })
+        .unwrap();
+
+        let custom = spec(Some("SELECT ID FROM APP.ORDERS;"), "");
+        let expected_custom = custom.source_sql();
+        assert!(expected_custom.contains("FROM ("));
+        collect_preview(&custom, 1, |actual| {
+            assert_eq!(actual, expected_custom);
+            Ok(source(0))
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn preview_timeout_is_504_and_other_source_errors_keep_failure_classification() {
+        let mut timeout = SourceReadError::new("call timed out", Some(1067));
+        timeout.timed_out = true;
+        assert_eq!(preview_response(Err(timeout)).status, 504);
+
+        let source_error = SourceReadError::with_kind(
+            "table does not exist",
+            Some(942),
+            FailureKind::SourceQuery,
+        );
+        let response = preview_response(Err(source_error));
+        assert_eq!(response.status, 502);
+        assert!(response.body_text().contains("SOURCE_QUERY"));
     }
 }
