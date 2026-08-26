@@ -25,6 +25,7 @@ import {
   previewErrorMessage,
 } from "./api";
 import type { BuilderColumn, BuilderSql, BuilderTable, PreviewResult } from "./api";
+import { overlayOwnsKeyboard } from "./dialogFocus";
 import { messageFrom } from "./errors";
 import type { DatasourceOption } from "./entry";
 import { ICON, UpsertNote, UPSERT_NOTE_AHEAD } from "./components/DesignSystem";
@@ -96,6 +97,8 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
   const [sql, setSql] = useState<BuilderSql | null>(null);
   const [sqlError, setSqlError] = useState<string | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
+  /** Escape 只在这块容器里算数（#242）。 */
+  const containerRef = useRef<HTMLElement | null>(null);
   /** 换步时焦点要落到新那一步的标题上（#239）。 */
   const headingRef = useRef<HTMLHeadingElement | null>(null);
   const lastStep = useRef(initial.step);
@@ -123,13 +126,16 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
     setPending({ kind: "change", intent: result.intent, loses: result.loses });
   }
 
+  /**
+   * 离开向导**一律先问一句**（#242）。
+   *
+   * 原来草稿里挑不出「手工填过」的东西时这里直接放行——可「里面有没有值得留的东西」
+   * 是人自己的判断：他刚粘进去半条 SQL、刚展开一棵树翻了十分钟，这些都不在
+   * `leaving()` 数的那几项里，而一次误触 Escape 把它们连同这一屏一起收掉，代价全在他身上。
+   * `leaving()` 仍然只回答**列得出什么**，列不出就用下面这句；确认这一道由这里保证。
+   */
   function requestLeave(proceed: () => void) {
-    const current = draftRef.current;
-    const loses = leaving(current);
-    if (loses === null) {
-      proceed();
-      return;
-    }
+    const loses = leaving(draftRef.current) ?? LEAVING_UNLISTED;
     setPending({ kind: "leave", intent: { type: "leave" }, loses, proceed });
   }
 
@@ -150,13 +156,28 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
 
   useImperativeHandle(ref, () => ({ requestLeave }), []);
 
+  /*
+   * Escape 退出向导，但只在**向导容器里**按的那一下算数（#242）。
+   *
+   * 原来这个监听挂在 window 上，于是任何一下 Escape 都是「退出向导」——包括收起一个原生
+   * `<select>` 的弹出层、或者关掉浏览器的自动填充下拉，这两样这一屏上都有。人以为自己
+   * 关掉的是刚弹出来的那个东西，整屏没了。挂到容器上之后，容器外面按的 Escape 根本到不了
+   * 这里；容器里开着浮层时，按键归最上面那一层管（`useDialogFocus` 自己排的队），
+   * Escape 只收起那一层——全屏 SQL 编辑器为此额外拦一道捕获阶段的日子也就到头了。
+   */
   useEffect(() => {
+    const container = containerRef.current;
+    if (container === null) return;
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && pending === null) requestLeave(onCancel);
+      if (event.key !== "Escape" || overlayOwnsKeyboard()) return;
+      event.preventDefault();
+      requestLeave(onCancel);
     }
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onCancel, pending]);
+    container.addEventListener("keydown", handleKeyDown);
+    return () => container.removeEventListener("keydown", handleKeyDown);
+    // requestLeave 只碰 ref 与 setState，身份变了也没有新东西可读。
+    // 确认框自己就是队列里的一层，`pending` 因此不必再进依赖表。
+  }, [onCancel]);
 
   useEffect(() => {
     if (leaving(draft) === null) return;
@@ -551,7 +572,11 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
   }
 
   return (
-    <section className="task-wizard" aria-label={draft.mode === "edit" ? "编辑任务" : "新建导入"}>
+    <section
+      className="task-wizard"
+      ref={containerRef}
+      aria-label={draft.mode === "edit" ? "编辑任务" : "新建导入"}
+    >
       <aside className="wizard-context">
         <header>
           <strong>导入上下文</strong>
@@ -808,6 +833,14 @@ function Refusable({ reason, children }: { reason: string | null; children: Reac
   return reason === null ? <>{children}</> : <span className="disabled-action" title={reason}>{children}</span>;
 }
 
+/**
+ * 离开时列不出东西，用的就是这一句（#242）。
+ *
+ * 「草稿里没有手工填过的东西」不是不问的理由，只是**没什么可列**：确认这一道照出，
+ * 框里换成一句话，主按钮仍然是那两条明路。
+ */
+export const LEAVING_UNLISTED: Loss = { headline: "要离开这个向导吗？", lines: [] };
+
 export function WizardConfirmDialog({ loss, leaving = false, onCancel, onConfirm, onDiscard }: {
   loss: Loss;
   leaving?: boolean;
@@ -816,7 +849,11 @@ export function WizardConfirmDialog({ loss, leaving = false, onCancel, onConfirm
   onDiscard?: () => void;
 }) {
   return <Modal title={loss.headline} onClose={onCancel} busy={false} narrow>
-    <div className="modal-body wizard-loss"><ul>{loss.lines.map((line) => <li key={line}>{line}</li>)}</ul></div>
+    <div className="modal-body wizard-loss">
+      {loss.lines.length === 0
+        ? <p>这份还没保存的草稿会留着，回来接着改。</p>
+        : <ul>{loss.lines.map((line) => <li key={line}>{line}</li>)}</ul>}
+    </div>
     <footer className="modal-footer">
       <button className="button is-ghost" type="button" onClick={onCancel}>取消</button>
       {leaving && onDiscard !== undefined && (

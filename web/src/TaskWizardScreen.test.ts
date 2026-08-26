@@ -5,8 +5,8 @@ import { describe, expect, it } from "vitest";
 import type { BuilderColumn, TargetColumn } from "./api";
 import { SqlEditorPanel } from "./SqlEditor";
 import { TaskEntryDialog } from "./TaskEntryDialog";
-import { TaskWizardScreen, WizardConfirmDialog } from "./TaskWizardScreen";
-import { apply, canAdvance, openNew, view } from "./wizard";
+import { LEAVING_UNLISTED, TaskWizardScreen, WizardConfirmDialog } from "./TaskWizardScreen";
+import { apply, canAdvance, leaving, openNew, view } from "./wizard";
 import type { Applied, Draft } from "./wizard";
 
 const SOURCE = { datasource_id: "ds-oracle", name: "生产 Oracle" };
@@ -269,5 +269,34 @@ describe("the preview step UI", () => {
     expect(html).toContain("最终确认的源端样例数据");
     expect(html).toContain("Alice");
     expect(html).toContain("7 ms");
+  });
+});
+
+describe("leaving the wizard", () => {
+  it("still has something to confirm with when the draft has nothing to list", () => {
+    // 全新草稿里挑不出可列的东西，`leaving()` 因此回 null——离开仍要过一道确认（#242），
+    // 用的就是这一句：判断「里面有没有值得留的东西」不归向导替人做。
+    expect(leaving(openNew(SOURCE, TARGET))).toBeNull();
+
+    const html = renderToStaticMarkup(createElement(WizardConfirmDialog, {
+      loss: LEAVING_UNLISTED,
+      leaving: true,
+      onCancel: () => undefined,
+      onConfirm: () => undefined,
+      onDiscard: () => undefined,
+    }));
+    expect(html).toContain("要离开这个向导吗？");
+    expect(html).toContain("这份还没保存的草稿会留着，回来接着改。");
+    expect(html).toContain("保留草稿并离开");
+    expect(html).toContain("丢弃草稿并离开");
+    expect(html).toContain("取消");
+    // 列不出东西时不摆一个空列表。
+    expect(html).not.toContain("<ul>");
+  });
+
+  it("names the wizard container the Escape handler is bound to", () => {
+    // Escape 挂在这块容器上，不在 window 上（#242）：容器外面按的那一下到不了向导。
+    const html = renderWizard(openNew(SOURCE, TARGET));
+    expect(html).toContain('<section class="task-wizard"');
   });
 });

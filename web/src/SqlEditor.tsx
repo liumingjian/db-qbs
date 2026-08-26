@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
 import { ICON } from "./components/DesignSystem";
 import { Maximize2, Minimize2, WrapText } from "lucide-react";
@@ -147,29 +147,11 @@ type SqlEditorProps = {
 export function SqlEditor(props: SqlEditorProps) {
   const [fullscreen, setFullscreen] = useState(false);
 
-  // 全屏时 Escape 归这里管，而且要在向导那个 window 上的退出监听之前拦下来：
-  // 否则按一下 Escape 是「退出整个向导」，而人只是想收起全屏。捕获阶段先跑，
-  // `stopImmediatePropagation` 把同一目标上剩下的监听也挡掉。
-  //
-  // 全屏层现在自己也是 `useDialogFocus` 排队里的一层，Escape 本来就归最上面那一层管
-  // （见下面的 `FullscreenFocusTrap`），这段拦截因此已经是第二道机制。撤掉它属于 #242：
-  // 那边要先把向导那个 window 级监听收进向导容器里，这里才好只剩一道。
-  useEffect(() => {
-    if (!fullscreen) {
-      return;
-    }
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key !== "Escape") {
-        return;
-      }
-      event.stopImmediatePropagation();
-      event.preventDefault();
-      setFullscreen(false);
-    }
-    window.addEventListener("keydown", handleKeyDown, true);
-    return () => window.removeEventListener("keydown", handleKeyDown, true);
-  }, [fullscreen]);
-
+  // 全屏时按 Escape 是收起全屏，这件事**没有**单独的监听：全屏层挂着的时候它就是
+  // `useDialogFocus` 排队里最上面那一层，按键归它管（见下面的 `FullscreenFocusTrap`）。
+  // 这里原来还有一段捕获阶段的拦截，专门抢在向导那个 window 级退出监听之前
+  // `stopImmediatePropagation`；向导的监听收进向导容器、并且会向这个队列让路之后，
+  // 那段拦截就只是第二道机制了，已随 #242 撤掉。
   return <SqlEditorPanel {...props} fullscreen={fullscreen} onFullscreen={setFullscreen} />;
 }
 
