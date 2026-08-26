@@ -357,6 +357,16 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    `every_route_reaches_its_handler` reconciles its own table against `routes()`; adding one without
    declaring whether it is public fails `every_route_declares_its_access` the same way.
 
+   **Failure has one shape**: `{"error": {"message": "..."}}`, on every route and every status.
+   `kind` is an **optional field inside that envelope**, never a second shape beside it: it says who
+   the operator has to go to next — their own input (`request`), the source database (`oracle`), the
+   target agent or the sink behind it (`agent` / `sink`), or the generated target DDL (`target_ddl`).
+   A screen that needs the attribution reads `kind`; one that does not treats it as absent. Anything
+   extra a failure carries (`oracle_code`, `failure_kind`, the offending columns) rides **inside the
+   same envelope**, so the web client parses one shell and never has to know which endpoint it called.
+   Every request body is read by one function, `read_json_body` — one wording for an unreadable body,
+   one for invalid JSON, and one 1 MiB cap, with no handler rolling its own.
+
    The process-level half is deliberately **outside** `Api`: listening and translating `tiny_http`,
    first-boot config migration, the background agent probe, SIGTERM, and sealing unfinished runs on
    restart all live in `crate::server::serve`. That half — and only that half — is what the binary-spawning

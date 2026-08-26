@@ -686,7 +686,7 @@ fn handle_start_run(request: &Request, state: &Api<'_>) -> HttpResponse {
     // 现场把 agent 停掉、同步照跑，正是这条缺失造成的。
     let agent = match resolve_target_agent(state, &task.target_datasource_id) {
         Ok(agent) => agent,
-        Err(error) => return json_response(502, &json!({ "kind": "agent", "message": error })),
+        Err(error) => return agent_failure(error),
     };
 
     match start_run(
@@ -934,7 +934,7 @@ fn handle_cleanup_run(state: &Api<'_>, run_record_id: &str) -> HttpResponse {
     };
     let agent = match resolve_target_agent(state, &cleanup.target_datasource_id) {
         Ok(agent) => agent,
-        Err(error) => return json_response(502, &json!({ "kind": "agent", "message": error })),
+        Err(error) => return agent_failure(error),
     };
     let client = match crate::HttpSinkClient::new(&agent.base_url) {
         Ok(client) => client,
@@ -953,7 +953,7 @@ fn handle_cleanup_run(state: &Api<'_>, run_record_id: &str) -> HttpResponse {
             Ok(()) => json_response(200, &json!({ "deleted_rows": response.deleted_rows })),
             Err(error) => internal_error(error),
         },
-        Err(error) => json_response(502, &json!({ "error": { "message": error.message } })),
+        Err(error) => sink_failure(error.message),
     }
 }
 
@@ -1620,16 +1620,9 @@ fn resolve_agent(state: &Api<'_>, agent_id: &str) -> Result<Agent, String> {
 }
 
 fn agent_unreachable(base_url: &str, error: &str) -> HttpResponse {
-    json_response(
-        502,
-        &json!({
-            "kind": "agent",
-            "error": {
-                "message": format!("连不上这个地址上的目标端 agent（{base_url}）：{error}"),
-            },
-            "message": format!("连不上这个地址上的目标端 agent（{base_url}）：{error}"),
-        }),
-    )
+    agent_failure(format!(
+        "连不上这个地址上的目标端 agent（{base_url}）：{error}"
+    ))
 }
 
 fn now_rfc3339() -> String {
@@ -1684,13 +1677,11 @@ fn handle_test_datasource_draft(request: &Request, state: &Api<'_>) -> HttpRespo
             // 它不在线就到此为止——底下那句「连不上 sink」说不清是库不通还是 agent 不通。
             let agent = match resolve_agent(state, agent_id) {
                 Ok(agent) => agent,
-                Err(error) => {
-                    return json_response(502, &json!({ "kind": "agent", "message": error }))
-                }
+                Err(error) => return agent_failure(error),
             };
             match test_target_connection(&agent.base_url, &target) {
                 Ok(()) => test_connection_ok(started, label),
-                Err(error) => json_response(502, &json!({ "kind": "sink", "message": error })),
+                Err(error) => sink_failure(error),
             }
         }
     }
@@ -1734,13 +1725,11 @@ fn handle_test_datasource(state: &Api<'_>, datasource_id: &str) -> HttpResponse 
             };
             let agent = match resolve_target_agent(state, datasource_id) {
                 Ok(agent) => agent,
-                Err(error) => {
-                    return json_response(502, &json!({ "kind": "agent", "message": error }))
-                }
+                Err(error) => return agent_failure(error),
             };
             match test_target_connection(&agent.base_url, &target) {
                 Ok(()) => json_response(200, &json!({ "ok": true })),
-                Err(error) => json_response(502, &json!({ "kind": "sink", "message": error })),
+                Err(error) => sink_failure(error),
             }
         }
     }
@@ -1762,7 +1751,7 @@ fn handle_target_tables(request: &Request, state: &Api<'_>) -> HttpResponse {
     };
     let agent = match resolve_target_agent(state, &input.datasource_id) {
         Ok(agent) => agent,
-        Err(error) => return json_response(502, &json!({ "kind": "agent", "message": error })),
+        Err(error) => return agent_failure(error),
     };
     match post_to_sink(
         &agent.base_url,
@@ -1770,7 +1759,7 @@ fn handle_target_tables(request: &Request, state: &Api<'_>) -> HttpResponse {
         &serde_json::to_value(&target).expect("target connection must serialize"),
     ) {
         Ok(body) => json_response(200, &body),
-        Err(error) => json_response(502, &json!({ "kind": "sink", "message": error })),
+        Err(error) => sink_failure(error),
     }
 }
 
@@ -1790,7 +1779,7 @@ fn handle_target_columns(request: &Request, state: &Api<'_>) -> HttpResponse {
     };
     let agent = match resolve_target_agent(state, &input.datasource_id) {
         Ok(agent) => agent,
-        Err(error) => return json_response(502, &json!({ "kind": "agent", "message": error })),
+        Err(error) => return agent_failure(error),
     };
     match post_to_sink(
         &agent.base_url,
@@ -1798,7 +1787,7 @@ fn handle_target_columns(request: &Request, state: &Api<'_>) -> HttpResponse {
         &json!({ "target": target, "target_table": input.target_table }),
     ) {
         Ok(body) => json_response(200, &body),
-        Err(error) => json_response(502, &json!({ "kind": "sink", "message": error })),
+        Err(error) => sink_failure(error),
     }
 }
 
@@ -1837,7 +1826,7 @@ fn handle_target_check(request: &Request, state: &Api<'_>) -> HttpResponse {
     };
     let agent = match resolve_target_agent(state, &input.target_datasource_id) {
         Ok(agent) => agent,
-        Err(error) => return json_response(502, &json!({ "kind": "agent", "message": error })),
+        Err(error) => return agent_failure(error),
     };
     let sink_body = match post_to_sink(
         &agent.base_url,
@@ -1851,16 +1840,11 @@ fn handle_target_check(request: &Request, state: &Api<'_>) -> HttpResponse {
         .expect("target check request must serialize"),
     ) {
         Ok(body) => body,
-        Err(error) => return json_response(502, &json!({ "kind": "sink", "message": error })),
+        Err(error) => return sink_failure(error),
     };
     let mut result: TargetCheckResult = match serde_json::from_value(sink_body) {
         Ok(result) => result,
-        Err(error) => {
-            return json_response(
-                502,
-                &json!({ "kind": "sink", "message": format!("目标端检查回话形状无效：{error}") }),
-            )
-        }
+        Err(error) => return sink_failure(format!("目标端检查回话形状无效：{error}")),
     };
     result.suggested_ddl = if result.ok {
         None
@@ -1961,8 +1945,45 @@ fn unauthorized() -> HttpResponse {
     json_response(401, &json!({ "error": { "message": "请先登录" } }))
 }
 
+/// **失败的正文只有一种壳**（#199）：`{"error": {"message": ...}}`，`kind` 是壳里的
+/// 一个可选字段，不是与它并排的第二种形状。
+///
+/// `kind` 答的是「下一步该找谁」——改自己的输入（`request`）、找 DBA（`oracle`）、
+/// 还是去看目标端那台机器（`agent` / `sink`）。需要归属的屏去读它，不需要的当它不存在。
+fn error_response(status: u16, kind: &str, message: String) -> HttpResponse {
+    error_response_with(status, kind, message, json!({}))
+}
+
+/// 同一只信封，外加这次失败自己带的那几个字段（Oracle 的错误码、判废的列）。
+/// **附加字段也在信封里边**，没有第二层——拼信封的地方只有这一处。
+fn error_response_with(
+    status: u16,
+    kind: &str,
+    message: String,
+    extra: serde_json::Value,
+) -> HttpResponse {
+    let mut detail = serde_json::Map::new();
+    detail.insert("message".to_owned(), json!(message));
+    detail.insert("kind".to_owned(), json!(kind));
+    if let serde_json::Value::Object(fields) = extra {
+        detail.extend(fields);
+    }
+    json_response(status, &json!({ "error": detail }))
+}
+
+/// 请求本身的错：改输入的人是调用方自己。
 fn bad_request(message: String) -> HttpResponse {
-    json_response(400, &json!({ "error": { "message": message } }))
+    error_response(400, "request", message)
+}
+
+/// 目标端 agent 那一段断了——这条链路上没有回退，只能去看那台机器。
+fn agent_failure(message: String) -> HttpResponse {
+    error_response(502, "agent", message)
+}
+
+/// agent 活着，但它背后的 sink/目标库不接受这次请求。
+fn sink_failure(message: String) -> HttpResponse {
+    error_response(502, "sink", message)
 }
 
 fn internal_error(message: String) -> HttpResponse {
@@ -2122,7 +2143,7 @@ fn preview_response(result: Result<PreviewResult, SourceReadError>) -> HttpRespo
     match result {
         Ok(preview) => json_response(200, &preview),
         Err(error) if error.timed_out => {
-            json_response(504, &json!({ "error": { "message": "源端数据预览超时" } }))
+            error_response(504, "oracle", "源端数据预览超时".to_owned())
         }
         Err(error) => oracle_failure(error),
     }
@@ -2174,11 +2195,11 @@ where
 }
 
 fn oracle_failure(error: crate::SourceReadError) -> HttpResponse {
-    json_response(
+    error_response_with(
         502,
-        &json!({
-            "kind": "oracle",
-            "message": error.user_message(),
+        "oracle",
+        error.user_message(),
+        json!({
             "oracle_code": error.oracle_code,
             // 取列失败不是一次 run，进不了运行历史；分类仍照实给出，
             // 否则「连不上 Oracle」与「dblink 不可用」在这个面上又只能靠人话反推。
@@ -2188,31 +2209,17 @@ fn oracle_failure(error: crate::SourceReadError) -> HttpResponse {
 }
 
 fn handle_column_fetch(request: &Request, state: &Api<'_>) -> HttpResponse {
-    let body = match request.body() {
-        Ok(body) => body,
-        Err(error) => {
-            return json_response(
-                400,
-                &json!({ "kind": "request", "message": format!("could not read request: {error}") }),
-            )
-        }
-    };
-    let input: ColumnFetchInput = match serde_json::from_slice(body) {
+    let input: ColumnFetchInput = match read_json_body(request) {
         Ok(input) => input,
-        Err(error) => {
-            return json_response(
-                400,
-                &json!({ "kind": "request", "message": format!("invalid JSON request: {error}") }),
-            )
-        }
+        Err(error) => return bad_request(error),
     };
     if let Err(error) = input.spec.validate() {
-        return json_response(400, &json!({ "kind": "request", "message": error }));
+        return bad_request(error);
     }
 
     let access = match oracle_access(state, &input.datasource_id) {
         Ok(access) => access,
-        Err(error) => return json_response(400, &json!({ "kind": "request", "message": error })),
+        Err(error) => return bad_request(error),
     };
     let columns = match OracleRowSource::describe(&access, &input.spec) {
         Ok(columns) => columns,
@@ -2231,14 +2238,11 @@ fn handle_column_fetch(request: &Request, state: &Api<'_>) -> HttpResponse {
         Err(error) => {
             let message = error.to_string();
             let issues = error.columns;
-            json_response(
+            error_response_with(
                 422,
-                &json!({
-                    "kind": "target_ddl",
-                    "message": message,
-                    "columns": issues,
-                    "described_columns": columns,
-                }),
+                "target_ddl",
+                message,
+                json!({ "columns": issues, "described_columns": columns }),
             )
         }
     }

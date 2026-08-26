@@ -866,18 +866,21 @@ fn builder_preview_validates_spec_and_limit_before_reaching_oracle() {
     assert!(custom_sql.body_text().contains("数据源 missing 不存在"));
 }
 
-/// 请求体超过 1 MiB 时的那句话，判定只有一处。
+/// 请求体超过 1 MiB 时的那句话，判定只有一处——`/api/columns` 也归它管，
+/// 那里从前自己重做了一遍读 body，于是这条上限对它形同不存在（#199）。
 #[test]
 fn oversized_request_bodies_are_refused() {
     let rig = Rig::new();
     let huge = format!(r#"{{"name":"{}"}}"#, "x".repeat(1024 * 1024 + 16));
-    let response = rig.post("/api/tasks", &huge);
-    assert_eq!(response.status, 400);
-    assert!(
-        response.body_text().contains("请求体超过 1 MiB"),
-        "{}",
-        response.body_text()
-    );
+    for path in ["/api/tasks", "/api/columns"] {
+        let response = rig.post(path, &huge);
+        assert_eq!(response.status, 400, "{path}: {}", response.body_text());
+        assert!(
+            response.body_text().contains("请求体超过 1 MiB"),
+            "{path}: {}",
+            response.body_text()
+        );
+    }
 }
 
 /// 任务定义的 CRUD：线上恰好三样，口令一个字节都不出现。
@@ -1517,6 +1520,25 @@ impl StoppableAgent {
     }
 }
 
+/// 取列面读请求体走的是与全片同一个 `read_json_body`：同一句中文、同一条上限（#199）。
+#[test]
+fn column_fetch_reads_its_body_through_the_shared_reader() {
+    let rig = Rig::new();
+    let response = rig.post("/api/columns", "{ 这不是 JSON");
+
+    assert_eq!(response.status, 400, "{}", response.body_text());
+    let body = rig.json(&response);
+    assert_eq!(body["error"]["kind"], "request");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("JSON 请求体无效"),
+        "{}",
+        response.body_text()
+    );
+}
+
 /// SQL 形状预检整段取消后，取列前的本地闸只剩规格自身的合法性。它仍必须在**连 Oracle 之前**判完。
 #[test]
 fn column_fetch_rejects_an_invalid_spec_before_reaching_oracle() {
@@ -1534,10 +1556,16 @@ fn column_fetch_rejects_an_invalid_spec_before_reaching_oracle() {
 
     assert_eq!(response.status, 400, "{}", response.body_text());
     let body = rig.json(&response);
-    assert_eq!(body["kind"], "request");
-    assert!(body.get("code").is_none());
-    assert!(body.get("run_id").is_none());
-    assert!(body["message"].as_str().unwrap().contains("MISSING"));
+    // 壳只有一种（#199）：`kind` 是信封里的字段，不是与 `message` 并排的第二种形状。
+    assert_eq!(body["error"]["kind"], "request");
+    assert!(body.get("kind").is_none());
+    assert!(body.get("message").is_none());
+    assert!(body["error"].get("code").is_none());
+    assert!(body["error"].get("run_id").is_none());
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("MISSING"));
 }
 
 #[test]
@@ -1632,8 +1660,9 @@ fn column_fetch_oracle_failure_does_not_create_a_run_touch_sink_or_write_storage
 
     assert_eq!(response.status, 502, "{}", response.body_text());
     let body = rig.json(&response);
-    assert_eq!(body["kind"], "oracle");
-    assert!(body.get("run_id").is_none());
+    assert_eq!(body["error"]["kind"], "oracle");
+    assert!(body.get("kind").is_none());
+    assert!(body["error"].get("run_id").is_none());
     assert_eq!(directory_entries(&rig.directory), files_before);
     // 进程内没有后台探测线程（那归 `serve()`），所以这里的判据是最硬的那条：
     // 取列失败之后，agent 那条地址上**一个字节都没过线**。
@@ -1683,9 +1712,13 @@ fn the_target_metadata_proxy_resolves_credentials_and_writes_nothing() {
         let response = rig.post(path, &body);
         assert_eq!(response.status, 502, "{}", response.body_text());
         let parsed = rig.json(&response);
-        assert_eq!(parsed["kind"], "sink");
+        assert_eq!(parsed["error"]["kind"], "sink");
         // 不属于任何 run：回话里没有 run_id。
-        assert!(parsed.get("run_id").is_none(), "{}", response.body_text());
+        assert!(
+            parsed["error"].get("run_id").is_none(),
+            "{}",
+            response.body_text()
+        );
     }
 
     // 不进任务定义、不进 SQLite、不留临时文件——目录里一个新条目都没有。
@@ -1785,7 +1818,7 @@ fn target_check_maps_request_datasource_agent_and_sink_failures_at_their_boundar
     let sink_failure = check_body(&target_id);
     let sink = rig.post_with_describer("/api/target/check", &sink_failure, described_id);
     assert_eq!(sink.status, 502, "{}", sink.body_text());
-    assert_eq!(rig.json(&sink)["kind"], "sink");
+    assert_eq!(rig.json(&sink)["error"]["kind"], "sink");
 
     let mut stopped = StoppableAgent::start();
     let registered = rig.post(
@@ -1801,7 +1834,7 @@ fn target_check_maps_request_datasource_agent_and_sink_failures_at_their_boundar
     let agent_failure = check_body(&stopped_target);
     let agent = rig.post_with_describer("/api/target/check", &agent_failure, described_id);
     assert_eq!(agent.status, 502, "{}", agent.body_text());
-    assert_eq!(rig.json(&agent)["kind"], "agent");
+    assert_eq!(rig.json(&agent)["error"]["kind"], "agent");
 }
 
 /// 草稿测连吃的是**表单里当前填的那组值**，不是库里存的那条，而且一个字节都不落盘。
@@ -1844,8 +1877,12 @@ fn the_draft_test_connection_reads_the_form_values_and_writes_nothing() {
     );
     assert_eq!(mysql_draft.status, 502, "{}", mysql_draft.body_text());
     let parsed = rig.json(&mysql_draft);
-    assert_eq!(parsed["kind"], "sink");
-    assert!(parsed.get("run_id").is_none(), "{}", mysql_draft.body_text());
+    assert_eq!(parsed["error"]["kind"], "sink");
+    assert!(
+        parsed["error"].get("run_id").is_none(),
+        "{}",
+        mysql_draft.body_text()
+    );
 
     // Oracle 草稿：客户端库路径是假的，连不上——但它同样不该落盘。
     let oracle_draft = rig.post(
@@ -1970,9 +2007,9 @@ fn a_stopped_agent_breaks_every_target_side_link() {
         let response = rig.send(method, &path, &body);
         assert_eq!(response.status, 502, "{path}: {}", response.body_text());
         let parsed = rig.json(&response);
-        assert_eq!(parsed["kind"], "agent", "{path}: {}", response.body_text());
+        assert_eq!(parsed["error"]["kind"], "agent", "{path}: {}", response.body_text());
         assert!(
-            parsed["message"].as_str().unwrap().contains("不在线"),
+            parsed["error"]["message"].as_str().unwrap().contains("不在线"),
             "{path}: {}",
             response.body_text()
         );

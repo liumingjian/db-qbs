@@ -62,9 +62,12 @@ describe("M3 web presentation helpers", () => {
     ];
     const parsed = targetDdlFailureFrom(
       new ApiError("target DDL cannot be generated", 422, {
-        kind: "target_ddl",
-        columns: issues,
-        described_columns: columns,
+        error: {
+          kind: "target_ddl",
+          message: "target DDL cannot be generated",
+          columns: issues,
+          described_columns: columns,
+        },
       }),
     );
 
