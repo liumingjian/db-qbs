@@ -84,6 +84,18 @@ describe("the mapping step UI", () => {
     }
   });
 
+  it("gives the wizard one polite announcer and a step heading focus can be moved to", () => {
+    for (const step of [1, 2, 3, 4] as Draft["step"][]) {
+      const html = renderWizard({ ...openNew(SOURCE, TARGET), step });
+      // 播报口只此一个，挂在向导上而不是每一步各来一个（#239）。
+      expect(html.match(/class="wizard-live visually-hidden"/g)).toHaveLength(1);
+      expect(html).toMatch(/<div class="wizard-live visually-hidden" role="status" aria-live="polite">/);
+      // 标题能被聚焦，但不进 Tab 序。
+      expect(html.match(/<h1 tabindex="-1">/g)).toHaveLength(1);
+      expect(html).not.toMatch(/<h1 tabindex="0">/);
+    }
+  });
+
   it("shows saved fields without metadata and offers one save action while editing", () => {
     const html = renderWizard({
       ...mappingDraft(),
