@@ -1,11 +1,21 @@
-use std::io::{self, Cursor, Read};
-use std::sync::Arc;
+//! sink 的 HTTP 面：请求进来、路由、handler、响应出去。
+//!
+//! 唯一的入口是 `Api::handle(&Request) -> Response`，用的是这个 crate 自己的
+//! `Request`/`Response`。从前 `handle_request` 直接吃 `tiny_http::Request`，于是
+//! `tests/` 想碰路由层就只能开一个真 socket 手搓 HTTP——业务那半边早就在
+//! `SinkService` 接缝后面进程内直调了，只有路由这一层还够不着（#200，跟着 #198 走）。
+//!
+//! 路由表是**数据**（`routes()`），不是一串 `if`。匹配分两趟：字面量样式先走一趟，
+//! 带占位的样式后走一趟，所以 `/v1/runs/cleanup` 不可能被 `/v1/runs/{}` 吃掉，
+//! **无论表里怎么排**——声明顺序不承重。
+
+use std::io;
 
 use db_qbs_shared::{write_log_line_with_fields, AgentInfo, CleanupRunRequest, LogEvent, LogLevel};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+use tiny_http::Server;
 
 use crate::{
     load_agent_identity, ApiError, BatchPayload, CommitRequest, Destination, DestinationFactory,
@@ -15,7 +25,207 @@ use crate::{
 
 const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
 
-type HttpResponse = Response<Cursor<Vec<u8>>>;
+/// HTTP 方法。认不出来的方法落进 `Other`，而路由表里只有前两种，所以它必然 404——
+/// 与旧实现里那条 `_ => not_found()` 同一个结果。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Method {
+    Get,
+    Post,
+    Other,
+}
+
+/// 一次请求：方法、路径、头、请求体。
+///
+/// `body` 是 `Result` 而不是 `Vec<u8>`：读请求体可能失败，而失败必须由**读它的那个
+/// handler** 报成 400，所以这个错误得一路带到 `read_json` 那里，不能在翻译层就吞掉。
+pub struct Request {
+    method: Method,
+    path: String,
+    headers: Vec<(String, String)>,
+    body: Result<Vec<u8>, String>,
+}
+
+impl Request {
+    pub fn new(method: Method, path: &str, body: Vec<u8>) -> Self {
+        Self {
+            method,
+            path: path.to_owned(),
+            headers: Vec::new(),
+            body: Ok(body),
+        }
+    }
+
+    /// 测试与桥接层共用：header 名大小写不敏感，与 HTTP 语义一致。
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    pub fn method(&self) -> Method {
+        self.method
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// 一份同名头**里的任意一份**取到这个值。
+    ///
+    /// 不是「第一份是不是它」：同名头可以来好几份，而从前那道 Content-Type 判定
+    /// 走的就是 `any`。收窄成看第一份，会让一份合法的请求变成 415。
+    pub fn header_matches(&self, name: &str, value: &str) -> bool {
+        self.headers.iter().any(|(header, existing)| {
+            header.eq_ignore_ascii_case(name) && existing.eq_ignore_ascii_case(value)
+        })
+    }
+
+    /// 请求体的字节。读失败时是 `Err`，超长时是一段比上限多一个字节的 `Ok`——
+    /// 「超过 64 MiB」这个判定归 `read_json`，与从前同一处。
+    pub fn body(&self) -> Result<&[u8], String> {
+        match &self.body {
+            Ok(body) => Ok(body),
+            Err(error) => Err(error.clone()),
+        }
+    }
+}
+
+/// 一次响应。状态码 + 头 + 字节，没有别的。
+pub struct Response {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl Response {
+    /// 响应体当 UTF-8 文本读；测试里断言 JSON 用得上。
+    pub fn body_text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// 一次请求能碰到的**全部**进程状态：一个服务实例加这台 agent 的身份。
+///
+/// 借用形态是刻意的：两者的所有权归 `serve()`，`Api` 只在一次服务期内借着用，
+/// 测试里同样可以就地拼一个出来。
+pub struct Api<'a, F: DestinationFactory> {
+    pub service: &'a SinkService<F>,
+    pub agent: &'a AgentInfo,
+}
+
+type Handler<F> = fn(&Api<'_, F>, &Request, &str) -> Response;
+
+/// 一条路由。`pattern` 里最多有一个 `{}`，代表一段 run id。
+pub struct Route<F: DestinationFactory> {
+    pub method: Method,
+    pub pattern: &'static str,
+    handler: Handler<F>,
+}
+
+impl<F: DestinationFactory> Route<F> {
+    fn new(method: Method, pattern: &'static str, handler: Handler<F>) -> Self {
+        Self {
+            method,
+            pattern,
+            handler,
+        }
+    }
+
+    /// 带占位的样式比字面量样式**后**匹配，见 `Api::handle`。
+    pub fn has_placeholder(&self) -> bool {
+        self.pattern.contains("{}")
+    }
+}
+
+/// 把请求路径按样式对一遍：对上了就回样式里 `{}` 那一段，没有占位时回空串。
+///
+/// 这一个函数取代了从前的 `run_resource` 与 `run_action`——两者是同一段逻辑
+/// 把前后缀内联了一遍。run id 里不许有 `/`、不许为空，与从前一字不差。
+fn match_pattern<'a>(pattern: &str, path: &'a str) -> Option<&'a str> {
+    let Some((prefix, suffix)) = pattern.split_once("{}") else {
+        return (pattern == path).then_some("");
+    };
+    let rest = path.strip_prefix(prefix)?;
+    let captured = rest.strip_suffix(suffix)?;
+    if captured.is_empty() || captured.contains('/') {
+        return None;
+    }
+    Some(captured)
+}
+
+/// 全部 v1 路由。**表里的先后不承重**——`Api::handle` 分两趟走，字面量永远压过占位。
+///
+/// 表按 `F` 现造：handler 是 `fn(&Api<'_, F>, ..)`，泛型函数里放不下一份
+/// `static`。十一条路由的一次 `Vec`，与它后面那次 MySQL 往返比可以忽略。
+pub fn routes<F: DestinationFactory>() -> Vec<Route<F>> {
+    use Method::{Get, Post};
+    vec![
+        Route::new(Get, "/v1/agent/info", |api, _request, _run_id| {
+            json_response(200, api.agent)
+        }),
+        Route::new(Post, "/v1/runs", |api, request, _run_id| {
+            handle_open(request, api.service)
+        }),
+        Route::new(Post, "/v1/runs/cleanup", |api, request, _run_id| {
+            handle_cleanup(request, api.service)
+        }),
+        Route::new(
+            Post,
+            "/v1/target/test-connection",
+            |_api, request, _run_id| handle_test_connection(request),
+        ),
+        Route::new(Post, "/v1/target/tables", |_api, request, _run_id| {
+            handle_target_tables(request)
+        }),
+        Route::new(Post, "/v1/target/columns", |_api, request, _run_id| {
+            handle_target_columns(request)
+        }),
+        Route::new(Post, "/v1/target/check", |api, request, _run_id| {
+            handle_target_check(request, api.service)
+        }),
+        Route::new(Post, "/v1/runs/{}/batches", |api, request, run_id| {
+            handle_batch(request, api.service, run_id)
+        }),
+        Route::new(Post, "/v1/runs/{}/commit", |api, request, run_id| {
+            handle_commit(request, api.service, run_id)
+        }),
+        Route::new(Post, "/v1/runs/{}/abort", |api, request, run_id| {
+            handle_abort(request, api.service, run_id)
+        }),
+        Route::new(Get, "/v1/runs/{}", |api, _request, run_id| {
+            handle_get(api.service, run_id)
+        }),
+    ]
+}
+
+impl<F: DestinationFactory> Api<'_, F> {
+    /// 这个 crate 的 HTTP 面**唯一**的入口。
+    ///
+    /// 两趟匹配：先字面量样式，再带占位的样式。这就是「顺序不承重」的全部机制——
+    /// 从前 `/v1/runs/cleanup` 要靠写在按 run id 分发的那一支之前才不被吃掉，
+    /// 现在即便把表倒过来写，结果也一个字节不变。
+    pub fn handle(&self, request: &Request) -> Response {
+        let routes = routes::<F>();
+        for placeholders in [false, true] {
+            for route in &routes {
+                if route.has_placeholder() != placeholders || route.method != request.method() {
+                    continue;
+                }
+                let Some(run_id) = match_pattern(route.pattern, request.path()) else {
+                    continue;
+                };
+                return (route.handler)(self, request, run_id);
+            }
+        }
+        error_response(not_found())
+    }
+}
 
 pub fn serve(config: SinkConfig) -> Result<(), String> {
     if config.listen.is_empty() {
@@ -57,10 +267,7 @@ pub fn serve(config: SinkConfig) -> Result<(), String> {
     }
     // 身份先于监听：起不来就别开门（ADR-0044 §2）。id 文件写不下去时 source 那侧的
     // 「注册」会在下一次重启后认到另一个身份，那正是本票要挡的静默——所以这里硬失败。
-    let agent = Arc::new(load_agent_identity(
-        &config.agent_id_path(),
-        config.agent_name.as_deref(),
-    )?);
+    let agent = load_agent_identity(&config.agent_id_path(), config.agent_name.as_deref())?;
     {
         let stdout = io::stdout();
         let mut writer = stdout.lock();
@@ -79,89 +286,55 @@ pub fn serve(config: SinkConfig) -> Result<(), String> {
         );
     }
     // sink 启动**不再连 MySQL**：连接按 run 建，连不上的失败点在 POST /v1/runs。
-    let service = Arc::new(SinkService::with_factory(MysqlFactory));
+    let service = SinkService::with_factory(MysqlFactory);
     let server = Server::http(&config.listen)
         .map_err(|error| format!("监听 {} 失败：{error}", config.listen))?;
 
+    let api = Api {
+        service: &service,
+        agent: &agent,
+    };
     for request in server.incoming_requests() {
-        handle_request(request, &service, &agent);
+        handle_request(request, &api);
     }
     Ok(())
 }
 
-fn handle_request<F: DestinationFactory>(
-    mut request: Request,
-    service: &SinkService<F>,
-    agent: &AgentInfo,
-) {
-    let method = request.method().clone();
-    let path = request.url().to_owned();
-    let response = if method == Method::Get && path == "/v1/agent/info" {
-        json_response(200, agent)
-    } else if method == Method::Post && path == "/v1/runs" {
-        handle_open(&mut request, service)
-    } else if method == Method::Post && path == "/v1/runs/cleanup" {
-        handle_cleanup(&mut request, service)
-    } else if method == Method::Post && path == "/v1/target/test-connection" {
-        handle_test_connection(&mut request)
-    } else if method == Method::Post && path == "/v1/target/tables" {
-        handle_target_tables(&mut request)
-    } else if method == Method::Post && path == "/v1/target/columns" {
-        handle_target_columns(&mut request)
-    } else if method == Method::Post && path == "/v1/target/check" {
-        handle_target_check(&mut request, service)
-    } else if method == Method::Post {
-        match run_action(&path) {
-            Some((run_id, "batches")) => handle_batch(&mut request, service, run_id),
-            Some((run_id, "commit")) => handle_commit(&mut request, service, run_id),
-            Some((run_id, "abort")) => handle_abort(&mut request, service, run_id),
-            _ => error_response(not_found()),
-        }
-    } else if method == Method::Get {
-        match run_resource(&path) {
-            Some(run_id) => handle_get(service, run_id),
-            None => error_response(not_found()),
-        }
-    } else {
-        error_response(not_found())
-    };
+/// 一个 tiny_http 请求的全程：翻译进来、交给 `Api::handle`、翻译回去。
+///
+/// 认识 `tiny_http` 的只有三处：`serve` 的监听循环、这个函数、底下的 `bridge`。
+/// 判断怎么回，全在 `Api::handle` 里。
+fn handle_request<F: DestinationFactory>(mut request: tiny_http::Request, api: &Api<'_, F>) {
+    let parsed = Request::from_tiny_http(&mut request);
+    let run_id = run_id_in_path::<F>(parsed.path());
+    let response = api.handle(&parsed).into_tiny_http();
 
     if let Err(error) = request.respond(response) {
-        let run_id = run_resource(&path).or_else(|| run_action(&path).map(|(run_id, _)| run_id));
         let stdout = io::stdout();
         let mut writer = stdout.lock();
         let _ = write_log_line_with_fields(
             &mut writer,
             LogLevel::Error,
             LogEvent::HttpResponseFailed,
-            run_id,
+            run_id.as_deref(),
             None,
             json!({ "message": format!("HTTP 响应写入失败：{error}") }),
         );
     }
 }
 
-fn run_resource(path: &str) -> Option<&str> {
-    let run_id = path.strip_prefix("/v1/runs/")?;
-    if run_id.is_empty() || run_id.contains('/') {
-        return None;
-    }
-    Some(run_id)
+/// 响应写不出去时，日志里那个 run id。**只给日志用**——分发不看它，分发看的是路由表。
+///
+/// 它自己也读那张表：带占位的路由多一条，这里就多认一条，不必有人记得来改。
+fn run_id_in_path<F: DestinationFactory>(path: &str) -> Option<String> {
+    routes::<F>()
+        .iter()
+        .filter(|route| route.has_placeholder())
+        .find_map(|route| match_pattern(route.pattern, path))
+        .map(str::to_owned)
 }
 
-fn run_action(path: &str) -> Option<(&str, &str)> {
-    let path = path.strip_prefix("/v1/runs/")?;
-    let (run_id, action) = path.split_once('/')?;
-    if run_id.is_empty() || action.is_empty() || action.contains('/') {
-        return None;
-    }
-    Some((run_id, action))
-}
-
-fn handle_open(
-    request: &mut Request,
-    service: &SinkService<impl DestinationFactory>,
-) -> HttpResponse {
+fn handle_open(request: &Request, service: &SinkService<impl DestinationFactory>) -> Response {
     if !has_json_content_type(request) {
         return error_response(unsupported_media_type(None));
     }
@@ -176,10 +349,7 @@ fn handle_open(
     }
 }
 
-fn handle_cleanup(
-    request: &mut Request,
-    service: &SinkService<impl DestinationFactory>,
-) -> HttpResponse {
+fn handle_cleanup(request: &Request, service: &SinkService<impl DestinationFactory>) -> Response {
     if !has_json_content_type(request) {
         return error_response(unsupported_media_type(None));
     }
@@ -194,10 +364,10 @@ fn handle_cleanup(
 }
 
 fn handle_batch(
-    request: &mut Request,
+    request: &Request,
     service: &SinkService<impl DestinationFactory>,
     run_id: &str,
-) -> HttpResponse {
+) -> Response {
     let payload: BatchPayload = match read_run_json(request, run_id) {
         Ok(payload) => payload,
         Err(error) => return error_response(error),
@@ -209,10 +379,10 @@ fn handle_batch(
 }
 
 fn handle_abort(
-    request: &mut Request,
+    request: &Request,
     service: &SinkService<impl DestinationFactory>,
     run_id: &str,
-) -> HttpResponse {
+) -> Response {
     if !has_json_content_type(request) {
         return error_response(unsupported_media_type(Some(run_id)));
     }
@@ -226,10 +396,10 @@ fn handle_abort(
 }
 
 fn handle_commit(
-    request: &mut Request,
+    request: &Request,
     service: &SinkService<impl DestinationFactory>,
     run_id: &str,
-) -> HttpResponse {
+) -> Response {
     let payload: CommitRequest = match read_run_json(request, run_id) {
         Ok(payload) => payload,
         Err(error) => return error_response(error),
@@ -240,7 +410,7 @@ fn handle_commit(
     }
 }
 
-fn handle_get(service: &SinkService<impl DestinationFactory>, run_id: &str) -> HttpResponse {
+fn handle_get(service: &SinkService<impl DestinationFactory>, run_id: &str) -> Response {
     match service.get(run_id) {
         Ok(response) => json_response(200, &response),
         Err(error) => error_response(error),
@@ -249,7 +419,7 @@ fn handle_get(service: &SinkService<impl DestinationFactory>, run_id: &str) -> H
 
 /// 「测试连接」（ADR-0037 §9）——**不属于任何 run**，所以它不进 run 注册表、
 /// 不留 tombstone，也不需要服务实例。source 侧的数据源管理面靠它验 MySQL 那一侧。
-fn handle_test_connection(request: &mut Request) -> HttpResponse {
+fn handle_test_connection(request: &Request) -> Response {
     if !has_json_content_type(request) {
         return error_response(unsupported_media_type(None));
     }
@@ -288,7 +458,7 @@ struct TargetColumnsRequest {
 /// 与 `test-connection` 同属「不属于任何 run 的端点」——**不产生 `run_id`、不进 run 注册表、
 /// 不留 tombstone、不写任何存储**，连接按请求建、用完即弃（`MysqlDestination` 出作用域即断）。
 /// 它喂的是**选择面**，不是判定面：拦截层仍然只有映射预检一处（ADR-0009 增补 §3 一字不改）。
-fn handle_target_tables(request: &mut Request) -> HttpResponse {
+fn handle_target_tables(request: &Request) -> Response {
     if !has_json_content_type(request) {
         return error_response(unsupported_media_type(None));
     }
@@ -310,7 +480,7 @@ fn handle_target_tables(request: &mut Request) -> HttpResponse {
 ///
 /// **表不存在不是错误**：`information_schema` 查不到就是空清单（ADR-0038 §9）。
 /// 构建器只亮不判——「这张表能不能用」的结论归映射预检出。
-fn handle_target_columns(request: &mut Request) -> HttpResponse {
+fn handle_target_columns(request: &Request) -> Response {
     if !has_json_content_type(request) {
         return error_response(unsupported_media_type(None));
     }
@@ -334,9 +504,9 @@ fn handle_target_columns(request: &mut Request) -> HttpResponse {
 }
 
 fn handle_target_check<F: DestinationFactory>(
-    request: &mut Request,
+    request: &Request,
     service: &SinkService<F>,
-) -> HttpResponse {
+) -> Response {
     if !has_json_content_type(request) {
         return error_response(unsupported_media_type(None));
     }
@@ -366,7 +536,7 @@ fn target_environment(message: String) -> ApiError {
 #[serde(deny_unknown_fields)]
 struct EmptyBody {}
 
-fn read_run_json<T: DeserializeOwned>(request: &mut Request, run_id: &str) -> Result<T, ApiError> {
+fn read_run_json<T: DeserializeOwned>(request: &Request, run_id: &str) -> Result<T, ApiError> {
     if !has_json_content_type(request) {
         return Err(unsupported_media_type(Some(run_id)));
     }
@@ -376,12 +546,9 @@ fn read_run_json<T: DeserializeOwned>(request: &mut Request, run_id: &str) -> Re
     })
 }
 
-fn read_json<T: DeserializeOwned>(request: &mut Request) -> Result<T, ApiError> {
-    let mut body = Vec::new();
-    request
-        .as_reader()
-        .take(MAX_BODY_BYTES + 1)
-        .read_to_end(&mut body)
+fn read_json<T: DeserializeOwned>(request: &Request) -> Result<T, ApiError> {
+    let body = request
+        .body()
         .map_err(|error| bad_request(format!("读取请求体失败：{error}")))?;
     if body.len() as u64 > MAX_BODY_BYTES {
         return Err(ApiError {
@@ -394,17 +561,11 @@ fn read_json<T: DeserializeOwned>(request: &mut Request) -> Result<T, ApiError> 
             details: json!({ "max_bytes": MAX_BODY_BYTES }),
         });
     }
-    serde_json::from_slice(&body).map_err(|error| bad_request(format!("JSON 请求体无效：{error}")))
+    serde_json::from_slice(body).map_err(|error| bad_request(format!("JSON 请求体无效：{error}")))
 }
 
 fn has_json_content_type(request: &Request) -> bool {
-    request.headers().iter().any(|header| {
-        header.field.equiv("Content-Type")
-            && header
-                .value
-                .as_str()
-                .eq_ignore_ascii_case("application/json")
-    })
+    request.header_matches("Content-Type", "application/json")
 }
 
 fn unsupported_media_type(run_id: Option<&str>) -> ApiError {
@@ -437,265 +598,83 @@ fn not_found() -> ApiError {
     }
 }
 
-fn error_response(error: ApiError) -> HttpResponse {
+fn error_response(error: ApiError) -> Response {
     let status = error.status;
     json_response(status, &error.into_envelope())
 }
 
-fn json_response(status: u16, value: &impl Serialize) -> HttpResponse {
+fn json_response(status: u16, value: &impl Serialize) -> Response {
     let body = serde_json::to_vec(value).expect("serializing an HTTP response must succeed");
-    let content_type = Header::from_bytes("Content-Type", "application/json")
-        .expect("static response header must be valid");
-    Response::from_data(body)
-        .with_status_code(StatusCode(status))
-        .with_header(content_type)
+    Response {
+        status,
+        headers: vec![("Content-Type".to_owned(), "application/json".to_owned())],
+        body,
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::io::{Read, Write};
-    use std::net::TcpStream;
-    use std::sync::Arc;
-    use std::thread;
+/// tiny_http 与这个模块之间的翻译层。`serve` 的监听循环之外，只剩这两个函数还认识它。
+mod bridge {
+    use std::io::Read;
 
-    use serde_json::Value;
+    use super::{Method, Request, Response, MAX_BODY_BYTES};
 
-    use super::*;
-    use crate::test_support::{datetime_target_column, InMemoryDestination};
-    use crate::FixedDestination;
-
-    /// 报文里的目标端连接（ADR-0037 §1）。夹具走 `FixedDestination`，这份值被忽略，
-    /// 但**必须带**——`OpenRunRequest` 的 `deny_unknown_fields` 与必填字段一起把它钉住了。
-    const TARGET_JSON: &str = r#""target":{"host":"127.0.0.1","port":3306,"username":"sink","password":"change-me","database":"qbs"},"#;
-
-    /// 这些用例开的都是同一张表：单列 `D_BIZ datetime`，主键就是它。
-    fn d_biz_destination() -> InMemoryDestination {
-        InMemoryDestination {
-            columns: vec![datetime_target_column("D_BIZ")],
-            ..InMemoryDestination::default()
+    impl From<&tiny_http::Method> for Method {
+        fn from(method: &tiny_http::Method) -> Self {
+            match method {
+                tiny_http::Method::Get => Method::Get,
+                tiny_http::Method::Post => Method::Post,
+                _ => Method::Other,
+            }
         }
     }
 
-    #[test]
-    fn run_action_requires_exactly_one_run_and_action_segment() {
-        assert_eq!(run_action("/v1/runs/run/batches"), Some(("run", "batches")));
-        assert_eq!(run_action("/v1/runs/run/abort"), Some(("run", "abort")));
-        assert_eq!(run_action("/v1/runs/run/commit"), Some(("run", "commit")));
-        assert_eq!(run_action("/v1/runs//batches"), None);
-        assert_eq!(run_action("/v1/runs/run/"), None);
-        assert_eq!(run_action("/v1/runs/run/batches/extra"), None);
-        assert_eq!(run_action("/runs/run/batches"), None);
-    }
-
-    #[test]
-    fn run_resource_requires_exactly_one_run_segment() {
-        assert_eq!(run_resource("/v1/runs/run"), Some("run"));
-        assert_eq!(run_resource("/v1/runs/"), None);
-        assert_eq!(run_resource("/v1/runs/run/extra"), None);
-        assert_eq!(run_resource("/runs/run"), None);
-    }
-
-    #[test]
-    fn http_open_batch_and_abort_lifecycle_uses_contract_statuses_and_bodies() {
-        let service = Arc::new(SinkService::new("qbs", Arc::new(d_biz_destination())));
-        let run_id = "20260814091530_a3f19c";
-        let open_body = format!(
-            r#"{{"run_id":"{run_id}",{TARGET_JSON}"target_table":"T_POSITION","primary_key":["D_BIZ"],"source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
-        );
-
-        let (status, opened) = exchange(service.clone(), "/v1/runs", &open_body);
-        assert_eq!(status, 200);
-        assert_eq!(opened["run_id"], run_id);
-
-        let batch_path = format!("/v1/runs/{run_id}/batches");
-        let (status, batch) =
-            exchange(service.clone(), &batch_path, r#"{"seq":1,"rows":[[null]]}"#);
-        assert_eq!(status, 200);
-        assert_eq!(batch["seq"], 1);
-        assert_eq!(batch["rows_written"], 1);
-        assert_eq!(batch["next_seq"], 2);
-
-        let abort_path = format!("/v1/runs/{run_id}/abort");
-        let (status, aborted) = exchange(service.clone(), &abort_path, "{}");
-        assert_eq!(status, 200);
-        assert_eq!(aborted["staging_dropped"], true);
-
-        let (status, repeated) = exchange(service.clone(), &abort_path, "{}");
-        assert_eq!(status, 200);
-        assert_eq!(repeated["staging_dropped"], false);
-
-        let (status, unknown) = exchange(service, "/v1/runs/20260814091531_b4e20d/abort", "{}");
-        assert_eq!(status, 200);
-        assert_eq!(unknown["staging_dropped"], false);
-    }
-
-    #[test]
-    fn http_commit_and_get_expose_the_terminal_resource() {
-        let service = Arc::new(SinkService::new("qbs", Arc::new(d_biz_destination())));
-        let run_id = "20260814091530_a3f19c";
-        let open_body = format!(
-            r#"{{"run_id":"{run_id}",{TARGET_JSON}"target_table":"T_POSITION","primary_key":["D_BIZ"],"source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
-        );
-        exchange(service.clone(), "/v1/runs", &open_body);
-        exchange(
-            service.clone(),
-            &format!("/v1/runs/{run_id}/batches"),
-            r#"{"seq":1,"rows":[["2026-08-14 12:00:00"]]}"#,
-        );
-
-        let (status, committed) = exchange(
-            service.clone(),
-            &format!("/v1/runs/{run_id}/commit"),
-            r#"{"total_batches":1,"total_rows":1}"#,
-        );
-        assert_eq!(status, 200);
-        assert_eq!(committed["source_rows"], 1);
-        assert_eq!(committed["swapped_rows"], 1);
-        assert_eq!(committed["count_ms"], 0);
-
-        let (status, terminal) =
-            exchange_method(service.clone(), "GET", &format!("/v1/runs/{run_id}"), "");
-        assert_eq!(status, 200);
-        assert_eq!(terminal["terminal"], "SWAPPED");
-
-        let (status, unknown) =
-            exchange_method(service, "GET", "/v1/runs/20260814091531_b4e20d", "");
-        assert_eq!(status, 404);
-        assert_eq!(unknown["error"]["code"], "RUN_UNKNOWN");
-    }
-
-    #[test]
-    fn the_target_metadata_face_fails_as_an_environment_fault_and_leaves_no_run_behind() {
-        // 连不上目标端 → SINK_ENVIRONMENT + details.kind = "OTHER"，码闭集不增
-        // （ADR-0038 §9，与 test-connection 同一个码）。127.0.0.1:1 上没有 MySQL。
-        let service = Arc::new(SinkService::new("qbs", Arc::new(d_biz_destination())));
-        let target = r#"{"host":"127.0.0.1","port":1,"username":"sink","password":"x","database":"qbs"}"#;
-
-        let (status, body) = exchange(service.clone(), "/v1/target/tables", target);
-        assert_eq!(status, 500, "{body}");
-        assert_eq!(body["error"]["code"], "SINK_ENVIRONMENT");
-        assert_eq!(body["error"]["details"]["kind"], "OTHER");
-        // 不属于任何 run：报文里没有 run_id，注册表里也没多出东西（ADR-0038 §3）。
-        assert!(body["error"]["run_id"].is_null(), "{body}");
-
-        let (status, body) = exchange(
-            service.clone(),
-            "/v1/target/columns",
-            &format!(r#"{{"target":{target},"target_table":"T_POSITION"}}"#),
-        );
-        assert_eq!(status, 500, "{body}");
-        assert_eq!(body["error"]["code"], "SINK_ENVIRONMENT");
-
-        let (status, unknown) =
-            exchange_method(service, "GET", "/v1/runs/20260814091530_a3f19c", "");
-        assert_eq!(status, 404);
-        assert_eq!(unknown["error"]["code"], "RUN_UNKNOWN");
-    }
-
-    #[test]
-    fn the_columns_endpoint_nests_the_connection_and_refuses_a_stray_field() {
-        // 连接嵌在 `target` 里（与 OpenRunRequest 同形），顶层只多一个 `target_table`。
-        // flatten 进顶层就得放弃 `deny_unknown_fields`，拼错字段名会静默通过。
-        let service = Arc::new(SinkService::new("qbs", Arc::new(d_biz_destination())));
-        let target = r#"{"host":"127.0.0.1","port":1,"username":"sink","password":"x","database":"qbs"}"#;
-
-        let (status, flattened) = exchange(
-            service.clone(),
-            "/v1/target/columns",
-            &format!(r#"{{{TARGET_JSON}"target_table":"T","host":"127.0.0.1"}}"#),
-        );
-        assert_eq!(status, 400, "{flattened}");
-        assert_eq!(flattened["error"]["code"], "BAD_REQUEST");
-
-        let (status, missing_table) = exchange(
-            service,
-            "/v1/target/columns",
-            &format!(r#"{{"target":{target}}}"#),
-        );
-        assert_eq!(status, 400, "{missing_table}");
-    }
-
-    #[test]
-    fn target_check_endpoint_returns_the_typed_precheck_result() {
-        let service = Arc::new(SinkService::new("qbs", Arc::new(d_biz_destination())));
-        let body = format!(
-            r#"{{{TARGET_JSON}"target_table":"T_POSITION","primary_key":["D_BIZ"],"source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
-        );
-
-        let (status, result) = exchange(service, "/v1/target/check", &body);
-        assert_eq!(status, 200, "{result}");
-        assert_eq!(result["ok"], true);
-        assert_eq!(result["findings"], json!([]));
-        assert!(result["suggested_ddl"].is_null());
-    }
-
-    /// 夹具的身份。**不落盘**：这一层测的是路由与报文，身份怎么来的由
-    /// `agent.rs` 自己的用例守（跨重启稳定那条）。
-    fn fixture_agent() -> AgentInfo {
-        AgentInfo {
-            agent_id: "fixture-agent".to_owned(),
-            name: "fixture".to_owned(),
-            version: "0.0.0-test".to_owned(),
+    impl Request {
+        /// 从 tiny_http 的请求里把方法、URL 和请求体取出来。
+        ///
+        /// 读到上限**再多一个字节**为止：多出来的那一个字节就是「超长」的判据，
+        /// 留给 `read_json` 去认——判定只有一处。
+        ///
+        /// 请求体在这里**一律读**，包括 GET 与没匹配上任何路由的那些。从前它只在
+        /// handler 里读，所以打到不存在的路径上的一个大 body 会被直接丢掉；
+        /// 代价是那种请求现在也要先缓冲到 64 MiB 上限才答 404，状态码一个字没变。
+        pub fn from_tiny_http(request: &mut tiny_http::Request) -> Self {
+            let method = Method::from(request.method());
+            let url = request.url().to_owned();
+            let headers = request
+                .headers()
+                .iter()
+                .map(|header| {
+                    (
+                        header.field.as_str().as_str().to_owned(),
+                        header.value.as_str().to_owned(),
+                    )
+                })
+                .collect();
+            let mut body = Vec::new();
+            let read = request
+                .as_reader()
+                .take(MAX_BODY_BYTES + 1)
+                .read_to_end(&mut body)
+                .map(|_| body)
+                .map_err(|error| error.to_string());
+            let mut parsed = Request::new(method, &url, Vec::new());
+            parsed.headers = headers;
+            parsed.body = read;
+            parsed
         }
     }
 
-    /// `GET /v1/agent/info`（ADR-0044 §2）：未鉴权、无请求体、回三个字段。
-    /// source 的注册与每次开跑前的身份核对都打这里，路由掉了整条链就哑了。
-    #[test]
-    fn agent_info_is_served() {
-        let service = Arc::new(SinkService::new("qbs", Arc::new(d_biz_destination())));
-
-        let (status, body) = exchange_method(service, "GET", "/v1/agent/info", "");
-
-        assert_eq!(status, 200, "{body}");
-        assert_eq!(body["agent_id"], "fixture-agent");
-        assert_eq!(body["name"], "fixture");
-        assert!(body.get("version").is_some(), "{body}");
-    }
-
-    fn exchange(
-        service: Arc<SinkService<FixedDestination<InMemoryDestination>>>,
-        path: &str,
-        body: &str,
-    ) -> (u16, Value) {
-        exchange_method(service, "POST", path, body)
-    }
-
-    fn exchange_method(
-        service: Arc<SinkService<FixedDestination<InMemoryDestination>>>,
-        method: &str,
-        path: &str,
-        body: &str,
-    ) -> (u16, Value) {
-        let server = Server::http("127.0.0.1:0").unwrap();
-        let address = server.server_addr().to_ip().unwrap();
-        let worker = thread::spawn(move || {
-            let request = server.recv().unwrap();
-            handle_request(request, &service, &fixture_agent());
-        });
-
-        let mut stream = TcpStream::connect(address).unwrap();
-        write!(
-            stream,
-            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        )
-        .unwrap();
-        stream.shutdown(std::net::Shutdown::Write).unwrap();
-        let mut raw_response = String::new();
-        stream.read_to_string(&mut raw_response).unwrap();
-        worker.join().unwrap();
-
-        let (head, body) = raw_response.split_once("\r\n\r\n").unwrap();
-        let status = head
-            .lines()
-            .next()
-            .unwrap()
-            .split_whitespace()
-            .nth(1)
-            .unwrap()
-            .parse()
-            .unwrap();
-        (status, serde_json::from_str(body).unwrap())
+    impl Response {
+        /// 交回给 tiny_http 去写线。
+        pub fn into_tiny_http(self) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+            let mut response = tiny_http::Response::from_data(self.body)
+                .with_status_code(tiny_http::StatusCode(self.status));
+            for (name, value) in &self.headers {
+                let header = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes())
+                    .expect("响应头是本进程自己造的，必然合法");
+                response = response.with_header(header);
+            }
+            response
+        }
     }
 }

@@ -362,6 +362,27 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    restart all live in `crate::server::serve`. That half — and only that half — is what the binary-spawning
    sentinels in `tests/source_skeleton.rs` exist to prove.
 
+**Sink API**
+   `sink`'s HTTP face has the same shape, one entry point down: `Api::handle(&Request) -> Response`
+   in `crates/sink/src/http.rs`, over the crate's own `Request`/`Response`. `tiny_http` is confined to
+   three places in that file — `serve`'s listener loop, the `handle_request` that feeds it, and the
+   translation pair at the bottom — and no route or handler knows it exists. Unlike `source`, `sink`
+   keeps that process-level half in the same file rather than a `server.rs`; the file is 700 lines,
+   not 2400. Tests drive all eleven routes in-process (`crates/sink/tests/api.rs`), against
+   `test_support::InMemoryDestination` behind the `SinkService` seam.
+
+   Routes are **data** (`routes()`) and matched in the same two passes, literal before placeholder, so
+   `/v1/runs/cleanup` cannot be swallowed by a run id however the table is written. A placeholder is
+   exactly one path segment: non-empty, no `/` — one `match_pattern`, where there used to be a
+   `run_resource` and a `run_action` saying the same thing twice.
+   `every_route_reaches_its_handler` reconciles its own table against `routes()`, so a new route
+   without a test fails the suite. The failure log reads the same table, so a run-scoped route added
+   later names its `run_id` without anyone remembering to go and say so.
+
+   **There is no authentication column**, because `sink` has no login at all: anything that can reach
+   the port can drive it with the credentials the caller supplies. Failure keeps the sink envelope —
+   `{"error": {"code", "message", "run_id", "details"}}` — unchanged by this shape.
+
 ## Standing limits
 
 Deliberate debts, not oversights. **Each is a fact about the code as it stands**, not a plan: what

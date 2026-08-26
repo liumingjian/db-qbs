@@ -1,5 +1,5 @@
 mod agent;
-mod http;
+pub mod http;
 mod mysql_destination;
 mod precheck;
 mod service;
