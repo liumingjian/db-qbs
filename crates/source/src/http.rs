@@ -589,6 +589,10 @@ fn handle_get_run(
                 "source_sql": record.source_sql,
                 "evidence": record.evidence,
                 "staging_table": record.staging_table,
+                // 发起时刻。界面上的「已用时」要的是**墙钟**，而 `ms` 是批次耗时的累加：
+                // 开跑前计数的那几十秒里一个批次都还没有，`ms` 因此是 0，
+                // 于是一次真的在跑的运行会先自称「已用时 00:00」将近一分钟（UX 评审 P1-8）。
+                "started_at": record.started_at,
                 "stage": record.stage,
                 "total_rows": record.total_rows,
                 "precount_ms": record.precount_ms,

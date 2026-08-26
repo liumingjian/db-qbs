@@ -15,6 +15,7 @@ import {
   UPSERT_NOTE_DONE,
 } from "./components/DesignSystem";
 import { formatTimestamp, historyPresentation, runIdPresentation } from "./history";
+import { PrecheckReports } from "./PrecheckReports";
 import { rerunAction } from "./rerun";
 import { sourceSummary, whereSummary } from "./spec";
 import { Modal } from "./ui";
@@ -165,6 +166,10 @@ export function RunDrawer({
               </div>
             )}
           </section>
+
+          {/* 映射预检的诊断表也摆在抽屉里（UX 评审 P1-6）：它原来只长在整屏详情上，
+              而那一屏唯一的入口是刚点完发起的那一次，刷新一下就再也找不到了。 */}
+          {run.mapping_issues.length > 0 && <PrecheckReports detail={run} />}
 
           {(presentation.kind === "failed" || presentation.kind === "unknown") && (
             <FailureEvidence

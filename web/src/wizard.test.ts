@@ -274,6 +274,23 @@ describe("when a change is worth asking about", () => {
 });
 
 describe("the advance gate", () => {
+  it("opens on a checklist, not on three red errors", () => {
+    // 刚进向导时什么都还没填，于是三条阻塞同时成立。把它们和「目标字段重复」摆成
+    // 同一种红色告警，等于开屏就宣布出了三件事——而人一步都还没走（UX 评审 P1-2）。
+    const fresh = openNew(SOURCE, TARGET);
+    const blockers = canAdvance(fresh, 1);
+    expect(blockers.length).toBeGreaterThan(0);
+    expect(blockers.every((blocker) => blocker.kind === "todo")).toBe(true);
+  });
+
+  it("still calls a real conflict an error", () => {
+    let draft = withTargetColumns(workedDraft());
+    draft = done(apply(draft, { type: "rename-target", source: "C_NAME", target: "ID" }));
+    const errors = canAdvance(draft, 1).filter((blocker) => blocker.kind === "error");
+    expect(errors.map((blocker) => blocker.message).join(" ")).toContain("重复");
+  });
+
+
   it("locates a duplicate target field to both rows", () => {
     let draft = withTargetColumns(workedDraft());
     draft = done(apply(draft, { type: "rename-target", source: "C_NAME", target: "ID" }));
@@ -293,6 +310,7 @@ describe("the advance gate", () => {
     draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
     expect(canAdvance(draft, 1)).toContainEqual({
       step: 1,
+      kind: "error",
       column: null,
       message: "主键必选：至少要勾一列作为 upsert 的去重键",
     });
@@ -360,6 +378,7 @@ describe("the advance gate", () => {
 
     expect(canAdvance(draft, 3)).toEqual([{
       step: 3,
+      kind: "error",
       column: null,
       message: "目标表检查未通过（1 项）",
     }]);
@@ -564,6 +583,44 @@ describe("derived values", () => {
     expect(draft.targetTableExists).toBe(false);
     draft = done(apply(draft, { type: "target-table", table: "t_customer" }));
     expect(draft.targetTableExists).toBe(true);
+  });
+
+  it("walks past the target-table check when it has nothing to say", () => {
+    // 第 3 步在检查通过时是一屏一句话，而检查在第 1 步做完就自动跑了（UX 评审 P1-7）。
+    const passed = passingCheck(withTargetColumns(workedDraft()));
+    const at2 = { ...passed, step: 2 as const };
+    expect(done(apply(at2, { type: "advance" })).step).toBe(4);
+    expect(done(apply({ ...passed, step: 4 as const }, { type: "back" })).step).toBe(2);
+  });
+
+  it("stops at the check when it has something to say", () => {
+    let draft = withTargetColumns(workedDraft());
+    draft = done(apply(draft, {
+      type: "check-arrived",
+      check: {
+        ok: false,
+        findings: [{
+          column: "C_NAME",
+          kind: "insufficient_length_or_precision",
+          expected: "VARCHAR(90)",
+          actual: "varchar(30)",
+          message: "目标 VARCHAR 长度不足",
+        }],
+        suggested_ddl: null,
+      },
+    }));
+    expect(done(apply({ ...draft, step: 2 as const }, { type: "advance" })).step).toBe(3);
+  });
+
+  it("stops at the check when it has not run", () => {
+    const unchecked = { ...withTargetColumns(workedDraft()), step: 2 as const };
+    expect(done(apply(unchecked, { type: "advance" })).step).toBe(3);
+  });
+
+  it("marks a folded check step done on the rail, not skipped over silently", () => {
+    const passed = passingCheck(withTargetColumns(workedDraft()));
+    const rail = view({ ...passed, step: 4 }, 4).rail;
+    expect(rail.find((entry) => entry.step === 3)?.state).toBe("done");
   });
 
   it("never offers a jump on the rail", () => {

@@ -14,7 +14,7 @@ import {
 import { messageFrom } from "./errors";
 import { FailureEvidence } from "./FailureEvidence";
 import { runIdPresentation } from "./history";
-import { mappingSuggestion } from "./m3";
+import { PrecheckReports } from "./PrecheckReports";
 import { progressOfLiveRun } from "./progress";
 import { runPresentation } from "./run";
 import type { RunPresentation } from "./run";
@@ -110,6 +110,10 @@ export function RunScreen({
     };
   }, [runRecordId]);
 
+  // 「已用时」要每秒自己走，不能等下一次轮询把它捎回来：轮询失败或页面切走时，
+  // 屏幕上那个数会停在最后一次成功读取的时刻，而运行还在跑。
+  const now = useNow(detail?.live === true);
+  const hidden = typeof document === "undefined" ? false : document.hidden;
   const presentation = detail === null ? null : runPresentation(detail);
   // 停不停得了和服务端读同一条规则，所以按钮在点下去之前就知道答案——
   // 过去它一直亮着，人只有吃一个 409 才发现封口点已经过了。
@@ -163,7 +167,9 @@ export function RunScreen({
       {loadError !== null && (
         <div className="run-notice is-error" role="alert">
           <span>{loadError}</span>
-          <span>将在页面可见时继续读取。</span>
+          {/* 这句话只在**真的暂停了**的时候才成立（UX 评审 P1-8）。轮询只在页面不可见时
+              停；页面开着的时候它每秒都在重试，而这句读起来像「已经不试了」。 */}
+          <span>{hidden ? "页面在后台，已暂停读取；切回来会继续。" : "正在重试。"}</span>
         </div>
       )}
       {cancelMessage !== null && (
@@ -179,7 +185,7 @@ export function RunScreen({
         <div className="run-content">
           <RunIdentity task={task} detail={detail} />
           {detail.live ? (
-            <LiveRun detail={detail} presentation={presentation} />
+            <LiveRun detail={detail} presentation={presentation} now={now} />
           ) : (
             <FinishedRun
               detail={detail}
@@ -191,6 +197,22 @@ export function RunScreen({
       )}
     </section>
   );
+}
+
+/**
+ * 每秒一跳，只在需要的时候跳。
+ *
+ * 运行结束就不跳了——一个终局的运行时长是个定值，让它继续每秒重渲染一次整屏，
+ * 只是白烧电。
+ */
+function useNow(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+  return now;
 }
 
 function RunIdentity({ task, detail }: { task: Task; detail: RunDetail }) {
@@ -210,9 +232,12 @@ function RunIdentity({ task, detail }: { task: Task; detail: RunDetail }) {
 function LiveRun({
   detail,
   presentation,
+  now,
 }: {
   detail: RunDetail & { live: true };
   presentation: RunPresentation;
+  /** 当前时刻，每秒一跳。墙钟时长与「最后动静」都从它算。 */
+  now: number;
 }) {
   const progress = progressOfLiveRun(detail);
   return (
@@ -250,7 +275,13 @@ function LiveRun({
           value={detail.total_rows === null ? "—" : formatCount(detail.total_rows)}
         />
         <Metric label="当前批次序号" value={formatCount(detail.seq)} />
-        <Metric label="已用时" value={formatDuration(detail.ms)} />
+        {/* 「已用时」是**墙钟**，不是批次耗时的累加（UX 评审 P1-8）。开跑前计数那几十秒里
+            一个批次都还没有，`ms` 是 0——原来这一格因此在一次真的在跑的运行上
+            先写将近一分钟的「已用时 00:00」。`ms` 还在，只是叫回它本来的名字，
+            与终局屏那一格同名。 */}
+        <Metric label="已用时" value={formatElapsed(detail.started_at, now)} />
+        <Metric label="最后动静" value={formatSince(detail.last_ts, now)} />
+        <Metric label="累计批次耗时" value={formatDuration(detail.ms)} />
         <Metric label="累计字节" value={formatBytes(detail.bytes)} />
       </dl>
     </>
@@ -357,62 +388,6 @@ function RunConclusion({
  * 容器随之改成单段布局（#132）：两栏 grid 与 `is-map-failed`（「映射失败时整宽」）在只剩
  * 一段之后都没有对象了，一并撤掉；态修饰只保留 `.is-failed`，本组件只在映射预检失败时渲染。
  */
-function PrecheckReports({
-  detail,
-}: {
-  detail: RunDetail & { live: false };
-}) {
-  return (
-    <div className="precheck-reports">
-      <section className="is-failed">
-        <header>
-          <strong>映射预检</strong>
-          <span>目标端</span>
-        </header>
-        <p>{detail.message ?? "目标端映射预检未通过。"}</p>
-        <DiagnosticTable
-          columns={["列", "源端", "目标端", "规则", "建议"]}
-          rows={detail.mapping_issues.map((issue) => [
-            issue.column ?? "—",
-            issue.source ?? "—",
-            issue.target ?? "—",
-            issue.rule ?? issue.message ?? "—",
-            mappingSuggestion(issue),
-          ])}
-        />
-        <small>总计 {detail.mapping_issues.length} 项问题</small>
-      </section>
-    </div>
-  );
-}
-
-function DiagnosticTable({
-  columns,
-  rows,
-}: {
-  columns: string[];
-  rows: string[][];
-}) {
-  return (
-    <div className="diagnostic-table-wrap">
-      <table className="diagnostic-table">
-        <thead>
-          <tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr>
-        </thead>
-        <tbody>
-          {rows.map((row, rowIndex) => (
-            <tr key={`${row[0]}-${rowIndex}`}>
-              {row.map((value, columnIndex) => (
-                <td key={`${columns[columnIndex]}-${columnIndex}`}>{value}</td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
 function DetailValue({ label, value }: { label: string; value: string }) {
   return (
     <div>
@@ -440,6 +415,35 @@ function formatDuration(milliseconds: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+/** 从发起到此刻的墙钟时长。时间戳读不动时给横杠，不给一个 00:00。 */
+function formatElapsed(startedAt: string, now: number): string {
+  const started = Date.parse(startedAt);
+  if (Number.isNaN(started)) {
+    return "—";
+  }
+  return formatDuration(Math.max(0, now - started));
+}
+
+/**
+ * 距离最后一个批次多久了——**卡住与慢的分界线**。
+ *
+ * 一次搬五十万行的运行看上去和一次已经僵在那里的运行没有区别：进度都不动，
+ * 行数都不涨。差别只在这一个数上，而 `last_ts` 一直取回来了，只是没人显示它。
+ */
+function formatSince(lastTs: string | null, now: number): string {
+  if (lastTs === null) {
+    return "—";
+  }
+  const last = Date.parse(lastTs);
+  if (Number.isNaN(last)) {
+    return "—";
+  }
+  const seconds = Math.max(0, Math.floor((now - last) / 1000));
+  return seconds < 60
+    ? `${seconds} 秒前`
+    : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒前`;
 }
 
 function formatBytes(bytes: number): string {

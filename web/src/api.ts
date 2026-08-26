@@ -346,6 +346,8 @@ export interface LiveRunDetail {
   source_sql: string;
   evidence?: RunEvidence;
   staging_table: string | null;
+  /** 发起时刻。「已用时」按它算墙钟——`ms` 是批次耗时的累加，不是运行的时长。 */
+  started_at: string;
   stage: string | null;
   total_rows: number | null;
   precount_ms: number | null;

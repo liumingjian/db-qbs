@@ -1,4 +1,4 @@
-import { Pencil } from "lucide-react";
+import { Database, Pencil } from "lucide-react";
 
 import type { RunHistory } from "./api";
 import { remediationFor } from "./troubleshooting";
@@ -48,7 +48,9 @@ export function FailureEvidence({
               : "以下连接与参数在发起时固定，不随后续配置修改而变化。"}
           </p>
         </div>
-        {remediation !== null && (
+        {/* 下一步该去哪儿（UX 评审 P1-11）。「没有可改的地方」也要说出口——
+            十六个失败分类里有八个原来在这里什么都不出。 */}
+        {remediation?.kind === "wizard" && (
           <button
             className="button is-ghost"
             type="button"
@@ -57,6 +59,17 @@ export function FailureEvidence({
             <Pencil size={15} aria-hidden="true" />
             {remediation.label}
           </button>
+        )}
+        {/* 数据源屏是一条真地址，所以这里给的是**链接**不是回调：抽屉与整屏两个宿主
+            都不必替它转发一次导航，而它也因此可以被中键点开。 */}
+        {remediation?.kind === "datasources" && (
+          <a className="button is-ghost" href="#datasources">
+            <Database size={15} aria-hidden="true" />
+            {remediation.label}
+          </a>
+        )}
+        {remediation?.kind === "none" && (
+          <p className="remediation-none">{remediation.reason}</p>
         )}
       </div>
       {/* 「重跑是安全的」要**在证据上面**：不知道发生了什么的时候，第一反应是不敢动。

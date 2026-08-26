@@ -188,6 +188,26 @@ export function preselect(
 }
 
 /**
+ * Whether the door has to be shown at all (UX review P1-10).
+ *
+ * The dialog exists to do two things: refuse entry with a reason, and take a
+ * choice. When the gate passes **and** `preselect` answers both sides on its
+ * own, it is doing neither — it is a modal whose only content is a button that
+ * says 进入向导. And now that both pickers live inside the wizard, changing
+ * one's mind afterwards costs nothing.
+ *
+ * The gate evaluation itself is untouched. It still runs, and it still stops
+ * people at the door when a link in the chain is broken; it just stops
+ * interrupting when it has nothing to say.
+ */
+export function entryNeedsDialog(guard: EntryGuard): boolean {
+  if (guard.kind !== "open") {
+    return true;
+  }
+  return preselect(guard.sources) === "" || preselect(guard.targets) === "";
+}
+
+/**
  * Why the door will not open yet, in the user's own language, or `null`.
  *
  * The offline case names the datasource **and** the agent: "the agent is

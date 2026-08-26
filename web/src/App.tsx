@@ -1,11 +1,11 @@
 import {
   Database,
+  Info,
   LoaderCircle,
   Menu,
   PanelLeftClose,
   Radio,
   Server,
-  Settings,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
@@ -34,10 +34,10 @@ import { AgentScreen } from "./AgentScreen";
 import { JobCenterScreen } from "./JobCenterScreen";
 import { latestRunByTask, runStatus } from "./listing";
 import { RunScreen } from "./RunScreen";
-import { SettingsScreen } from "./SettingsScreen";
+import { AboutPanel } from "./AboutPanel";
 import { DatasourceScreen } from "./DatasourceScreen";
-import { evaluateEdit, evaluateEntry, gateFix, gateReason } from "./entry";
-import type { EntryFix, EntryGuard } from "./entry";
+import { entryNeedsDialog, evaluateEdit, evaluateEntry, gateFix, gateReason, preselect } from "./entry";
+import type { DatasourceOption, EntryFix, EntryGuard } from "./entry";
 import { TaskEntryDialog } from "./TaskEntryDialog";
 import { TaskWizardScreen } from "./TaskWizardScreen";
 import type { TaskWizardScreenHandle } from "./TaskWizardScreen";
@@ -61,21 +61,47 @@ type DialogState =
  * 落地页本来也一直是作业中心（见 `pageFromHash` 的兜底），导航第一项是 agent 时，
  * 高亮的那一项和展开的那一屏对不上。
  */
-type NavigationPage = "jobs" | "datasources" | "agents" | "settings";
+type NavigationPage = "jobs" | "datasources" | "agents";
 type Page = NavigationPage | "wizard";
 
-/** 旧的运行历史地址。**重定向而不是 404**：它还在旧链接与旧文档里流通，接住比让人撞墙便宜。 */
-const RETIRED_HISTORY_HASHES = ["#history", "#/history"];
+/**
+ * 已退役的地址。**重定向而不是 404**：它们还在旧链接与旧文档里流通，接住比让人撞墙便宜。
+ *
+ * `#settings` 是这一轮加进来的：那一屏降成了顶栏右上角的「关于」浮层（UX 评审 P1-12）。
+ */
+const RETIRED_HASHES = ["#history", "#/history", "#settings", "#/settings"];
+
+/**
+ * 运行详情的地址（UX 评审 P1-6）。
+ *
+ * 它原来**没有地址**：整屏运行详情只是一个 `activeRun` state，唯一的入口是刚点完
+ * 「发起运行」的那一次。刷新一页、发一条链接给同事、按一下浏览器后退，它就没了。
+ *
+ * 键是 `run_record_id` 而不是 `task_id`：这一屏摆的是**一次运行**，不是一个任务。
+ * 按任务寻址的话，同一条链接在下一次运行之后指向的会是另一件事。
+ */
+const RUN_HASH_PREFIX = "#runs/";
+
+export function runHash(runRecordId: string): string {
+  return `${RUN_HASH_PREFIX}${encodeURIComponent(runRecordId)}`;
+}
+
+function runRecordFromHash(hash: string): string | null {
+  return hash.startsWith(RUN_HASH_PREFIX)
+    ? decodeURIComponent(hash.slice(RUN_HASH_PREFIX.length))
+    : null;
+}
 
 function pageFromHash(hash: string): Page {
+  if (runRecordFromHash(hash) !== null) {
+    // 运行详情压在作业中心这一屏上：面包屑与侧栏高亮都归它。
+    return "jobs";
+  }
   if (hash === "#agents") {
     return "agents";
   }
   if (hash === "#datasources") {
     return "datasources";
-  }
-  if (hash === "#settings") {
-    return "settings";
   }
   if (hash === "#wizard") {
     return "wizard";
@@ -156,7 +182,6 @@ const NAV_ITEMS: readonly { page: NavigationPage; label: string }[] = [
   { page: "jobs", label: "作业中心" },
   { page: "datasources", label: "数据源" },
   { page: "agents", label: "目标端 Agent" },
-  { page: "settings", label: "系统设置" },
 ];
 
 function navIcon(page: NavigationPage, size: number) {
@@ -167,8 +192,6 @@ function navIcon(page: NavigationPage, size: number) {
       return <Database size={size} aria-hidden="true" />;
     case "datasources":
       return <Server size={size} aria-hidden="true" />;
-    case "settings":
-      return <Settings size={size} aria-hidden="true" />;
   }
 }
 
@@ -217,6 +240,8 @@ export function App() {
     task: Task;
     runRecordId: string;
   } | null>(null);
+  /** 地址里点名、但还没解析成 `activeRun` 的那次运行。 */
+  const [requestedRun, setRequestedRun] = useState<string | null>(null);
   /**
    * 发起失败的那句话。发起不再有对话框可以把错误挂在里面，所以它挂在屏顶——
    * 「同一任务已有一次运行进行中」这类 409 就是从这里读到的。
@@ -334,8 +359,8 @@ export function App() {
         navigationBypass.current = false;
         return;
       }
-      // 旧的 `#history` 打进来就地换成作业中心的地址：**不留一个还能回去的空屏**。
-      if (RETIRED_HISTORY_HASHES.includes(window.location.hash)) {
+      // 退役地址打进来就地换成作业中心的地址：**不留一个还能回去的空屏**。
+      if (RETIRED_HASHES.includes(window.location.hash)) {
         window.location.replace("#jobs");
         return;
       }
@@ -346,6 +371,8 @@ export function App() {
         return;
       }
       setPage(requested);
+      // 地址里点名的那一次运行。任务与历史都还在路上时先记下来，等它们到齐再解析。
+      setRequestedRun(runRecordFromHash(window.location.hash));
     }
     handleHashChange();
     window.addEventListener("hashchange", handleHashChange);
@@ -392,6 +419,23 @@ export function App() {
     window.location.hash = "wizard";
   }, [agents, datasources, datasourcesLoading, dialog]);
 
+  // 地址 → `activeRun`。两份数据都到齐才解析得了：运行记录给出 task_id，任务清单给出任务。
+  // 解析不出来时**不跳走**——可能只是还没读完；读完了还找不到，那条记录是真的不在了。
+  useEffect(() => {
+    if (requestedRun === null) {
+      setActiveRun(null);
+      return;
+    }
+    if (activeRun?.runRecordId === requestedRun) return;
+    const run = runHistory.find((entry) => entry.run_record_id === requestedRun);
+    const task = run === undefined
+      ? undefined
+      : tasks?.find((entry) => entry.task_id === run.task_id);
+    if (task !== undefined) {
+      setActiveRun({ task, runRecordId: requestedRun });
+    }
+  }, [activeRun, requestedRun, runHistory, tasks]);
+
   const latestRuns = useMemo(() => latestRunByTask(runHistory), [runHistory]);
   /** 存着的那份草稿，且它绑的两端数据源都还在。 */
   const resumableDraft = useMemo(() => {
@@ -402,7 +446,11 @@ export function App() {
       ? savedDraft
       : null;
   }, [datasources, savedDraft]);
-  const editDatasourceOptions = useMemo(() => {
+  /**
+   * 向导两端可选的数据源。**新建与编辑同一份**（UX 评审 P1-10）：两个下拉现在
+   * 新建态也出，于是它们在两条路上都得有内容。
+   */
+  const wizardDatasourceOptions = useMemo(() => {
     if (wizardDraft === null) return { sources: [], targets: [] };
     const guard = evaluateEdit(
       {
@@ -424,7 +472,39 @@ export function App() {
   }
 
   function openCreateDialog() {
+    // 门禁照旧评估，只是**没话要说的时候不再拦一道**（UX 评审 P1-10）：
+    // 通过、而且两端各自只有一个可选项时，这个对话框的全部内容就是一颗「进入向导」。
+    // 两个选择器现在向导里也有，进去之后改主意不花钱。
+    const guard = evaluateEntry(datasources, agents, datasourcesLoading);
+    if (guard.kind === "open" && !entryNeedsDialog(guard)) {
+      const source = guard.sources.find(
+        (option) => option.datasource_id === preselect(guard.sources),
+      );
+      const target = guard.targets.find(
+        (option) => option.datasource_id === preselect(guard.targets),
+      );
+      if (source !== undefined && target !== undefined) {
+        enterNewWizard(source, target);
+        return;
+      }
+    }
     setDialog({ kind: "entry" });
+  }
+
+  /** 开一份新草稿并进向导。入口对话框与「直接进」两条路共用。 */
+  function enterNewWizard(source: DatasourceOption, target: DatasourceOption) {
+    const fresh = openNew(
+      { datasource_id: source.datasource_id, name: source.name },
+      { datasource_id: target.datasource_id, name: target.name },
+      target.agentStatus === "online",
+    );
+    // 新建就是新建：存着的那份被这一份顶掉，不留两份让人猜哪个是哪个。
+    savedDraftRef.current = fresh;
+    setSavedDraft(null);
+    writeWizardDraft(fresh);
+    setWizardDraft(fresh);
+    setPage("wizard");
+    window.location.hash = "wizard";
   }
 
   function closeDialog() {
@@ -441,6 +521,7 @@ export function App() {
 
   function commitNavigation(nextPage: Page) {
     setActiveRun(null);
+    setRequestedRun(null);
     if (nextPage !== "wizard") {
       setWizardDraft(null);
       // 草稿不跟着走：它留在 sessionStorage 里，作业中心上摆一条回去的路。
@@ -517,7 +598,12 @@ export function App() {
     setStartError(null);
     try {
       const accepted = await startRun(task.task_id);
+      // 落到运行详情，**并把地址一起改掉**（UX 评审 P1-6）：这一屏现在有地址了，
+      // 刷新一下还在，链接发得出去。
       setActiveRun({ task, runRecordId: accepted.run_record_id });
+      setRequestedRun(accepted.run_record_id);
+      navigationBypass.current = true;
+      window.location.hash = runHash(accepted.run_record_id).slice(1);
     } catch (error) {
       setStartError(`${task.name}：${messageFrom(error)}`);
     } finally {
@@ -622,7 +708,9 @@ export function App() {
             </strong>
           </span>
           <span className="topbar-right">
-            <span className="environment">当前工作台</span>
+            {/* 「当前工作台」那枚标签是个**常量**：它每一次渲染都写同样四个字，
+                既不说环境也不说身份。删掉（UX 评审 P1-12），位置让给「关于」。 */}
+            <AboutButton />
           </span>
         </header>
 
@@ -701,7 +789,7 @@ export function App() {
               task={activeRun.task}
               runRecordId={activeRun.runRecordId}
               onBack={() => {
-                setActiveRun(null);
+                commitNavigation("jobs");
                 void loadList();
               }}
               onRelaunch={() => void handleStart(activeRun.task)}
@@ -752,8 +840,8 @@ export function App() {
                 setSavedDraft(null);
                 clearWizardDraft();
               }}
-              sourceOptions={editDatasourceOptions.sources}
-              targetOptions={editDatasourceOptions.targets}
+              sourceOptions={wizardDatasourceOptions.sources}
+              targetOptions={wizardDatasourceOptions.targets}
             />
           )}
 
@@ -776,7 +864,6 @@ export function App() {
             />
           )}
 
-          {activeRun === null && page === "settings" && <SettingsScreen />}
         </div>
 
         {page === "jobs" && dialog?.kind === "entry" && (
@@ -794,18 +881,7 @@ export function App() {
               const target = guard.targets.find((option) => option.datasource_id === targetDatasourceId);
               if (source === undefined || target === undefined) return;
               setDialog(null);
-              const fresh = openNew(
-                { datasource_id: source.datasource_id, name: source.name },
-                { datasource_id: target.datasource_id, name: target.name },
-                target.agentStatus === "online",
-              );
-              // 新建就是新建：存着的那份被这一份顶掉，不留两份让人猜哪个是哪个。
-              savedDraftRef.current = fresh;
-              setSavedDraft(null);
-              writeWizardDraft(fresh);
-              setWizardDraft(fresh);
-              setPage("wizard");
-              window.location.hash = "wizard";
+              enterNewWizard(source, target);
             }}
           />
         )}
@@ -838,6 +914,65 @@ export function App() {
   );
 }
 
+/**
+ * 顶栏右上角的「关于」（UX 评审 P1-12）。
+ *
+ * **不是模态**，所以不装焦点陷阱：它是一份读完就走的只读清单，把 Tab 圈在里面
+ * 反而挡住了后面的界面。Escape 与点外面都关，打开时焦点进去、关掉时回到触发它的按钮。
+ */
+function AboutButton() {
+  const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLSpanElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const panel = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    panel.current?.focus();
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setOpen(false);
+        trigger.current?.focus();
+      }
+    }
+    function handleMouseDown(event: MouseEvent) {
+      if (event.target instanceof Node && wrap.current?.contains(event.target) !== true) {
+        setOpen(false);
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("mousedown", handleMouseDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("mousedown", handleMouseDown);
+    };
+  }, [open]);
+
+  return (
+    <span className="about-wrap" ref={wrap}>
+      <button
+        className="button is-ghost about-trigger"
+        type="button"
+        ref={trigger}
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <Info size={15} aria-hidden="true" />
+        关于
+      </button>
+      {open && (
+        <div className="about-popover" ref={panel} role="dialog" aria-label="关于 db-qbs" tabIndex={-1}>
+          <header>
+            <strong>关于 db-qbs</strong>
+            <span>本版设置只读</span>
+          </header>
+          <AboutPanel />
+        </div>
+      )}
+    </span>
+  );
+}
+
 function pageLabel(page: Page): string {
   switch (page) {
     case "agents":
@@ -846,8 +981,6 @@ function pageLabel(page: Page): string {
       return "作业中心";
     case "datasources":
       return "数据源";
-    case "settings":
-      return "系统设置";
     case "wizard":
       return "新建导入";
   }

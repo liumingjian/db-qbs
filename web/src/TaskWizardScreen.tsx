@@ -1,4 +1,5 @@
 import {
+  Check,
   ChevronDown,
   ChevronRight,
   Copy,
@@ -9,6 +10,7 @@ import {
   X,
 } from "lucide-react";
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 
 import {
   checkTargetTable,
@@ -97,6 +99,9 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
   const [checkError, setCheckError] = useState<string | null>(null);
   const model = view(draft);
   const advanceBlocked = model.step.blockers.length > 0;
+  /** 最后一步为什么提交不了，或者 `null`。 */
+  const submitRefusal =
+    busy === "submit" ? "正在提交" : canAdvance(draft, 4)[0]?.message ?? null;
   const sqlIdentity = JSON.stringify(toSpec(draft));
 
   function commit(next: Draft) {
@@ -543,7 +548,10 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
                 </button>
               )}
             </div>
-            {draft.mode === "edit" && (
+            {/* 新建时也给（UX 评审 P1-10）：这两个下拉原来只在编辑态出现，于是新建路上
+                选错了源库只能退回去从头再来一遍。改动本身有清空规则守着（Rule 1 / Rule 3），
+                真会丢东西时向导自己会拦一道。 */}
+            {sourceOptions.length > 0 && (
               <label className="wizard-select-label">源端数据源
                 <select value={draft.source.datasource_id} onChange={(event) => {
                   const option = sourceOptions.find((candidate) => candidate.datasource_id === event.target.value);
@@ -609,7 +617,7 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
                 <RefreshCw className={busy === "target" ? "is-spinning" : ""} size={15} />
               </button>
             </div>
-            {draft.mode === "edit" && (
+            {targetOptions.length > 0 && (
               <label className="wizard-select-label">目标端数据源
                 <select value={draft.target.datasource_id} onChange={(event) => {
                   const option = targetOptions.find((candidate) => candidate.datasource_id === event.target.value);
@@ -670,7 +678,10 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
         <ol className="wizard-rail" aria-label="导入步骤">
           {model.rail.map((entry) => (
             <li className={`is-${entry.state}`} aria-current={entry.state === "current" ? "step" : undefined} key={entry.step}>
-              <span>{entry.step}</span><strong>{entry.label}</strong>
+              {/* 走过的步子打勾、当前那一步填实心（UX 评审 P1-7）：两者原来长得一模一样，
+                  于是这条轨道说不出「我在哪儿」——而那正是它唯一的职责。 */}
+              <span>{entry.state === "done" ? <Check size={13} aria-label="已完成" /> : entry.step}</span>
+              <strong>{entry.label}</strong>
             </li>
           ))}
         </ol>
@@ -696,23 +707,27 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
           </button>
           <span className="wizard-footer-actions">
             {draft.step < 4 ? (
-              <button
-                className="button is-primary"
-                type="button"
-                disabled={advanceBlocked}
-                title={advanceBlocked ? "请先处理当前步骤中的问题" : undefined}
-                onClick={advance}
-              >{draft.step === 3 ? "查看确认页" : "下一步"}</button>
+              <Refusable reason={advanceBlocked ? "请先处理当前步骤中的问题" : null}>
+                <button className="button is-primary" type="button" disabled={advanceBlocked} onClick={advance}>
+                  {draft.step === 3 ? "查看确认页" : "下一步"}
+                </button>
+              </Refusable>
             ) : draft.mode === "edit" ? (
-              <button className="button is-primary" type="button" disabled={busy === "submit" || canAdvance(draft, 4).length > 0} title={busy === "submit" ? "正在提交" : canAdvance(draft, 4)[0]?.message} onClick={() => void submit("save-only")}>
-                {busy === "submit" ? <LoaderCircle className="is-spinning" size={15} /> : null}保存
-              </button>
+              <Refusable reason={submitRefusal}>
+                <button className="button is-primary" type="button" disabled={submitRefusal !== null} onClick={() => void submit("save-only")}>
+                  {busy === "submit" ? <LoaderCircle className="is-spinning" size={15} /> : null}保存
+                </button>
+              </Refusable>
             ) : (
               <>
-                <button className="button" type="button" disabled={busy === "submit" || canAdvance(draft, 4).length > 0} title={busy === "submit" ? "正在提交" : canAdvance(draft, 4)[0]?.message} onClick={() => void submit("save-only")}>只保存</button>
-                <button className="button is-primary" type="button" disabled={busy === "submit" || canAdvance(draft, 4).length > 0} title={busy === "submit" ? "正在提交" : canAdvance(draft, 4)[0]?.message} onClick={() => void submit("start")}>
-                  {busy === "submit" ? <LoaderCircle className="is-spinning" size={15} /> : null}开始导入
-                </button>
+                <Refusable reason={submitRefusal}>
+                  <button className="button" type="button" disabled={submitRefusal !== null} onClick={() => void submit("save-only")}>只保存</button>
+                </Refusable>
+                <Refusable reason={submitRefusal}>
+                  <button className="button is-primary" type="button" disabled={submitRefusal !== null} onClick={() => void submit("start")}>
+                    {busy === "submit" ? <LoaderCircle className="is-spinning" size={15} /> : null}开始导入
+                  </button>
+                </Refusable>
               </>
             )}
           </span>
@@ -739,6 +754,14 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
  * **保留草稿并离开**，旁边多一颗真要扔掉的路——不给的话，那份草稿只能靠作业中心上
  * 那条通知去扔，而人此刻就在这里，就是在做这个决定。
  */
+/**
+ * 按不动的按钮**自己不会解释自己**：浏览器不给 `disabled` 控件派发指针事件，
+ * 挂在按钮上的 `title` 一个字都不会显示（UX 评审 P1-11）。理由挂外层。
+ */
+function Refusable({ reason, children }: { reason: string | null; children: ReactNode }) {
+  return reason === null ? <>{children}</> : <span className="disabled-action" title={reason}>{children}</span>;
+}
+
 export function WizardConfirmDialog({ loss, leaving = false, onCancel, onConfirm, onDiscard }: {
   loss: Loss;
   leaving?: boolean;
@@ -783,7 +806,6 @@ function StepBody({
 }) {
   const model = view(draft).step;
   if (model.step === 1) {
-    const mappingBlockers = model.blockers.filter((blocker) => blocker.column === null);
     return <section className="wizard-step">
       <header><h1>选列与字段映射</h1><p>系统会先做同名匹配，请判断要搬哪些列，以及每一列应写到目标表的哪里。</p></header>
       {draft.fetchMode === "sql" && (
@@ -821,7 +843,7 @@ function StepBody({
           </tr>)}
         </tbody></table></div>
       )}
-      {mappingBlockers.length > 0 && <div className="wizard-mapping-problems" role="alert"><strong>映射与主键</strong><ul>{mappingBlockers.map((blocker) => <li key={blocker.message}>{blocker.message}</li>)}</ul></div>}
+      <Blockers blockers={model.blockers} label="映射与主键" />
     </section>;
   }
   if (model.step === 2) {
@@ -970,7 +992,30 @@ function previewIdentity(draft: Draft): string {
   });
 }
 
-function Blockers({ blockers: allBlockers }: { blockers: ReturnType<typeof canAdvance> }) {
+/**
+ * 一步走不下去的理由，**分成两档**（UX 评审 P1-2）。
+ *
+ * 还没填的字段是「待办」：中性色、无标题、不进 live region——它们在向导刚打开、
+ * 一步都还没走的时候就全部成立，用告警色说这件事等于开屏宣布出了三个问题。
+ * 值与值打架、或者目标库不会接受的那些才是「错误」：红色，并且播报。
+ *
+ * 两档同时有的时候错误在上：那才是需要处理的，待办自己会随着填写消失。
+ */
+function Blockers({ blockers: allBlockers, label }: {
+  blockers: ReturnType<typeof canAdvance>;
+  label?: string;
+}) {
   const blockers = allBlockers.filter((blocker) => blocker.column === null);
-  return blockers.length === 0 ? null : <ul className="wizard-blockers">{blockers.map((blocker) => <li key={blocker.message}>{blocker.message}</li>)}</ul>;
+  const errors = blockers.filter((blocker) => blocker.kind === "error");
+  const todos = blockers.filter((blocker) => blocker.kind === "todo");
+  if (blockers.length === 0) return null;
+  return <>
+    {errors.length > 0 && <div className="wizard-mapping-problems" role="alert">
+      {label !== undefined && <strong>{label}</strong>}
+      <ul>{errors.map((blocker) => <li key={blocker.message}>{blocker.message}</li>)}</ul>
+    </div>}
+    {todos.length > 0 && <ul className="wizard-todos">
+      {todos.map((blocker) => <li key={blocker.message}>{blocker.message}</li>)}
+    </ul>}
+  </>;
 }

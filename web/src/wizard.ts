@@ -164,6 +164,20 @@ export type Applied =
 /** One reason the next step is out of reach, located to a column where it can be. */
 export interface Blocker {
   step: Step;
+  /**
+   * Whether this is something still to do, or something actually wrong.
+   *
+   * The wizard used to open on three red alerts — 请先选一张源表 / 请先选目标表 /
+   * 至少要选一列 — before anyone had taken a single step. Nothing had gone wrong;
+   * those are simply the fields, unfilled. Rendering them the same as
+   * "目标字段 ID 重复" spends the alert colour on the empty state, which leaves
+   * nothing louder for the case that has to be louder (UX review P1-2).
+   *
+   * `todo` — a field is empty. Neutral checklist, no live region.
+   * `error` — a value conflicts with another value, or with what the target
+   *   database will accept. Red, and announced.
+   */
+  kind: "todo" | "error";
   /** The source column the problem belongs to, or `null` for a whole-step one. */
   column: string | null;
   message: string;
@@ -638,15 +652,24 @@ function reduce(draft: Draft, change: Change): Reduced {
       if (draft.step === 4 || canAdvance(draft, draft.step).length > 0) {
         return { draft, cleared: [] };
       }
-      return { draft: { ...draft, step: (draft.step + 1) as Step }, cleared: [] };
+      const next = (draft.step + 1) as Step;
+      return {
+        draft: { ...draft, step: next === 3 && checkIsSilent(draft) ? 4 : next },
+        cleared: [],
+      };
     }
 
     // Going back is free and lossless. Nothing on the step just left is discarded.
-    case "back":
+    case "back": {
+      if (draft.step === 1) {
+        return { draft, cleared: [] };
+      }
+      const previous = (draft.step - 1) as Step;
       return {
-        draft: draft.step === 1 ? draft : { ...draft, step: (draft.step - 1) as Step },
+        draft: { ...draft, step: previous === 3 && checkIsSilent(draft) ? 2 : previous },
         cleared: [],
       };
+    }
 
     case "leave":
       return { draft, cleared: ["draft"] };
@@ -737,6 +760,23 @@ function withColumns(
       primary_key: primaryKey.filter((name) => targets.has(name.toUpperCase())),
     },
   };
+}
+
+/**
+ * Whether step 3 has anything to say.
+ *
+ * The check runs itself the moment step 1 is complete, so by the time anyone
+ * walks up to step 3 it has usually already passed — and the step is then one
+ * sentence and a button, in the middle of the flow, between the filter and the
+ * confirmation (UX review P1-7). When it passed, the step folds: the answer is
+ * carried on the confirmation page, where P0-3 now states it in three states.
+ *
+ * It unfolds again the moment it has something to say — findings, never run, or
+ * gone stale under a changed mapping. Skipping it is a shortcut past a step with
+ * no content, never past a step with a verdict.
+ */
+function checkIsSilent(draft: Draft): boolean {
+  return checkIsFresh(draft) && draft.check!.value.ok;
 }
 
 /** The target table's own PRIMARY KEY, when every one of its columns is mapped. */
@@ -880,29 +920,33 @@ const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_$#]*$/;
  */
 export function canAdvance(draft: Draft, step: Step): Blocker[] {
   const blockers: Blocker[] = [];
+  /** Something actually wrong. */
   const at = (message: string, column: string | null = null) =>
-    blockers.push({ step, column, message });
+    blockers.push({ step, kind: "error", column, message });
+  /** Something still to do: a field that is empty, and nothing more than that. */
+  const todo = (message: string, column: string | null = null) =>
+    blockers.push({ step, kind: "todo", column, message });
 
   if (step === 1) {
     if (draft.fetchMode === "sql") {
       if ((draft.spec.source_sql ?? "").trim() === "") {
-        at("自定义 SQL 不能为空");
+        todo("自定义 SQL 不能为空");
       }
       if (draft.spec.dblink !== undefined) {
         at("自定义 SQL 已包含源端查询路径，不能同时设置 dblink");
       }
     } else {
       if (draft.spec.owner === "" || draft.spec.table === "") {
-        at("请先选一张源表");
+        todo("请先选一张源表");
       } else if (!IDENTIFIER.test(draft.spec.owner) || !IDENTIFIER.test(draft.spec.table)) {
         at("源表名必须是未加引号的 Oracle 标识符");
       }
     }
     if (draft.spec.target_table.trim() === "") {
-      at("请先选目标表——字段映射要对着它才有意义");
+      todo("请先选目标表——字段映射要对着它才有意义");
     }
     if (draft.spec.columns.length === 0) {
-      at("至少要选一列");
+      todo("至少要选一列");
     }
 
     const sources = new Map<string, number>();
@@ -922,7 +966,7 @@ export function canAdvance(draft: Draft, step: Step): Blocker[] {
     const orphans = new Set(orphanSources(draft));
     for (const mapping of draft.spec.columns) {
       if (mapping.target.trim() === "") {
-        at("还没映射到目标字段", mapping.source);
+        todo("还没映射到目标字段", mapping.source);
         continue;
       }
       if (!IDENTIFIER.test(mapping.target)) {
@@ -965,7 +1009,7 @@ export function canAdvance(draft: Draft, step: Step): Blocker[] {
     const excused = draft.mode === "edit" && !draft.targetAgentOnline;
     if (!excused) {
       if (!checkIsFresh(draft)) {
-        at("请先运行目标表检查");
+        todo("请先运行目标表检查");
       } else if (!draft.check!.value.ok) {
         at(`目标表检查未通过（${draft.check!.value.findings.length} 项）`);
       }
@@ -973,7 +1017,7 @@ export function canAdvance(draft: Draft, step: Step): Blocker[] {
   }
 
   if (step === 4 && taskName(draft).trim() === "") {
-    at("任务名不能为空");
+    todo("任务名不能为空");
   }
 
   return blockers;

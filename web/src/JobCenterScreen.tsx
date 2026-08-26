@@ -16,6 +16,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { copyTaskCurl, deleteTask, startRun } from "./api";
 import type { Datasource, RunHistory, Task } from "./api";
 import { messageFrom } from "./errors";
+import { runHash } from "./App";
 import { qualifiedTargetTable } from "./datasource";
 import { formatTimestamp, historyPresentation } from "./history";
 import {
@@ -729,12 +730,22 @@ function JobResults({
                   </span>
                 </td>
                 <td>
-                  <span
-                    className={`state is-${status}`}
-                    title={run === undefined ? undefined : conclusionOf(run)}
-                  >
-                    {LATEST_RUN_LABELS[status]}
-                  </span>
+                  {/* 状态是**一条链接**（UX 评审 P1-6）：运行详情整屏现在有地址了，
+                      而这一格正是人看完状态之后想点进去的那一格。旁边那颗时钟图标
+                      照旧开抽屉——快速看一眼与摊开细看是两件事。 */}
+                  {run === undefined ? (
+                    <span className={`state is-${status}`}>
+                      {LATEST_RUN_LABELS[status]}
+                    </span>
+                  ) : (
+                    <a
+                      className={`state is-${status}`}
+                      href={runHash(run.run_record_id)}
+                      title={conclusionOf(run)}
+                    >
+                      {LATEST_RUN_LABELS[status]}
+                    </a>
+                  )}
                 </td>
                 <td>
                   {progress.kind === "value" ? (
@@ -798,9 +809,16 @@ function JobResults({
                         onClick={() => onStart(task)}
                       />
                     ) : (
+                      // 停不停得了与运行详情屏读同一条规则（UX 评审 P1-11）：
+                      // 这一颗过去无条件亮着，人只有吃一个 409 才知道封口点已经过了。
                       <ActionButton
-                        label={`停止运行 ${runAction.runRecordId}`}
+                        label={
+                          runAction.refusal === null
+                            ? `停止运行 ${runAction.runRecordId}`
+                            : `停止运行（不可用）：${runAction.refusal}`
+                        }
                         icon={<Ban size={16} />}
+                        disabled={runAction.refusal !== null}
                         onClick={() => onStop(runAction.runRecordId)}
                       />
                     )}

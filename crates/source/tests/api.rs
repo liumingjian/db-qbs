@@ -954,6 +954,9 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
     });
     assert!(detail["evidence"].is_object());
     detail.as_object_mut().unwrap().remove("evidence");
+    // 发起时刻是跑的时候生成的，断不出字面量，只断它在且是个时间戳。
+    assert!(detail["started_at"].as_str().is_some_and(|at| at.ends_with('Z')));
+    detail.as_object_mut().unwrap().remove("started_at");
     assert_eq!(
         detail,
         serde_json::json!({

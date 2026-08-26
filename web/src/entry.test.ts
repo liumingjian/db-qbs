@@ -6,6 +6,7 @@ import {
   evaluateEdit,
   evaluateEntry,
   gateFix,
+  entryNeedsDialog,
   gateReason,
   preselect,
 } from "./entry";
@@ -297,5 +298,31 @@ describe("evaluateEdit", () => {
       expect(gateReason(gate).length).toBeGreaterThan(0);
     }
     expect(gateReason("source-deleted")).toContain("源端数据源");
+  });
+});
+
+describe("entryNeedsDialog", () => {
+  const source = oracle("ds-oracle", "生产 Oracle");
+  const target = mysql("ds-mysql", "报表 MySQL", "agent-a");
+  const online = agent("agent-a", "目标端 A", "online");
+
+  it("does not interrupt when the gate passes and there is nothing to choose", () => {
+    const guard = evaluateEntry([source, target], [online], false);
+    expect(guard.kind).toBe("open");
+    expect(entryNeedsDialog(guard)).toBe(false);
+  });
+
+  it("still asks when there is a real choice on either side", () => {
+    const guard = evaluateEntry(
+      [source, oracle("ds-oracle-2", "灾备 Oracle"), target],
+      [online],
+      false,
+    );
+    expect(entryNeedsDialog(guard)).toBe(true);
+  });
+
+  it("always shows the door when it is refusing entry", () => {
+    expect(entryNeedsDialog(evaluateEntry([], [], false))).toBe(true);
+    expect(entryNeedsDialog({ kind: "loading" })).toBe(true);
   });
 });

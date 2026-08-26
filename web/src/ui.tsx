@@ -153,6 +153,10 @@ export function FormField({
 /**
  * 表格行里的图标动作位。`title` 默认就是 `label`——只有需要说明**为什么按不动**时才另给
  * （禁用态的按钮自己不会解释自己，原因只能挂在悬停提示上）。
+ *
+ * **禁用时 `title` 要挂在外层 `<span>` 上**：浏览器不给 `disabled` 控件派发指针事件，
+ * 挂在按钮本身的提示一个字都不会显示（UX 评审 P1-11）。抽屉里的重跑按钮早就是这么写的，
+ * 这里补上同一条——否则「说明为什么按不动」这句注释描述的是一件没发生的事。
  */
 export function ActionButton({
   label,
@@ -169,17 +173,24 @@ export function ActionButton({
   title?: string;
   onClick: () => void;
 }) {
-  return (
+  const button = (
     <button
       className={`icon-button ${danger ? "is-danger" : ""}`}
       type="button"
-      title={title ?? label}
+      title={disabled ? undefined : title ?? label}
       aria-label={label}
       disabled={disabled}
       onClick={onClick}
     >
       {icon}
     </button>
+  );
+  return disabled ? (
+    <span className="disabled-action" title={title ?? label}>
+      {button}
+    </span>
+  ) : (
+    button
   );
 }
 

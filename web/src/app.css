@@ -51,7 +51,15 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .breadcrumb { display: flex; gap: 7px; }
 .breadcrumb strong { color: var(--text); font-weight: var(--weight-em); }
 .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
-.environment { padding: 1px 7px; border: 1px solid var(--line-strong); border-radius: var(--radius); color: var(--mute); font-family: var(--font-num); font-size: var(--size-meta); }
+/* 「关于」浮层（P1-12）：顶栏右上角，不是导航的一格。 */
+.about-wrap { position: relative; display: inline-flex; }
+.about-trigger { height: 30px; padding: 0 10px; font-size: var(--size-meta); }
+.about-popover { position: absolute; z-index: 45; top: calc(100% + 8px); right: 0; width: min(520px, calc(100vw - 32px)); max-height: min(70vh, 620px); overflow: auto; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); box-shadow: 0 6px 24px rgba(0, 0, 0, .12); }
+.about-popover:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+.about-popover > header { position: sticky; top: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 11px var(--pad); border-bottom: 1px solid var(--line); background: var(--panel); }
+.about-popover > header strong { font-size: var(--size-body); font-weight: var(--weight-em); }
+.about-popover > header span { color: var(--mute); font-size: var(--size-cap); }
+.about-panel { padding: var(--pad); }
 .mobile-brand { display: none; font-weight: var(--weight-em); }
 .mobile-nav { display: none; }
 /* 宽屏是混合规则（评审 §2）：**表格屏居中收在 1800px 内**——27" 通栏时任务名在最左、
@@ -101,6 +109,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .button { height: var(--ctl-h); display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 4px 15px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); box-shadow: var(--btn-shadow); cursor: pointer; font-size: var(--size-body); font-family: inherit; white-space: nowrap; }
 .button.is-primary { border-color: var(--brand); background: var(--brand); color: #fff; }
 .button.is-ghost:hover { border-color: var(--brand); color: var(--brand); }
+/* `<a class="button">`：按钮的样子，链接的行为。 */
+a.button { text-decoration: none; }
 /* 危险动作分两档（2026-08 UX 评审 P0-2）：
    **描边的是入口**——它只是打开确认框，此刻还什么都没发生；
    **实心的是落锤**——确认框里那一颗，按下去数据就变了。
@@ -117,6 +127,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .icon-button.is-tool:hover { color: var(--brand); }
 .icon-button:disabled { color: var(--mute); }
 .icon-button:disabled:hover { background: transparent; }
+/* 禁用按钮的悬停提示挂在这一层：浏览器不给 disabled 控件派发指针事件。 */
+.disabled-action { display: inline-flex; }
 .text-button { padding: 0; border: 0; background: transparent; color: var(--brand); cursor: pointer; }
 
 /* ---------------------------------------------------------------- 数据表 */
@@ -216,6 +228,11 @@ pre.drawer-sql,
 .state.is-live { background: var(--brand); }
 .state.is-unknown { background: var(--mute); }
 .state.is-none { border-color: var(--line-strong); background: var(--panel); color: var(--mute); }
+/* 状态标签是链接（P1-6）：不加下划线、不改颜色——它先是一枚状态标签，才是一条路。
+   悬停时给一圈描边把「可点」说出来。 */
+a.state { text-decoration: none; cursor: pointer; }
+a.state:hover { box-shadow: 0 0 0 2px var(--brand-dim); }
+a.state:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
 
 /* ---------------------------------------------------------------- 分页
    客户端分页且**不装成服务端分页**（ADR-0042 §2 原样有效）；形态照参照物。 */
@@ -546,8 +563,13 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .wizard-rail li:last-child::after { display: none; }
 .wizard-rail li > span { width: 24px; height: 24px; flex: none; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 50%; background: var(--panel); font-family: var(--font-num); font-size: var(--size-cap); }
 .wizard-rail li > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--size-meta); font-weight: var(--weight-em); }
-.wizard-rail li.is-current, .wizard-rail li.is-done { color: var(--brand); }
-.wizard-rail li.is-current > span, .wizard-rail li.is-done > span { border-color: var(--brand); background: var(--brand); color: #fff; }
+/* 三态必须**看得出是三态**（P1-7）：走过的是描边加勾，当前那一步是实心加一圈光晕，
+   没到的是灰。原来 is-current 与 is-done 是同一条规则，于是这条轨道说不出「我在哪儿」。 */
+.wizard-rail li.is-done { color: var(--brand); }
+.wizard-rail li.is-done > span { border-color: var(--brand); background: var(--panel); color: var(--brand); }
+.wizard-rail li.is-current { color: var(--brand); }
+.wizard-rail li.is-current > strong { font-weight: var(--weight-em); }
+.wizard-rail li.is-current > span { border-color: var(--brand); background: var(--brand); color: #fff; box-shadow: 0 0 0 3px var(--brand-dim); }
 .wizard-step-scroll { min-height: 0; flex: 1; overflow: auto; padding: var(--pad); background: var(--bg); }
 .wizard-step { max-width: 1120px; display: flex; flex-direction: column; gap: 16px; margin: 0 auto; }
 .wizard-step > header h1 { margin: 0; font-size: 20px; letter-spacing: 0; }
@@ -577,6 +599,11 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .wizard-mapping-problems strong { flex: none; font-size: var(--size-meta); }
 .wizard-mapping-problems ul { margin: 0; padding-left: 18px; line-height: var(--lh-prose); }
 .wizard-blockers { margin: 0; padding: 10px 10px 10px 30px; border-left: 3px solid var(--crit); background: var(--crit-bg); color: var(--crit); line-height: var(--lh-prose); }
+/* 「还没填」那一档（P1-2）：中性清单，不是告警。方块标记而不是圆点，跟错误那档的
+   项目符号区分开；颜色一律 --mute。 */
+.wizard-todos { margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); color: var(--mute); list-style: none; line-height: var(--lh-prose); }
+.wizard-todos li { display: flex; align-items: baseline; gap: 8px; }
+.wizard-todos li::before { flex: none; color: var(--line-strong); content: "\25A2"; }
 .wizard-loss ul { margin: 0; padding-left: 20px; color: var(--dim); line-height: var(--lh-prose); }
 .wizard-name { max-width: 520px; color: var(--text); font-weight: var(--weight-em); }
 .wizard-confirm-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; margin: 0; padding: 1px; background: var(--line); }
@@ -646,6 +673,8 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .failure-evidence-heading { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
 .failure-evidence-heading h3 { margin: 0; font-size: var(--size-body); }
 .failure-evidence-heading p { margin: 3px 0 0; color: var(--mute); font-size: var(--size-meta); }
+/* 「这一类没有可改的地方」——它占的是按钮那一格，所以宽度要收住，别把标题挤成两行。 */
+.remediation-none { max-width: 42ch; margin: 0; color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-prose); text-align: right; }
 .evidence-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0; border: 1px solid var(--line); background: var(--line); gap: 1px; }
 .evidence-grid > div { min-width: 0; padding: 9px 11px; background: var(--panel); }
 .evidence-grid dt { color: var(--mute); font-size: var(--size-cap); }
