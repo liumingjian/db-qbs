@@ -191,9 +191,13 @@ a.button { text-decoration: none; }
 .icon-button.is-tool:hover { color: var(--brand); }
 .icon-button:disabled { color: var(--mute); }
 .icon-button:disabled:hover { background: transparent; }
+/* 禁用按钮的悬停提示挂在这一层：浏览器不给 disabled 控件派发指针事件。**只救得了鼠标**
+   ——禁用的按钮不在 Tab 序里，只用键盘的人碰不到那句提示；新写的拒绝理由因此走下面的
+   `.refusal`，这一条留给还在用 title 的旧调用方（`ui.tsx` 的 ActionButton）。 */
+.disabled-action { display: inline-flex; }
 /* 被拦住的控件和拦它的那句理由住在这一层：理由是**看得见的一行字**，不是悬停提示
-   （#238）——禁用的控件既不在 Tab 序里，也收不到指针事件。 */
-.disabled-action { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+   （#238）。理由跟在控件后面，一行摆不下就换行，不把控件挤窄。 */
+.refusal { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .refusal-reason { color: var(--mute); }
 .text-button { padding: 0; border: 0; background: transparent; color: var(--brand); cursor: pointer; }
 
@@ -690,7 +694,9 @@ select, .page-size {
 .wizard-mapping tr.is-problem select { border-color: var(--crit); }
 .wizard-mapping td small { display: block; max-width: 260px; margin-top: 3px; color: var(--crit); font-size: var(--size-cap); white-space: normal; }
 /* 主键为什么按不动**不是错误**——是目标表自己定了主键。跟着 --crit 走的话，
-   一张配得完全正确的映射表会有一整列红字。 */
+   一张配得完全正确的映射表会有一整列红字。上面 `.refusal-reason` 已经写过同一句 color，
+   这一条不是重复：映射表里 `.wizard-mapping td small` 的 --crit 权重更高，压得住它，
+   所以这里得再写一遍把颜色抢回来。两条都不能删。 */
 .wizard-mapping td small.refusal-reason { color: var(--mute); }
 .wizard-mapping .auto-mark { display: inline; margin-left: 5px; color: var(--ok); }
 /* 目标表还不存在时，目标列是**打出来的**（P1-4）：没有列清单可挑，这里打的名字
