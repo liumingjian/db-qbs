@@ -1,5 +1,6 @@
 import type { RunHistory } from "./api";
 import { runStatus } from "./listing";
+import { runPhase } from "./runStage";
 
 /**
  * 作业中心「迁移进度」那一格的**判定**（ADR-0043 §7）。
@@ -60,20 +61,30 @@ export function progressOf(run: RunHistory | undefined): ProgressCell {
 export function progressOfLiveRun(run: {
   total_rows: number | null;
   rows_pushed: number;
+  stage: string | null;
 }): ProgressCell {
   return progressFromCounts(run, "live");
 }
 
 function progressFromCounts(
-  run: { total_rows: number | null; rows_pushed: number },
+  run: { total_rows: number | null; rows_pushed: number; stage: string | null },
   tone: ProgressTone,
 ): ProgressCell {
   const total = run.total_rows;
   if (total === null) {
+    // **空分母有两种**（UX 评审 P1-8）。开跑前计数还没跑完时它当然是空的——
+    // 那是这次运行最开始的几十秒，一个五十万行的表要数上小半分钟。原来这两种
+    // 都写「计数没成功」，于是每一次运行的开头都自称出了一次故障。
     return {
       kind: "unknown",
       label: EMPTY_LABEL,
-      title: "未取到总行数——开跑前的计数没成功，这次运行本身不受影响。",
+      // 阶段的拼写归 `runStage.ts` 管，这里不再自己写一遍 "PREPARING"。
+      // 形参仍是 `string`：不认识的拼写要原样传下去（见 `stageLabel` 的理由），
+      // 而 `runPhase` 对它返回 null——落到「计数没成功」那一档，与改之前一致。
+      title:
+        run.stage === null || runPhase(run.stage) === "PREPARING"
+          ? "正在开跑前计数——总行数还没数出来，进度要等它。"
+          : "未取到总行数——开跑前的计数没成功，这次运行本身不受影响。",
     };
   }
   const done = run.rows_pushed;

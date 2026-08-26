@@ -1,0 +1,1421 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>db-qbs 控制台 · 改版对照（2026-08）</title>
+<style>
+/* ============================================================
+   Design tokens — copied verbatim from docs/design-system/tokens.css.
+   No new visual language: this page reuses the shipped token set.
+   ============================================================ */
+:root{
+  --bg:#F0F2F5; --panel:#FFFFFF; --line:#F0F0F0; --line-strong:#D9D9D9;
+  --brand:#3C7EFF; --brand-dim:#ECF2FF; --brand-deep:#1D4ED8;
+  --ok:#52C41A; --crit:#F5222D; --warn:#FAAD14; --info:#3C7EFF;
+  --ok-fill:#F6FFED; --ok-ink:#0B6637; --ok-bd:#B7EB8F;
+  --crit-fill:#FFF1F0; --crit-bd:#FFA39E; --crit-ink:#A8071A;
+  --warn-fill:#FFFBE6; --warn-bd:#FFE58F; --warn-ink:#874D00;
+  --ink:rgba(0,0,0,.85); --dim:rgba(0,0,0,.65); --mute:rgba(0,0,0,.45);
+  --sider-bg:#001529; --sider-w:256px; --sider-item-radius:10px;
+  --radius:4px; --row-h:41px; --head-h:39px; --ctl-h:32px;
+  --cell-pad:8px; --card-pad:10px; --pad:16px; --topbar-h:50px;
+  --font-cn:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;
+  --font-num:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --sql-keyword:#7C3AED; --sql-string:#0B7285; --sql-number:#B45309; --sql-comment:#6B7280;
+  /* page chrome (not part of the product's token set) */
+  --doc-bg:#161B22; --doc-panel:#FFFFFF; --doc-ink:#E6EDF3; --doc-mute:#8B949E;
+}
+
+/* ============================================================
+   Page chrome
+   ============================================================ */
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--doc-bg);color:var(--doc-ink);font:14px/1.7 var(--font-cn)}
+a{color:#79C0FF}
+.doc-top{position:sticky;top:0;z-index:50;background:rgba(13,17,23,.94);backdrop-filter:blur(8px);
+  border-bottom:1px solid #30363D;padding:10px 24px;display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+.doc-top h1{margin:0;font-size:15px;font-weight:600;letter-spacing:.3px}
+.doc-top .sub{color:var(--doc-mute);font-size:12px}
+.doc-nav{display:flex;gap:4px;margin-left:auto;flex-wrap:wrap}
+.doc-nav a{padding:4px 10px;border-radius:99px;font-size:12px;text-decoration:none;color:var(--doc-mute);border:1px solid transparent}
+.doc-nav a:hover{color:#fff;border-color:#30363D;background:#21262D}
+.modes{display:flex;gap:0;border:1px solid #30363D;border-radius:6px;overflow:hidden}
+.modes button{background:#0D1117;color:var(--doc-mute);border:0;padding:5px 12px;font:12px var(--font-cn);cursor:pointer}
+.modes button.on{background:var(--brand);color:#fff}
+main{max-width:2200px;margin:0 auto;padding:28px 24px 120px}
+.lede{max-width:900px;color:#C9D1D9;margin:8px 0 34px}
+.lede b{color:#fff}
+.lede code{background:#21262D;padding:1px 5px;border-radius:3px;font:12px var(--font-num)}
+section{margin:0 0 64px;scroll-margin-top:70px}
+section>h2{font-size:22px;margin:0 0 4px;font-weight:600;letter-spacing:.4px}
+section>h2 .n{display:inline-block;width:28px;height:28px;line-height:28px;text-align:center;border-radius:8px;
+  background:var(--brand);color:#fff;font-size:14px;margin-right:10px;vertical-align:2px}
+section>.verdict{color:#C9D1D9;max-width:1000px;margin:0 0 20px;padding-left:38px}
+section>.verdict b{color:#FFA198}
+h3.sub-h{font-size:15px;color:#C9D1D9;font-weight:600;margin:34px 0 12px;padding-left:38px;
+  border-left:3px solid var(--brand);margin-left:-0px}
+
+/* comparison layout */
+.pair{display:grid;gap:18px;align-items:start}
+body[data-mode="lr"] .pair{grid-template-columns:1fr 1fr}
+body[data-mode="tb"] .pair{grid-template-columns:1fr}
+.frame{position:relative;border-radius:10px;overflow:hidden;background:#000;border:1px solid #30363D}
+.frame>.tag{position:absolute;top:0;right:0;z-index:30;font-size:11px;letter-spacing:1px;font-weight:600;
+  padding:5px 12px;border-radius:0 0 0 8px;color:#fff}
+.frame.before>.tag{background:#8B5A2B}
+.frame.after>.tag{background:#1A7F37}
+.frame.new>.tag{background:#6E40C9}
+.viewport{overflow:hidden}
+.frame .stage{zoom:.60}
+.notes{margin:14px 0 0;padding:0;list-style:none;display:grid;gap:8px}
+body[data-mode="lr"] .notes{grid-template-columns:1fr 1fr}
+.notes li{background:#0D1117;border:1px solid #21262D;border-left:3px solid #30363D;border-radius:6px;
+  padding:9px 12px;font-size:13px;color:#C9D1D9}
+.notes li b{color:#fff;font-weight:600}
+.notes li code{background:#21262D;padding:1px 5px;border-radius:3px;font:11px var(--font-num);color:#79C0FF}
+.notes li.p0{border-left-color:#F85149} .notes li.p1{border-left-color:#D29922} .notes li.p2{border-left-color:#3FB950}
+.sev{display:inline-block;font:10px/1.5 var(--font-num);font-weight:700;padding:1px 6px;border-radius:3px;margin-right:8px;vertical-align:1px}
+.p0 .sev{background:#F85149;color:#fff} .p1 .sev{background:#D29922;color:#241a00} .p2 .sev{background:#3FB950;color:#052e10}
+
+/* callout pins drawn on top of a mockup */
+.frame{padding-bottom:8px}
+.pin{display:inline-block;margin:8px 0 0 8px;font:12px/1.5 var(--font-cn);padding:4px 10px;border-radius:4px;
+  color:#fff;white-space:normal}
+.pin::before{content:"▲ ";opacity:.7}
+.pin code{background:rgba(255,255,255,.18);padding:0 4px;border-radius:3px;font:11px var(--font-num)}
+.pin.bad{background:#C93C37} .pin.good{background:#1A7F37} .pin.note{background:#30363D}
+.outline-bad{outline:2px solid #F5222D;outline-offset:-2px}
+.outline-good{outline:2px solid #52C41A;outline-offset:-2px}
+
+/* ============================================================
+   Product mock — everything below re-creates the real console
+   ============================================================ */
+.stage{width:1440px;display:flex;background:var(--bg);color:var(--ink);
+  font:14px/1.6 var(--font-cn);-webkit-font-smoothing:antialiased}
+.stage.tall{min-height:660px}
+
+.sider{width:var(--sider-w);flex:none;background:var(--sider-bg);padding:0 12px;color:#fff}
+.sider.narrow{width:56px;padding:0 8px}
+.brand{display:flex;align-items:center;gap:10px;height:72px;padding:0 8px;font-size:17px;font-weight:600}
+.brand i{width:26px;height:26px;border-radius:7px;background:var(--brand);display:grid;place-items:center;
+  font:12px var(--font-num);font-style:normal}
+.nav{display:grid;gap:4px}
+.nav a{display:flex;align-items:center;gap:12px;height:44px;padding:0 14px;border-radius:var(--sider-item-radius);
+  color:rgba(255,255,255,.72);text-decoration:none;font-size:14px}
+.nav a.on{background:var(--brand);color:#fff;font-weight:500}
+.nav svg{width:17px;height:17px;flex:none;opacity:.9}
+
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.topbar{height:var(--topbar-h);flex:none;background:var(--panel);border-bottom:1px solid var(--line);
+  display:flex;align-items:center;gap:14px;padding:0 var(--pad)}
+.topbar .crumb{color:var(--mute);font-size:14px}
+.topbar .crumb b{color:var(--ink);font-weight:600}
+.topbar .right{margin-left:auto;display:flex;align-items:center;gap:8px}
+.wschip{border:1px solid var(--line-strong);border-radius:var(--radius);padding:3px 9px;font-size:12px;color:var(--mute)}
+.content{flex:1;padding:var(--pad);min-width:0}
+.wrap-cap{max-width:1800px;margin:0 auto}
+
+/* controls */
+.btn{height:var(--ctl-h);padding:0 14px;border-radius:var(--radius);border:1px solid var(--line-strong);
+  background:var(--panel);color:var(--ink);font:14px var(--font-cn);display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.btn.primary{background:var(--brand);border-color:var(--brand);color:#fff}
+.btn.ghost{color:var(--dim)}
+.btn.danger{border-color:var(--crit-bd);color:var(--crit);background:var(--panel)}
+.btn.danger.solid{background:var(--crit);border-color:var(--crit);color:#fff}
+.btn.sm{height:26px;padding:0 10px;font-size:12px}
+.btn[disabled]{opacity:.45;cursor:not-allowed}
+.inp{height:var(--ctl-h);border:1px solid var(--line-strong);border-radius:var(--radius);padding:0 10px;
+  background:var(--panel);font:14px var(--font-cn);color:var(--ink);min-width:0}
+.inp.ph{color:var(--mute)}
+.sel{height:var(--ctl-h);border:1px solid var(--line-strong);border-radius:var(--radius);padding:0 26px 0 10px;
+  background:var(--panel) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><path d='M0 0l5 6 5-6z' fill='%23999'/></svg>") no-repeat right 9px center;
+  appearance:none;font:14px var(--font-cn);color:var(--ink);display:inline-flex;align-items:center}
+.sel.native{background-image:none;border-color:#767676;border-radius:2px;padding-right:10px}
+.icon-btn{width:28px;height:28px;border-radius:var(--radius);border:0;background:transparent;color:var(--brand);
+  display:inline-grid;place-items:center;cursor:pointer}
+.icon-btn.sm24{width:24px;height:24px}
+.icon-btn.crit{color:var(--crit)}
+.icon-btn[disabled]{color:var(--mute);opacity:.5}
+.icon-btn svg{width:16px;height:16px}
+.sep{width:1px;height:14px;background:var(--line-strong);margin:0 2px}
+
+/* cards + tables */
+.card{background:var(--panel);border-radius:var(--radius);margin-bottom:var(--pad)}
+.card-header{display:flex;align-items:center;gap:10px;padding:var(--card-pad) var(--pad);border-bottom:1px solid var(--line)}
+.card-header h4{margin:0;font-size:16px;font-weight:600}
+.card-header .count{color:var(--mute);font-size:12px}
+.card-header .right{margin-left:auto;display:flex;align-items:center;gap:8px}
+.tabish{border:1px solid var(--line);border-radius:var(--radius);padding:6px 14px;font-weight:600;font-size:14px}
+.grid{width:100%;border-collapse:collapse}
+.grid th{height:var(--head-h);text-align:left;font-size:14px;font-weight:600;color:var(--ink);
+  padding:0 var(--cell-pad);background:#FAFAFA;border-bottom:1px solid var(--line);white-space:nowrap}
+.grid td{height:var(--row-h);padding:6px var(--cell-pad);border-bottom:1px solid var(--line);vertical-align:middle}
+.grid tr.hov td{background:#FAFAFA}
+.nowrap td{white-space:nowrap}
+.uuid{display:block;font:12px var(--font-num);color:var(--mute);margin-top:2px}
+.mono{font:12px var(--font-num)}
+.sub{color:var(--mute);font-size:12px}
+.dimtxt{color:var(--dim)}
+.ell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;max-width:100%}
+.badge{display:inline-block;padding:2px 8px;font-size:12px;line-height:18px;border-radius:0}
+.badge.r{border-radius:var(--radius)}
+.badge.ok{background:var(--ok);color:#fff}
+.badge.ok-soft{background:var(--ok-fill);color:var(--ok-ink);border:1px solid var(--ok-bd)}
+.badge.crit-soft{background:var(--crit-fill);color:var(--crit-ink);border:1px solid var(--crit-bd)}
+.badge.warn-soft{background:var(--warn-fill);color:var(--warn-ink);border:1px solid var(--warn-bd)}
+.badge.info-soft{background:var(--brand-dim);color:var(--brand-deep);border:1px solid #BBD4FF}
+.chip{display:inline-block;border:1px solid var(--line-strong);border-radius:0;padding:2px 8px;font-size:12px;color:var(--dim);background:#FAFAFA}
+.chip.r{border-radius:var(--radius)}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:1px}
+.dot.ok{background:var(--ok)} .dot.crit{background:var(--crit)} .dot.run{background:var(--brand)}
+.bar{display:inline-block;width:118px;height:6px;border-radius:3px;background:#EEE;vertical-align:middle;overflow:hidden}
+.bar>i{display:block;height:100%;background:var(--ok)}
+.bar.running>i{background:var(--brand)}
+.bar.crit>i{background:var(--crit)}
+.pct{font:12px var(--font-num);color:var(--dim);margin-left:8px}
+.acts{display:flex;align-items:center;gap:2px}
+.action-column{position:sticky;right:0;background:var(--panel);box-shadow:-6px 0 6px -6px rgba(0,0,0,.12)}
+tr.hov .action-column{background:#FAFAFA}
+.clipwrap{overflow:hidden;position:relative}
+.clipwrap .grid{width:1639px}
+.filterbar{background:var(--panel);border-radius:var(--radius);padding:12px var(--pad);margin-bottom:var(--pad);
+  display:flex;align-items:center;gap:10px}
+.filterbar label{color:var(--dim);font-size:14px;white-space:nowrap}
+.empty{padding:64px 0;text-align:center;color:var(--mute)}
+</style>
+</head>
+<body data-mode="lr">
+<style>
+/* ---- wizard ---- */
+.wiz{display:flex;flex:1;min-width:0;background:var(--bg)}
+.wizctx{width:300px;flex:none;background:var(--panel);border-right:1px solid var(--line);padding:14px;overflow:hidden}
+.wizctx.slim{width:240px}
+.wizctx h5{margin:0 0 12px;font-size:15px;font-weight:600;display:flex;align-items:center}
+.wizctx h5 .x{margin-left:auto;color:var(--mute)}
+.seg{display:flex;border:1px solid var(--line-strong);border-radius:var(--radius);overflow:hidden;margin-bottom:14px}
+.seg div{flex:1;text-align:center;padding:7px 0;font-size:14px;color:var(--dim);background:var(--panel)}
+.seg div.on{background:var(--brand-dim);color:var(--brand);border:1px solid var(--brand);margin:-1px;border-radius:var(--radius)}
+.ctx-title{display:flex;align-items:center;font-size:14px;font-weight:600;margin:14px 0 8px}
+.ctx-title .r{margin-left:auto;color:var(--brand)}
+.flabel{display:block;color:var(--dim);font-size:12px;margin:10px 0 6px;font-family:var(--font-num)}
+.flabel.cn{font-family:var(--font-cn)}
+.tree{border:1px solid var(--line);border-radius:var(--radius);margin-top:8px;overflow:hidden}
+.tree div{padding:9px 12px;border-bottom:1px solid var(--line);font-size:14px;display:flex;align-items:center;gap:8px}
+.tree div:last-child{border-bottom:0}
+.tree div.on{background:var(--brand-dim);color:var(--brand)}
+.tree .c{margin-left:auto;color:var(--mute);font:12px var(--font-num)}
+.wizmain{flex:1;min-width:0;display:flex;flex-direction:column}
+.rail{background:var(--panel);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:0;padding:14px var(--pad)}
+.rail li{list-style:none;display:flex;align-items:center;gap:9px;color:var(--mute);font-size:14px}
+.rail li>span{width:24px;height:24px;border-radius:50%;border:1px solid var(--line-strong);display:grid;place-items:center;
+  font:12px var(--font-num);background:var(--panel)}
+.rail li.is-done{color:var(--brand)} .rail li.is-done>span{border-color:var(--brand);background:var(--brand);color:#fff}
+.rail li.is-current{color:var(--brand);font-weight:600}
+.rail li.is-current>span{border-color:var(--brand);background:var(--brand);color:#fff}
+.rail li.is-current.ring>span{box-shadow:0 0 0 3px var(--brand-dim)}
+.rail li.is-done.outline>span{background:var(--panel);color:var(--brand)}
+.rail .ln{flex:1;height:1px;background:var(--line-strong);margin:0 16px;min-width:36px}
+.wizbody{flex:1;padding:22px var(--pad);overflow:hidden}
+.wizbody h3{margin:0 0 6px;font-size:20px;font-weight:600}
+.wizbody .lead{color:var(--mute);margin:0 0 18px}
+.wizfoot{border-top:1px solid var(--line);background:var(--panel);padding:12px var(--pad);display:flex;align-items:center}
+.wizfoot .right{margin-left:auto;display:flex;gap:10px}
+.alerts{display:grid;gap:6px;margin:14px 0}
+.alerts .a{background:var(--crit-fill);border:1px solid var(--crit-bd);color:var(--crit-ink);
+  border-radius:var(--radius);padding:7px 12px;font-size:14px}
+.todo{background:#FAFAFA;border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;margin:14px 0}
+.todo h6{margin:0 0 8px;font-size:12px;color:var(--mute);font-weight:600;letter-spacing:.4px}
+.todo ul{margin:0;padding:0;list-style:none;display:grid;gap:6px}
+.todo li{font-size:14px;color:var(--dim);display:flex;align-items:center;gap:9px}
+.todo li i{width:15px;height:15px;border:1px solid var(--line-strong);border-radius:3px;display:inline-block;flex:none}
+.todo li.done{color:var(--mute)}
+.todo li.done i{background:var(--ok);border-color:var(--ok);position:relative}
+.todo li.done i::after{content:"";position:absolute;left:4px;top:1px;width:4px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}
+
+/* ---- sql editor ---- */
+.sqlbox{border:1px solid var(--line-strong);border-radius:var(--radius);background:var(--panel);overflow:hidden}
+.sqlbox .tools{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--line);background:#FAFAFA}
+.sqlbox .tools .r{margin-left:auto;display:flex;gap:6px}
+.sqlwrap{display:flex;font:12px/1.55 var(--font-num)}
+.gutter{flex:none;padding:9px 8px;text-align:right;color:var(--mute);background:#FAFAFA;border-right:1px solid var(--line);user-select:none}
+.sqltext{padding:9px 10px;white-space:pre;overflow:hidden;flex:1;min-width:0}
+.sqltext.wrapped{white-space:pre-wrap;word-break:break-word}
+.k{color:var(--sql-keyword)} .s{color:var(--sql-string)} .n{color:var(--sql-number)} .c{color:var(--sql-comment)}
+
+/* ---- run detail / drawer ---- */
+.drawer{width:1040px;background:var(--bg);display:flex;flex-direction:column;box-shadow:-12px 0 32px rgba(0,0,0,.14)}
+.dhead{background:var(--panel);padding:14px var(--pad);display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--line)}
+.dhead h4{margin:0;font-size:16px;font-weight:600}
+.dbody{flex:1;padding:var(--pad);overflow:hidden}
+.dfoot{background:var(--panel);border-top:1px solid var(--line);padding:12px var(--pad);display:flex;align-items:center;gap:10px}
+.dfoot .right{margin-left:auto;display:flex;gap:10px}
+.scrim{flex:1;background:rgba(0,0,0,.45)}
+.kv{display:grid;gap:16px 24px;padding:var(--pad)}
+.kv.c4{grid-template-columns:repeat(4,1fr)}
+.kv.auto{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+.kv dt{color:var(--mute);font-size:12px;margin-bottom:4px}
+.kv dd{margin:0;font:14px var(--font-num);overflow-wrap:anywhere}
+.kv.num dd{text-align:right;font-variant-numeric:tabular-nums}
+.kv.num dt{text-align:right}
+.notice{border-left:3px solid var(--ok);background:var(--ok-fill);padding:10px 14px;border-radius:0 var(--radius) var(--radius) 0}
+.notice.warn{border-left-color:var(--warn);background:var(--warn-fill)}
+.notice.info{border-left-color:var(--brand);background:var(--brand-dim)}
+.notice b{font-weight:600}
+.notice p{margin:4px 0 0;font-size:13px;color:var(--dim)}
+
+/* ---- modal ---- */
+.modal-layer{position:relative;background:rgba(0,0,0,.45);padding:60px 0;display:grid;place-items:center}
+.modal{width:560px;background:var(--panel);border-radius:var(--radius);box-shadow:0 12px 40px rgba(0,0,0,.2);overflow:hidden}
+.modal .mh{padding:14px var(--pad);border-bottom:1px solid var(--line);font-size:16px;font-weight:600;display:flex;align-items:center;gap:9px}
+.modal .mb{padding:var(--pad);font-size:14px;color:var(--dim)}
+.modal .mf{padding:12px var(--pad);border-top:1px solid var(--line);display:flex;gap:10px;justify-content:flex-end;
+  position:sticky;bottom:0;background:var(--panel)}
+.mlist{margin:12px 0 0;border:1px solid var(--line);border-radius:var(--radius);max-height:190px;overflow:hidden}
+.mlist div{padding:8px 12px;border-bottom:1px solid var(--line);font-size:13px;display:flex;gap:8px;align-items:center}
+.mlist div:last-child{border-bottom:0}
+.mlist .arrow{color:var(--mute)}
+.mlist .tgt{font:12px var(--font-num);color:var(--crit-ink)}
+.native-confirm{width:420px;background:#F2F2F2;border-radius:12px;box-shadow:0 20px 50px rgba(0,0,0,.35);
+  padding:18px;text-align:center;font-size:13px;color:#111}
+.native-confirm .t{font-weight:600;margin-bottom:6px}
+.native-confirm .btns{display:flex;gap:8px;margin-top:16px}
+.native-confirm .btns button{flex:1;height:26px;border-radius:6px;border:1px solid #C6C6C6;background:#fff;font:13px var(--font-cn)}
+.native-confirm .btns button.d{background:#0A66FF;border-color:#0A66FF;color:#fff}
+
+/* ---- about popover ---- */
+.pop{position:absolute;top:58px;right:56px;width:420px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--radius);box-shadow:0 8px 28px rgba(0,0,0,.14);z-index:20}
+.pop .ph{padding:12px var(--pad);border-bottom:1px solid var(--line);font-weight:600;font-size:16px}
+.pop .pb{padding:var(--pad)}
+.deflist{display:grid;grid-template-columns:auto 1fr;gap:8px 18px;font-size:13px;align-items:baseline}
+.deflist dt{color:var(--mute)} .deflist dd{margin:0;font:12px var(--font-num);color:var(--dim)}
+.prose{max-width:820px;color:var(--dim);font-size:14px}
+.prose code{font:12px var(--font-num);background:#FAFAFA;border:1px solid var(--line);padding:1px 5px;border-radius:3px}
+.prose .faint{color:var(--mute);font-size:12px}
+</style>
+
+<div class="doc-top">
+  <h1>db-qbs 控制台 · 改版对照</h1>
+  <span class="sub">2026-08 · 基于 POC 实测 · 六屏</span>
+  <div class="modes">
+    <button data-m="lr" class="on">左右对照</button>
+    <button data-m="tb">上下对照</button>
+  </div>
+  <nav class="doc-nav">
+    <a href="#s1">1 作业中心</a><a href="#s2">2 数据源</a><a href="#s3">3 目标端 Agent</a>
+    <a href="#s4">4 系统设置</a><a href="#s5">5 任务向导</a><a href="#s6">6 运行详情</a>
+  </nav>
+</div>
+
+<main>
+<p class="lede">
+这份对照页只做一件事：把 <b>现在长什么样</b> 和 <b>建议改成什么样</b> 并排放在一起。
+左边是 POC 实测复刻（颜色、字号、间距、中文文案、数据都取自 <code>http://10.250.0.24:18088/</code> 的真实截图），
+右边是改版方案，用的是同一套 <code>docs/design-system/tokens.css</code> ——
+<b>不换视觉语言，只修执行层面的破绽</b>。每屏下方列出改了什么、为什么，等级对应
+<a href="./ux-review-2026-08.md">ux-review-2026-08.md</a> 里的 P0 / P1 / P2。
+示例数据在真实两条任务的基础上补了「进行中」「失败」等状态，两边用的是同一份数据。
+</p>
+<style>.stage svg{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;width:16px;height:16px}</style>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="i-db" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></symbol>
+<symbol id="i-server" viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01M6 18h.01"/></symbol>
+<symbol id="i-radio" viewBox="0 0 24 24"><path d="M4.9 19.1a10 10 0 010-14.2M7.8 16.2a6 6 0 010-8.4"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 010 8.4M19.1 4.9a10 10 0 010 14.2"/></symbol>
+<symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24"><path d="M6 3l14 9-14 9z"/></symbol>
+<symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+<symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+<symbol id="i-pencil" viewBox="0 0 24 24"><path d="M17 3a2.8 2.8 0 114 4L7.5 20.5 2 22l1.5-5.5z"/></symbol>
+<symbol id="i-tag" viewBox="0 0 24 24"><path d="M20.6 13.4L13.4 20.6a2 2 0 01-2.8 0l-8-8V3h9.6l8.4 8.4a2 2 0 010 2z"/><circle cx="7.5" cy="7.5" r="1.2"/></symbol>
+<symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 11-3-6.7L21 8"/><path d="M21 3v5h-5"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></symbol>
+<symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></symbol>
+<symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.3 3.9L2 18a2 2 0 001.7 3h16.6a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/><path d="M12 9v4M12 17h.01"/></symbol>
+<symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></symbol>
+<symbol id="i-plug" viewBox="0 0 24 24"><path d="M12 22v-5M9 2v6M15 2v6"/><path d="M7 8h10v3a5 5 0 01-10 0z"/></symbol>
+<symbol id="i-max" viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5"/></symbol>
+<symbol id="i-wrap" viewBox="0 0 24 24"><path d="M3 6h18M3 12h13a3 3 0 010 6h-4M9 15l-3 3 3 3"/></symbol>
+<symbol id="i-align" viewBox="0 0 24 24"><path d="M3 6h18M3 12h12M3 18h15"/></symbol>
+<symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 007 0l3-3a5 5 0 00-7-7l-1 1"/><path d="M14 11a5 5 0 00-7 0l-3 3a5 5 0 007 7l1-1"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></symbol>
+</defs></svg>
+
+<!-- ================= 1 · 作业中心 ================= -->
+<section id="s1">
+<h2><span class="n">1</span>作业中心</h2>
+<p class="verdict">这一屏的设计意图写在代码注释里：<b>「一行 = 一个任务 + 它最近一次运行」</b>。
+问题是「最近一次运行」那半句在 1440px 下 100% 看不见——实测 <code>scrollWidth 1639</code> vs <code>clientWidth 1132</code>，
+每行有约 500px 在屏幕外，而 27 寸屏上右边还空着一大片。</p>
+
+<div class="pair">
+  <div class="frame before"><span class="tag">现状</span><div class="viewport"><div class="stage tall" data-nav="jobs" data-crumb="作业中心">
+    <div class="content">
+      <div class="filterbar">
+        <label>任务名</label><input class="inp ph" style="width:230px" value="任务名 / 源表 / 目标表">
+        <label>源端</label><span class="sel native" style="width:170px">全部源端</span>
+        <label>目标端</label><span class="sel native" style="width:170px">全部目标端</span>
+        <label>运行状态</label><span class="sel native" style="width:110px">全部</span>
+        <span style="margin-left:auto;display:flex;gap:8px"><button class="btn">重置</button><button class="btn primary">查询</button></span>
+      </div>
+      <div class="card">
+        <div class="card-header" style="border-bottom:0;padding:12px var(--pad)">
+          <span class="tabish">作业中心</span><span class="count">共 5 个</span>
+          <span class="right">
+            <button class="icon-btn"><svg><use href="#i-refresh"/></svg></button>
+            <button class="btn primary"><svg><use href="#i-plus"/></svg>新建任务</button>
+            <button class="btn">批量发起</button>
+            <button class="btn danger">批量删除</button>
+          </span>
+        </div>
+        <div class="clipwrap">
+          <table class="grid nowrap">
+            <thead><tr>
+              <th style="width:40px"><input type="checkbox"></th>
+              <th style="width:470px">任务名</th><th style="width:453px">源表</th><th style="width:160px">目标表</th>
+              <th style="width:150px">迁移进度</th><th style="width:110px">运行状态</th><th style="width:180px">启动时间</th>
+              <th style="width:110px">运行时长</th><th class="action-column" style="width:210px">操作</th>
+            </tr></thead>
+            <tbody>
+              <tr>
+                <td><input type="checkbox"></td>
+                <td>SYSTEM.TEST_SOURCE_001 → TEST_SOURCE_001<span class="uuid">dcf28b16f21ae35add70be89066278ce</span></td>
+                <td><span class="mono">SYSTEM.TEST_SOURCE_001</span><span class="sub" style="display:block">POC Oracle 11g</span></td>
+                <td><span class="mono">TEST_SOURCE_001</span><span class="sub" style="display:block">mysql库</span></td>
+                <td><span class="bar"><i style="width:100%"></i></span><span class="pct">100%</span></td>
+                <td><span class="badge ok">成功</span></td><td class="mono">2026/08/26 09:03:24</td><td>54 秒</td>
+                <td class="action-column"><div class="acts">
+                  <button class="icon-btn sm24"><svg><use href="#i-play"/></svg></button>
+                  <button class="icon-btn sm24"><svg><use href="#i-copy"/></svg></button><span class="sep"></span>
+                  <button class="icon-btn sm24"><svg><use href="#i-clock"/></svg></button>
+                  <button class="icon-btn sm24"><svg><use href="#i-pencil"/></svg></button>
+                  <button class="icon-btn sm24"><svg><use href="#i-tag"/></svg></button><span class="sep"></span>
+                  <button class="icon-btn sm24 crit"><svg><use href="#i-trash"/></svg></button>
+                </div></td>
+              </tr>
+              <tr>
+                <td><input type="checkbox"></td>
+                <td>自定义 SQL → TEST_SOURCE_001<span class="uuid">3db54fa6c90786b797dabdf218667153</span></td>
+                <td><span class="chip">自定义 SQL</span> <span class="mono">SELECT a.ID AS ID, a.BIZ_DATE AS BIZ_DATE, a.AMO…</span></td>
+                <td><span class="mono">TEST_SOURCE_001</span><span class="sub" style="display:block">mysql库</span></td>
+                <td><span class="bar"><i style="width:100%"></i></span><span class="pct">100%</span></td>
+                <td><span class="badge ok">成功</span></td><td class="mono">2026/08/26 09:06:59</td><td>1 分 25 秒</td>
+                <td class="action-column"><div class="acts">
+                  <button class="icon-btn sm24"><svg><use href="#i-play"/></svg></button>
+                  <button class="icon-btn sm24"><svg><use href="#i-copy"/></svg></button><span class="sep"></span>
+                  <button class="icon-btn sm24"><svg><use href="#i-clock"/></svg></button>
+                  <button class="icon-btn sm24"><svg><use href="#i-pencil"/></svg></button>
+                  <button class="icon-btn sm24"><svg><use href="#i-tag"/></svg></button><span class="sep"></span>
+                  <button class="icon-btn sm24 crit"><svg><use href="#i-trash"/></svg></button>
+                </div></td>
+              </tr>
+              <tr>
+                <td><input type="checkbox"></td>
+                <td>SYSTEM.ORDERS → DB_QBS_POC_ORDERS<span class="uuid">7f2c48a1d0b34e6c9a15ef83c7d02b64</span></td>
+                <td><span class="mono">SYSTEM.ORDERS</span><span class="sub" style="display:block">POC Oracle 11g</span></td>
+                <td><span class="mono">DB_QBS_POC_ORDERS</span><span class="sub" style="display:block">mysql库</span></td>
+                <td><span class="bar running"><i style="width:62%"></i></span><span class="pct">62%</span></td>
+                <td><span class="badge r info-soft">进行中</span></td><td class="mono">2026/08/26 09:41:02</td><td>3 分 12 秒</td>
+                <td class="action-column"><div class="acts">
+                  <button class="icon-btn sm24"><svg><use href="#i-play"/></svg></button>
+                  <button class="icon-btn sm24"><svg><use href="#i-copy"/></svg></button><span class="sep"></span>
+                  <button class="icon-btn sm24"><svg><use href="#i-clock"/></svg></button>
+                  <button class="icon-btn sm24"><svg><use href="#i-pencil"/></svg></button>
+                  <button class="icon-btn sm24"><svg><use href="#i-tag"/></svg></button><span class="sep"></span>
+                  <button class="icon-btn sm24 crit"><svg><use href="#i-trash"/></svg></button>
+                </div></td>
+              </tr>
+              <tr>
+                <td><input type="checkbox"></td>
+                <td>SYSTEM.CUSTOMER → DB_QBS_POC_BAD<span class="uuid">a91e5d7c2f884b03ae6610d9c5f27e18</span></td>
+                <td><span class="mono">SYSTEM.CUSTOMER</span><span class="sub" style="display:block">POC Oracle 11g</span></td>
+                <td><span class="mono">DB_QBS_POC_BAD</span><span class="sub" style="display:block">mysql库</span></td>
+                <td><span class="bar crit"><i style="width:8%"></i></span><span class="pct">8%</span></td>
+                <td><span class="badge r crit-soft">失败</span></td><td class="mono">2026/08/26 09:38:15</td><td>12 秒</td>
+                <td class="action-column"><div class="acts">
+                  <button class="icon-btn sm24"><svg><use href="#i-play"/></svg></button>
+                  <button class="icon-btn sm24"><svg><use href="#i-copy"/></svg></button><span class="sep"></span>
+                  <button class="icon-btn sm24"><svg><use href="#i-clock"/></svg></button>
+                  <button class="icon-btn sm24"><svg><use href="#i-pencil"/></svg></button>
+                  <button class="icon-btn sm24"><svg><use href="#i-tag"/></svg></button><span class="sep"></span>
+                  <button class="icon-btn sm24 crit"><svg><use href="#i-trash"/></svg></button>
+                </div></td>
+              </tr>
+              <tr>
+                <td><input type="checkbox"></td>
+                <td>HR.EMPLOYEES → DB_QBS_POC_EMP<span class="uuid">c4d8b0f36a1e4d2790b7ac5518e3f0a2</span></td>
+                <td><span class="mono">HR.EMPLOYEES</span><span class="sub" style="display:block">POC Oracle 11g</span></td>
+                <td><span class="mono">DB_QBS_POC_EMP</span><span class="sub" style="display:block">mysql库</span></td>
+                <td><span class="sub">—</span></td>
+                <td><span class="sub">尚未运行</span></td><td class="sub">—</td><td class="sub">—</td>
+                <td class="action-column"><div class="acts">
+                  <button class="icon-btn sm24"><svg><use href="#i-play"/></svg></button>
+                  <button class="icon-btn sm24"><svg><use href="#i-copy"/></svg></button><span class="sep"></span>
+                  <button class="icon-btn sm24"><svg><use href="#i-pencil"/></svg></button>
+                  <button class="icon-btn sm24"><svg><use href="#i-tag"/></svg></button><span class="sep"></span>
+                  <button class="icon-btn sm24 crit"><svg><use href="#i-trash"/></svg></button>
+                </div></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div style="height:40px"></div>
+    </div>
+  </div></div>
+  <span class="pin bad">sticky 操作列不透明，把「目标表」齐字切断，没有省略号</span>
+  <span class="pin bad">→ 约 500px 在屏幕外：迁移进度 / 运行状态 / 启动时间 / 运行时长 全都看不见</span>
+  <span class="pin bad">32 位 UUID 占掉每一行的第二行</span>
+  </div>
+
+  <div class="frame after"><span class="tag">改版后</span><div class="viewport"><div class="stage tall" data-nav="jobs" data-crumb="作业中心">
+    <div class="content"><div class="wrap-cap">
+      <div class="filterbar">
+        <label>任务名</label><input class="inp ph" style="width:240px" value="任务名 / 源表 / 目标表">
+        <label>源端</label><span class="sel" style="width:160px">全部源端</span>
+        <label>目标端</label><span class="sel" style="width:160px">全部目标端</span>
+        <label>运行状态</label><span class="sel" style="width:104px">全部</span>
+        <span style="margin-left:auto;display:flex;gap:8px"><button class="btn ghost">重置</button><button class="btn primary">查询</button></span>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <h4>作业中心</h4><span class="count">共 5 个 · 按创建时间倒序</span>
+          <span class="right">
+            <button class="icon-btn"><svg><use href="#i-refresh"/></svg></button>
+            <button class="btn ghost">批量发起</button>
+            <button class="btn ghost">批量删除</button>
+            <button class="btn primary"><svg><use href="#i-plus"/></svg>新建任务</button>
+          </span>
+        </div>
+        <table class="grid" style="table-layout:fixed">
+          <colgroup><col style="width:36px"><col style="width:206px"><col style="width:92px"><col style="width:150px">
+            <col style="width:150px"><col style="width:150px"><col style="width:134px"><col style="width:78px"><col style="width:156px"></colgroup>
+          <thead><tr>
+            <th><input type="checkbox"></th><th>任务名</th><th>运行状态</th><th>迁移进度</th>
+            <th>目标表</th><th>源表</th><th>启动时间</th><th>时长</th><th class="action-column">操作</th>
+          </tr></thead>
+          <tbody>
+            <tr>
+              <td><input type="checkbox"></td>
+              <td><span class="ell" title="SYSTEM.TEST_SOURCE_001 → TEST_SOURCE_001">SYSTEM.TEST_SOURCE_001 → TEST_SOURCE_001</span></td>
+              <td><span class="dot ok"></span>成功</td>
+              <td><span class="bar"><i style="width:100%"></i></span><span class="pct">100%</span></td>
+              <td><span class="ell mono" title="TEST_SOURCE_001">TEST_SOURCE_001</span><span class="sub">mysql库</span></td>
+              <td><span class="ell mono" title="SYSTEM.TEST_SOURCE_001">SYSTEM.TEST_SOURCE_001</span></td>
+              <td class="mono" style="font-size:12px">08-26 09:03:24</td><td class="mono" style="font-size:12px">54 秒</td>
+              <td class="action-column"><div class="acts">
+                <button class="icon-btn" title="发起运行"><svg><use href="#i-play"/></svg></button>
+                <button class="icon-btn" title="运行详情"><svg><use href="#i-clock"/></svg></button>
+                <button class="icon-btn" title="编辑任务定义"><svg><use href="#i-pencil"/></svg></button>
+                <button class="icon-btn" title="复制为新任务"><svg><use href="#i-copy"/></svg></button>
+                <button class="icon-btn" title="更多"><svg><use href="#i-more"/></svg></button>
+              </div></td>
+            </tr>
+            <tr>
+              <td><input type="checkbox"></td>
+              <td><span class="ell" title="自定义 SQL → TEST_SOURCE_001">自定义 SQL → TEST_SOURCE_001</span></td>
+              <td><span class="dot ok"></span>成功</td>
+              <td><span class="bar"><i style="width:100%"></i></span><span class="pct">100%</span></td>
+              <td><span class="ell mono" title="TEST_SOURCE_001">TEST_SOURCE_001</span><span class="sub">mysql库</span></td>
+              <td><span class="chip r">自定义 SQL</span> <span class="mono">a.ID</span></td>
+              <td class="mono" style="font-size:12px">08-26 09:06:59</td><td class="mono" style="font-size:12px">1分25秒</td>
+              <td class="action-column"><div class="acts">
+                <button class="icon-btn" title="发起运行"><svg><use href="#i-play"/></svg></button>
+                <button class="icon-btn" title="运行详情"><svg><use href="#i-clock"/></svg></button>
+                <button class="icon-btn" title="编辑任务定义"><svg><use href="#i-pencil"/></svg></button>
+                <button class="icon-btn" title="复制为新任务"><svg><use href="#i-copy"/></svg></button>
+                <button class="icon-btn" title="更多"><svg><use href="#i-more"/></svg></button>
+              </div></td>
+            </tr>
+            <tr class="hov">
+              <td><input type="checkbox"></td>
+              <td><span class="ell">SYSTEM.ORDERS → DB_QBS_POC_ORDERS</span></td>
+              <td><span class="dot run"></span>进行中</td>
+              <td><span class="bar running"><i style="width:62%"></i></span><span class="pct">62%</span>
+                  <span class="sub" style="display:block">最后动静 2 秒前</span></td>
+              <td><span class="ell mono">DB_QBS_POC_ORDERS</span><span class="sub">mysql库</span></td>
+              <td><span class="ell mono">SYSTEM.ORDERS</span></td>
+              <td class="mono" style="font-size:12px">08-26 09:41:02</td><td class="mono" style="font-size:12px">3分12秒</td>
+              <td class="action-column"><div class="acts">
+                <button class="icon-btn crit" title="停止运行"><svg><use href="#i-stop"/></svg></button>
+                <button class="icon-btn" title="运行详情"><svg><use href="#i-clock"/></svg></button>
+                <button class="icon-btn" disabled title="运行中不能改定义"><svg><use href="#i-pencil"/></svg></button>
+                <button class="icon-btn" title="复制为新任务"><svg><use href="#i-copy"/></svg></button>
+                <button class="icon-btn" title="更多"><svg><use href="#i-more"/></svg></button>
+              </div></td>
+            </tr>
+            <tr>
+              <td><input type="checkbox"></td>
+              <td><span class="ell">SYSTEM.CUSTOMER → DB_QBS_POC_BAD</span></td>
+              <td><span class="dot crit"></span>失败</td>
+              <td><span class="bar crit"><i style="width:8%"></i></span><span class="pct">8%</span>
+                  <span class="sub" style="display:block">目标列类型不兼容</span></td>
+              <td><span class="ell mono">DB_QBS_POC_BAD</span><span class="sub">mysql库</span></td>
+              <td><span class="ell mono">SYSTEM.CUSTOMER</span></td>
+              <td class="mono" style="font-size:12px">08-26 09:38:15</td><td class="mono" style="font-size:12px">12 秒</td>
+              <td class="action-column"><div class="acts">
+                <button class="icon-btn" title="重新发起"><svg><use href="#i-play"/></svg></button>
+                <button class="icon-btn" title="运行详情"><svg><use href="#i-clock"/></svg></button>
+                <button class="icon-btn" title="编辑任务定义"><svg><use href="#i-pencil"/></svg></button>
+                <button class="icon-btn" title="复制为新任务"><svg><use href="#i-copy"/></svg></button>
+                <button class="icon-btn" title="更多"><svg><use href="#i-more"/></svg></button>
+              </div></td>
+            </tr>
+            <tr>
+              <td><input type="checkbox"></td>
+              <td><span class="ell">HR.EMPLOYEES → DB_QBS_POC_EMP</span></td>
+              <td><span class="sub">尚未运行</span></td>
+              <td><span class="sub">—</span></td>
+              <td><span class="ell mono">DB_QBS_POC_EMP</span><span class="sub">mysql库</span></td>
+              <td><span class="ell mono">HR.EMPLOYEES</span></td>
+              <td class="sub">—</td><td class="sub">—</td>
+              <td class="action-column"><div class="acts">
+                <button class="icon-btn" title="发起运行"><svg><use href="#i-play"/></svg></button>
+                <button class="icon-btn" disabled title="还没有运行过"><svg><use href="#i-clock"/></svg></button>
+                <button class="icon-btn" title="编辑任务定义"><svg><use href="#i-pencil"/></svg></button>
+                <button class="icon-btn" title="复制为新任务"><svg><use href="#i-copy"/></svg></button>
+                <button class="icon-btn" title="更多"><svg><use href="#i-more"/></svg></button>
+              </div></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div style="height:40px"></div>
+    </div></div>
+  </div></div>
+  <span class="pin good">运行状态与进度进首屏，一眼看完</span>
+  <span class="pin good">操作列固定 5 个槽位，禁用也占位——手不用重新找</span>
+  </div>
+</div>
+
+<ul class="notes">
+  <li class="p1"><span class="sev">P1</span><b>列序重排</b>：任务名 · 运行状态 · 迁移进度 · 目标表 · 源表 · 启动时间 · 时长 · 操作。先看结果，再看配置。</li>
+  <li class="p1"><span class="sev">P1</span><b>源表 / 目标表限宽 + 省略号</b>，完整值放 <code>title</code>。自定义 SQL 不再原样倒一段截断的语句，只留 <code>自定义 SQL</code> 标签和首个标识符。</li>
+  <li class="p1"><span class="sev">P1</span><b>UUID 移出行内</b>。它是排障用的，现在却让每一行都付两倍高度的代价。移到运行详情和 hover。</li>
+  <li class="p1"><span class="sev">P1</span><b>表格居中限宽 1800px</b>。27 寸(2560px)下不再无限拉伸，也不再只用一半——这是约定的混合策略。</li>
+  <li class="p2"><span class="sev">P2</span><b>操作列槽位固定</b>。现在「运行详情」按条件渲染，尚未运行的行少一个图标，后面的图标整体左移，高频用户的肌肉记忆全废。</li>
+  <li class="p2"><span class="sev">P2</span><b>行内图标 24px → 28px</b>，与全局 32px 控件拉近；sticky 操作列背景跟随行 hover 态，读起来像刻意的浮层而不是渲染 bug。</li>
+  <li class="p2"><span class="sev">P2</span><b>状态从方角实心 badge 换成色点 + 文字</b>，弱化色块噪音；卡片头统一到一套 <code>.card-header</code>，标题字号 16px 真正高于正文。</li>
+  <li class="p1"><span class="sev">P1</span><b>进行中的行显示「最后动静 2 秒前」</b>——这个信号（<code>last_ts</code>）后端已经在返回，前端一直丢掉。</li>
+</ul>
+
+<h3 class="sub-h">1b · 批量发起：从零摩擦补上一道确认</h3>
+<div class="pair">
+  <div class="frame before"><span class="tag">现状</span><div class="viewport"><div class="stage" style="min-height:220px" data-nav="jobs" data-crumb="作业中心">
+    <div class="content"><div class="card" style="padding:22px var(--pad)">
+      <p style="margin:0 0 14px;color:var(--dim)">勾选 4 个任务 → 点「批量发起」 →
+        <b style="color:var(--crit-ink)">没有任何确认，直接开始改写 4 张生产表。</b></p>
+      <div style="display:flex;gap:8px"><button class="btn">批量发起</button><button class="btn danger">批量删除</button></div>
+      <p class="sub" style="margin:14px 0 0">对照：只删任务定义的「批量删除」反而有一个把名字逐条列全的完整弹窗。<b style="color:var(--crit-ink)">危险权重是反的。</b></p>
+    </div></div>
+  </div></div></div>
+
+  <div class="frame new"><span class="tag">改版后 · 新增</span><div class="viewport"><div class="stage" style="min-height:220px">
+    <div class="modal-layer" style="width:100%;padding:26px 0">
+      <div class="modal">
+        <div class="mh"><svg style="color:var(--warn)"><use href="#i-alert"/></svg>发起 4 个任务</div>
+        <div class="mb">
+          这会向下面 4 张<b>目标表</b>按主键合并写入。请先核对表名：
+          <div class="mlist">
+            <div><span>SYSTEM.TEST_SOURCE_001</span><span class="arrow">→</span><span class="tgt">mysql库 · TEST_SOURCE_001</span></div>
+            <div><span>自定义 SQL</span><span class="arrow">→</span><span class="tgt">mysql库 · TEST_SOURCE_001</span></div>
+            <div><span>SYSTEM.CUSTOMER</span><span class="arrow">→</span><span class="tgt">mysql库 · DB_QBS_POC_BAD</span></div>
+            <div><span>HR.EMPLOYEES</span><span class="arrow">→</span><span class="tgt">mysql库 · DB_QBS_POC_EMP</span></div>
+          </div>
+        </div>
+        <div class="mf"><button class="btn">取消</button><button class="btn primary">发起 4 个任务</button></div>
+      </div>
+    </div>
+  </div></div></div>
+</div>
+<ul class="notes">
+  <li class="p0"><span class="sev">P0</span><b>批量发起加确认，单条发起保持一键。</b>这个不对称是刻意的：单条是用户刚配完、刚确认过的任务，高频操作不能再加税；批量一次改写 N 张生产表，必须先把表名摊开给人看。</li>
+  <li class="p0"><span class="sev">P0</span>弹窗的写法直接<b>复用现有 <code>BulkDeleteDialog</code></b> —— 那个组件把名字逐条列全，做得很好，只是挂错了地方。</li>
+  <li class="p0"><span class="sev">P0</span><b>危险按钮补实心变体</b>：只有真正执行破坏的那颗按钮用红底白字，工具栏上「只是打开弹窗」的那颗降为 ghost。</li>
+</ul>
+</section>
+<!-- ================= 2 · 数据源 ================= -->
+<section id="s2">
+<h2><span class="n">2</span>数据源</h2>
+<p class="verdict">这一屏本身没有结构问题——它的毛病全是设计系统层面的：<b>UUID 抢戏、卡片头和作业中心不是同一套、
+承载数据源名的 <code>--mute</code> 对比度只有约 3.5:1（低于 AA 正文标准）</b>，以及「测试连接」点完之后结果去哪了没人知道。</p>
+<div class="pair">
+  <div class="frame before"><span class="tag">现状</span><div class="viewport"><div class="stage" style="min-height:340px" data-nav="ds" data-crumb="数据源">
+    <div class="content"><div class="card">
+      <div class="card-header" style="border-bottom:0;padding:12px var(--pad)">
+        <h4 style="font-size:14px">数据源</h4><span class="count">共 2 个</span>
+        <span class="right"><button class="btn primary"><svg><use href="#i-plus"/></svg>新建数据源</button></span>
+      </div>
+      <table class="grid nowrap">
+        <thead><tr><th style="width:430px">名称</th><th style="width:110px">类型</th><th style="width:330px">连接</th>
+          <th style="width:160px">目标端 Agent</th><th style="width:110px">用户</th><th style="width:110px">被引用</th><th>操作</th></tr></thead>
+        <tbody>
+          <tr><td>POC Oracle 11g<span class="uuid">52bb90396fa361e0bc45fd698c950354</span></td>
+            <td>Oracle</td><td class="mono">//10.250.0.222:1522/xe</td><td></td><td class="mono">system</td><td>2 个任务</td>
+            <td><div class="acts"><button class="icon-btn sm24"><svg><use href="#i-plug"/></svg></button><span class="sep"></span>
+              <button class="icon-btn sm24"><svg><use href="#i-pencil"/></svg></button><span class="sep"></span>
+              <button class="icon-btn sm24 crit"><svg><use href="#i-trash"/></svg></button></div></td></tr>
+          <tr><td>mysql库<span class="uuid">31dce82a1e16df273710a9ec2add55d4</span></td>
+            <td>MySQL</td><td class="mono">10.250.0.24:3306 / mysql</td><td>默认</td><td class="mono">root</td><td>2 个任务</td>
+            <td><div class="acts"><button class="icon-btn sm24"><svg><use href="#i-plug"/></svg></button><span class="sep"></span>
+              <button class="icon-btn sm24"><svg><use href="#i-pencil"/></svg></button><span class="sep"></span>
+              <button class="icon-btn sm24 crit"><svg><use href="#i-trash"/></svg></button></div></td></tr>
+        </tbody>
+      </table>
+    </div></div>
+  </div></div>
+  <span class="pin bad">名称行下方的 UUID 比名称本身还长</span>
+  </div>
+
+  <div class="frame after"><span class="tag">改版后</span><div class="viewport"><div class="stage" style="min-height:340px" data-nav="ds" data-crumb="数据源">
+    <div class="content"><div class="wrap-cap"><div class="card">
+      <div class="card-header">
+        <h4>数据源</h4><span class="count">共 2 个</span>
+        <span class="right"><button class="icon-btn"><svg><use href="#i-refresh"/></svg></button>
+          <button class="btn primary"><svg><use href="#i-plus"/></svg>新建数据源</button></span>
+      </div>
+      <table class="grid" style="table-layout:fixed">
+        <colgroup><col style="width:230px"><col style="width:100px"><col style="width:260px"><col style="width:150px">
+          <col style="width:110px"><col style="width:120px"><col style="width:182px"></colgroup>
+        <thead><tr><th>名称</th><th>类型</th><th>连接</th><th>目标端 Agent</th><th>用户</th><th>被引用</th><th>操作</th></tr></thead>
+        <tbody>
+          <tr><td><span class="ell" style="font-weight:500">POC Oracle 11g</span>
+              <span class="sub">上次连通 · 12 分钟前</span></td>
+            <td><span class="chip r">Oracle</span></td><td><span class="ell mono">//10.250.0.222:1522/xe</span></td>
+            <td class="sub">仅作源端</td><td class="mono">system</td>
+            <td><a href="#" style="color:var(--brand);text-decoration:none">2 个任务</a></td>
+            <td><div class="acts"><button class="btn sm"><svg style="width:13px;height:13px"><use href="#i-plug"/></svg>测试连接</button>
+              <button class="icon-btn" title="编辑"><svg><use href="#i-pencil"/></svg></button>
+              <button class="icon-btn crit" title="删除"><svg><use href="#i-trash"/></svg></button></div></td></tr>
+          <tr class="hov"><td><span class="ell" style="font-weight:500">mysql库</span>
+              <span class="sub">上次连通 · 3 分钟前</span></td>
+            <td><span class="chip r">MySQL</span></td><td><span class="ell mono">10.250.0.24:3306 / mysql</span></td>
+            <td><span class="dot ok"></span>默认</td><td class="mono">root</td>
+            <td><a href="#" style="color:var(--brand);text-decoration:none">2 个任务</a></td>
+            <td><div class="acts"><button class="btn sm"><svg style="width:13px;height:13px"><use href="#i-plug"/></svg>测试连接</button>
+              <button class="icon-btn" title="编辑"><svg><use href="#i-pencil"/></svg></button>
+              <button class="icon-btn crit" title="删除"><svg><use href="#i-trash"/></svg></button></div></td></tr>
+        </tbody>
+      </table>
+    </div></div></div>
+  </div></div>
+  <span class="pin good">名称提到 <code>--dim</code>，副行换成有用的信息：上次连通时间</span>
+  </div>
+</div>
+<ul class="notes">
+  <li class="p2"><span class="sev">P2</span><b>UUID 下线</b>，副行改成「上次连通 · 12 分钟前」——同样一行高度，换成每天真的会看的信息。</li>
+  <li class="p2"><span class="sev">P2</span><b>数据源名从 <code>--mute</code>(≈3.5:1) 提到 <code>--dim</code>(≈7:1)</b>。这一列是整屏的主标识，不该用最弱的墨色。</li>
+  <li class="p2"><span class="sev">P2</span><b>「测试连接」从图标改成带文字的按钮</b>并就地回显结果。图标形式点完之后没有反馈落点，用户不知道成没成。</li>
+  <li class="p2"><span class="sev">P2</span><b>卡片头收敛到统一的 <code>.card-header</code></b>，标题 16px；「被引用」变成可点的链接，直接筛到那两个任务。</li>
+  <li class="p2"><span class="sev">P2</span>类型用圆角 chip（<code>--badge-radius:0</code> 的方角和产品整体 4px 圆角是冲突的）；空白的「目标端 Agent」单元格补上「仅作源端」，而不是留空让人猜。</li>
+</ul>
+</section>
+
+<!-- ================= 3 · 目标端 Agent ================= -->
+<section id="s3">
+<h2><span class="n">3</span>目标端 Agent</h2>
+<p class="verdict">同样的设计系统问题，外加一个真实的可用性缺口：<b>「最近可见」给的是绝对时间戳，
+而人真正想知道的是「它现在还活着吗」</b>——这需要拿当前时间去减，每次都得心算。</p>
+<div class="pair">
+  <div class="frame before"><span class="tag">现状</span><div class="viewport"><div class="stage" style="min-height:300px" data-nav="ag" data-crumb="目标端 Agent">
+    <div class="content"><div class="card">
+      <div class="card-header" style="border-bottom:0;padding:12px var(--pad)">
+        <h4 style="font-size:14px">目标端 Agent</h4><span class="count">共 1 台</span>
+        <span class="right"><button class="btn primary"><svg><use href="#i-radio"/></svg>注册 Agent</button></span>
+      </div>
+      <table class="grid nowrap">
+        <thead><tr><th style="width:400px">名称</th><th style="width:330px">地址</th><th style="width:110px">状态</th>
+          <th style="width:130px">身份</th><th style="width:90px">版本</th><th style="width:210px">最近可见</th>
+          <th style="width:120px">被引用</th><th>操作</th></tr></thead>
+        <tbody>
+          <tr><td>默认<span class="uuid">92a093bf93c74b33f0245d8768c5a57b</span></td>
+            <td class="mono">http://10.250.0.202:18080</td><td><span class="badge ok">在线</span></td>
+            <td class="mono">664758c3</td><td class="mono">0.1.0</td><td class="mono">2026/08/26 09:20:13</td><td>1 条数据源</td>
+            <td><div class="acts"><button class="icon-btn sm24"><svg><use href="#i-refresh"/></svg></button><span class="sep"></span>
+              <button class="icon-btn sm24"><svg><use href="#i-pencil"/></svg></button><span class="sep"></span>
+              <button class="icon-btn sm24 crit"><svg><use href="#i-trash"/></svg></button></div></td></tr>
+        </tbody>
+      </table>
+    </div></div>
+  </div></div>
+  <span class="pin bad">绝对时间戳：还得自己减一下才知道是不是刚掉线</span>
+  </div>
+
+  <div class="frame after"><span class="tag">改版后</span><div class="viewport"><div class="stage" style="min-height:300px" data-nav="ag" data-crumb="目标端 Agent">
+    <div class="content"><div class="wrap-cap"><div class="card">
+      <div class="card-header">
+        <h4>目标端 Agent</h4><span class="count">共 1 台</span>
+        <span class="right"><button class="icon-btn"><svg><use href="#i-refresh"/></svg></button>
+          <button class="btn primary"><svg><use href="#i-radio"/></svg>注册 Agent</button></span>
+      </div>
+      <table class="grid" style="table-layout:fixed">
+        <colgroup><col style="width:190px"><col style="width:240px"><col style="width:110px"><col style="width:120px">
+          <col style="width:80px"><col style="width:140px"><col style="width:120px"><col style="width:152px"></colgroup>
+        <thead><tr><th>名称</th><th>地址</th><th>状态</th><th>身份</th><th>版本</th><th>最近可见</th><th>被引用</th><th>操作</th></tr></thead>
+        <tbody>
+          <tr><td><span class="ell" style="font-weight:500">默认</span><span class="sub">默认目标端</span></td>
+            <td><span class="ell mono">http://10.250.0.202:18080</span></td>
+            <td><span class="dot ok"></span>在线</td>
+            <td class="mono">664758c3</td><td class="mono">0.1.0</td>
+            <td title="2026/08/26 09:20:13">12 秒前</td>
+            <td><a href="#" style="color:var(--brand);text-decoration:none">1 条数据源</a></td>
+            <td><div class="acts"><button class="icon-btn" title="重新探活"><svg><use href="#i-refresh"/></svg></button>
+              <button class="icon-btn" title="编辑"><svg><use href="#i-pencil"/></svg></button>
+              <button class="icon-btn crit" title="注销"><svg><use href="#i-trash"/></svg></button></div></td></tr>
+        </tbody>
+      </table>
+    </div></div></div>
+  </div></div>
+  <span class="pin good">相对时间，绝对时间放 title</span>
+  </div>
+</div>
+<ul class="notes">
+  <li class="p1"><span class="sev">P1</span><b>「最近可见」改相对时间</b>（<code>12 秒前</code>），绝对时间戳放 <code>title</code>。判断在线与否是这一屏唯一的高频问题，不该要求人做减法。</li>
+  <li class="p2"><span class="sev">P2</span><b>状态改色点 + 文字</b>，方角实心绿块退场；操作图标 24 → 28px，并补 <code>title</code>（重新探活 / 编辑 / 注销）。</li>
+  <li class="p2"><span class="sev">P2</span>UUID 下线，副行留给「默认目标端」这类真正有意义的角色说明。</li>
+</ul>
+</section>
+
+<!-- ================= 4 · 系统设置 ================= -->
+<section id="s4">
+<h2><span class="n">4</span>系统设置</h2>
+<p class="verdict">这一屏自己都承认「本版只读」——内容是一段说明性长文，讲的是「这里什么都改不了，去别处改」。
+<b>它却占着四个主导航席位之一。</b>高频用户一年看它一次，代价是每天在导航里跳过它一次。</p>
+<div class="pair">
+  <div class="frame before"><span class="tag">现状 · 占一个主导航席位</span><div class="viewport"><div class="stage" style="min-height:560px" data-nav="st" data-crumb="系统设置">
+    <div class="content"><div class="card" style="padding-bottom:18px">
+      <div class="card-header" style="border-bottom:0;padding:12px var(--pad)">
+        <h4 style="font-size:14px">系统设置</h4><span class="count">本版只读</span></div>
+      <div style="padding:0 var(--pad)"><div class="prose">
+        <p>这一版没有可以在界面上改的设置。能改的三类东西各有落点：<b>连接信息</b>在「数据源」屏增删改，
+        <b>目标端 agent</b> 在「目标端 Agent」屏注册与增删改，<b>任务定义</b>在作业中心的任务构建器里改。</p>
+        <p>其余是服务端的进程级配置，写在 <code>source.toml</code> 里，改完需要重启服务：</p>
+        <dl class="deflist" style="margin:14px 0">
+          <dt>Oracle 客户端库</dt><dd>oracle_client_lib_dir</dd>
+          <dt>本服务监听地址</dt><dd>listen</dd>
+          <dt>数据目录（任务、数据源、运行历史都在这里）</dt><dd>data_dir</dd>
+          <dt>运行历史保留期</dt><dd>history_retention_days（默认 90 天）</dd>
+        </dl>
+        <p class="faint"><code>sink_base_url</code> 已退役（ADR-0044 §5）：目标端地址不再是一个全局配置，而是逐条数据源绑定的
+        agent。老配置里若还留着它，首次启动会把它迁成一台名为「默认」的 agent，随后就可以从配置文件里删掉。</p>
+        <p class="faint">口令类字段不在这里显示，也永远不回读——界面拿不到它们，连密文都拿不到（ADR-0037 §5）。</p>
+      </div></div>
+    </div></div>
+  </div></div>
+  <span class="pin bad">四分之一的主导航，换来一屏读完就走的说明文</span>
+  </div>
+
+  <div class="frame after"><span class="tag">改版后 · 降级为「关于」浮层</span><div class="viewport"><div class="stage" style="min-height:560px;position:relative" data-nav="jobs" data-crumb="作业中心" data-nav3="1" data-about="1">
+    <div class="content"><div class="wrap-cap">
+      <div class="filterbar">
+        <label>任务名</label><input class="inp ph" style="width:240px" value="任务名 / 源表 / 目标表">
+        <label>源端</label><span class="sel" style="width:160px">全部源端</span>
+        <label>运行状态</label><span class="sel" style="width:104px">全部</span>
+        <span style="margin-left:auto;display:flex;gap:8px"><button class="btn ghost">重置</button><button class="btn primary">查询</button></span>
+      </div>
+      <div class="card"><div class="card-header"><h4>作业中心</h4><span class="count">共 5 个</span></div>
+        <div class="empty">导航只剩三项：作业中心 · 数据源 · 目标端 Agent</div></div>
+    </div></div>
+    <div class="pop">
+      <div class="ph">关于 db-qbs</div>
+      <div class="pb">
+        <dl class="deflist">
+          <dt>版本</dt><dd>0.1.0</dd>
+          <dt>源端服务</dt><dd>10.250.0.24:18088</dd>
+          <dt>数据目录</dt><dd>data_dir</dd>
+          <dt>运行历史保留</dt><dd>90 天</dd>
+        </dl>
+        <div class="notice info" style="margin-top:14px">
+          <b>本版没有可以在界面上改的设置。</b>
+          <p>连接信息在「数据源」改，目标端 agent 在「目标端 Agent」改，任务定义在任务构建器里改。
+          其余是 <code style="font-family:var(--font-num)">source.toml</code> 的进程级配置，改完需重启服务。</p>
+        </div>
+      </div>
+    </div>
+  </div></div>
+  <span class="pin good">收进右上角，需要时一眼，不需要时不占地方</span>
+  </div>
+</div>
+<ul class="notes">
+  <li class="p1"><span class="sev">P1</span><b>「系统设置」退出主导航，降级为右上角的「关于」浮层。</b>内容不删，只是不再占用每天都要扫过的空间。</li>
+  <li class="p1"><span class="sev">P1</span>顺手去掉写死的 <code>当前工作台</code> 标签——它永远显示同一个常量，不承载任何信息。</li>
+  <li class="p2"><span class="sev">P2</span>长说明文压缩成一段结论 + 一张定义表；ADR 编号这类只有开发看的引用挪到文档里。</li>
+</ul>
+</section>
+<!-- ================= 5 · 任务向导 ================= -->
+<section id="s5">
+<h2><span class="n">5</span>任务向导</h2>
+<p class="verdict">两个问题最扎手。一是<b>自定义 SQL 的编辑框只有 145px 高、挤在 300px 宽的左栏里</b>——
+而用户的实际用法是从别处<b>粘贴</b>一段几十行的 SQL 进来，这个尺寸下每一行都要横向滚动。
+二是<b>向导一打开就是三条红色报错</b>，而那只是「还没填」，不是「填错了」。</p>
+
+<h3 class="sub-h">5a · 自定义 SQL：把编辑器搬进主区</h3>
+<div class="pair">
+  <div class="frame before"><span class="tag">现状</span><div class="viewport"><div class="stage" style="min-height:700px" data-nav="jobs" data-crumb="新建任务">
+    <div class="wiz">
+      <div class="wizctx">
+        <h5>导入上下文 <span class="x"><svg><use href="#i-x"/></svg></span></h5>
+        <div class="seg"><div>按表选择</div><div class="on">自定义 SQL</div></div>
+        <div class="ctx-title">源端 · POC Oracle 11g <span class="r"><svg><use href="#i-refresh"/></svg></span></div>
+        <span class="flabel cn">源端数据源</span>
+        <span class="sel native" style="width:100%">POC Oracle 11g · //10.250.0.222:1522/xe</span>
+        <span class="flabel">DBLINK</span>
+        <span class="sel native" style="width:100%">本地库</span>
+        <span class="flabel cn">查询语句</span>
+        <div class="sqlbox outline-bad" style="min-height:145px">
+          <div class="sqltext" style="min-height:145px"><span class="k">SELECT</span> a.ID <span class="k">AS</span> ID,
+       a.BIZ_DATE <span class="k">AS</span> BIZ_DATE,
+       a.AMOUNT <span class="k">AS</span> AMOUNT,
+       a.CUSTOMER_NAME <span class="k">AS</span> CUSTOMER_NAME,
+       a.UPDATED_AT <span class="k">AS</span> UPDATED_AT
+  <span class="k">FROM</span> SYSTEM.TEST_SOURCE_001 a
+  <span class="k">JOIN</span> SYSTEM.CUSTOMER c <span class="k">ON</span> c.ID = a.CUSTOMER_ID
+ <span class="k">WHERE</span> a.BIZ_DATE &gt;= <span class="k">TO_DATE</span>(<span class="s">'2025-01-01'</span>, <span class="s">'YYYY-MM-DD'</span>)
+   <span class="k">AND</span> a.AMOUNT &gt; <span class="n">0</span>
+ <span class="k">ORDER BY</span> a.ID</div>
+        </div>
+        <div class="ctx-title" style="margin-top:20px">目标端 · mysql库 <span class="r"><svg><use href="#i-refresh"/></svg></span></div>
+        <span class="flabel cn">目标端数据源</span>
+        <span class="sel native" style="width:100%">mysql库 · 10.250.0.24:3306 / mysql</span>
+        <div class="inp ph" style="width:100%;display:flex;align-items:center;gap:8px;margin-top:10px">
+          <svg style="width:14px;height:14px;color:var(--mute)"><use href="#i-search"/></svg>筛选目标表<span style="margin-left:auto;font:12px var(--font-num)">42 / 42</span></div>
+        <div class="tree" style="margin-top:8px">
+          <div>DB_QBS_POC_BAD</div><div>DB_QBS_POC_ORDERS</div><div>TEST_SOURCE_001</div>
+        </div>
+      </div>
+      <div class="wizmain">
+        <ul class="rail" style="margin:0">
+          <li class="is-current"><span>1</span>选列与字段映射</li><span class="ln"></span>
+          <li><span>2</span>过滤与验证</li><span class="ln"></span>
+          <li><span>3</span>目标表检查</li><span class="ln"></span>
+          <li><span>4</span>确认并运行</li>
+        </ul>
+        <div class="wizbody">
+          <h3>选列与字段映射</h3>
+          <p class="lead">系统会先做同名匹配，请判断要搬哪些列，以及每一列应写到目标表的哪里。</p>
+          <div class="alerts">
+            <div class="a">请先选一张源表</div>
+            <div class="a">请先选目标表——字段映射要对着它才有意义</div>
+            <div class="a">至少要选一列</div>
+          </div>
+          <div class="card" style="margin-top:18px"><div class="empty" style="padding:80px 0">还没有可映射的列</div></div>
+        </div>
+        <div class="wizfoot"><button class="btn">取消</button>
+          <span class="right"><button class="btn primary" disabled>下一步</button></span></div>
+      </div>
+    </div>
+  </div></div>
+  <span class="pin bad">145px 高 · 260px 可视宽：一段 10 行 SQL 要横竖两个方向滚</span>
+  <span class="pin bad">打开就三条红字，说的却是「还没填」</span>
+  </div>
+
+  <div class="frame after"><span class="tag">改版后</span><div class="viewport"><div class="stage" style="min-height:700px" data-nav="jobs" data-crumb="新建任务">
+    <div class="wiz">
+      <div class="wizctx slim">
+        <h5>导入上下文 <span class="x"><svg><use href="#i-x"/></svg></span></h5>
+        <div class="seg"><div>按表选择</div><div class="on">自定义 SQL</div></div>
+        <span class="flabel cn">源端数据源</span>
+        <span class="sel" style="width:100%">POC Oracle 11g</span>
+        <span class="sub" style="display:block;margin-top:4px">//10.250.0.222:1522/xe · DBLINK 本地库</span>
+        <span class="flabel cn" style="margin-top:18px">目标端数据源</span>
+        <span class="sel" style="width:100%">mysql库</span>
+        <span class="sub" style="display:block;margin-top:4px">10.250.0.24:3306 / mysql · agent 默认 <span class="dot ok"></span></span>
+        <span class="flabel cn" style="margin-top:18px">目标表</span>
+        <div style="display:flex;gap:6px">
+          <input class="inp" style="flex:1;min-width:0;font-family:var(--font-num);font-size:12px" value="DB_QBS_POC_STAT">
+          <button class="icon-btn" title="刷新目标表清单"><svg><use href="#i-refresh"/></svg></button>
+        </div>
+        <div style="margin-top:8px"><span class="badge r warn-soft">尚不存在</span></div>
+        <div class="notice warn" style="margin-top:10px;padding:8px 10px">
+          <b style="font-size:13px">这张表还没建</b>
+          <p style="font-size:12px">已按当前选列生成建表 DDL，拿去执行后点刷新即可继续。</p>
+          <button class="btn sm" style="margin-top:8px">查看 DDL</button>
+        </div>
+      </div>
+      <div class="wizmain">
+        <ul class="rail" style="margin:0">
+          <li class="is-current ring"><span>1</span>选列与字段映射</li><span class="ln"></span>
+          <li><span>2</span>过滤与验证</li><span class="ln"></span>
+          <li><span>3</span>确认并运行</li>
+        </ul>
+        <div class="wizbody">
+          <h3>选列与字段映射</h3>
+          <p class="lead">先写出源端查询，系统会拿它的结果集去和目标表做同名匹配。</p>
+          <div class="sqlbox outline-good">
+            <div class="tools">
+              <span style="font-size:12px;color:var(--dim);font-weight:600">源端查询</span>
+              <span class="sub">10 行 · Oracle</span>
+              <span class="r">
+                <button class="btn sm"><svg style="width:13px;height:13px"><use href="#i-wrap"/></svg>软换行</button>
+                <button class="btn sm"><svg style="width:13px;height:13px"><use href="#i-align"/></svg>格式化</button>
+                <button class="btn sm"><svg style="width:13px;height:13px"><use href="#i-max"/></svg>全屏</button>
+              </span>
+            </div>
+            <div class="sqlwrap" style="min-height:230px">
+              <div class="gutter"> 1<br> 2<br> 3<br> 4<br> 5<br> 6<br> 7<br> 8<br> 9<br>10</div>
+              <div class="sqltext"><span class="k">SELECT</span> a.ID <span class="k">AS</span> ID,
+       a.BIZ_DATE <span class="k">AS</span> BIZ_DATE,
+       a.AMOUNT <span class="k">AS</span> AMOUNT,
+       a.CUSTOMER_NAME <span class="k">AS</span> CUSTOMER_NAME,
+       a.UPDATED_AT <span class="k">AS</span> UPDATED_AT
+  <span class="k">FROM</span> SYSTEM.TEST_SOURCE_001 a
+  <span class="k">JOIN</span> SYSTEM.CUSTOMER c <span class="k">ON</span> c.ID = a.CUSTOMER_ID
+ <span class="k">WHERE</span> a.BIZ_DATE &gt;= <span class="k">TO_DATE</span>(<span class="s">'2025-01-01'</span>, <span class="s">'YYYY-MM-DD'</span>)
+   <span class="k">AND</span> a.AMOUNT &gt; <span class="n">0</span>
+ <span class="k">ORDER BY</span> a.ID</div>
+            </div>
+          </div>
+          <div class="todo">
+            <h6>还差三件事</h6>
+            <ul>
+              <li class="done"><i></i>写出源端查询</li>
+              <li><i></i>选定目标表（已填 <span class="mono">DB_QBS_POC_STAT</span>，等建表后确认）</li>
+              <li><i></i>至少勾选一列并指定主键</li>
+            </ul>
+          </div>
+        </div>
+        <div class="wizfoot"><button class="btn ghost">取消</button>
+          <span class="right">
+            <span title="目标表还没建出来，建完点刷新即可继续"><button class="btn primary" disabled>下一步</button></span>
+          </span></div>
+      </div>
+    </div>
+  </div></div>
+  <span class="pin good">编辑器进主区：行号 · 软换行 · 格式化 · 全屏</span>
+  <span class="pin good">红色让位给中性待办清单</span>
+  <span class="pin good">目标表可以手输「还不存在」的名字，并据此出 DDL</span>
+  </div>
+</div>
+<ul class="notes">
+  <li class="p1"><span class="sev">P1</span><b>SQL 模式下编辑器搬进主区</b>，最小高度 ~420px，配行号、软换行开关、格式化、全屏。粘贴才是它的主用法，现在的尺寸完全撑不住。</li>
+  <li class="p1"><span class="sev">P1</span><b>软换行是开关，默认关。</b><code>SqlEditor.tsx</code> 里 <code>wrap="off"</code> 是有原因的（高亮层和输入层必须逐像素对齐，否则光标会漂）——开启时两层用同一套换行规则，约束仍然成立。</li>
+  <li class="p1"><span class="sev">P1</span><b>只读 SQL 也要高亮</b>：<code>.ddl-output</code> 和抽屉里的 <code>pre.drawer-sql</code> 现在完全没有着色，而可编辑的那个满色。高亮器和 token 都是现成的。</li>
+  <li class="p1"><span class="sev">P1</span><b>红字拆成「待办」和「错误」两类。</b>字段为空 = 待办，中性清单，不带 <code>role="alert"</code>；字段填了但不合法（重复列、缺主键）才是错误，保留红色和 live region。红色必须意味着「你做错了」，否则真出错时没人看。</li>
+  <li class="p1"><span class="sev">P1</span><b>目标表允许手输</b>，不存在就标「尚不存在」并生成建表 DDL；刷新按钮不再要求「先选目标表」。现在这三条互相咬死，目标表没建过就是死路一条，只能退出向导（草稿全丢）。</li>
+  <li class="p1"><span class="sev">P1</span><b>四步压成三步。</b>「目标表检查」在步骤 1 完成时就自动跑了，顺利时它只是一句话的过场；把结果并进确认页，只有不通过或没跑成时才展开成整屏。</li>
+  <li class="p1"><span class="sev">P1</span><b>创建模式放开两个数据源下拉。</b>现在它们被 <code>draft.mode === "edit"</code> 挡着，创建时想换数据源只能退出重来。</li>
+  <li class="p1"><span class="sev">P1</span><b>离开向导保留草稿</b>（sessionStorage），拦截弹窗的主按钮改成「保留草稿并离开」。一份任务定义是十几个决定加一段手贴的 SQL，不该被一次导航清空。</li>
+  <li class="p2"><span class="sev">P2</span><b>步骤条能看出「我在哪」。</b>现在 <code>is-current</code> 和 <code>is-done</code> 样式完全一样，走到第 4 步时四个圈全是实心蓝。当前步给实心 + 光晕，已完成给描边 + 对勾。</li>
+  <li class="p2"><span class="sev">P2</span><b>原生 <code>select</code> 纳入表单样式</b>（高度 <code>--ctl-h</code>、<code>--radius</code>、同一套边框）。它出现在整个产品最重要的创建流程里，却是浏览器默认样式。</li>
+</ul>
+
+<h3 class="sub-h">5b · 确认并运行：不能把「没检查过」画成「已通过」</h3>
+<div class="pair">
+  <div class="frame before"><span class="tag">现状</span><div class="viewport"><div class="stage" style="min-height:560px" data-nav="jobs" data-crumb="编辑任务">
+    <div class="wiz"><div class="wizmain">
+      <ul class="rail" style="margin:0">
+        <li class="is-done"><span>1</span>选列与字段映射</li><span class="ln"></span>
+        <li class="is-done"><span>2</span>过滤与验证</li><span class="ln"></span>
+        <li class="is-done"><span>3</span>目标表检查</li><span class="ln"></span>
+        <li class="is-current"><span>4</span>确认并运行</li>
+      </ul>
+      <div class="wizbody">
+        <h3>确认并运行</h3>
+        <p class="lead">最后核对系统汇总的完整决定，并判断是否可以保存或开始导入。</p>
+        <span class="flabel cn" style="margin:0 0 6px">任务名</span>
+        <input class="inp" style="width:100%;max-width:660px" value="SYSTEM.TEST_SOURCE_001 → TEST_SOURCE_001">
+        <div class="card" style="margin-top:16px">
+          <dl class="kv" style="grid-template-columns:1fr 1fr;border-bottom:1px solid var(--line)">
+            <div><dt>源端</dt><dd>SYSTEM.TEST_SOURCE_001</dd></div>
+            <div><dt>目标表</dt><dd>TEST_SOURCE_001</dd></div>
+          </dl>
+          <dl class="kv" style="grid-template-columns:1fr 1fr;border-bottom:1px solid var(--line)">
+            <div><dt>WHERE</dt><dd style="font-family:var(--font-cn)">整表</dd></div>
+            <div><dt>主键</dt><dd>ID</dd></div>
+          </dl>
+          <div style="padding:var(--pad);border-bottom:1px solid var(--line)">
+            <dt style="color:var(--mute);font-size:12px;margin-bottom:8px">字段映射</dt>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <span class="chip">ID → ID</span><span class="chip">BIZ_DATE → BIZ_DATE</span>
+              <span class="chip">AMOUNT → AMOUNT</span><span class="chip">CUSTOMER_NAME → CUSTOMER_NAME</span>
+              <span class="chip">UPDATED_AT → UPDATED_AT</span>
+            </div>
+          </div>
+          <div style="padding:var(--pad)" class="outline-bad">
+            <dt style="color:var(--mute);font-size:12px;margin-bottom:6px">目标表检查</dt>
+            <div style="font-size:14px">已通过</div>
+          </div>
+        </div>
+      </div>
+      <div class="wizfoot"><button class="btn">上一步</button>
+        <span class="right"><button class="btn primary">保存</button></span></div>
+    </div></div>
+  </div></div>
+  <span class="pin bad">「已通过」也可能是「压根没检查」——两种状态渲染得一模一样</span>
+  </div>
+
+  <div class="frame after"><span class="tag">改版后</span><div class="viewport"><div class="stage" style="min-height:560px" data-nav="jobs" data-crumb="编辑任务">
+    <div class="wiz"><div class="wizmain">
+      <ul class="rail" style="margin:0">
+        <li class="is-done outline"><span><svg style="width:13px;height:13px"><use href="#i-check"/></svg></span>选列与字段映射</li><span class="ln"></span>
+        <li class="is-done outline"><span><svg style="width:13px;height:13px"><use href="#i-check"/></svg></span>过滤与验证</li><span class="ln"></span>
+        <li class="is-current ring"><span>3</span>确认并运行</li>
+      </ul>
+      <div class="wizbody">
+        <h3>确认并运行</h3>
+        <p class="lead">最后核对系统汇总的完整决定，并判断是否可以保存或开始导入。</p>
+        <span class="flabel cn" style="margin:0 0 6px">任务名</span>
+        <input class="inp" style="width:100%;max-width:660px" value="SYSTEM.TEST_SOURCE_001 → TEST_SOURCE_001">
+        <div class="card" style="margin-top:16px">
+          <dl class="kv" style="grid-template-columns:1fr 1fr;border-bottom:1px solid var(--line)">
+            <div><dt>源端</dt><dd>SYSTEM.TEST_SOURCE_001</dd></div>
+            <div><dt>目标表</dt><dd>mysql库 · TEST_SOURCE_001</dd></div>
+          </dl>
+          <dl class="kv" style="grid-template-columns:1fr 1fr;border-bottom:1px solid var(--line)">
+            <div><dt>WHERE</dt><dd style="font-family:var(--font-cn)">整表</dd></div>
+            <div><dt>主键</dt><dd>ID</dd></div>
+          </dl>
+          <div style="padding:var(--pad);border-bottom:1px solid var(--line)">
+            <dt style="color:var(--mute);font-size:12px;margin-bottom:8px">字段映射 · 5 列</dt>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <span class="chip r">ID → ID</span><span class="chip r">BIZ_DATE → BIZ_DATE</span>
+              <span class="chip r">AMOUNT → AMOUNT</span><span class="chip r">CUSTOMER_NAME → CUSTOMER_NAME</span>
+              <span class="chip r">UPDATED_AT → UPDATED_AT</span>
+            </div>
+          </div>
+          <div style="padding:var(--pad)">
+            <dt style="color:var(--mute);font-size:12px;margin-bottom:8px">目标表检查</dt>
+            <div class="notice warn outline-good" style="display:flex;align-items:flex-start;gap:12px">
+              <svg style="width:17px;height:17px;color:var(--warn-ink);margin-top:2px"><use href="#i-alert"/></svg>
+              <div style="flex:1">
+                <b>尚未检查</b>
+                <p>目标端 Agent「默认」不在线，这一步查不了；保存不受影响，运行要等它回来。</p>
+              </div>
+              <button class="btn sm">立即检查</button>
+            </div>
+          </div>
+        </div>
+        <div class="notice info" style="margin-top:16px">
+          <b>写入方式：按主键 upsert</b>
+          <p>新增和变更会写入目标表；<b>源端已删除的行不会从目标表消失</b>。需要严格一致请先手工清空目标表。</p>
+        </div>
+      </div>
+      <div class="wizfoot"><button class="btn ghost">上一步</button>
+        <span class="right"><button class="btn">仅保存</button><button class="btn primary">保存并运行</button></span></div>
+    </div></div>
+  </div></div>
+  <span class="pin good">三态：已通过 / 有 N 处需要处理 / 尚未检查（附原因 + 立即检查）</span>
+  <span class="pin good">运行之前就把 upsert 语义讲清楚</span>
+  </div>
+</div>
+<ul class="notes">
+  <li class="p0"><span class="sev">P0</span><b>目标表检查改三态。</b>「我们查过，没问题」和「我们根本没查」现在在最后一屏上像素级相同。<code>wizard.ts:1168</code> 在检查不新鲜时把 findings 直接置空，于是渲染成「已通过」。</li>
+  <li class="p0"><span class="sev">P0</span><b>把 <code>excused</code> 的理由显示出来。</b><code>wizard.ts:1151-1156</code> 已经算好了「Agent 不在线所以查不了」这句话，<b>但没有任何组件读它</b>——推理是对的，只是在到达屏幕前被丢掉了。</li>
+  <li class="p0"><span class="sev">P0</span><b>确认页写明 upsert 语义。</b>这是运行前唯一一次能说清楚的机会，说在结果出来之后就晚了。</li>
+  <li class="p2"><span class="sev">P2</span>目标表补上数据源名（<code>mysql库 · TEST_SOURCE_001</code>）；映射 chip 数量放进标题；主按钮拆成「仅保存」和「保存并运行」，不再用一颗含糊的「保存」。</li>
+</ul>
+</section>
+<!-- ================= 6 · 运行详情 ================= -->
+<section id="s6">
+<h2><span class="n">6</span>运行详情</h2>
+<p class="verdict">这一屏有全篇最重的一条：<b><code>SWAPPED 目标表已切换</code> 描述的是一次并没有发生的切换。</b>
+底层实际执行的是 <code>INSERT ... ON DUPLICATE KEY UPDATE</code>，源端删掉的行会一直留在目标表里。
+「已切换」建立的心智模型是原子替换，而事实是历次写入的并集。次要问题：<b>运行详情没有地址</b>，
+不能收藏、不能贴给同事、刷新即失；而最有用的「映射预检」表只在启动运行的那个标签页里出现过一次。</p>
+
+<div class="pair">
+  <div class="frame before"><span class="tag">现状 · 抽屉</span><div class="viewport"><div class="stage" style="min-height:700px">
+    <div class="scrim"></div>
+    <div class="drawer">
+      <div class="dhead"><svg style="color:var(--brand)"><use href="#i-x"/></svg>
+        <h4>运行详情 · SYSTEM.TEST_SOURCE_001 → TEST_SOURCE_001</h4>
+        <span class="uuid" style="margin:0">8b3709d02c9ee356161fe4542deb72d1</span></div>
+      <div class="dbody">
+        <div class="card"><div class="card-header"><h4>结论</h4></div>
+          <div style="padding:var(--pad)">
+            <div style="display:flex;align-items:center;gap:14px;margin-bottom:12px">
+              <span class="sub">运行结果</span><span class="mono" style="font-size:14px">SUCCEEDED</span>
+              <span class="badge ok-soft outline-bad" style="font-family:var(--font-num)">SWAPPED&nbsp;&nbsp;目标表已切换</span>
+            </div>
+            <div class="notice">目标端：运行成功：已推送 500,000 行，暂存表已切换为目标表。</div>
+          </div>
+        </div>
+        <div class="card"><div class="card-header"><h4>行数核对</h4></div>
+          <dl class="kv c4">
+            <div><dt>源端读取</dt><dd>500,000</dd></div><div><dt>暂存写入</dt><dd>500,000</dd></div>
+            <div><dt>目标端回报</dt><dd>500,000</dd></div><div><dt>清理行数</dt><dd>0</dd></div>
+          </dl>
+        </div>
+        <div class="card"><div class="card-header"><h4>分段耗时</h4></div>
+          <dl class="kv c4 outline-bad">
+            <div><dt>开跑前计数</dt><dd>74 ms</dd></div><div><dt>取数</dt><dd>6,109 ms</dd></div>
+            <div><dt>推送</dt><dd>12,281 ms</dd></div><div><dt>提交</dt><dd>35,234 ms</dd></div>
+            <div><dt>门禁计数</dt><dd>27 ms</dd></div><div><dt>开游标</dt><dd>54,240 ms</dd></div>
+          </dl>
+        </div>
+        <div class="card"><div class="card-header"><h4>当前任务定义（可能已修改）</h4></div>
+          <dl class="kv" style="grid-template-columns:1fr 1fr">
+            <div><dt>源表</dt><dd>SYSTEM.TEST_SOURCE_001</dd></div><div><dt>目标表</dt><dd>TEST_SOURCE_001</dd></div>
+            <div><dt>主键</dt><dd>ID</dd></div><div><dt>条件</dt><dd style="font-family:var(--font-cn)">整表</dd></div>
+          </dl>
+        </div>
+      </div>
+      <div class="dfoot">
+        <span class="sub">这一条已是最近一次运行；同一个任务的多次历史版本不展示。</span>
+        <span class="right"><button class="btn danger"><svg style="width:14px;height:14px"><use href="#i-trash"/></svg>清理本次写入</button>
+          <button class="btn">关闭</button></span></div>
+    </div>
+  </div></div>
+  <span class="pin bad">upsert 被说成「切换」——最高风险的一条文案</span>
+  <span class="pin bad">数字左对齐、固定四列，量级对不齐</span>
+  <span class="pin bad">没有 URL：不能收藏、不能分享、刷新即失</span>
+  </div>
+
+  <div class="frame after"><span class="tag">改版后 · 独立页面 #/runs/&lt;id&gt;</span><div class="viewport"><div class="stage" style="min-height:700px" data-nav="jobs" data-crumb="作业中心 / 运行详情">
+    <div class="content">
+      <div class="card" style="margin-bottom:var(--pad)">
+        <div class="card-header">
+          <h4>SYSTEM.TEST_SOURCE_001 → TEST_SOURCE_001</h4>
+          <span class="chip r mono" style="font-size:11px">#/runs/8b3709d0…</span>
+          <button class="icon-btn" title="复制链接"><svg><use href="#i-link"/></svg></button>
+          <span class="right">
+            <button class="btn"><svg style="width:14px;height:14px"><use href="#i-play"/></svg>重新发起</button>
+            <button class="btn danger"><svg style="width:14px;height:14px"><use href="#i-trash"/></svg>清理本次写入</button>
+          </span>
+        </div>
+        <div style="padding:var(--pad)">
+          <div style="display:flex;align-items:center;gap:14px;margin-bottom:12px">
+            <span class="dot ok"></span><b>成功</b>
+            <span class="badge r ok-soft">已按主键合并写入</span>
+            <span class="sub">2026/08/26 09:03:24 · 用时 54 秒</span>
+          </div>
+          <div class="notice outline-good">
+            <b>已推送 500,000 行，按主键合并进目标表。</b>
+            <p>新增和变更已写入；<b>源端已删除的行仍保留在目标表</b>——upsert 只写不删。需要严格一致请先手工清空目标表。</p>
+          </div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--pad)">
+        <div class="card" style="margin:0"><div class="card-header"><h4>行数核对</h4></div>
+          <dl class="kv auto num">
+            <div><dt>源端读取</dt><dd>500,000</dd></div><div><dt>暂存写入</dt><dd>500,000</dd></div>
+            <div><dt>目标端回报</dt><dd>500,000</dd></div><div><dt>清理行数</dt><dd>0</dd></div>
+          </dl>
+        </div>
+        <div class="card" style="margin:0"><div class="card-header"><h4>分段耗时</h4><span class="count">合计 108.0 s</span></div>
+          <dl class="kv auto num outline-good">
+            <div><dt>开游标</dt><dd>54,240</dd></div><div><dt>提交</dt><dd>35,234</dd></div>
+            <div><dt>推送</dt><dd>12,281</dd></div><div><dt>取数</dt><dd>6,109</dd></div>
+            <div><dt>开跑前计数</dt><dd>74</dd></div><div><dt>门禁计数</dt><dd>27</dd></div>
+          </dl>
+          <p class="sub" style="padding:0 var(--pad) var(--pad);margin:0">单位 ms · 从大到小</p>
+        </div>
+      </div>
+      <div class="card" style="margin-top:var(--pad)">
+        <div class="card-header"><h4>映射预检</h4><span class="count">5 列 · 2 处需要留意</span></div>
+        <table class="grid">
+          <thead><tr><th>源列</th><th>源类型</th><th>目标列</th><th>目标类型</th><th>结论</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">ID</td><td class="mono">NUMBER</td><td class="mono">ID</td><td class="mono">BIGINT</td>
+              <td><span class="dot ok"></span>兼容 · 主键</td></tr>
+            <tr><td class="mono">BIZ_DATE</td><td class="mono">DATE</td><td class="mono">BIZ_DATE</td><td class="mono">DATETIME</td>
+              <td><span class="dot ok"></span>兼容</td></tr>
+            <tr><td class="mono">AMOUNT</td><td class="mono">NUMBER(12,2)</td><td class="mono">AMOUNT</td><td class="mono">DECIMAL(12,2)</td>
+              <td><span class="dot ok"></span>兼容</td></tr>
+            <tr class="hov"><td class="mono">CUSTOMER_NAME</td><td class="mono">VARCHAR2(100)</td><td class="mono">CUSTOMER_NAME</td><td class="mono">VARCHAR(64)</td>
+              <td><span class="badge r warn-soft">可能截断</span></td></tr>
+            <tr class="hov"><td class="mono">UPDATED_AT</td><td class="mono">TIMESTAMP(6)</td><td class="mono">UPDATED_AT</td><td class="mono">DATETIME(3)</td>
+              <td><span class="badge r warn-soft">精度下降</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div></div>
+  <span class="pin good">有地址、可复制、可分享</span>
+  <span class="pin good">说清楚 upsert 到底做了什么</span>
+  <span class="pin good">映射预检不再只在「刚点了运行」的那个标签页里出现</span>
+  </div>
+</div>
+<ul class="notes">
+  <li class="p0"><span class="sev">P0</span><b><code>目标表已切换</code> → <code>已按主键合并写入</code></b>，并补一句「源端已删除的行仍保留在目标表」。
+    <code>history.ts:165</code> 的「暂存表已切换为目标表」同步改成「已按主键合并进目标表」。<code>DISCARDED</code> 的「目标表未被触碰」是准确的，保留。</li>
+  <li class="p0"><span class="sev">P0</span><b>只改文案不改行为</b>（既定范围）：目标表仍可能是新旧结果集的并集。这条债还在，只是界面从「误导」变成「说明白了自己的边界」。</li>
+  <li class="p1"><span class="sev">P1</span><b>运行详情成为路由 <code>#/runs/&lt;id&gt;</code></b>，列表里的时钟图标变成真链接。现在它只是 <code>activeRun</code> 这个 React state，刷新就没了。</li>
+  <li class="p1"><span class="sev">P1</span><b>映射预检在这里也渲染。</b>它现在只出现在整屏运行页，而那个页面只有「在本标签页点了发起」才能到达。</li>
+  <li class="p2"><span class="sev">P2</span><b>分段耗时按量级排序、数字右对齐、自适应列数</b>，一眼看出瓶颈是「开游标 54s」。现在固定四列 + 左对齐，六个数字读起来要逐个比。</li>
+  <li class="p2"><span class="sev">P2</span>运行结果不再同时抛出 <code>SUCCEEDED</code> 和「成功」两套词汇；页面头部直接给出结论 + 时间 + 用时。</li>
+</ul>
+
+<h3 class="sub-h">6b · 清理本次写入：从原生 confirm 换成正式弹窗</h3>
+<div class="pair">
+  <div class="frame before"><span class="tag">现状</span><div class="viewport"><div class="stage" style="min-height:260px">
+    <div class="modal-layer" style="width:100%;background:rgba(0,0,0,.2);padding:40px 0">
+      <div class="native-confirm">
+        <div class="t">10.250.0.24:18088 显示</div>
+        <div>确定清理这一次运行写入的数据？此操作不可撤销。</div>
+        <div class="btns"><button>取消</button><button class="d">确定</button></div>
+      </div>
+    </div>
+  </div></div>
+  <span class="pin bad">没有表名、没有行数，「清理」这个词还听着像整理房间</span>
+  </div>
+
+  <div class="frame after"><span class="tag">改版后</span><div class="viewport"><div class="stage" style="min-height:260px">
+    <div class="modal-layer" style="width:100%;padding:22px 0">
+      <div class="modal">
+        <div class="mh"><svg style="color:var(--crit)"><use href="#i-alert"/></svg>清理本次写入</div>
+        <div class="mb">
+          将从 <b class="mono" style="color:var(--crit-ink);font-size:13px">mysql库 · TEST_SOURCE_001</b>
+          删除这次运行写进去的 <b>500,000</b> 行。
+          <div class="notice warn" style="margin-top:12px">
+            <b>清理是删除，不是还原。</b>
+            <p>目标表不会回到运行之前的样子——这次覆盖掉的旧值找不回来，只是把新写进去的行删掉。</p>
+          </div>
+        </div>
+        <div class="mf"><button class="btn">取消</button><button class="btn danger solid">删除这 500,000 行</button></div>
+      </div>
+    </div>
+  </div></div>
+  <span class="pin good">库.表 · 行数 · 「不是还原」 · 实心红确认键</span>
+  </div>
+</div>
+<ul class="notes">
+  <li class="p0"><span class="sev">P0</span><b>换成正式 Modal</b>（<code>ui.tsx</code> 里现成的），写明三件原生 confirm 说不了的事：完整的 <code>库.表</code>、要删的行数、以及<b>清理 ≠ 还原</b>。</li>
+  <li class="p0"><span class="sev">P0</span><b>确认键用实心红</b>。目前 <code>.is-danger</code> 是白底红框，而「只是打开弹窗」的工具栏按钮用的是同一个类——真正执行破坏的那颗必须最重。</li>
+  <li class="p0"><span class="sev">P0</span><b>弹窗要接管焦点</b>：进入时聚焦、Tab 循环在弹窗内、关闭后归还给触发元素。现在 <code>ui.tsx:29-37</code> 只处理了 Escape，Tab 会走到被遮住的背景里去——这是全篇唯一够 P0 的无障碍缺陷，而它正好作用在每一个危险确认上。</li>
+</ul>
+
+<h3 class="sub-h">6c · 结局不明：唯一需要人去查库的结局，却什么线索都不给</h3>
+<div class="pair">
+  <div class="frame before"><span class="tag">现状</span><div class="viewport"><div class="stage" style="min-height:300px">
+    <div class="content" style="background:var(--bg)">
+      <div class="card" style="max-width:900px"><div class="card-header"><h4>结论</h4></div>
+        <div style="padding:var(--pad)">
+          <div style="display:flex;align-items:center;gap:14px;margin-bottom:12px">
+            <span class="sub">运行结果</span><span class="mono" style="font-size:14px">UNKNOWN</span>
+            <span class="badge r warn-soft">结局不明</span>
+          </div>
+          <div class="notice warn outline-bad">目标端在提交阶段失联，这次运行的最终结果无法确认。请到目标库核对后再决定是否重跑。</div>
+          <p class="sub" style="margin:12px 0 0">（没有证据面板：<code>FailureEvidence</code> 只在 <code>kind === "failed"</code> 时渲染，UNKNOWN 两边都不占）</p>
+        </div>
+      </div>
+    </div>
+  </div></div>
+  <span class="pin bad">「去核对」——去哪核对？哪个库、哪张表、暂存表叫什么？</span>
+  </div>
+
+  <div class="frame after"><span class="tag">改版后</span><div class="viewport"><div class="stage" style="min-height:300px">
+    <div class="content" style="background:var(--bg)">
+      <div class="card" style="max-width:900px"><div class="card-header"><h4>结论</h4></div>
+        <div style="padding:var(--pad)">
+          <div style="display:flex;align-items:center;gap:14px;margin-bottom:12px">
+            <span class="dot" style="background:var(--warn)"></span><b>结局不明</b>
+            <span class="sub">目标端在提交阶段失联</span>
+          </div>
+          <div class="notice info outline-good">
+            <b>重跑是安全的——写入按主键幂等。</b>
+            <p>不确定的是「这次到底写进去多少」，不是「重跑会不会写重」。</p>
+          </div>
+        </div>
+        <div class="card-header" style="border-top:1px solid var(--line)"><h4 style="font-size:14px">核对线索</h4></div>
+        <dl class="kv auto">
+          <div><dt>目标端地址</dt><dd>10.250.0.24:3306</dd></div>
+          <div><dt>库 . 表</dt><dd>mysql . TEST_SOURCE_001</dd></div>
+          <div><dt>暂存表</dt><dd>TEST_SOURCE_001__stg_20260826</dd></div>
+          <div><dt>最后已知写入</dt><dd>412,000 行</dd></div>
+          <div><dt>目标端运行号</dt><dd>run-7714</dd></div>
+          <div><dt>失联时刻</dt><dd>09:12:41</dd></div>
+        </dl>
+      </div>
+    </div>
+  </div></div>
+  <span class="pin good">四个事实齐了：地址、库.表、暂存表、最后已知行数</span>
+  </div>
+</div>
+<ul class="notes">
+  <li class="p0"><span class="sev">P0</span><b>UNKNOWN 也渲染证据面板</b>，改名「核对线索」。<code>RunDrawer.tsx:160</code> 和 <code>RunScreen.tsx:282</code> 都把它挂在 <code>failed</code> 上，而 UNKNOWN 既不是 ok 也不是 failed，两个门都进不去。</li>
+  <li class="p0"><span class="sev">P0</span><b>补一句「重跑是安全的」。</b>这一句能把一张工单变成一次点击——所有人在这一屏想问的都是这个问题。</li>
+</ul>
+</section>
+
+<section id="rest">
+<h2><span class="n">7</span>剩下的：运行中的状态与设计系统收口</h2>
+<p class="verdict">这些没有单独做对照图，但都在评审报告里有 <code>file:line</code> 证据。</p>
+<ul class="notes" style="grid-template-columns:1fr 1fr">
+  <li class="p1"><span class="sev">P1</span><b>运行中前 54 秒显示 <code>已用时 00:00</code>。</b><code>RunScreen.tsx:251</code> 把「累计批次耗时」标成「已用时」，第一批还没跑当然是 0。改成真实墙钟，并补「最后动静 N 秒前」——<code>last_ts</code> 已经在取，只是没用。</li>
+  <li class="p1"><span class="sev">P1</span><b><code>迁移进度 —</code> 的提示在正常运行时谎报「计数失败」。</b><code>progress.ts:191-196</code> 把 <code>total_rows === null</code> 一律当成预计数失败，包括 PREPARING 阶段还没数完的时候。要按阶段分支。</li>
+  <li class="p1"><span class="sev">P1</span><b>列表里的停止按钮无条件可点</b>，点了吃 409。<code>runStage.ts:294-320</code> 已经算出了三条明确的拒绝理由，<code>troubleshooting.ts:9-17</code> 却完全不读它。</li>
+  <li class="p1"><span class="sev">P1</span><b>失败后的「下一步」指错了地方</b>：映射类故障跳步骤 3（映射在步骤 1），连接类跳步骤 2（该去数据源屏）。15 种故障里有 8 种什么都不给。</li>
+  <li class="p1"><span class="sev">P1</span><b>禁用按钮上的 <code>title</code> 永远不显示。</b><code>TaskWizardScreen.tsx:642-653</code> 把 title 挂在 <code>disabled</code> 的 button 上，浏览器不会触发。<code>RunDrawer.tsx:276-289</code> 的 <code>&lt;span title&gt;</code> 包裹写法是对的，定为全局范式。</li>
+  <li class="p1"><span class="sev">P1</span><b>新建前的数据源选择弹窗大多数时候是空过场</b>（<code>entry.ts:179-188</code> 只有一个选项时会自动选中，而这里数据源 ≤10、多数任务走同一对）。只在真正缺前置条件时保留它。</li>
+  <li class="p2"><span class="sev">P2</span><b>字号阶梯 20/16/14/12</b>。现在标题和正文都是 14px，视觉上分不出层级。</li>
+  <li class="p2"><span class="sev">P2</span><b>中文标签不再走等宽栈</b>（<code>app.css:261</code> 让 <code>--font-num</code> 渲染中文，后面又在三处手工逃逸）。<code>--font-num</code> 只留给数字和标识符。</li>
+  <li class="p2"><span class="sev">P2</span><b>遮罩统一</b>：抽屉 0.45、弹窗 ≈0.29，收敛成一个 <code>--scrim</code>。<b>弹窗页脚 sticky</b>，长弹窗里按钮不再被滚走。</li>
+  <li class="p2"><span class="sev">P2</span><b>筛选后无结果要给出口</b>：现在只有一句「没有匹配的任务」，加一颗「清除筛选」。未筛选的空状态做得很好，照着它的水准对齐。</li>
+  <li class="p2"><span class="sev">P2</span><b>入口弹窗里的 agent 状态对比度实测约 2:1</b>，提到语义墨色 token。</li>
+  <li class="p2"><span class="sev">P2</span><b>断点补齐</b>：现有断点只有 760/620/480，760px 到无穷之间什么都不发生。补 1800px 居中上限和 1280px 列优先级两档。</li>
+</ul>
+</section>
+
+<section id="out">
+<h2><span class="n">8</span>这一轮明确不做</h2>
+<ul class="notes" style="grid-template-columns:1fr 1fr 1fr">
+  <li class="p2"><b>运行历史</b> —— 只留最近一次运行，代码里本来就是刻意这么设计的。</li>
+  <li class="p2"><b>快捷键</b> —— 不需要。</li>
+  <li class="p2"><b>「清空后重灌」模式</b> —— upsert 那条只改文案。</li>
+  <li class="p2"><b>暗色主题</b> —— 但 token 之外不新增硬编码色值，以后想做很便宜。</li>
+  <li class="p2"><b>换视觉语言</b> —— 继续用现有 token 集，上面全部是执行层面的修正。</li>
+  <li class="p2"><b>1280px 以下自动收起侧栏</b> —— 用户在 27 寸台式上，真正的浪费在宽的那一头。</li>
+</ul>
+</section>
+</main>
+
+<script>
+// Sider + topbar are identical across every mock; stamp them in rather than repeating the markup.
+const NAV = [
+  ["jobs", "作业中心", "i-db"],
+  ["ds", "数据源", "i-server"],
+  ["ag", "目标端 Agent", "i-radio"],
+  ["st", "系统设置", "i-gear"],
+];
+document.querySelectorAll(".stage[data-nav]").forEach((stage) => {
+  const on = stage.dataset.nav;
+  const items = stage.dataset.nav3 ? NAV.slice(0, 3) : NAV;
+  const nav = items
+    .map((n) => `<a href="#" class="${n[0] === on ? "on" : ""}"><svg><use href="#${n[2]}"/></svg>${n[1]}</a>`)
+    .join("");
+  const crumb = stage.dataset.crumb || "";
+  const parts = crumb.split(" / ");
+  const trail = parts.map((p, i) => (i === parts.length - 1 ? `<b>${p}</b>` : p)).join(" / ");
+  const about = stage.dataset.about
+    ? `<button class="icon-btn"><svg><use href="#i-info"/></svg></button>`
+    : `<span class="wschip">当前工作台</span>`;
+  stage.insertAdjacentHTML(
+    "afterbegin",
+    `<aside class="sider"><div class="brand"><i>Q</i>db-qbs</div><nav class="nav">${nav}</nav></aside>`
+  );
+  const main = document.createElement("div");
+  main.className = "main";
+  main.innerHTML = `<div class="topbar"><svg style="color:var(--mute)"><use href="#i-align"/></svg>
+    <span class="crumb">数据导入 / ${trail}</span><span class="right">${about}</span></div>`;
+  const rest = [...stage.children].filter((c) => !c.classList.contains("sider"));
+  rest.forEach((c) => main.appendChild(c));
+  stage.appendChild(main);
+});
+
+// Every mock is authored at a true 1440px; scale it to whatever width the frame ends up with.
+const STAGE_W = 1440;
+function fitStages() {
+  document.querySelectorAll(".frame .stage").forEach((s) => {
+    const box = s.closest(".viewport");
+    if (box && box.clientWidth) s.style.zoom = (box.clientWidth / STAGE_W).toFixed(4);
+  });
+}
+document.querySelectorAll(".modes button").forEach((b) => {
+  b.addEventListener("click", () => {
+    document.querySelectorAll(".modes button").forEach((x) => x.classList.remove("on"));
+    b.classList.add("on");
+    document.body.dataset.mode = b.dataset.m;
+    fitStages();
+  });
+});
+window.addEventListener("resize", fitStages);
+fitStages();
+</script>
+</body>
+</html>

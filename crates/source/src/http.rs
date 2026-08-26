@@ -30,12 +30,14 @@ use serde_json::{json, Value};
 use url::Url;
 
 use crate::{
-    embedded_web_asset, fetch_agent_info, generate_target_ddl, validate_builder_dblink,
-    validate_source_sql, Agent, AgentEndpoint, AgentEvidence, AgentInput, AgentStore,
+    cleared_cookie_header, embedded_web_asset, fetch_agent_info, generate_target_ddl,
+    session_cookie_header, session_token_from_cookie_header, validate_builder_dblink,
+    validate_source_sql, Agent, AgentEndpoint, AgentEvidence, AgentInput, AgentStore, AuthStore,
     ColumnPrecision, DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess,
     OracleRowSource, RowSource, RunEvidence, RunHistory, RunParametersEvidence, SourceColumn,
     SourceConfig, SourceEvidence, SourceReadError, TargetCheckRequest, TargetCheckResult,
     TargetConnection, TargetEvidence, Task, TaskConfig, TaskInput, TaskSpec, TaskStore, UnknownReason,
+    SESSION_IDLE_SECONDS, USERNAME,
 };
 
 const MAX_REQUEST_BODY_BYTES: u64 = 1024 * 1024;
@@ -188,6 +190,8 @@ pub struct Api<'a> {
     pub agents: &'a AgentRegistry,
     pub history: &'a HistoryStore,
     pub runs: &'a RunRegistry,
+    /// 登录、会话与口令。**只护得到这个进程的 HTTP 面**——sink 那半边仍然没有鉴权。
+    pub auth: &'a AuthStore,
     pub describe_source: fn(&OracleAccess, &TaskSpec) -> Result<Vec<SourceColumn>, SourceReadError>,
 }
 
@@ -289,18 +293,42 @@ impl Response {
 
 type Handler = fn(&Api<'_>, &Request, &str) -> HttpResponse;
 
+/// 一条路由归谁进。**它是路由表上的一列，不是 handler 里的一句 `if`**——
+/// 判定因此只有一处，而 `every_route_reaches_its_handler` 会连这一列一起对账：
+/// 新加一条路由却不声明它归哪一档，测试当场就红。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    /// 没有会话也进得去。**只有三条**：登录、退出、问一句「我登着吗」。
+    Public,
+    /// 要一张活着的会话票据，没有就是 401。
+    Session,
+}
+
 /// 一条路由。`pattern` 里最多有一个 `{}`，代表一段资源 id。
 pub struct Route {
     pub method: Method,
     pub pattern: &'static str,
+    pub access: Access,
     handler: Handler,
 }
 
 impl Route {
+    /// 要登录才进得去的那一档。**绝大多数路由走这个构造**，
+    /// 所以它叫 `new`：让「忘了想」落到更安全的一边。
     fn new(method: Method, pattern: &'static str, handler: Handler) -> Self {
         Self {
             method,
             pattern,
+            access: Access::Session,
+            handler,
+        }
+    }
+
+    fn public(method: Method, pattern: &'static str, handler: Handler) -> Self {
+        Self {
+            method,
+            pattern,
+            access: Access::Public,
             handler,
         }
     }
@@ -334,6 +362,19 @@ pub fn routes() -> &'static [Route] {
     ROUTES.get_or_init(|| {
         use Method::{Delete, Get, Post, Put};
         vec![
+            // 会话那三条是**全表仅有的公开路由**：没有它们，登录本身也会撞 401。
+            Route::public(Get, "/api/session", |state, request, _id| {
+                handle_session_state(request, state)
+            }),
+            Route::public(Post, "/api/session", |state, request, _id| {
+                handle_login(request, state)
+            }),
+            Route::public(Delete, "/api/session", |state, request, _id| {
+                handle_logout(request, state)
+            }),
+            Route::new(Put, "/api/password", |state, request, _id| {
+                handle_change_password(request, state)
+            }),
             Route::new(Post, "/api/columns", |state, request, _id| {
                 handle_column_fetch(request, state)
             }),
@@ -459,18 +500,162 @@ impl Api<'_> {
     /// 这就是「顺序不承重」的全部机制。从前 `/api/datasources/test-connection` 要靠
     /// 排在按 id 那条前面才不被吃掉，`/api/agents/{}/probe` 同理；现在即便把表倒过来写，
     /// 结果也一个字节不变。
+    ///
+    /// **鉴权就拦在这里，在分发之前。** 它不在任何一个 handler 里，也不在 `serve()` 里：
+    /// 放进 handler 就会有第 31 个 handler 忘了写，放进 `serve()` 则整个 `tests/api.rs`
+    /// 都碰不到它（那半边不开 socket）。
     fn route_api(&self, request: &Request) -> Response {
+        let token = request
+            .header("Cookie")
+            .and_then(session_token_from_cookie_header);
+        // 认一次就顺手把滑动窗口往前推了，所以它必须只发生一次，不能每个 handler 各来一遍。
+        let session = match token {
+            Some(token) => match self.auth.authenticate(token, Utc::now()) {
+                Ok(true) => Some(token),
+                Ok(false) => None,
+                Err(error) => return internal_error(error),
+            },
+            None => None,
+        };
         for placeholders in [false, true] {
             for route in routes() {
                 if route.has_placeholder() != placeholders || route.method != request.method() {
                     continue;
                 }
-                if let Some(resource_id) = match_pattern(route.pattern, request.path()) {
+                let Some(resource_id) = match_pattern(route.pattern, request.path()) else {
+                    continue;
+                };
+                if route.access == Access::Public {
                     return (route.handler)(self, request, resource_id);
                 }
+                let Some(token) = session else {
+                    return unauthorized();
+                };
+                let mut response = (route.handler)(self, request, resource_id);
+                // 服务端那份窗口刚被推过了，cookie 也得跟着续期——否则浏览器会在
+                // **登录满 8 小时**那一刻把票据丢掉，而服务端那一份其实还活着，
+                // 于是「闲置 8 小时才踢」在用户那边变成了「登录 8 小时后必被踢」。
+                response.headers.push((
+                    "Set-Cookie".to_owned(),
+                    session_cookie_header(token, SESSION_IDLE_SECONDS),
+                ));
+                return response;
             }
         }
-        not_found()
+        // 一条都没匹配上。**没登录的一律回 401，不回 404**：两者的差别足以让门外的人
+        // 把整张路由表枚举出来，而那正是这道门要拦的第一步。
+        if session.is_some() {
+            not_found()
+        } else {
+            unauthorized()
+        }
+    }
+}
+
+/// 登录接口的输入。用户名这一栏留着不是因为有第二个账号，而是因为
+/// 一个只有口令框的登录表单会让人以为自己走错了页面。
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LoginInput {
+    username: String,
+    password: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PasswordChangeInput {
+    current_password: String,
+    new_password: String,
+}
+
+/// 「我登着吗」。**它是公开的**：让还没登录的人问这一句，前端才能在首屏决定
+/// 摆登录页还是摆应用，而不必先撞一个 401 再从错误里反推。
+fn handle_session_state(request: &Request, state: &Api<'_>) -> HttpResponse {
+    let authenticated = match request
+        .header("Cookie")
+        .and_then(session_token_from_cookie_header)
+    {
+        Some(token) => match state.auth.authenticate(token, Utc::now()) {
+            Ok(live) => live,
+            Err(error) => return internal_error(error),
+        },
+        None => false,
+    };
+    json_response(
+        200,
+        &json!({
+            "authenticated": authenticated,
+            "username": if authenticated { Some(USERNAME) } else { None },
+        }),
+    )
+}
+
+/// 登录。**失败不限速、不冷却、不锁定**（所有者裁定）：出厂口令长期有效，
+/// 所以这道门的实际强度是「能连上端口的人试两次即可进入」。这句话不写在界面上，
+/// 但也不能不写在代码里。
+fn handle_login(request: &Request, state: &Api<'_>) -> HttpResponse {
+    let input: LoginInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    match state.auth.verify_password(&input.username, &input.password) {
+        Ok(true) => {}
+        // 账号错与口令错**回同一句话**：分开报只会告诉试口令的人账号叫什么。
+        Ok(false) => {
+            return json_response(401, &json!({ "error": { "message": "账号或口令不正确" } }))
+        }
+        Err(error) => return internal_error(error),
+    }
+    let issued = match state.auth.issue_session(Utc::now()) {
+        Ok(issued) => issued,
+        Err(error) => return internal_error(error),
+    };
+    let mut response = json_response(200, &json!({ "authenticated": true, "username": USERNAME }));
+    response.headers.push((
+        "Set-Cookie".to_owned(),
+        session_cookie_header(&issued.token, issued.max_age_seconds),
+    ));
+    response
+}
+
+/// 退出登录。**销的只有这一张票**——别处登着的同一个账号不受影响。
+///
+/// 没带票据也回 200：退出是个幂等动作，「你本来就没登着」不是一次失败。
+fn handle_logout(request: &Request, state: &Api<'_>) -> HttpResponse {
+    if let Some(token) = request
+        .header("Cookie")
+        .and_then(session_token_from_cookie_header)
+    {
+        if let Err(error) = state.auth.forget(token) {
+            return internal_error(error);
+        }
+    }
+    let mut response = json_response(200, &json!({ "authenticated": false }));
+    response
+        .headers
+        .push(("Set-Cookie".to_owned(), cleared_cookie_header()));
+    response
+}
+
+/// 改口令。要先输当前口令，改完**除了这一张之外的会话全部失效**。
+///
+/// 这条路由归 `Access::Session`，所以走到这里时票据必然是活的——
+/// 从 cookie 里再取一次只是为了知道「留哪一张」。
+fn handle_change_password(request: &Request, state: &Api<'_>) -> HttpResponse {
+    let input: PasswordChangeInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    let keep = request
+        .header("Cookie")
+        .and_then(session_token_from_cookie_header)
+        .unwrap_or_default();
+    match state
+        .auth
+        .change_password(&input.current_password, &input.new_password, keep)
+    {
+        Ok(()) => json_response(200, &json!({ "message": "口令已修改" })),
+        Err(error) => bad_request(error),
     }
 }
 
@@ -589,6 +774,10 @@ fn handle_get_run(
                 "source_sql": record.source_sql,
                 "evidence": record.evidence,
                 "staging_table": record.staging_table,
+                // 发起时刻。界面上的「已用时」要的是**墙钟**，而 `ms` 是批次耗时的累加：
+                // 开跑前计数的那几十秒里一个批次都还没有，`ms` 因此是 0，
+                // 于是一次真的在跑的运行会先自称「已用时 00:00」将近一分钟（UX 评审 P1-8）。
+                "started_at": record.started_at,
                 "stage": record.stage,
                 "total_rows": record.total_rows,
                 "precount_ms": record.precount_ms,
@@ -1111,8 +1300,19 @@ fn handle_task_curl(request: &Request, state: &Api<'_>, task_id: &str) -> HttpRe
     };
     let body = serde_json::to_string(&json!({ "task_id": task_id }))
         .expect("serializing a task identity must succeed");
+    // 手拼而不是走 `json!`：`serde_json` 的 map 是有序的**字典序**，于是
+    // `password` 会排到 `username` 前面——功能上无所谓，但这段命令是给人读的。
+    // 两个值都是常量，都不含引号，没有转义面。
+    let credentials = format!(r#"{{"username":"{USERNAME}","password":"改成你的口令"}}"#);
+    // **两条命令，不是一条。** `/api/runs` 现在要一张会话票据，所以先登录换 cookie、
+    // 再拿着 cookie 发起。少了前半条，这段命令会稳定地撞回 401——
+    // 那不是「脚本写错了」，是这段命令自己不完整。
+    //
+    // 口令是个占位符，不是真值：这个接口不发票据，也不回读口令（ADR-0037 §5 的负面条款
+    // 一字不改）。cookie 落在 `/tmp` 下一个按任务命名的文件里，**用完自己删**。
+    let jar = format!("/tmp/db-qbs-session-{task_id}.cookie");
     let command = format!(
-        "curl --request POST '{origin}/api/runs' --header 'Content-Type: application/json' --data '{body}'"
+        "curl --silent --show-error --cookie-jar '{jar}' --request POST '{origin}/api/session' --header 'Content-Type: application/json' --data '{credentials}' > /dev/null && curl --cookie '{jar}' --request POST '{origin}/api/runs' --header 'Content-Type: application/json' --data '{body}'; rm -f '{jar}'"
     );
     json_response(200, &json!({ "command": command }))
 }
@@ -1753,6 +1953,12 @@ fn not_found() -> HttpResponse {
         404,
         &json!({ "error": { "message": "请求的 source API 资源不存在" } }),
     )
+}
+
+/// 没有活着的会话时的唯一回答。**过期与从未登录不分开报**：对调用方它们是同一件事
+/// ——回登录页去。
+fn unauthorized() -> HttpResponse {
+    json_response(401, &json!({ "error": { "message": "请先登录" } }))
 }
 
 fn bad_request(message: String) -> HttpResponse {

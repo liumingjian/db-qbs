@@ -45,6 +45,25 @@ function historyRow(overrides: Partial<RunHistory> = {}): RunHistory {
   };
 }
 
+describe("一个还没数完的分母不是一次失败的计数", () => {
+  it("PREPARING 阶段的空分母说的是「还在数」", () => {
+    const cell = progressOf(historyRow({ stage: "PREPARING", total_rows: null, outcome: null, finished_at: null }));
+    expect(cell.kind).toBe("unknown");
+    expect(cell.title).toContain("正在");
+    expect(cell.title).not.toContain("没成功");
+  });
+
+  it("数完了还是空分母，那才是计数没成功", () => {
+    const cell = progressOf(historyRow({ stage: "STREAMING", total_rows: null, outcome: null, finished_at: null }));
+    expect(cell.title).toContain("没成功");
+  });
+
+  it("活的运行同样分得清这两件事", () => {
+    expect(progressOfLiveRun({ total_rows: null, rows_pushed: 0, stage: "PREPARING" }).title).toContain("正在");
+    expect(progressOfLiveRun({ total_rows: null, rows_pushed: 4, stage: "STREAMING" }).title).toContain("没成功");
+  });
+});
+
 describe("progressOf", () => {
   it("向下取整，99.98% 是 99% 而不是 100%", () => {
     // ADR-0043 §7 边界 1 的原型：四舍五入成 100% 等于拿显示撒谎。
@@ -100,7 +119,7 @@ describe("progressOf", () => {
   });
 
   it("运行详情页的 live 记录也按同一套分母分子算进度", () => {
-    expect(progressOfLiveRun({ total_rows: 1200, rows_pushed: 430 })).toMatchObject({
+    expect(progressOfLiveRun({ total_rows: 1200, rows_pushed: 430, stage: "STREAMING" })).toMatchObject({
       kind: "value",
       label: "35%",
       tone: "live",

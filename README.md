@@ -63,8 +63,18 @@ The first stop in the UI is **Target Agent**: register one by entering the sink 
 stored only if the probe succeeds), then select it when creating a MySQL datasource. **The target
 database is reachable only through an agent**; there is no global fallback address.
 
-**Neither `listen` is authenticated**, and both bind loopback by default. Multi-user access requires
-your own reverse proxy in front doing auth and TLS. To run an import without the UI:
+The UI asks for a login. The account is **`admin` / `admin`** and there is only one — no
+registration, and the password changes only when you change it, from the menu at the top right.
+Forgot it? On the source host:
+
+```sh
+db-qbs-source reset-password --config source.toml   # back to admin / admin, every session voided
+```
+
+**That login covers `source`'s HTTP face and nothing else.** `sink` is still unauthenticated and
+holds `DELETE` on the target database, both `listen` addresses bind loopback by default, and the
+password travels in cleartext unless you put TLS in front. Multi-user or off-host access still
+requires your own reverse proxy doing TLS. To run an import without the UI:
 
 ```sh
 db-qbs-source-run --config source.toml --task task.toml --biz-date 2026-08-14

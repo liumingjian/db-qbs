@@ -1,7 +1,9 @@
 import { X } from "lucide-react";
-import { useEffect } from "react";
+import { useId, useRef } from "react";
+import { ICON } from "./components/DesignSystem";
 import type { ReactNode } from "react";
 
+import { useDialogFocus } from "./dialogFocus";
 import { PAGE_SIZE_OPTIONS } from "./listing";
 
 /**
@@ -10,6 +12,10 @@ import { PAGE_SIZE_OPTIONS } from "./listing";
  * 它们原来长在 `App.tsx` 里，数据源屏（ADR-0039 §1~§4）要用同一套对话框与表单行，
  * 于是搬到这里——**一个字都没改形态**，只换了住处。这不是新组件：
  * 设计系统的组件清单不因此增减（ADR-0039 §9「零设计系统改动」）。
+ *
+ * 2026-08（UX 评审 P0-5）**只补行为不改形态**：焦点管理挪进 `useDialogFocus`，
+ * 与运行详情抽屉共用同一份实现。原来这里只有一个 Escape 监听——`aria-modal="true"`
+ * 是一句关于行为的承诺，没有焦点陷阱时它是假的。
  */
 export function Modal({
   title,
@@ -26,15 +32,11 @@ export function Modal({
   wide?: boolean;
   children: ReactNode;
 }) {
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !busy) {
-        onClose();
-      }
-    }
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [busy, onClose]);
+  const dialog = useRef<HTMLElement | null>(null);
+  // 一层对话框一个标题 id。写死 `modal-title` 时，抽屉上再叠一个对话框
+  // （清理确认）就会有两个元素顶着同一个 id，辅助技术读到的是先出现的那一个。
+  const titleId = useId();
+  useDialogFocus(dialog, { onEscape: onClose, escapable: !busy });
 
   return (
     <div
@@ -48,12 +50,14 @@ export function Modal({
     >
       <section
         className={`modal ${narrow ? "is-narrow" : ""} ${wide ? "is-wide" : ""}`}
+        ref={dialog}
         role="dialog"
         aria-modal="true"
-        aria-labelledby="modal-title"
+        aria-labelledby={titleId}
+        tabIndex={-1}
       >
         <header className="modal-header">
-          <h2 id="modal-title">{title}</h2>
+          <h2 id={titleId}>{title}</h2>
           <button
             className="icon-button"
             type="button"
@@ -62,7 +66,7 @@ export function Modal({
             onClick={onClose}
             disabled={busy}
           >
-            <X size={16} aria-hidden="true" />
+            <X size={ICON.md} aria-hidden="true" />
           </button>
         </header>
         {children}
@@ -150,6 +154,10 @@ export function FormField({
 /**
  * 表格行里的图标动作位。`title` 默认就是 `label`——只有需要说明**为什么按不动**时才另给
  * （禁用态的按钮自己不会解释自己，原因只能挂在悬停提示上）。
+ *
+ * **禁用时 `title` 要挂在外层 `<span>` 上**：浏览器不给 `disabled` 控件派发指针事件，
+ * 挂在按钮本身的提示一个字都不会显示（UX 评审 P1-11）。抽屉里的重跑按钮早就是这么写的，
+ * 这里补上同一条——否则「说明为什么按不动」这句注释描述的是一件没发生的事。
  */
 export function ActionButton({
   label,
@@ -166,17 +174,24 @@ export function ActionButton({
   title?: string;
   onClick: () => void;
 }) {
-  return (
+  const button = (
     <button
       className={`icon-button ${danger ? "is-danger" : ""}`}
       type="button"
-      title={title ?? label}
+      title={disabled ? undefined : title ?? label}
       aria-label={label}
       disabled={disabled}
       onClick={onClick}
     >
       {icon}
     </button>
+  );
+  return disabled ? (
+    <span className="disabled-action" title={title ?? label}>
+      {button}
+    </span>
+  ) : (
+    button
   );
 }
 
@@ -213,12 +228,25 @@ export function Pagination({
   /** 不给就不出「每页条数」下拉——分页条本身照旧。 */
   onPageSize?: (pageSize: number) => void;
 }) {
-  // **总数不超过一页时整条不出**——只有一页时，页码按钮与两个按不动的箭头只是噪声。
-  // 唯一的例外是「每页条数已经被人改过」：那时把整条藏掉会**关死唯一一条回去的路**
-  // （选了 100 / 页，列表一页装下了，于是控件消失，再也换不回 20）。
-  // 默认那一档下的行为一字未变，X11 观察到的仍是「一页时整条不出」。
-  if (total <= pageSize && (onPageSize === undefined || pageSize === PAGE_SIZE_OPTIONS[0])) {
+  // **一页装得下时不出页码**——按不动的箭头和唯一那颗 `1` 只是噪声。
+  //
+  // 但整条也不能就此消失（UX 评审 P2 收尾）：原来的规则是「除非每页条数被改过」，
+  // 于是同一个列表在 20 / 页时没有分页条、在 100 / 页时有一条完整的，两种形态之间
+  // 没有可讲的道理。现在改成**同一条，少一半**：只留「共 N 条」与每页条数，
+  // 页码与箭头不出。回去的路一直在，噪声也一直没有。
+  const singlePage = total <= pageSize;
+  if (singlePage && onPageSize === undefined) {
     return null;
+  }
+  if (singlePage && onPageSize !== undefined) {
+    return (
+      <nav className="list-pagination is-single" aria-label="分页">
+        <span className="pagination-total">
+          共 {total} {unit}
+        </span>
+        <PageSizeSelect pageSize={pageSize} onPageSize={onPageSize} />
+      </nav>
+    );
   }
   return (
     <nav className="list-pagination" aria-label="分页">
@@ -265,20 +293,32 @@ export function Pagination({
         ›
       </button>
       {onPageSize !== undefined && (
-        <select
-          className="page-size"
-          aria-label="每页条数"
-          value={pageSize}
-          onChange={(event) => onPageSize(Number(event.target.value))}
-        >
-          {PAGE_SIZE_OPTIONS.map((size) => (
-            <option key={size} value={size}>
-              {size} / 页
-            </option>
-          ))}
-        </select>
+        <PageSizeSelect pageSize={pageSize} onPageSize={onPageSize} />
       )}
     </nav>
+  );
+}
+
+function PageSizeSelect({
+  pageSize,
+  onPageSize,
+}: {
+  pageSize: number;
+  onPageSize: (pageSize: number) => void;
+}) {
+  return (
+    <select
+      className="page-size"
+      aria-label="每页条数"
+      value={pageSize}
+      onChange={(event) => onPageSize(Number(event.target.value))}
+    >
+      {PAGE_SIZE_OPTIONS.map((size) => (
+        <option key={size} value={size}>
+          {size} / 页
+        </option>
+      ))}
+    </select>
   );
 }
 

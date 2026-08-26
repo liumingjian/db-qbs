@@ -7,6 +7,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 mod agent;
+mod auth;
 mod datasource;
 mod failure_kind;
 pub mod http;
@@ -23,6 +24,12 @@ mod transfer;
 mod web_assets;
 
 pub use agent::{fetch_agent_info, normalize_base_url, Agent, AgentInput, AgentStatus, AgentStore};
+// 登录、会话与口令（source 的 HTTP 面）。**它护不到 sink**——那半边仍然没有鉴权。
+pub use auth::{
+    cleared_cookie_header, session_cookie_header, session_token_from_cookie_header,
+    validate_new_password, AuthStore, IssuedSession, DEFAULT_PASSWORD, SESSION_COOKIE,
+    SESSION_IDLE_SECONDS, USERNAME,
+};
 // 报文形状的唯一定义在 `db-qbs-shared`（#124）。这里只保留门面，
 // crate 内部与既有测试的引用路径一个字不变。
 pub use db_qbs_shared::{
