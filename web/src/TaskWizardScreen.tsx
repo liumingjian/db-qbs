@@ -171,6 +171,20 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape" || overlayOwnsKeyboard()) return;
       event.preventDefault();
+      /*
+       * 这一下 Escape 到这里就为止了，不再往上走。
+       *
+       * 少了这一句，按 Escape 的效果是**什么都没发生**：`requestLeave` 里的 setState 在
+       * 原生事件里当场冲刷，确认框同步挂上，`useDialogFocus` 随即往 window 上装它自己的
+       * 按键监听——而这同一个 Escape 才刚走到向导容器，还没冒泡到 window。于是它接着撞上
+       * 那个刚装好的监听，被当成「收起最上面那一层」，确认框在同一次派发里又被关掉了。
+       * 人看到的是一闪都没闪，Escape 像是坏的。
+       *
+       * 这不是把全屏编辑器那道捕获阶段的拦截换个地方装回来：那一道是抢在别人**之前**把
+       * 事件掐掉，这一句是「这下按键我已经处理完了」，上面不该再有人拿同一下做第二件事。
+       * 浮层当家时上面那个 `return` 先走，这一句根本轮不到。
+       */
+      event.stopPropagation();
       requestLeave(onCancel);
     }
     container.addEventListener("keydown", handleKeyDown);
