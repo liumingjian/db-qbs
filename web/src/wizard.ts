@@ -315,9 +315,41 @@ export function confirm(draft: Draft, intent: Change): Draft {
   return reduce(draft, intent).draft;
 }
 
-/** What leaving would cost, or `null` when there is nothing to protect. */
+/** What leaving would cost, or `null` when there is nothing it can **list**. */
 export function leaving(draft: Draft): Loss | null {
   return lossOf(draft, ["draft"]);
+}
+
+/**
+ * 离开向导**一律先问一句**，这就是要问的那句（#242）。
+ *
+ * 原来草稿里挑不出「手工填过」的东西时就直接放行——可「里面有没有值得留的东西」是人
+ * 自己的判断：他刚粘进去半条 SQL、刚展开一棵树翻了十分钟，这些都不在 `leaving()` 数的
+ * 那几项里，而一次误触 Escape 把它们连同这一屏一起收掉，代价全在他身上。`leaving()`
+ * 只回答**列得出什么**；「值不值得确认」是草稿自己的规矩，跟清空的那几条一样住在这里，
+ * 不归屏幕判断。
+ */
+export function leavingConfirmation(draft: Draft): Loss {
+  return leaving(draft) ?? LEAVE_QUESTION;
+}
+
+/** 列不出东西时问的那一句：确认照出，框里换成一句话。 */
+const LEAVE_QUESTION: Loss = { headline: "要离开这个向导吗？", lines: [] };
+
+/**
+ * 从第 `from` 步走到第 `to` 步的路上，向导**自己折掉**的那几步。
+ *
+ * 不是「中间隔着的那几步」：隔着不等于跳过，往回走更不是。折叠是这一步此刻确实没话说
+ * （`checkIsSilent`），只有它才值得播报成「无需处理，已跳过」——否则一句没发生过的
+ * 跳过会被念给读屏的人听。
+ */
+export function foldedSteps(draft: Draft, from: Step, to: Step): Step[] {
+  if (to <= from) return [];
+  const folded: Step[] = [];
+  for (let step = (from + 1) as Step; step < to; step = (step + 1) as Step) {
+    if (step === 3 && checkIsSilent(draft)) folded.push(step);
+  }
+  return folded;
 }
 
 // ---------------------------------------------------------------------------

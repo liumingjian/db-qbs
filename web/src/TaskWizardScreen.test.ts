@@ -5,8 +5,8 @@ import { describe, expect, it } from "vitest";
 import type { BuilderColumn, TargetColumn } from "./api";
 import { SqlEditorPanel } from "./SqlEditor";
 import { TaskEntryDialog } from "./TaskEntryDialog";
-import { LEAVING_UNLISTED, TaskWizardScreen, WizardConfirmDialog } from "./TaskWizardScreen";
-import { apply, canAdvance, leaving, openNew, view } from "./wizard";
+import { TaskWizardScreen, WizardConfirmDialog } from "./TaskWizardScreen";
+import { apply, canAdvance, leaving, leavingConfirmation, openNew, view } from "./wizard";
 import type { Applied, Draft } from "./wizard";
 
 const SOURCE = { datasource_id: "ds-oracle", name: "生产 Oracle" };
@@ -294,12 +294,12 @@ describe("the preview step UI", () => {
 
 describe("leaving the wizard", () => {
   it("still has something to confirm with when the draft has nothing to list", () => {
-    // 全新草稿里挑不出可列的东西，`leaving()` 因此回 null——离开仍要过一道确认（#242），
-    // 用的就是这一句：判断「里面有没有值得留的东西」不归向导替人做。
+    // 全新草稿里挑不出可列的东西，`leaving()` 因此回 null——离开仍要过一道确认（#242）。
+    // 问什么、值不值得问都在 `wizard.ts` 里定好（`leavingConfirmation`），屏幕只负责摆出来。
     expect(leaving(openNew(SOURCE, TARGET))).toBeNull();
 
     const html = renderToStaticMarkup(createElement(WizardConfirmDialog, {
-      loss: LEAVING_UNLISTED,
+      loss: leavingConfirmation(openNew(SOURCE, TARGET)),
       leaving: true,
       onCancel: () => undefined,
       onConfirm: () => undefined,
@@ -314,9 +314,20 @@ describe("leaving the wizard", () => {
     expect(html).not.toContain("<ul>");
   });
 
-  it("names the wizard container the Escape handler is bound to", () => {
+  it("names the wizard container the Escape handler is bound to, and lets it hold focus", () => {
     // Escape 挂在这块容器上，不在 window 上（#242）：容器外面按的那一下到不了向导。
+    // 容器自己可聚焦（tabindex="-1"）：不然刚打开、还没按过 Tab 时焦点在 body 上，
+    // Escape 派发的目标在容器外面，这条路要先按一下 Tab 才通。
     const html = renderWizard(openNew(SOURCE, TARGET));
-    expect(html).toContain('<section class="task-wizard"');
+    expect(html).toContain('<section class="task-wizard" tabindex="-1"');
+  });
+
+  it("does not explain a busy refresh in a tooltip on the button it disables", () => {
+    // 「正在刷新」正是按钮禁用那一刻的理由，挂在 title 上一个字都不会显示（#238）；
+    // 按得动时的那句提示留在 title 上没问题。
+    const html = renderWizard(openNew(SOURCE, TARGET));
+    expect(html).not.toContain('title="正在刷新"');
+    expect(html).not.toContain('title="正在刷新结果列"');
+    expect(html).toContain('title="刷新目标表清单"');
   });
 });

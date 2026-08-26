@@ -35,7 +35,9 @@ import {
   apply,
   canAdvance,
   confirm,
+  foldedSteps,
   leaving,
+  leavingConfirmation,
   taskName,
   toSpec,
   view,
@@ -126,16 +128,9 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
     setPending({ kind: "change", intent: result.intent, loses: result.loses });
   }
 
-  /**
-   * 离开向导**一律先问一句**（#242）。
-   *
-   * 原来草稿里挑不出「手工填过」的东西时这里直接放行——可「里面有没有值得留的东西」
-   * 是人自己的判断：他刚粘进去半条 SQL、刚展开一棵树翻了十分钟，这些都不在
-   * `leaving()` 数的那几项里，而一次误触 Escape 把它们连同这一屏一起收掉，代价全在他身上。
-   * `leaving()` 仍然只回答**列得出什么**，列不出就用下面这句；确认这一道由这里保证。
-   */
+  /** 离开向导一律先问一句（#242）；问什么、值不值得问，都是 `wizard.ts` 的规矩。 */
   function requestLeave(proceed: () => void) {
-    const loses = leaving(draftRef.current) ?? LEAVING_UNLISTED;
+    const loses = leavingConfirmation(draftRef.current);
     setPending({ kind: "leave", intent: { type: "leave" }, loses, proceed });
   }
 
@@ -183,11 +178,31 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
        * 这不是把全屏编辑器那道捕获阶段的拦截换个地方装回来：那一道是抢在别人**之前**把
        * 事件掐掉，这一句是「这下按键我已经处理完了」，上面不该再有人拿同一下做第二件事。
        * 浮层当家时上面那个 `return` 先走，这一句根本轮不到。
+       *
+       * **这一句只在 `useDialogFocus` 把监听装在 window 上、且走冒泡阶段时才管用**
+       * （见 `dialogFocus.ts`）：那样它才排在这块容器**后面**，才拦得住。哪天把那个
+       * 监听改成捕获阶段，或者改挂到浮层自己的容器上，这一句就拦不到它了，Escape 会
+       * 重新变成「一闪都没闪」——搬之前先回来读这一段。
        */
       event.stopPropagation();
       requestLeave(onCancel);
     }
     container.addEventListener("keydown", handleKeyDown);
+    /*
+     * 挂完监听先把焦点收进来。
+     *
+     * 不收的话，刚打开向导、还没按过 Tab 时焦点在 `<body>` 上，Escape 派发的目标在容器
+     * 外面，压根到不了上面那个监听——退出向导这条路要先按一下 Tab 才通。收进来的是容器
+     * 自己（`tabIndex={-1}`：能用脚本聚焦，不进 Tab 序），不抢任何一个控件，也不必假装
+     * 换了一步；「容器外面按的 Escape 不退出向导」这条照旧成立，外面依然到不了这里。
+     * 焦点已经在里面、或者上头压着一层浮层（进向导时的那个对话框）时，让开。
+     */
+    if (
+      !overlayOwnsKeyboard() &&
+      !(document.activeElement instanceof Node && container.contains(document.activeElement))
+    ) {
+      container.focus();
+    }
     return () => container.removeEventListener("keydown", handleKeyDown);
     // requestLeave 只碰 ref 与 setState，身份变了也没有新东西可读。
     // 确认框自己就是队列里的一层，`pending` 因此不必再进依赖表。
@@ -215,7 +230,9 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
     const from = lastStep.current;
     lastStep.current = draft.step;
     headingRef.current?.focus();
-    setAnnouncement(stepAnnouncement(model.rail, from, draft.step));
+    setAnnouncement(
+      stepAnnouncement(model.rail, draft.step, foldedSteps(draft, from, draft.step)),
+    );
     // model.rail 只随 draft.step 变，不必进依赖表。
   }, [draft.step]);
 
@@ -589,6 +606,8 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
     <section
       className="task-wizard"
       ref={containerRef}
+      /* 只为了让 Escape 一进来就有地方落（见上面那个监听），不进 Tab 序。 */
+      tabIndex={-1}
       aria-label={draft.mode === "edit" ? "编辑任务" : "新建导入"}
     >
       <aside className="wizard-context">
@@ -689,9 +708,13 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
               <strong>目标端 · {model.context.targetName}</strong>
               {/* 刷新**不再绑在「已经选了表」上**（UX 评审 P1-4）：在别处刚建完表回来刷一下
                   清单，正是没选表的时候最需要的动作。选了表就顺带把它的列也重读一遍。 */}
-              <button className="icon-button" type="button" disabled={busy === "target"} title={busy === "target" ? "正在刷新" : draft.spec.target_table === "" ? "刷新目标表清单" : "刷新目标表清单与目标列"} aria-label="刷新目标表" onClick={refreshTarget}>
-                <RefreshCw className={busy === "target" ? "is-spinning" : ""} size={ICON.sm} />
-              </button>
+              {/* 「正在刷新」是**按不动的理由**，挂在 title 上等于永远不显示（#238）：
+                  按钮此刻正是禁用的。剩下那句是按得动时的提示，留在 title 上没问题。 */}
+              <Refusable reason={busy === "target" ? "正在刷新" : null}>{(describedBy) => (
+                <button className="icon-button" type="button" disabled={busy === "target"} title={busy === "target" ? undefined : draft.spec.target_table === "" ? "刷新目标表清单" : "刷新目标表清单与目标列"} aria-label="刷新目标表" aria-describedby={describedBy} onClick={refreshTarget}>
+                  <RefreshCw className={busy === "target" ? "is-spinning" : ""} size={ICON.sm} />
+                </button>
+              )}</Refusable>
             </div>
             {targetOptions.length > 0 && (
               <label className="wizard-select-label">目标端数据源
@@ -853,20 +876,12 @@ function Refusable({ reason, children }: {
 }) {
   const reasonId = useId();
   return reason === null ? <>{children(undefined)}</> : (
-    <span className="disabled-action">
+    <span className="refusal">
       {children(reasonId)}
       <small className="refusal-reason" id={reasonId}>{reason}</small>
     </span>
   );
 }
-
-/**
- * 离开时列不出东西，用的就是这一句（#242）。
- *
- * 「草稿里没有手工填过的东西」不是不问的理由，只是**没什么可列**：确认这一道照出，
- * 框里换成一句话，主按钮仍然是那两条明路。
- */
-export const LEAVING_UNLISTED: Loss = { headline: "要离开这个向导吗？", lines: [] };
 
 export function WizardConfirmDialog({ loss, leaving = false, onCancel, onConfirm, onDiscard }: {
   loss: Loss;
@@ -894,19 +909,19 @@ export function WizardConfirmDialog({ loss, leaving = false, onCancel, onConfirm
 }
 
 /**
- * 播报词（#239）：到了第几步、这一步叫什么，以及中间被折掉的那些步。
+ * 播报词（#239）：到了第几步、这一步叫什么，以及路上被折掉的那些步。
  *
- * 目前只有第 3 步会折：目标表检查一次就过、且没过期时，它没什么可说的，向导直接跨过去
- * （`checkIsSilent`）。跨过去这件事本身得说出来——轨道上那一格已经打了勾。
+ * 折掉哪几步不在这里数：中间隔着一步不等于向导跳过了它——往回走更不是。
+ * 那是 `foldedSteps()` 照着真正的折叠信号（`checkIsSilent`）给的答案，这里只负责念出来。
  */
-function stepAnnouncement(rail: readonly RailEntry[], from: Step, to: Step): string {
+function stepAnnouncement(
+  rail: readonly RailEntry[],
+  to: Step,
+  folded: readonly Step[],
+): string {
   const label = (step: Step) => rail.find((entry) => entry.step === step)?.label ?? "";
-  const low = Math.min(from, to);
-  const high = Math.max(from, to);
-  const folded = rail
-    .filter((entry) => entry.step > low && entry.step < high)
-    .map((entry) => `第 ${entry.step} 步「${entry.label}」无需处理，已跳过。`);
-  return `${folded.join("")}第 ${to} 步，共 ${rail.length} 步：${label(to)}`;
+  const skipped = folded.map((step) => `第 ${step} 步「${label(step)}」无需处理，已跳过。`);
+  return `${skipped.join("")}第 ${to} 步，共 ${rail.length} 步：${label(to)}`;
 }
 
 function StepBody({
