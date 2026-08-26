@@ -54,7 +54,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 /* 「关于」浮层（P1-12）：顶栏右上角，不是导航的一格。 */
 .about-wrap { position: relative; display: inline-flex; }
 .about-trigger { height: 30px; padding: 0 10px; font-size: var(--size-meta); }
-.about-popover { position: absolute; z-index: 45; top: calc(100% + 8px); right: 0; width: min(520px, calc(100vw - 32px)); max-height: min(70vh, 620px); overflow: auto; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); box-shadow: 0 6px 24px rgba(0, 0, 0, .12); }
+.about-popover { position: absolute; z-index: 45; top: calc(100% + 8px); right: 0; width: min(520px, calc(100vw - 32px)); max-height: min(70vh, 620px); overflow: auto; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); box-shadow: var(--shadow-pop); }
 .about-popover:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
 .about-popover > header { position: sticky; top: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 11px var(--pad); border-bottom: 1px solid var(--line); background: var(--panel); }
 .about-popover > header strong { font-size: var(--size-body); font-weight: var(--weight-em); }
@@ -124,6 +124,13 @@ a.button { text-decoration: none; }
    两档长得一样时，工具条上那颗按钮看着比它实际的分量重，而确认框里那颗看着比它轻。 */
 .button.is-danger { border-color: var(--crit-bd); background: var(--panel); color: var(--crit); }
 .button.is-danger.is-solid { border-color: var(--crit); background: var(--crit); color: var(--on-solid); }
+/* 危险三档（2026-08 UX 评审 P0-2.4）。分档依据是**按下去当场会发生什么**：
+   ghost 只打开一个确认框，一行都还没动；solid 是落锤那一颗，按下去就真删。
+   中间的描边档留给「已经在对话框里、但还要再点一次」之类的场合。
+   ghost 保留 .button 的盒子（内边距与高度不变），只把那圈边和底色收成透明，
+   所以它跟工具条里其他按钮仍然对得齐，不会看着像掉了一块。 */
+.button.is-danger.is-ghost { border-color: transparent; background: transparent; box-shadow: none; }
+.button.is-danger.is-ghost:hover:not(:disabled) { border-color: var(--crit-bd); background: var(--crit-bg); color: var(--crit); }
 .button:disabled, .icon-button:disabled { cursor: not-allowed; opacity: .55; }
 /* 行内动作是**无边框图标位**（ADR-0043 §5：全图标，ADR-0042 §6 已作废）。 */
 .icon-button { height: var(--action-h); min-width: var(--action-h); display: inline-grid; place-items: center; padding: 0 7px; border: 1px solid transparent; border-radius: var(--radius); background: transparent; color: var(--brand); cursor: pointer; }
@@ -210,7 +217,7 @@ pre.drawer-sql,
 /* 操作列吸附右侧（参照物的 `ant-table-cell-fix-right`）：1024 下横滚时它始终在。
    只给作业中心那张宽表——数据源屏一屏放得下，吸附只会在没有溢出时白留一道阴影。 */
 .action-column { width: 1%; white-space: nowrap; }
-.job-grid .action-column { position: sticky; right: 0; box-shadow: -6px 0 6px -6px rgba(0, 0, 0, .12); }
+.job-grid .action-column { position: sticky; right: 0; box-shadow: var(--shadow-edge); }
 /* 吸附的格子必须**自己**是不透明的，而且要跟着行悬停走：底色继承自通用规则时，
    横滚经过它下面的那些字会从它身上透出来。这两条写死，不靠继承。 */
 .job-grid td.action-column { background: var(--panel); }
@@ -297,6 +304,10 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
    而这条说的是「你有件事没做完」，所以换成品牌色的那一档。 */
 .notice.is-draft { border-left-color: var(--brand); background: var(--brand-dim); color: var(--dim); }
 .notice.is-draft strong { color: var(--text); }
+/* 「地址点名的那条运行不在」。也不是错误——没人做错什么，只是那条记录没了，
+   所以走 --warn 而不是默认的 --crit。 */
+.notice.is-warn { border-left-color: var(--warn); background: var(--warn-bg); color: var(--dim); }
+.notice.is-warn strong { color: var(--text); }
 .notice-side { margin-left: 8px; color: var(--mute); font-size: var(--size-meta); }
 .notice-actions { flex: none; display: flex; align-items: center; gap: 14px; }
 .text-button.is-quiet { color: var(--mute); }
@@ -379,7 +390,10 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .entry-option-copy strong { overflow-wrap: anywhere; font-size: var(--size-body); font-weight: var(--weight-em); }
 .entry-option-copy > span { overflow-wrap: anywhere; color: var(--mute); font-family: var(--font-num); font-size: var(--size-cap); }
 .entry-agent-status { max-width: 42%; flex: none; overflow-wrap: anywhere; color: var(--dim); font-size: var(--size-cap); text-align: right; }
-.entry-agent-status.is-online { color: var(--ok); }
+/* P2-6：这两条原来直接用语义色当**文字色**。--ok (#52C41A) 压白底只有约 2:1，
+   12px 的字根本读不出来——语义四色是给实心底和边框用的，不是给小字用的。
+   --ok-ink 就是为此存在的配套墨色（tokens.css §语义四色），--crit 压白底本就够。 */
+.entry-agent-status.is-online { color: var(--ok-ink); }
 .entry-agent-status.is-offline { color: var(--crit); }
 .entry-reason { grid-column: 1 / -1; margin: 0; color: var(--crit); font-size: var(--size-meta); }
 

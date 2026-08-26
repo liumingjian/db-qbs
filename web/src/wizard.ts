@@ -824,9 +824,10 @@ function lossOf(draft: Draft, cleared: readonly Cleared[]): Loss | null {
       .map((kind) => LOSS_LINES[kind](draft));
     return lines.length === 0
       ? null
-      // 草稿离开时写进 sessionStorage（UX 评审 P1-5），所以这里不再是一句告警。
-      // 留下这个对话框是为了**说出草稿里有什么**——它是「你还有一份没做完的东西」的回执，
-      // 不是一道关卡；真要扔掉的人在这个框上另有一颗按钮。
+      // The draft is written to sessionStorage on the way out (UX review P1-5), so
+      // this is no longer a warning. The dialog stays in order to *say what is in the
+      // draft* — it is a receipt for "you still have something unfinished", not a
+      // gate; anyone who really wants it gone has a separate button right here.
       : { headline: "离开后这份还没保存的草稿会留着，回来接着改：", lines };
   }
   const lines = cleared

@@ -12,11 +12,13 @@ import {
   ICON,
   SensitiveValue,
   TerminalBlock,
+  UnknownConclusion,
   UpsertNote,
   UPSERT_NOTE_DONE,
 } from "./components/DesignSystem";
 import { formatTimestamp, historyPresentation, runIdPresentation } from "./history";
 import { PrecheckReports } from "./PrecheckReports";
+import { HighlightedSql } from "./SqlEditor";
 import { rerunAction } from "./rerun";
 import { sourceSummary, whereSummary } from "./spec";
 import { Modal } from "./ui";
@@ -113,13 +115,10 @@ export function RunDrawer({
           <section className="panel">
             <h3>结论</h3>
             {presentation.kind === "unknown" ? (
-              <div
-                className={`unknown-conclusion is-${run.unknown_reason?.toLowerCase()}`}
-              >
-                <strong>结局不明</strong>
-                <span>{presentation.conclusion}</span>
-                <small>无法确认目标表是否被修改，请到目标库核对。</small>
-              </div>
+              <UnknownConclusion
+                reason={run.unknown_reason}
+                conclusion={presentation.conclusion}
+              />
             ) : (
               <div className="panel-body">
                 <div className="detail-status">
@@ -243,7 +242,7 @@ export function RunDrawer({
 
           <section className="panel">
             <h3>当次执行的源端 SQL</h3>
-            <pre className="drawer-sql">{run.source_sql}</pre>
+            <pre className="drawer-sql"><HighlightedSql sql={run.source_sql} /></pre>
           </section>
 
           {(run.column !== null || run.value !== null) &&
@@ -262,10 +261,10 @@ export function RunDrawer({
           <span className="spacer" />
           {cleanupError !== null && <span className="form-error">{cleanupError}</span>}
           {run.cleanup_status === "available" && (
-            // 入口只是**打开确认框**，此刻一行都还没删——所以它是描边的那一档，
+            // 入口只是**打开确认框**，此刻一行都还没删——所以它是最轻的那一档，
             // 落锤那颗在 `CleanupDialog` 里（2026-08 UX 评审 P0-2）。
             <button
-              className="button is-danger"
+              className="button is-danger is-ghost"
               type="button"
               disabled={cleaning}
               onClick={() => setCleanupConfirm(true)}

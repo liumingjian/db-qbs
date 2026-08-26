@@ -1,19 +1,21 @@
 /**
- * 哈希地址的读写，**只有这一份**。
+ * Reading and writing hash addresses — the only copy of this.
  *
- * 它不住在 `App.tsx` 里，是因为作业中心那一列状态标签要拿它拼链接——而 `App` 本来就
- * 引着作业中心，反过来再引一次就成了环。环在 ESM 下能跑，但求值顺序从此要靠运气，
- * 不值得为省一个文件去赌。
+ * It does not live in `App.tsx` because the job centre's status chips build links
+ * with it, and `App` already imports the job centre; importing back would close a
+ * cycle. Cycles do run under ESM, but evaluation order then rides on luck, which is
+ * not worth betting to save one file.
  */
 
 /**
- * 运行详情的地址（UX 评审 P1-6）。
+ * The address of a run detail (UX review P1-6).
  *
- * 它原来**没有地址**：整屏运行详情只是一个 `activeRun` state，唯一的入口是刚点完
- * 「发起运行」的那一次。刷新一页、发一条链接给同事、按一下浏览器后退，它就没了。
+ * It used to have no address at all: the full-screen run detail was just an
+ * `activeRun` state whose only entrance was the run you had just started. Reload the
+ * page, send a colleague a link, or press Back, and it was gone.
  *
- * 键是 `run_record_id` 而不是 `task_id`：这一屏摆的是**一次运行**，不是一个任务。
- * 按任务寻址的话，同一条链接在下一次运行之后指向的会是另一件事。
+ * Keyed on `run_record_id`, not `task_id`: this screen shows one *run*, not a task.
+ * Keyed by task, the same link would point at something else after the next start.
  */
 const RUN_HASH_PREFIX = "#runs/";
 

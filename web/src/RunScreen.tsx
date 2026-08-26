@@ -9,6 +9,7 @@ import {
   PhaseLine,
   SensitiveValue,
   TerminalBlock,
+  UnknownConclusion,
   UpsertNote,
   UPSERT_NOTE_DONE,
 } from "./components/DesignSystem";
@@ -355,11 +356,10 @@ function RunConclusion({
 }) {
   if (presentation.kind === "unknown") {
     return (
-      <div className={`unknown-conclusion is-${detail.unknown_reason?.toLowerCase()}`}>
-        <strong>结局不明</strong>
-        <span>{presentation.conclusion}</span>
-        <small>无法确认目标表是否被修改，请到目标库核对。</small>
-      </div>
+      <UnknownConclusion
+        reason={detail.unknown_reason}
+        conclusion={presentation.conclusion}
+      />
     );
   }
 

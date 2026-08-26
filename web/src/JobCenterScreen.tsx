@@ -444,8 +444,10 @@ export function JobCenterScreen({
             >
               {bulkBusy ? "正在发起" : "批量发起"}
             </button>
+            {/* 只是打开确认框，此刻一行都还没删——所以是最轻的那一档
+                （2026-08 UX 评审 P0-2.4）。落锤那颗在 `BulkDeleteDialog` 里。 */}
             <button
-              className="button is-danger"
+              className="button is-danger is-ghost"
               type="button"
               disabled={selectedTasks.length === 0 || bulkBusy}
               onClick={() => setBulkConfirm("delete")}
@@ -853,13 +855,17 @@ function JobResults({
                       onClick={() => onCopyCurl(task)}
                     />
                     <span className="divider" />
-                    {run !== undefined && (
-                      <ActionButton
-                        label="运行详情"
-                        icon={<Clock3 size={ICON.md} />}
-                        onClick={() => onOpen(task.task_id)}
-                      />
-                    )}
+                    {/* 位子占住不撤（2026-08 UX 评审 P2-15）：从没跑过的任务原来这一颗
+                        直接消失，于是同一列动作在相邻两行里落在不同的横坐标上，
+                        照着肌肉记忆点下去点到的是隔壁那颗。按不动并说明为什么，
+                        比凭空少一颗好。 */}
+                    <ActionButton
+                      label="运行详情"
+                      icon={<Clock3 size={ICON.md} />}
+                      disabled={run === undefined}
+                      title={run === undefined ? "这个任务还没有跑过" : "运行详情"}
+                      onClick={() => onOpen(task.task_id)}
+                    />
                     <ActionButton
                       label="编辑任务定义"
                       icon={<Pencil size={ICON.md} />}

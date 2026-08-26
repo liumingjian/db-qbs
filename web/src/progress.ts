@@ -1,5 +1,6 @@
 import type { RunHistory } from "./api";
 import { runStatus } from "./listing";
+import { runPhase } from "./runStage";
 
 /**
  * 作业中心「迁移进度」那一格的**判定**（ADR-0043 §7）。
@@ -77,8 +78,11 @@ function progressFromCounts(
     return {
       kind: "unknown",
       label: EMPTY_LABEL,
+      // 阶段的拼写归 `runStage.ts` 管，这里不再自己写一遍 "PREPARING"。
+      // 形参仍是 `string`：不认识的拼写要原样传下去（见 `stageLabel` 的理由），
+      // 而 `runPhase` 对它返回 null——落到「计数没成功」那一档，与改之前一致。
       title:
-        run.stage === null || run.stage === "PREPARING"
+        run.stage === null || runPhase(run.stage) === "PREPARING"
           ? "正在开跑前计数——总行数还没数出来，进度要等它。"
           : "未取到总行数——开跑前的计数没成功，这次运行本身不受影响。",
     };

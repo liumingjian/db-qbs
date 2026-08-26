@@ -28,8 +28,7 @@ import type { BuilderColumn, BuilderSql, BuilderTable, PreviewResult } from "./a
 import { messageFrom } from "./errors";
 import type { DatasourceOption } from "./entry";
 import { ICON, UpsertNote, UPSERT_NOTE_AHEAD } from "./components/DesignSystem";
-import { HighlightedSqlInput, SqlEditor } from "./SqlEditor";
-import { tokenize } from "./sql";
+import { HighlightedSql, HighlightedSqlInput, SqlEditor } from "./SqlEditor";
 import { Modal } from "./ui";
 import {
   apply,
@@ -983,15 +982,6 @@ function ResultColumns({ columns, busy }: { columns: readonly BuilderColumn[]; b
       </li>)}
     </ul>
   </div>;
-}
-
-/** 只读 SQL 的高亮：`.ddl-output` 与最终查询原来是纯文本，而令牌早就备好了。 */
-function HighlightedSql({ sql }: { sql: string }) {
-  return <>{tokenize(sql).map((token, index) =>
-    token.kind === "whitespace" || token.kind === "word"
-      ? token.text
-      : <span className={`sql-t-${token.kind}`} key={index}>{token.text}</span>,
-  )}</>;
 }
 
 function PreviewData({ preview }: { preview: PreviewResult }) {

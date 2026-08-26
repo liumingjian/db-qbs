@@ -2,17 +2,18 @@ import type { RunHistory } from "./api";
 import { mappingSuggestion } from "./m3";
 
 /**
- * 目标端映射预检的那一份诊断表。
+ * The diagnostic table for the target-side mapping precheck.
  *
- * 它原来只长在运行详情**整屏**里，而那一屏唯一的入口是刚点完「发起运行」的那一次
- * （`App.tsx` 的 `handleStart`）——刷新一下、或者过一会儿从列表回来看，就再也找不到它了。
- * 抽屉现在也摆它（UX 评审 P1-6）：预检失败时列出来的是**每一列具体哪里不合**，
- * 那正是要照着去改映射的东西。
+ * It used to grow only on the full-screen run detail, whose sole entrance was the run
+ * you had just started (`handleStart` in `App.tsx`) — reload, or come back from the
+ * list a while later, and it was unreachable. The drawer now carries it too (UX review
+ * P1-6): what a failed precheck lists is exactly which column offends which rule,
+ * which is the thing you edit the mapping against.
  */
 export function PrecheckReports({
   detail,
 }: {
-  /** 只要有 `message` 与 `mapping_issues` 就够，历史记录与终局详情都能喂进来。 */
+  /** `message` and `mapping_issues` are all it needs, so history rows and finished details both fit. */
   detail: Pick<RunHistory, "message" | "mapping_issues">;
 }) {
   return (

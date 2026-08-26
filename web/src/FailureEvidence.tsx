@@ -2,6 +2,7 @@ import { Database, Pencil } from "lucide-react";
 import { ICON } from "./components/DesignSystem";
 
 import type { RunHistory } from "./api";
+import { HighlightedSql } from "./SqlEditor";
 import { remediationFor } from "./troubleshooting";
 import type { Step } from "./wizard";
 
@@ -76,9 +77,22 @@ export function FailureEvidence({
       {/* 「重跑是安全的」要**在证据上面**：不知道发生了什么的时候，第一反应是不敢动。
           写入是按主键 upsert 的，幂等——这句先说，人才读得进下面那一堆地址。 */}
       {unknown && (
-        <p className="clue-safety">
-          <strong>重跑是安全的</strong>——写入是按主键幂等的，重跑不会写重。
-        </p>
+        <>
+          <p className="clue-safety">
+            <strong>重跑是安全的</strong>——写入是按主键幂等的，重跑不会写重。
+          </p>
+          {/* 这两栏**不在下面那份连接快照里**，是故意的：它们讲的是「这次跑到哪儿了」，
+              不是「连的是哪台机器」。摆进快照里的话，一条没有快照的旧记录
+              （最可能没有的正是 PROCESS_DISAPPEARED）会把它们一起吞掉，
+              而那恰恰是最需要它们的一次。 */}
+          <dl className="evidence-grid is-clue-facts">
+            <EvidenceValue label="暂存表" value={run.staging_table ?? "—"} />
+            <EvidenceValue
+              label="最后已知行数"
+              value={countFormatter.format(lastKnownRows)}
+            />
+          </dl>
+        </>
       )}
       {missing ? (
         <div className="drawer-note">此运行记录创建时尚未记录连接快照。</div>
@@ -100,17 +114,8 @@ export function FailureEvidence({
               label="字段映射"
               value={parameters.columns.map((column) => `${column.source} → ${column.target}`).join(", ") || "—"}
             />
-            {unknown && (
-              <>
-                <EvidenceValue label="暂存表" value={run.staging_table ?? "—"} />
-                <EvidenceValue
-                  label="最后已知行数"
-                  value={countFormatter.format(lastKnownRows)}
-                />
-              </>
-            )}
           </dl>
-          <pre className="evidence-sql">{parameters.source_sql}</pre>
+          <pre className="evidence-sql"><HighlightedSql sql={parameters.source_sql} /></pre>
         </>
       )}
     </section>

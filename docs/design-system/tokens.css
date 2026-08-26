@@ -78,15 +78,27 @@
   --on-solid: #FFFFFF;             /* 压在实心主色 / 危险色上的字 */
   --line-mid: #E8E8E8;             /* 行内动作分组的那道竖线，比 --line 深一档 */
   --action-h: 28px;                /* 表格行内的图标动作位。24px 低于可点目标下限 */
-  /* 图标三档。lucide 的 `size` 是 JS 数字，进不了 CSS 变量——这三个数的另一份
-     在 `components/DesignSystem.tsx` 的 `ICON` 里，改这里就要改那里。 */
+  /* 投影。卡片**不投影**（见上），下面两条只给脱离文档流、压在别的内容上的东西。
+     颜色单列一条：暗色主题下要换的是它，而不是每一处的偏移量。
+     `--shadow-pop` 给顶栏那颗「关于」的浮层，`--shadow-edge` 给横向滚动时
+     粘在右缘的操作列——一个往下压，一个往左推，偏移量不通用，颜色通用。 */
+  --shadow-color: rgba(0, 0, 0, .12);
+  --shadow-pop:  0 6px 24px var(--shadow-color);
+  --shadow-edge: -6px 0 6px -6px var(--shadow-color);
+  /* 图标四档。lucide 的 `size` 是 JS 数字，进不了 CSS 变量——这四个数的另一份
+     在 `components/DesignSystem.tsx` 的 `ICON` 里，改这里就要改那里。
+     `empty` 不是控件是插图，所以没有配套的 `--icon-empty`：CSS 侧没人用得上它。 */
   --icon-sm: 14px;
   --icon-md: 16px;
   --icon-lg: 18px;
 
   /* ---- 形状与密度：全部实测 ---- */
   --radius:       4px;   /* 卡片、控件、按钮、页码 */
-  --badge-radius: 0px;   /* 状态标签是**方角**（实测 border-radius: 0），不是胶囊也不是圆角 */
+  /* 状态标签是**方角**（实测 border-radius: 0），不是胶囊也不是圆角。
+     2026-08 UX 评审 P2-11 提议把它并到 --radius；不采纳，理由记在这里：方角是这套
+     语言里唯一把「状态」与「可点」分开的形状信号——按钮、输入、卡片全是 4px 圆角，
+     标签一圆，它就长得像一颗按不动的按钮。所有者已裁定不换视觉语言，这一条是实测值。 */
+  --badge-radius: 0px;
   --row-h:        41px;  /* 数据行（实测） */
   --head-h:       39px;  /* 表头行（实测） */
   --ctl-h:        32px;  /* 按钮、下拉、输入（实测） */

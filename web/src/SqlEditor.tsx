@@ -22,6 +22,22 @@ import { formatSql, tokenize } from "./sql";
  * - 行号是另画的一层，不进这两层里的任何一层：塞进 `<pre>` 会让两层的字符流不同。
  *   **软换行开着时不出行号**——一条逻辑行占几行显示行，右边第 7 行对不上左边的 7。
  */
+/**
+ * 只读 SQL 的高亮。可编辑的那个是 `HighlightedSqlInput`，两者共用 `tokenize`。
+ *
+ * 住在这里而不是向导里，是因为读 SQL 的地方不止向导一处：运行详情抽屉的
+ * `pre.drawer-sql` 与失败证据里的 `.evidence-sql` 原来都是纯文本
+ * （2026-08 UX 评审 P1-3）——恰恰是出了事回头核对那一句查询的时候，最需要一眼
+ * 认出哪个是字符串字面量、哪个是被双引号括起来的标识符。
+ */
+export function HighlightedSql({ sql }: { sql: string }) {
+  return <>{tokenize(sql).map((token, index) =>
+    token.kind === "whitespace" || token.kind === "word"
+      ? token.text
+      : <span className={`sql-t-${token.kind}`} key={index}>{token.text}</span>,
+  )}</>;
+}
+
 export function HighlightedSqlInput({
   value,
   placeholder,

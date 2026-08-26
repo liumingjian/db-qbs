@@ -417,6 +417,16 @@ export function App() {
     }
   }, [activeRun, requestedRun, runHistory, tasks]);
 
+  /**
+   * 地址点名了一条运行，但它不在（UX 评审复审）。
+   *
+   * `tasks !== null` 是「两份都读完了」的信号——`loadList` 一次性设置两者。读完了还
+   * 找不到，那条记录就是真的不在了：可能已被清理，也可能这条链接来自另一套环境。
+   * 原来这种情况下整屏静默渲染成一张空的任务列表，收到链接的人只会以为界面坏了。
+   */
+  const missingRun =
+    requestedRun !== null && activeRun === null && tasks !== null ? requestedRun : null;
+
   const latestRuns = useMemo(() => latestRunByTask(runHistory), [runHistory]);
   /** 存着的那份草稿，且它绑的两端数据源都还在。 */
   const resumableDraft = useMemo(() => {
@@ -723,6 +733,27 @@ export function App() {
               >
                 知道了
               </button>
+            </div>
+          )}
+
+          {missingRun !== null && page === "jobs" && (
+            <div className="notice is-warn">
+              <span>
+                找不到运行记录
+                <strong className="mono">{missingRun}</strong>
+                <span className="notice-side">可能已被清理，或这条链接来自另一套环境</span>
+              </span>
+              <span className="notice-actions">
+                <button
+                  className="text-button"
+                  type="button"
+                  onClick={() => {
+                    window.location.hash = "jobs";
+                  }}
+                >
+                  回到作业中心
+                </button>
+              </span>
             </div>
           )}
 

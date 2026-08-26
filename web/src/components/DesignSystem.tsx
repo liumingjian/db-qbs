@@ -88,6 +88,31 @@ export function UpsertNote({ text }: { text: string }) {
   return <p className="upsert-note">{text}</p>;
 }
 
+/**
+ * 「结局不明」那一格。运行详情整屏与抽屉两处**共用这一份**。
+ *
+ * `reason` 可空——旧记录里就是空的。空的时候不挂修饰类：原来两处各写一遍
+ * `is-${reason?.toLowerCase()}`，于是 `null` 会渲染成 `class="… is-undefined"`
+ * （2026-08 UX 评审复审）。CSS 里只有 `.is-service_restarted` 一条，
+ * 别的取值本来也只是挂着好看。
+ */
+export function UnknownConclusion({
+  reason,
+  conclusion,
+}: {
+  reason: string | null;
+  conclusion: string;
+}) {
+  const modifier = reason === null ? "" : ` is-${reason.toLowerCase()}`;
+  return (
+    <div className={`unknown-conclusion${modifier}`}>
+      <strong>结局不明</strong>
+      <span>{conclusion}</span>
+      <small>无法确认目标表是否被修改，请到目标库核对。</small>
+    </div>
+  );
+}
+
 export function ErrorCodeTag({
   code,
   httpStatus,
