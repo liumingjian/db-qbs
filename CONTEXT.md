@@ -395,17 +395,5 @@ gets paid off and when lives in the issue tracker, not here.
    no SQL shape precheck, so the problem surfaces only during a real run, or silently loses precision.
    **The mapping precheck is unaffected**: it describes through a cursor on the sink side and remains
    a hard gate.
-9. **The mapping precheck can be switched off wholesale.** `DB_QBS_POC_RELAXED_PRECHECK=1` on the
-   sink host turns off the type whitelist, nullability, the unique-constraint check and the range
-   check **together**, and what happens to an out-of-range value then is decided by the target
-   server rather than by this product: under `STRICT_TRANS_TABLES` MySQL refuses the write, so the
-   run fails **while pushing batches** — after the source has been read in full and a staging table
-   created, rather than before anything started — and without strict mode MySQL truncates the value
-   and the write succeeds, which is the silent corruption the precheck exists to prevent. Either
-   way the gate is gone; only the shape of the damage differs.
-   It is announced **once**, in a `sink_started` warning at startup, and nowhere else: a
-   finished run's log, history and screen carry no trace of which mode it ran under. It is not a
-   capability, it is a POC-era escape hatch, and the `POC` in its name is the judgement of whoever
-   added it.
-10. **An upsert never deletes.** Rows removed at the source stay in the target table forever; see
-    **Swap**.
+9. **An upsert never deletes.** Rows removed at the source stay in the target table forever; see
+   **Swap**.

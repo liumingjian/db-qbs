@@ -6,10 +6,9 @@ use std::sync::{Arc, Mutex};
 use db_qbs_sink::test_support::InMemoryDestination;
 use db_qbs_sink::{
     build_staging_ddl, check_connection_settings, precheck, precheck_with_primary_key,
-    BatchPayload, CleanupRunRequest, CreateStagingError, DropStagingError, FixedDestination,
-    OpenOutcome, OpenRunRequest, PrecheckMode, RangeCheckColumn, RangeCheckResult, SinkConfig,
-    SinkService, SourceColumn, TargetCheckKind, TargetCheckRequest, TargetColumn, TargetConnection,
-    TargetKey,
+    BatchPayload, CleanupRunRequest, CreateStagingError, DropStagingError, OpenOutcome,
+    OpenRunRequest, RangeCheckColumn, RangeCheckResult, SinkConfig, SinkService, SourceColumn,
+    TargetCheckKind, TargetCheckRequest, TargetColumn, TargetConnection, TargetKey,
 };
 
 const RUN_ID: &str = "20260814091530_a3f19c";
@@ -887,83 +886,6 @@ fn open_creates_staging_then_abort_is_idempotent() {
             .staging_dropped
     );
     assert_eq!(destination.dropped.lock().unwrap().len(), 1);
-}
-
-#[test]
-fn poc_relaxed_precheck_allows_mixed_types_not_null_and_split_keys() {
-    let sources = vec![
-        source_column("C_VALUE", "VARCHAR2", None, None, Some(20)),
-        source_column("ID", "NUMBER", Some(10), Some(0), None),
-        source_column("SUB_ID", "NUMBER", Some(10), Some(0), None),
-    ];
-    let targets = vec![
-        target_column(
-            "C_VALUE",
-            "int",
-            "int",
-            Some(10),
-            Some(0),
-            None,
-            None,
-            false,
-            None,
-            1,
-        ),
-        target_column(
-            "ID",
-            "int",
-            "int",
-            Some(10),
-            Some(0),
-            None,
-            None,
-            false,
-            None,
-            2,
-        ),
-        target_column(
-            "SUB_ID",
-            "int",
-            "int",
-            Some(10),
-            Some(0),
-            None,
-            None,
-            false,
-            None,
-            3,
-        ),
-    ];
-    let destination = Arc::new(InMemoryDestination {
-        columns: targets,
-        keys: vec![
-            TargetKey {
-                name: "PRIMARY".to_owned(),
-                columns: vec!["ID".to_owned()],
-            },
-            TargetKey {
-                name: "SUB_ID_UNIQUE".to_owned(),
-                columns: vec!["SUB_ID".to_owned()],
-            },
-        ],
-        ..InMemoryDestination::default()
-    });
-    let service = SinkService::with_factory(
-        FixedDestination::new("qbs", destination.clone()),
-        PrecheckMode::Relaxed,
-    );
-    let mut request = open_request(sources);
-    request.primary_key = vec!["ID".to_owned(), "SUB_ID".to_owned()];
-
-    let OpenOutcome::Opened {
-        columns_checked, ..
-    } = service.open(request).unwrap()
-    else {
-        panic!("relaxed precheck skips the range check entirely");
-    };
-
-    assert_eq!(columns_checked, 3);
-    assert_eq!(destination.created.lock().unwrap().len(), 1);
 }
 
 #[test]
