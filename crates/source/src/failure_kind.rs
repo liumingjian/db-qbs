@@ -39,9 +39,14 @@ pub enum FailureKind {
     SinkEnvironment,
     /// 目标表正被另一个 run 的切换事务占着（`SWAP_TARGET_BUSY`）。
     TargetBusy,
-    /// 校验门禁未通过（`VERIFY_FAILED`，或本地对 commit 响应的行数断言）。
+    /// 校验门禁未通过（`VERIFY_FAILED`）。**只由目标端判**：门禁开在切换事务里，
+    /// 那是唯一能把「数的那份」和「切的那份」钉成同一个快照的地方。
+    ///
+    /// source 本地对 commit 响应的复核**不落这一档**（#196）：同样这几件事目标端已经
+    /// 先判过并放行了，本端还能判不过就只可能是两端判据不一致，那是 [`FailureKind::Defect`]。
     VerifyFailed,
-    /// 程序缺陷，不是运行故障：`INTERNAL_*`、协议断言、序号/封口错。
+    /// 程序缺陷，不是运行故障：`INTERNAL_*`、协议断言、序号/封口错，
+    /// 以及 source 复核 commit 响应时发现两端判据不一致（#196）。
     Defect,
     /// 结局未知：进程消失、服务重启、commit 断连后仍判不出。
     Unknown,

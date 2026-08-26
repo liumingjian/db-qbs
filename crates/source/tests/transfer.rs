@@ -403,6 +403,61 @@ fn rows_written_mismatch_aborts_before_commit() {
     );
 }
 
+/// 这面镜子只有在「sink 的判据和我不一样」时才响：sink 在切换事务里先判过同一件事，
+/// 判据还是同一份 `shared::verification`。所以它响 = 版本歪了，是缺陷，不是数据出了问题——
+/// 报 `VerifyFailed` 会把人打发去查一份没毛病的数据。
+#[test]
+fn a_commit_response_outside_the_shared_verdict_is_a_defect_not_a_verify_failure() {
+    for skewed in [
+        // 切换的 affected_rows 掉出 [staged, 2×staged]：sink 侧该判 SWAP_FAILED 的那一档。
+        CommitResponse {
+            source_rows: 1,
+            staged_rows: 1,
+            purged_rows: 0,
+            swapped_rows: 3,
+            count_ms: 4,
+        },
+        // 暂存行数与源端读出的行数不等：sink 侧该判 VERIFY_FAILED 的那一档。
+        CommitResponse {
+            source_rows: 1,
+            staged_rows: 2,
+            purged_rows: 0,
+            swapped_rows: 2,
+            count_ms: 4,
+        },
+        // 连回声都不对：sink 把我送去的 source_rows 原样回传，对不上就是协议歪了。
+        CommitResponse {
+            source_rows: 9,
+            staged_rows: 1,
+            purged_rows: 0,
+            swapped_rows: 1,
+            count_ms: 4,
+        },
+    ] {
+        let mut source = FakeSource::new(vec![vec![Some("1".to_owned())]]);
+        let mut sink = RecordingSink {
+            skewed_commit: Some(skewed.clone()),
+            ..RecordingSink::default()
+        };
+
+        let failure = run_transfer(
+            &mut source,
+            &mut sink,
+            TransferRequest {
+                run_id: RUN_ID.to_owned(),
+                target_table: "ORDERS".to_owned(),
+                target: target(),
+                primary_key: vec!["ID".to_owned()],
+            },
+            |_| {},
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.kind, FailureKind::Defect, "skewed={skewed:?}");
+        assert_eq!(failure.stage, db_qbs_source::RunStage::Committing);
+    }
+}
+
 #[test]
 fn abort_failure_is_reported_before_the_failed_stage() {
     let mut source = FakeSource::new(vec![Vec::new()]);
@@ -521,6 +576,9 @@ struct RecordingSink {
     range_check_requests: Vec<Option<Vec<RangeCheckResult>>>,
     wrong_batch_count: bool,
     abort_error: bool,
+    /// 让 commit 回一份**与 sink 自己的判据不相容**的数字。生产里回不出这种数字：
+    /// sink 在切换事务里先判过一遍。所以这个开关模拟的只有一件事——两端判据不同。
+    skewed_commit: Option<CommitResponse>,
 }
 
 impl SinkClient for RecordingSink {
@@ -571,6 +629,9 @@ impl SinkClient for RecordingSink {
     ) -> Result<CommitResponse, SinkError> {
         self.calls.push("commit");
         self.commit_counts = Some((total_batches, total_rows));
+        if let Some(response) = self.skewed_commit.clone() {
+            return Ok(response);
+        }
         Ok(CommitResponse {
             source_rows: total_rows,
             staged_rows: total_rows,

@@ -327,6 +327,9 @@ SELECT INDEX_NAME, COLUMN_NAME
                 // 区间判据（而非等值）连同它的三条理由都在 `swap_rows_in_range` 的文档里，
                 // source 侧那面镜子读的也是它——上一次两端各写一份时，
                 // sink 改了区间、source 的等值断言没跟上，「重跑改值」整条主路径必失败（#135 C4④）。
+                // 这一档最后落到 `SWAP_FAILED` / `SinkWrite`，而 source 那面镜子同样这件事
+                // 落 `Defect`（#196）——**不是同一个故障两个标签**：这里是第一手判断，
+                // 数字确实不对；那里只有在本端已经放行之后才可能响，那时问题在两端判据不同。
                 if !swap_rows_in_range(staged_rows, swapped_rows) {
                     transaction.rollback()?;
                     let message = format!(

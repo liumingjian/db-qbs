@@ -499,6 +499,11 @@ pub fn run_transfer(
     //
     // 批次那条腿这里没有独立信源（commit 响应不带批次数），所以两个批次数都填
     // `total_batches`：本地能复核的只有行数这条腿，写成相等就是把这件事说出来。
+    //
+    // **响了就是 `Defect`，不是 `VerifyFailed`**（#196）：同样这三件事，sink 已经在切换
+    // 事务里、拿同一份判据先判过一遍，判不过就不会回 200。所以这里还能响，只可能是
+    // 两端判据不同——版本歪了，是程序缺陷，不是数据出了问题；挂 `VerifyFailed` 等于
+    // 把人打发去查一份没毛病的数据。
     let counts = RowCounts {
         source_rows,
         staged_rows: committed.staged_rows,
@@ -513,9 +518,11 @@ pub fn run_transfer(
         return Err(Box::new(
             TransferFailure::new(
                 RunStage::Committing,
-                FailureKind::VerifyFailed,
+                FailureKind::Defect,
                 format!(
-                    "目标端 commit 响应行数断言失败：source_rows={} staged_rows={} swapped_rows={}",
+                    "目标端 commit 响应行数断言失败：source_rows={} staged_rows={} \
+                     swapped_rows={}。同样这几件事目标端在切换事务里已经拿同一份判据判过并放行了，\
+                     所以这是两端判据不一致——多半是两端版本不同，这是程序缺陷，不是数据问题，请报 issue",
                     committed.source_rows, committed.staged_rows, committed.swapped_rows
                 ),
                 source_rows,
