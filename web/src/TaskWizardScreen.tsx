@@ -9,7 +9,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { forwardRef, useEffect, useId, useImperativeHandle, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import {
@@ -714,27 +714,27 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
           </button>
           <span className="wizard-footer-actions">
             {draft.step < 4 ? (
-              <Refusable reason={advanceBlocked ? "请先处理当前步骤中的问题" : null}>
-                <button className="button is-primary" type="button" disabled={advanceBlocked} onClick={advance}>
+              <Refusable reason={advanceBlocked ? "请先处理当前步骤中的问题" : null}>{(describedBy) => (
+                <button className="button is-primary" type="button" disabled={advanceBlocked} aria-describedby={describedBy} onClick={advance}>
                   {draft.step === 3 ? "查看确认页" : "下一步"}
                 </button>
-              </Refusable>
+              )}</Refusable>
             ) : draft.mode === "edit" ? (
-              <Refusable reason={submitRefusal}>
-                <button className="button is-primary" type="button" disabled={submitRefusal !== null} onClick={() => void submit("save-only")}>
+              <Refusable reason={submitRefusal}>{(describedBy) => (
+                <button className="button is-primary" type="button" disabled={submitRefusal !== null} aria-describedby={describedBy} onClick={() => void submit("save-only")}>
                   {busy === "submit" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : null}保存
                 </button>
-              </Refusable>
+              )}</Refusable>
             ) : (
               <>
-                <Refusable reason={submitRefusal}>
-                  <button className="button" type="button" disabled={submitRefusal !== null} onClick={() => void submit("save-only")}>只保存</button>
-                </Refusable>
-                <Refusable reason={submitRefusal}>
-                  <button className="button is-primary" type="button" disabled={submitRefusal !== null} onClick={() => void submit("start")}>
+                <Refusable reason={submitRefusal}>{(describedBy) => (
+                  <button className="button" type="button" disabled={submitRefusal !== null} aria-describedby={describedBy} onClick={() => void submit("save-only")}>只保存</button>
+                )}</Refusable>
+                <Refusable reason={submitRefusal}>{(describedBy) => (
+                  <button className="button is-primary" type="button" disabled={submitRefusal !== null} aria-describedby={describedBy} onClick={() => void submit("start")}>
                     {busy === "submit" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : null}开始导入
                   </button>
-                </Refusable>
+                )}</Refusable>
               </>
             )}
           </span>
@@ -762,11 +762,24 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
  * 那条通知去扔，而人此刻就在这里，就是在做这个决定。
  */
 /**
- * 按不动的按钮**自己不会解释自己**：浏览器不给 `disabled` 控件派发指针事件，
- * 挂在按钮上的 `title` 一个字都不会显示（UX 评审 P1-11）。理由挂外层。
+ * 按不动的按钮**自己不会解释自己**：浏览器不给 `disabled` 控件派发指针事件，挂在控件
+ * 上的 `title` 一个字都不会显示（UX 评审 P1-11）；挂到外层 `<span>` 上也只救得了鼠标——
+ * 禁用的按钮不在 Tab 序里，只用键盘的人永远碰不到那句解释（#238）。
+ *
+ * 所以理由不再是提示气泡，而是**控件旁边的一行可见文字**，再用 `aria-describedby`
+ * 认到控件头上，当它的可访问描述。控件可以继续禁用：理由不再依赖「够得着它」。
  */
-function Refusable({ reason, children }: { reason: string | null; children: ReactNode }) {
-  return reason === null ? <>{children}</> : <span className="disabled-action" title={reason}>{children}</span>;
+function Refusable({ reason, children }: {
+  reason: string | null;
+  children: (describedBy: string | undefined) => ReactNode;
+}) {
+  const reasonId = useId();
+  return reason === null ? <>{children(undefined)}</> : (
+    <span className="disabled-action">
+      {children(reasonId)}
+      <small className="refusal-reason" id={reasonId}>{reason}</small>
+    </span>
+  );
 }
 
 export function WizardConfirmDialog({ loss, leaving = false, onCancel, onConfirm, onDiscard }: {
@@ -822,9 +835,13 @@ function StepBody({
         <section className="generated-sql wizard-sql-card">
           <header>
             <div><strong>自定义 SQL</strong><span>这条语句就是发起时要执行的源端查询</span></div>
-            <button className="button" type="button" disabled={(draft.spec.source_sql ?? "").trim() === "" || busy === "columns"} title={(draft.spec.source_sql ?? "").trim() === "" ? "先写好 SQL" : busy === "columns" ? "正在刷新结果列" : undefined} onClick={loadSourceColumns}>
-              {busy === "columns" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : <RefreshCw size={ICON.sm} />}刷新结果列
-            </button>
+            {/* 理由原来挂在这颗**自己就是 `disabled`** 的按钮的 `title` 上，一个字都显示不出来
+                （#238）。跟底下那几颗一样，交给 `Refusable` 写成旁边的一行字。 */}
+            <Refusable reason={(draft.spec.source_sql ?? "").trim() === "" ? "先写好 SQL" : busy === "columns" ? "正在刷新结果列" : null}>{(describedBy) => (
+              <button className="button" type="button" disabled={(draft.spec.source_sql ?? "").trim() === "" || busy === "columns"} aria-describedby={describedBy} onClick={loadSourceColumns}>
+                {busy === "columns" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : <RefreshCw size={ICON.sm} />}刷新结果列
+              </button>
+            )}</Refusable>
           </header>
           <SqlEditor
             value={draft.spec.source_sql ?? ""}
@@ -845,7 +862,11 @@ function StepBody({
               : row.control === "new" ? <span className="new-target-field"><input aria-label={`${row.source} 的目标列名`} aria-invalid={row.problem ? true : undefined} value={row.target} spellCheck={false} onChange={(event) => change({ type: "rename-target", source: row.source, target: event.target.value })} /><small className="new-mark">将新建</small></span>
               : <select aria-invalid={row.problem ? true : undefined} value={row.target} onChange={(event) => change({ type: "rename-target", source: row.source, target: event.target.value })}><option value="">请选择</option>{draft.targetColumns.map((column) => <option key={column.name}>{column.name}</option>)}</select>
             }{row.problem && <small>{row.problem}</small>}</>}</td>
-            <td><input type="checkbox" disabled={!row.selected || row.target === "" || row.primaryKeyLock !== null} title={!row.selected ? "先勾选这一列" : row.target === "" ? "先选择目标列" : row.primaryKeyLock ?? undefined} checked={row.primaryKey} onChange={() => change({ type: "toggle-primary-key", target: row.target })} />{row.primaryKeyLock && <small className="lock-note">{row.primaryKeyLock}</small>}</td>
+            {/* 主键锁定的那句话本来就是可见的，另外两句却只在 `title` 里——而这颗勾选框
+                三种情况下都是 `disabled`，`title` 谁都看不到（#238）。三句合到同一条路上。 */}
+            <td><Refusable reason={!row.selected ? "先勾选这一列" : row.target === "" ? "先选择目标列" : row.primaryKeyLock}>{(describedBy) => (
+              <input type="checkbox" disabled={!row.selected || row.target === "" || row.primaryKeyLock !== null} aria-describedby={describedBy} checked={row.primaryKey} onChange={() => change({ type: "toggle-primary-key", target: row.target })} />
+            )}</Refusable></td>
             <td><button className="icon-button is-danger" type="button" title={`删除列 ${row.source}`} aria-label={`删除列 ${row.source}`} onClick={() => change({ type: "remove-column", source: row.source })}><Trash2 size={ICON.sm} /></button></td>
           </tr>)}
         </tbody></table></div>
