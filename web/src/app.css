@@ -54,8 +54,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .environment { padding: 1px 7px; border: 1px solid var(--line-strong); border-radius: var(--radius); color: var(--mute); font-family: var(--font-num); font-size: var(--size-meta); }
 .mobile-brand { display: none; font-weight: var(--weight-em); }
 .mobile-nav { display: none; }
-.content { flex: 1; padding: var(--pad); }
-.content.is-wizard { min-height: 0; padding: 0; }
+/* 宽屏是混合规则（评审 §2）：**表格屏居中收在 1800px 内**——27" 通栏时任务名在最左、
+   操作在最右，读一行要横扫 2000px 以上，而九列里真正有信息的部分只占中间一段。
+   **向导与运行详情通栏**：映射表、SQL、证据栅格都是越宽越好读的东西。 */
+.content { flex: 1; width: 100%; max-width: 1800px; margin: 0 auto; padding: var(--pad); }
+.content.is-wide { max-width: none; }
+.content.is-wizard { min-height: 0; max-width: none; padding: 0; }
 
 /* 折叠：256 ⇄ 48。折叠后图标**居中**——参照物这里没跟着改 padding-left，选中的蓝块被
    48px 切成一条竖边，那是它的渲染瑕疵不是它的设计（ADR-0043 文末自决 2）。 */
@@ -121,13 +125,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .data-grid th { height: var(--head-h); padding: var(--cell-pad); border-bottom: 1px solid var(--line); background: var(--mute-bg); color: var(--text); font-weight: var(--weight-em); text-align: left; white-space: nowrap; }
 .data-grid td { height: var(--row-h); padding: var(--cell-pad); border-bottom: 1px solid var(--line); background: var(--panel); vertical-align: middle; }
 .data-grid tbody tr:hover td { background: var(--mute-bg); }
-.job-grid { min-width: 1080px; }
+.job-grid { min-width: 1000px; }
 .job-grid td { white-space: nowrap; }
-.task-name, .task-id { display: block; }
-.task-name { white-space: nowrap; }
-.task-id { color: var(--mute); font-family: var(--font-num); font-size: var(--size-cap); }
+.task-name { display: block; max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 源表 / 目标表一格两行：上行表名（等宽），下行数据源**名字**，不是 id（ADR-0039 §8）。 */
 .table-cell { display: block; font-family: var(--font-num); font-size: var(--size-meta); }
+/* 这两列**封顶**（P1-1）：一个长表名或一句自定义 SQL 原来可以把这一列撑到 450px 以上，
+   而它撑走的宽度是从右边那几列——运行状态、时间、操作——身上拿的。全文进 title。 */
+.job-grid .table-cell { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
 /* ── 连字一律关掉 ──────────────────────────────────────────────────────────
    --font-num 排在最前的是 JetBrains Mono / Cascadia Mono（tokens.css），两者默认把
    `>=` 画成 `≥`、`!=` 画成 `≠`、`->` 画成 `→`。这些地方摆的是**将要执行的语句**
@@ -185,6 +190,10 @@ pre.drawer-sql,
    只给作业中心那张宽表——数据源屏一屏放得下，吸附只会在没有溢出时白留一道阴影。 */
 .action-column { width: 1%; white-space: nowrap; }
 .job-grid .action-column { position: sticky; right: 0; box-shadow: -6px 0 6px -6px rgba(0, 0, 0, .12); }
+/* 吸附的格子必须**自己**是不透明的，而且要跟着行悬停走：底色继承自通用规则时，
+   横滚经过它下面的那些字会从它身上透出来。这两条写死，不靠继承。 */
+.job-grid td.action-column { background: var(--panel); }
+.job-grid tbody tr:hover td.action-column { background: var(--mute-bg); }
 .job-grid th.action-column { z-index: 2; }
 .row-actions { display: flex; align-items: center; }
 /* 两道分隔线把「跑」｜「看 / 改 / 改名」｜「删」分成三组——位置因此是有结构的，不是硬记。 */

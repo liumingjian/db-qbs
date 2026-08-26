@@ -541,7 +541,11 @@ export function App() {
           </span>
         </header>
 
-        <div className={`content ${page === "wizard" ? "is-wizard" : ""}`}>
+        <div
+          className={`content ${page === "wizard" ? "is-wizard" : ""} ${
+            activeRun !== null ? "is-wide" : ""
+          }`}
+        >
           {loadError !== null && page === "jobs" && (
             <div className="notice is-error" role="alert">
               <span>{loadError}</span>

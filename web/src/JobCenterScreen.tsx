@@ -43,9 +43,14 @@ import { ActionButton, Modal, Pagination } from "./ui";
  * 一行 = **一个任务 + 它最近一次运行**。这条合并是所有者 2026-08-21 裁定 2 的直接后果：
  * 「运行历史」独立屏取消，同一个任务的多次历史本版不做（原话「另说」）。
  *
- * 列序逐字（裁定 3）：**☐ · 任务名 · 源表 · 目标表 · 迁移进度 · 运行状态 · 启动时间 ·
- * 运行时长 · 操作**。主键 / 条件 / 错误码 / 目标表效果**一个都不在这张表上**——
- * 它们是任务属性或三轴的东西，收进详情抽屉（`RunDrawer`）。
+ * 列序（2026-08 UX 评审 P1-1 改，原裁定 3 的顺序作废）：**☐ · 任务名 · 运行状态 ·
+ * 迁移进度 · 目标表 · 源表 · 启动时间 · 运行时长 · 操作**。主键 / 条件 / 错误码 /
+ * 目标表效果**一个都不在这张表上**——它们是任务属性或三轴的东西，收进详情抽屉（`RunDrawer`）。
+ *
+ * 改序的理由只有一条：**这一屏存在的理由是「跑了没有、跑成什么样」**。原来它排在第 5、6 列，
+ * 1440 下要横滚 507px 才看得见，而占着最前面两格的是源表与目标表——任务属性，一天看一次
+ * 就够，一次运行也不会变。现在前四格答完「哪个任务 / 跑成什么样 / 到哪儿了 / 写进哪张表」，
+ * 后面才是它的定义。
  *
  * 「运行状态」列是**一维索引，不是轴二**：五个词都是同一种实心方角标签，齐是对的。
  * 轴二 / 轴三整体在抽屉里，形状一个没变（ADR-0043 §4，走查 X17）。
@@ -674,15 +679,15 @@ function JobResults({
               />
             </th>
             <th>任务名</th>
-            <th>源表</th>
-            <th>目标表</th>
-            <th>迁移进度</th>
             <th>
               运行状态
               <span className="visually-hidden">
                 有进行中任务时会自动刷新。
               </span>
             </th>
+            <th>迁移进度</th>
+            <th>目标表</th>
+            <th>源表</th>
             <th>启动时间</th>
             <th>运行时长</th>
             <th className="action-column">操作</th>
@@ -716,26 +721,19 @@ function JobResults({
                   />
                 </td>
                 <td>
-                  <span className="task-name">{task.name}</span>
-                  <span className="task-id">{task.task_id}</span>
-                </td>
-                <td>
-                  {/* 自定义 SQL 的任务没有 owner / table——直接拼这两个字段会渲染成
-                      一个孤零零的 `.`。这一列改成「徽标 + 截断的一行」，全文进 title。 */}
-                  <span className="table-cell" title={source.full}>
-                    {source.kind === "sql" && (
-                      <span className="source-kind">自定义 SQL</span>
-                    )}
-                    {source.label}
-                  </span>
-                  <span className="table-side">
-                    {nameOf(task.source_datasource_id)}
+                  {/* `task_id` 不再占第二行（2026-08 UX 评审 P1-1）：每一行都摆一串
+                      32 位十六进制，是把**九列里最没人读的那一样**放进了每一行的视线
+                      正中。它没消失，挂在任务名的 title 上，要用的时候悬停一下就有。 */}
+                  <span className="task-name" title={`任务 ID ${task.task_id}`}>
+                    {task.name}
                   </span>
                 </td>
                 <td>
-                  <span className="table-cell">{task.spec.target_table}</span>
-                  <span className="table-side">
-                    {nameOf(task.target_datasource_id)}
+                  <span
+                    className={`state is-${status}`}
+                    title={run === undefined ? undefined : conclusionOf(run)}
+                  >
+                    {LATEST_RUN_LABELS[status]}
                   </span>
                 </td>
                 <td>
@@ -756,11 +754,26 @@ function JobResults({
                   )}
                 </td>
                 <td>
-                  <span
-                    className={`state is-${status}`}
-                    title={run === undefined ? undefined : conclusionOf(run)}
-                  >
-                    {LATEST_RUN_LABELS[status]}
+                  <span className="table-cell" title={task.spec.target_table}>
+                    {task.spec.target_table}
+                  </span>
+                  <span className="table-side">
+                    {nameOf(task.target_datasource_id)}
+                  </span>
+                </td>
+                <td>
+                  {/* 自定义 SQL 的任务这里**只给一枚徽标**，不给语句片段：截断到一行的
+                      SQL 认不出是哪一条（几十个任务的开头都是 `SELECT a.ID AS ID,`），
+                      却要吃掉这一列大半的宽度。全文照旧在 title 上，完整语句在详情里。 */}
+                  <span className="table-cell" title={source.full}>
+                    {source.kind === "sql" ? (
+                      <span className="source-kind">自定义 SQL</span>
+                    ) : (
+                      source.label
+                    )}
+                  </span>
+                  <span className="table-side">
+                    {nameOf(task.source_datasource_id)}
                   </span>
                 </td>
                 <td className="time-cell">
