@@ -615,15 +615,11 @@ function namesFromConflict(error: unknown, key: string): string[] {
   if (!(error instanceof ApiError) || error.status !== 409) {
     return [];
   }
-  const body = error.body;
-  if (typeof body !== "object" || body === null || !("error" in body)) {
+  const detail = errorDetail(error.body);
+  if (detail === undefined) {
     return [];
   }
-  const detail = (body as { error: unknown }).error;
-  if (typeof detail !== "object" || detail === null || !(key in detail)) {
-    return [];
-  }
-  const names = (detail as Record<string, unknown>)[key];
+  const names = detail[key];
   return Array.isArray(names)
     ? names.filter((name): name is string => typeof name === "string")
     : [];
@@ -851,8 +847,9 @@ export function previewErrorMessage(error: unknown): string {
   if (error.status === 400) return `预览请求无效：${error.message}`;
   if (error.status === 504) return `数据预览超时：${error.message}`;
   if (error.status === 502) {
-    const body = error.body as { failure_kind?: unknown } | null;
-    const kind = typeof body?.failure_kind === "string" ? `（${body.failure_kind}）` : "";
+    const detail = errorDetail(error.body);
+    const kind =
+      typeof detail?.failure_kind === "string" ? `（${detail.failure_kind}）` : "";
     return `源数据库预览失败${kind}：${error.message}`;
   }
   return error.message;
@@ -918,19 +915,23 @@ async function readJson<T>(
   return body as T;
 }
 
+/**
+ * source 的**唯一**错误信封：`{"error": {"message": ..., "kind"?: ...}}`（#199）。
+ *
+ * 壳只有一种，所以这里不必按端点认形状。`kind` 是壳里的可选字段，读它的是需要
+ * 「下一步该找谁」的屏（取列、目标端元数据）；不需要的屏当它不存在。
+ */
+export function errorDetail(body: unknown): Record<string, unknown> | undefined {
+  if (typeof body !== "object" || body === null || !("error" in body)) {
+    return undefined;
+  }
+  const detail = (body as { error: unknown }).error;
+  return typeof detail === "object" && detail !== null
+    ? (detail as Record<string, unknown>)
+    : undefined;
+}
+
 function errorMessage(body: unknown): string | undefined {
-  if (typeof body !== "object" || body === null) {
-    return undefined;
-  }
-  if ("message" in body && typeof body.message === "string") {
-    return body.message;
-  }
-  if (!("error" in body)) {
-    return undefined;
-  }
-  const error = body.error;
-  if (typeof error !== "object" || error === null || !("message" in error)) {
-    return undefined;
-  }
-  return typeof error.message === "string" ? error.message : undefined;
+  const message = errorDetail(body)?.message;
+  return typeof message === "string" ? message : undefined;
 }

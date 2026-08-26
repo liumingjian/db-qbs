@@ -1,4 +1,4 @@
-import { ApiError } from "./api";
+import { ApiError, errorDetail } from "./api";
 import type {
   FetchedColumn,
   MappingIssue,
@@ -55,15 +55,17 @@ export function ddlTextSegments(ddl: string): DdlTextSegment[] {
 }
 
 export function targetDdlFailureFrom(error: unknown): TargetDdlFailure | null {
-  if (!(error instanceof ApiError) || !isRecord(error.body)) {
+  if (!(error instanceof ApiError)) {
     return null;
   }
-  if (error.body.kind !== "target_ddl") {
+  // 与其余失败同一只信封（#199）：`kind` 在 `error` 里边，附加字段跟着它一起。
+  const detail = errorDetail(error.body);
+  if (detail === undefined || detail.kind !== "target_ddl") {
     return null;
   }
 
-  const columns = error.body.described_columns;
-  const issues = error.body.columns;
+  const columns = detail.described_columns;
+  const issues = detail.columns;
   if (
     !Array.isArray(columns) ||
     !columns.every(isFetchedColumn) ||

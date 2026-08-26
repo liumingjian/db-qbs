@@ -170,6 +170,21 @@ describe("task API", () => {
     ).rejects.toThrow("任务定义请求体无效");
   });
 
+  // 壳只有一种（#199）：错误正文一律是 `{"error": {...}}`，平铺的 message 不再是 API 的形状。
+  it("reads the error message out of the one envelope", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({ error: { message: "取列失败", kind: "request" } }),
+          { status: 400 },
+        ),
+      ),
+    );
+
+    await expect(fetchColumns("ds-oracle", emptySpec())).rejects.toThrow("取列失败");
+  });
+
   it("projects a stored task to name plus spec without its identity", () => {
     const task = { task_id: "task-01", ...taskInput() };
 
@@ -497,7 +512,7 @@ describe("SQL builder API", () => {
     expect(previewErrorMessage(new ApiError("owner 不能为空", 400, {})))
       .toBe("预览请求无效：owner 不能为空");
     expect(previewErrorMessage(new ApiError("源端：ORA-00942", 502, {
-      failure_kind: "SOURCE_QUERY",
+      error: { message: "源端：ORA-00942", kind: "oracle", failure_kind: "SOURCE_QUERY" },
     }))).toBe("源数据库预览失败（SOURCE_QUERY）：源端：ORA-00942");
     expect(previewErrorMessage(new ApiError("源端数据预览超时", 504, {})))
       .toBe("数据预览超时：源端数据预览超时");
@@ -536,10 +551,12 @@ describe("SQL builder API", () => {
 
   it("preserves structured target-DDL failures from column fetches", async () => {
     const body = {
-      kind: "target_ddl",
-      message: "2 column(s) cannot be expressed in the target table",
-      columns: [{ column: "C_MEMO", source: "CLOB", message: "不支持的类型" }],
-      described_columns: [],
+      error: {
+        kind: "target_ddl",
+        message: "2 column(s) cannot be expressed in the target table",
+        columns: [{ column: "C_MEMO", source: "CLOB", message: "不支持的类型" }],
+        described_columns: [],
+      },
     };
     vi.stubGlobal(
       "fetch",
@@ -553,6 +570,6 @@ describe("SQL builder API", () => {
     );
 
     expect(error).toBeInstanceOf(ApiError);
-    expect(error).toMatchObject({ message: body.message, status: 422, body });
+    expect(error).toMatchObject({ message: body.error.message, status: 422, body });
   });
 });

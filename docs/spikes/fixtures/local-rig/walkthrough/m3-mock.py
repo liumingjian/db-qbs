@@ -102,19 +102,22 @@ COLUMNS_OK = {
 }
 
 # W5：白名单外的列 —— 列表照给，只有 DDL 区块换成「整份不给」。
+# 产品的错误信封只有一种（#199）：`kind` 与附加字段都在 `error` 里边。
 COLUMNS_REJECTED = {
-    "kind": "target_ddl",
-    "message": "2 column(s) cannot be expressed in the target table",
-    "columns": [
-        {"column": "PAYLOAD", "source": "CLOB", "message": "unsupported source type; narrow it in the source SQL or CAST it"},
-        {"column": "BF", "source": "BINARY_FLOAT", "message": "unsupported source type; CAST it to NUMBER(p,s)"},
-    ],
-    "described_columns": [
-        {"name": "ROW_ID", "type": "NUMBER", "precision": 8, "scale": 0, "length": None, "support": "ok"},
-        {"name": "PAYLOAD", "type": "CLOB", "precision": None, "scale": None, "length": None, "support": "unsupported"},
-        {"name": "BF", "type": "BINARY_FLOAT", "precision": None, "scale": None, "length": None, "support": "unsupported"},
-        {"name": "LOAD_DATE", "type": "DATE", "precision": None, "scale": None, "length": None, "support": "ok"},
-    ],
+    "error": {
+        "kind": "target_ddl",
+        "message": "2 column(s) cannot be expressed in the target table",
+        "columns": [
+            {"column": "PAYLOAD", "source": "CLOB", "message": "unsupported source type; narrow it in the source SQL or CAST it"},
+            {"column": "BF", "source": "BINARY_FLOAT", "message": "unsupported source type; CAST it to NUMBER(p,s)"},
+        ],
+        "described_columns": [
+            {"name": "ROW_ID", "type": "NUMBER", "precision": 8, "scale": 0, "length": None, "support": "ok"},
+            {"name": "PAYLOAD", "type": "CLOB", "precision": None, "scale": None, "length": None, "support": "unsupported"},
+            {"name": "BF", "type": "BINARY_FLOAT", "precision": None, "scale": None, "length": None, "support": "unsupported"},
+            {"name": "LOAD_DATE", "type": "DATE", "precision": None, "scale": None, "length": None, "support": "ok"},
+        ],
+    },
 }
 
 # W1/W6：映射预检失败 —— 逐列一条 + 值域校核那条混在同一张表里。
