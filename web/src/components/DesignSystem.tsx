@@ -8,6 +8,25 @@ const phases: Array<{ code: RunPhase; label: string }> = RUN_PHASES.map(
   (code) => ({ code, label: stageLabel(code) }),
 );
 
+/**
+ * 图标尺寸的**唯一一张表**（2026-08 UX 评审 P2）。
+ *
+ * 原来它是逐处手写的：13、14、15、16、17、18、22 七个数散在八个文件里，同一个角色
+ * 在两屏上差一两个像素——差得看不出来，也就永远改不回来。lucide 的 `size` 是 JS 数字，
+ * 进不了 CSS 变量，所以这张表在 TS 这边；`tokens.css` 里那三条 `--icon-*` 是它的另一份，
+ * 供 CSS 侧对齐，两边要一起改。
+ */
+export const ICON = {
+  /** 按钮里、文字行内。与正文齐平。 */
+  sm: 14,
+  /** 表格行内动作位、卡片工具条。 */
+  md: 16,
+  /** 抽屉与对话框的关闭键——容器更大，图标跟着大一档。 */
+  lg: 18,
+  /** 空状态里那枚示意图标。它不是控件，是插图，所以不在上面三档里。 */
+  empty: 22,
+} as const;
+
 export function PhaseLine({ current }: { current: RunPhase | null }) {
   const currentIndex = current === null ? -1 : phases.findIndex(({ code }) => code === current);
   return (
@@ -115,7 +134,7 @@ export function SensitiveValue({
           type="button"
           onClick={() => setRevealed((valueIsRevealed) => !valueIsRevealed)}
         >
-          <RevealIcon size={14} aria-hidden="true" />
+          <RevealIcon size={ICON.sm} aria-hidden="true" />
           {revealed ? "隐藏" : "显示"}
         </button>
       </header>

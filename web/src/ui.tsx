@@ -1,5 +1,6 @@
 import { X } from "lucide-react";
 import { useId, useRef } from "react";
+import { ICON } from "./components/DesignSystem";
 import type { ReactNode } from "react";
 
 import { useDialogFocus } from "./dialogFocus";
@@ -65,7 +66,7 @@ export function Modal({
             onClick={onClose}
             disabled={busy}
           >
-            <X size={16} aria-hidden="true" />
+            <X size={ICON.md} aria-hidden="true" />
           </button>
         </header>
         {children}
@@ -227,12 +228,25 @@ export function Pagination({
   /** 不给就不出「每页条数」下拉——分页条本身照旧。 */
   onPageSize?: (pageSize: number) => void;
 }) {
-  // **总数不超过一页时整条不出**——只有一页时，页码按钮与两个按不动的箭头只是噪声。
-  // 唯一的例外是「每页条数已经被人改过」：那时把整条藏掉会**关死唯一一条回去的路**
-  // （选了 100 / 页，列表一页装下了，于是控件消失，再也换不回 20）。
-  // 默认那一档下的行为一字未变，X11 观察到的仍是「一页时整条不出」。
-  if (total <= pageSize && (onPageSize === undefined || pageSize === PAGE_SIZE_OPTIONS[0])) {
+  // **一页装得下时不出页码**——按不动的箭头和唯一那颗 `1` 只是噪声。
+  //
+  // 但整条也不能就此消失（UX 评审 P2 收尾）：原来的规则是「除非每页条数被改过」，
+  // 于是同一个列表在 20 / 页时没有分页条、在 100 / 页时有一条完整的，两种形态之间
+  // 没有可讲的道理。现在改成**同一条，少一半**：只留「共 N 条」与每页条数，
+  // 页码与箭头不出。回去的路一直在，噪声也一直没有。
+  const singlePage = total <= pageSize;
+  if (singlePage && onPageSize === undefined) {
     return null;
+  }
+  if (singlePage && onPageSize !== undefined) {
+    return (
+      <nav className="list-pagination is-single" aria-label="分页">
+        <span className="pagination-total">
+          共 {total} {unit}
+        </span>
+        <PageSizeSelect pageSize={pageSize} onPageSize={onPageSize} />
+      </nav>
+    );
   }
   return (
     <nav className="list-pagination" aria-label="分页">
@@ -279,20 +293,32 @@ export function Pagination({
         ›
       </button>
       {onPageSize !== undefined && (
-        <select
-          className="page-size"
-          aria-label="每页条数"
-          value={pageSize}
-          onChange={(event) => onPageSize(Number(event.target.value))}
-        >
-          {PAGE_SIZE_OPTIONS.map((size) => (
-            <option key={size} value={size}>
-              {size} / 页
-            </option>
-          ))}
-        </select>
+        <PageSizeSelect pageSize={pageSize} onPageSize={onPageSize} />
       )}
     </nav>
+  );
+}
+
+function PageSizeSelect({
+  pageSize,
+  onPageSize,
+}: {
+  pageSize: number;
+  onPageSize: (pageSize: number) => void;
+}) {
+  return (
+    <select
+      className="page-size"
+      aria-label="每页条数"
+      value={pageSize}
+      onChange={(event) => onPageSize(Number(event.target.value))}
+    >
+      {PAGE_SIZE_OPTIONS.map((size) => (
+        <option key={size} value={size}>
+          {size} / 页
+        </option>
+      ))}
+    </select>
   );
 }
 

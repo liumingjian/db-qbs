@@ -40,7 +40,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .app-shell { display: grid; grid-template-columns: var(--sider-w) minmax(0, 1fr); min-height: 100vh; background: var(--bg); }
 .sidebar { background: var(--sider-bg); }
 .product-brand { height: var(--topbar-h); margin-top: 10px; display: flex; align-items: center; gap: 10px; padding: 10px 4px 10px 20px; color: var(--sider-text-active); font-size: 16px; font-weight: var(--weight-em); }
-.brand-mark { width: 24px; height: 24px; flex: none; display: grid; place-items: center; border-radius: var(--radius); background: var(--brand); color: #fff; font-family: var(--font-num); font-size: var(--size-cap); }
+.brand-mark { width: 24px; height: 24px; flex: none; display: grid; place-items: center; border-radius: var(--radius); background: var(--brand); color: var(--on-solid); font-family: var(--font-num); font-size: var(--size-cap); }
 .sidebar nav { display: flex; flex-direction: column; padding: 8px 0; }
 .nav-item { height: var(--sider-item-h); margin: 0 10px; display: flex; align-items: center; gap: 10px; padding: 14px 24px 14px 20px; border-radius: var(--sider-item-radius); color: var(--sider-text); text-decoration: none; }
 .nav-item:hover { color: var(--sider-text-active); }
@@ -84,9 +84,18 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .card { border-radius: var(--radius); background: var(--panel); }
 .card-header { min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: var(--gap); padding: 12px var(--pad); border-bottom: 1px solid var(--line); }
 .card-header > div { display: flex; align-items: baseline; gap: 10px; }
-.card-header h1 { margin: 0; font-size: var(--size-body); font-weight: var(--weight-em); letter-spacing: 0; }
+/* 卡头的标题**统一带那块灰底**（UX 评审 P2）。它是照参照物量出来的处理（--title-bg，
+   x2doris 的「Job Center」那一块），原来只有作业中心有，于是三屏的卡头一眼就是两套。
+   要么三屏都有、要么都没有；分家是唯一不该有的选项。 */
+.card-header h1 { margin: 0; padding: 6px 12px; background: var(--title-bg); color: var(--text); font-size: var(--size-title); font-weight: var(--weight-em); line-height: 28px; letter-spacing: 0; }
+.card-header h2, .card-header h3 { margin: 0; font-size: var(--size-section); font-weight: var(--weight-em); }
+/* 运行详情那一张是**详情卡不是列表卡**：标题旁边还站着「返回任务」与运行记录号，
+   再加一块灰底会把那一行挤成三段互不相干的东西。 */
+.run-header h1 { padding: 0; background: transparent; }
 .card-subtitle { color: var(--mute); font-size: var(--size-meta); }
-.table-card { padding: var(--card-pad); }
+/* 卡头自己带内边距，这里只管表体那一圈。 */
+.table-card { padding: 0 var(--card-pad) var(--card-pad); }
+.table-card > .card-header { padding-inline: 6px; }
 
 /* 筛选条独立成卡，摆在表格卡上方（参照物的形态）。 */
 .filter-card { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: var(--gap); padding: 12px var(--card-pad) 6px; border-radius: var(--radius); background: var(--panel); }
@@ -97,17 +106,15 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .filter-field select:focus, .filter-field input:focus { border-color: var(--brand); outline: 0; box-shadow: 0 0 0 2px var(--brand-dim); }
 .filter-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 
-/* 卡内标题块 + 工具条。 */
-.table-title-row { min-height: 48px; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding-bottom: 8px; }
-.table-title { margin: 0 32px 0 0; padding: 8px 12px; background: var(--title-bg); color: var(--text); font-size: var(--size-body); font-weight: var(--weight-em); line-height: 24px; }
-.table-count { color: var(--mute); font-size: var(--size-meta); }
-.table-toolbar { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+/* 卡内工具条。`.table-title-row` / `.table-title` / `.table-count` 三个类已并入
+   `.card-header`（UX 评审 P2）：三屏一套结构、一套间距、一种标题处理。 */
+.table-toolbar { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .toolbar-icons { display: flex; gap: 2px; padding-right: 12px; margin-right: 4px; border-right: 1px solid var(--line); }
 .toolbar-icons .icon-button { width: var(--ctl-h); height: var(--ctl-h); }
 
 /* ---------------------------------------------------------------- 按钮 */
 .button { height: var(--ctl-h); display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 4px 15px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); box-shadow: var(--btn-shadow); cursor: pointer; font-size: var(--size-body); font-family: inherit; white-space: nowrap; }
-.button.is-primary { border-color: var(--brand); background: var(--brand); color: #fff; }
+.button.is-primary { border-color: var(--brand); background: var(--brand); color: var(--on-solid); }
 .button.is-ghost:hover { border-color: var(--brand); color: var(--brand); }
 /* `<a class="button">`：按钮的样子，链接的行为。 */
 a.button { text-decoration: none; }
@@ -116,10 +123,10 @@ a.button { text-decoration: none; }
    **实心的是落锤**——确认框里那一颗，按下去数据就变了。
    两档长得一样时，工具条上那颗按钮看着比它实际的分量重，而确认框里那颗看着比它轻。 */
 .button.is-danger { border-color: var(--crit-bd); background: var(--panel); color: var(--crit); }
-.button.is-danger.is-solid { border-color: var(--crit); background: var(--crit); color: #fff; }
+.button.is-danger.is-solid { border-color: var(--crit); background: var(--crit); color: var(--on-solid); }
 .button:disabled, .icon-button:disabled { cursor: not-allowed; opacity: .55; }
 /* 行内动作是**无边框图标位**（ADR-0043 §5：全图标，ADR-0042 §6 已作废）。 */
-.icon-button { height: 24px; display: inline-grid; place-items: center; padding: 0 7px; border: 1px solid transparent; border-radius: var(--radius); background: transparent; color: var(--brand); cursor: pointer; }
+.icon-button { height: var(--action-h); min-width: var(--action-h); display: inline-grid; place-items: center; padding: 0 7px; border: 1px solid transparent; border-radius: var(--radius); background: transparent; color: var(--brand); cursor: pointer; }
 .icon-button:hover { background: var(--brand-dim); }
 .icon-button.is-danger { color: var(--crit); }
 .icon-button.is-danger:hover { background: var(--crit-bg); }
@@ -186,7 +193,9 @@ pre.drawer-sql,
 .error-code,
 .sensitive-value dl,
 .settings-copy dd { font-variant-ligatures: none; }
-.table-side { display: block; color: var(--mute); font-size: var(--size-cap); }
+/* 数据源名字**不是装饰**：一眼看出这行搬到哪个库，靠的就是它。--mute 对白底约 3.5:1，
+   过不了 WCAG AA 的正文档，而这一格是要读的（P2）。 */
+.table-side { display: block; color: var(--dim); font-size: var(--size-cap); }
 .time-cell { font-family: var(--font-num); font-size: var(--size-meta); font-variant-numeric: tabular-nums; }
 .mono, .sql-cell { font-family: var(--font-num); font-size: var(--size-meta); }
 /* tokens.css 把 tabular-nums 挂在 .num / td.n 上，应用里用的却是 .mono / .numeric-column，
@@ -209,7 +218,7 @@ pre.drawer-sql,
 .job-grid th.action-column { z-index: 2; }
 .row-actions { display: flex; align-items: center; }
 /* 两道分隔线把「跑」｜「看 / 改 / 改名」｜「删」分成三组——位置因此是有结构的，不是硬记。 */
-.row-actions .divider { width: 1px; height: 14px; margin: 0 4px; background: #E8E8E8; }
+.row-actions .divider { width: 1px; height: 14px; margin: 0 4px; background: var(--line-mid); }
 
 /* ---------------------------------------------------------------- 迁移进度
    只有一个整数百分比 + 一条细条：向下取整、不带小数、不附行数（ADR-0043 §7）。 */
@@ -222,7 +231,7 @@ pre.drawer-sql,
 
 /* ---------------------------------------------------------------- 运行状态
    一维索引，**不是轴二**：五个词齐是对的（ADR-0043 §4）。实心方角标签。 */
-.state { display: inline-block; height: 22px; padding: 0 7px; border: 1px solid transparent; border-radius: var(--badge-radius); color: #fff; font-size: var(--size-meta); line-height: 20px; white-space: nowrap; }
+.state { display: inline-block; height: 22px; padding: 0 7px; border: 1px solid transparent; border-radius: var(--badge-radius); color: var(--on-solid); font-size: var(--size-meta); line-height: 20px; white-space: nowrap; }
 .state.is-succeeded { background: var(--ok); }
 .state.is-failed { background: var(--crit); }
 .state.is-live { background: var(--brand); }
@@ -239,13 +248,13 @@ a.state:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
 .list-pagination { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 10px; min-height: 24px; color: var(--text); }
 .pagination-total { margin-right: auto; color: var(--mute); font-family: var(--font-num); font-size: var(--size-meta); }
 .page-btn { min-width: 24px; height: 24px; padding: 0 4px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); font-weight: var(--weight-em); line-height: 22px; cursor: pointer; }
-.page-btn.is-active { border-color: var(--brand); background: var(--brand); color: #fff; }
+.page-btn.is-active { border-color: var(--brand); background: var(--brand); color: var(--on-solid); }
 .page-btn:disabled { color: var(--mute); cursor: not-allowed; }
 .page-size { height: 24px; padding: 0 4px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-size: var(--size-meta); font-family: inherit; }
 
 /* ---------------------------------------------------------------- 详情抽屉
    顶替整个「运行历史」屏：右侧 760px，不是新页也不是居中模态（ADR-0043 §4）。 */
-.drawer-scrim { position: fixed; z-index: 40; inset: 0; background: rgba(0, 0, 0, .45); }
+.drawer-scrim { position: fixed; z-index: 40; inset: 0; background: var(--scrim); }
 .drawer { position: fixed; z-index: 41; top: 0; right: 0; bottom: 0; width: 760px; max-width: 92vw; display: flex; flex-direction: column; background: var(--bg); }
 .drawer-header { min-height: 56px; display: flex; align-items: center; gap: 12px; padding: 0 var(--pad); border-bottom: 1px solid var(--line); background: var(--panel); }
 .drawer-header h2 { margin: 0; font-size: var(--size-body); font-weight: var(--weight-em); }
@@ -257,16 +266,25 @@ a.state:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
 .panel { border-radius: var(--radius); background: var(--panel); }
 .panel > h3 { margin: 0; padding: 11px var(--pad); border-bottom: 1px solid var(--line); font-size: var(--size-body); font-weight: var(--weight-em); }
 .panel > .panel-body { padding: 14px var(--pad); }
-.kv { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px 18px; }
-.kv.is-pairs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+/* 列数**跟着宽度走**，不是写死四栏：抽屉在窄屏上会被压到 92vw，四栏那时每栏 120px，
+   一个 `TEST_SOURCE_001__stg_20260824` 要折三行。 */
+.kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px 18px; }
+.kv.is-pairs { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
 .kv > div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.kv .k { color: var(--mute); font-size: var(--size-cap); }
+.kv .k { color: var(--mute); font-family: var(--font-cn); font-size: var(--size-cap); }
 .kv .v { overflow-wrap: anywhere; font-family: var(--font-num); font-size: var(--size-meta); font-variant-numeric: tabular-nums; }
+/* 「行数核对」「分段耗时」这两块摆的全是数：**右对齐**才比得出位数。
+   左对齐时 500,000 与 12,281 的个位差着三格，一眼看不出哪个大（P2）。 */
+.kv.is-numeric .v { text-align: right; }
+.kv.is-numeric .k { text-align: right; }
 .kv .v.is-bad { color: var(--crit); }
 pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height: 240px; border-top: 1px solid var(--line); background: var(--mute-bg); color: var(--dim); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ---------------------------------------------------------------- 空态与提示 */
 .loading-state, .no-results { padding: 44px var(--pad); color: var(--mute); text-align: center; }
+/* 筛出零条时**同时给一条出路**（P2）：只说「没有匹配的任务」，下一步只能回到筛选栏
+   把刚填的东西逐个还原。 */
+.no-results { display: flex; align-items: baseline; justify-content: center; gap: 12px; }
 .empty-state { min-height: 280px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 44px var(--pad); text-align: center; }
 .empty-icon { width: 48px; height: 48px; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--mute-bg); color: var(--mute); }
 .empty-state h2 { margin: 14px 0 4px; font-size: var(--size-body); font-weight: var(--weight-em); letter-spacing: 0; }
@@ -286,18 +304,22 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
 
 /* ---------------------------------------------------------------- 对话框与表单 */
-.modal-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; overflow-y: auto; padding: 24px; background: color-mix(in srgb, var(--text) 34%, transparent); }
+.modal-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; overflow-y: auto; padding: 24px; background: var(--scrim); }
 .modal { width: min(680px, 100%); max-height: calc(100vh - 48px); overflow-y: auto; border-radius: var(--radius); background: var(--panel); }
 .modal.is-narrow { width: min(460px, 100%); }
 .modal.is-wide { width: min(980px, 100%); }
 .modal-header { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: var(--gap); padding: 10px var(--pad); border-bottom: 1px solid var(--line); }
-.modal-header h2 { margin: 0; font-size: var(--size-body); font-weight: var(--weight-em); letter-spacing: 0; }
+.modal-header h2 { margin: 0; font-size: var(--size-section); font-weight: var(--weight-em); letter-spacing: 0; }
 .modal-header .icon-button { width: var(--ctl-h); height: var(--ctl-h); color: var(--dim); }
 .modal-body { padding: var(--pad); }
-.modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px var(--pad); border-top: 1px solid var(--line); }
+/* 页脚**吸底**：对话框是可滚的，长清单（批量删除、批量发起）会把「确认 / 取消」
+   推到看不见的地方，于是那个决定必须先滚一段才做得了。 */
+.modal-footer { position: sticky; bottom: 0; z-index: 1; display: flex; justify-content: flex-end; gap: 8px; padding: 12px var(--pad); border-top: 1px solid var(--line); background: var(--panel); }
 .form-stack { display: flex; flex-direction: column; gap: 14px; }
 .form-field { display: flex; flex-direction: column; gap: 5px; color: var(--dim); font-size: var(--size-body); }
-.form-field > span { font-family: var(--font-num); font-size: var(--size-meta); }
+/* 字段名是中文，**不进等宽栈**：--font-num 里一个中文字形都没有，整条栈会一路回退到
+   浏览器默认字体，于是同一屏上出现两种中文字形（P2）。等宽只留给值。 */
+.form-field > span { font-family: var(--font-cn); font-size: var(--size-meta); }
 .field-label { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 /* 徽标共用一份底子。`.source-kind`（作业中心「源表」列里自定义 SQL 任务的类别标）
    与表单里的中性徽标长得一模一样，各写一遍会各自漂。 */
@@ -356,7 +378,7 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .entry-option-copy { min-width: 0; display: flex; flex: 1; flex-direction: column; gap: 2px; }
 .entry-option-copy strong { overflow-wrap: anywhere; font-size: var(--size-body); font-weight: var(--weight-em); }
 .entry-option-copy > span { overflow-wrap: anywhere; color: var(--mute); font-family: var(--font-num); font-size: var(--size-cap); }
-.entry-agent-status { max-width: 42%; flex: none; overflow-wrap: anywhere; color: var(--mute); font-size: var(--size-cap); text-align: right; }
+.entry-agent-status { max-width: 42%; flex: none; overflow-wrap: anywhere; color: var(--dim); font-size: var(--size-cap); text-align: right; }
 .entry-agent-status.is-online { color: var(--ok); }
 .entry-agent-status.is-offline { color: var(--crit); }
 .entry-reason { grid-column: 1 / -1; margin: 0; color: var(--crit); font-size: var(--size-meta); }
@@ -552,6 +574,24 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .target-missing-note .field-badge { flex: none; margin-left: 0; }
 .wizard-select-label, .wizard-name { display: flex; flex-direction: column; gap: 6px; color: var(--dim); font-size: var(--size-meta); }
 .wizard-select-label select, .wizard-name input, .wizard-mapping select { height: var(--ctl-h); padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); }
+.wizard-select-label input, .wizard-select-label select { width: 100%; font-size: var(--size-body); }
+.wizard-select-label input { height: var(--ctl-h); padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); }
+.wizard-select-label input:focus, .wizard-select-label select:focus { border-color: var(--brand); outline: 0; box-shadow: 0 0 0 2px var(--brand-dim); }
+
+/* ---- 下拉的统一外观（UX 评审 P2）----
+   `<select>` 原来一个都没管，于是**新建任务这条主路上最显眼的两个控件**是浏览器原生的：
+   macOS 上是圆角带阴影的胶囊，Windows 上是方角灰框，跟旁边照着 Ant Design 4 量出来的
+   输入框对不上。这里只做三件事——收掉原生外观、补一支和边框同色的箭头、留出箭头的位置。 */
+select, .page-size {
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--mute) 50%),
+    linear-gradient(135deg, var(--mute) 50%, transparent 50%);
+  background-position: right 13px center, right 8px center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 26px;
+}
 .wizard-context .schema-tree { max-height: 230px; }
 .wizard-context .schema-tree.is-target { max-height: 180px; }
 .wizard-summary { display: flex; flex-direction: column; gap: 6px; padding: 11px; border-left: 3px solid var(--brand); background: var(--panel); color: var(--mute); font-size: var(--size-cap); line-height: var(--lh-prose); }
@@ -569,10 +609,10 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .wizard-rail li.is-done > span { border-color: var(--brand); background: var(--panel); color: var(--brand); }
 .wizard-rail li.is-current { color: var(--brand); }
 .wizard-rail li.is-current > strong { font-weight: var(--weight-em); }
-.wizard-rail li.is-current > span { border-color: var(--brand); background: var(--brand); color: #fff; box-shadow: 0 0 0 3px var(--brand-dim); }
+.wizard-rail li.is-current > span { border-color: var(--brand); background: var(--brand); color: var(--on-solid); box-shadow: 0 0 0 3px var(--brand-dim); }
 .wizard-step-scroll { min-height: 0; flex: 1; overflow: auto; padding: var(--pad); background: var(--bg); }
 .wizard-step { max-width: 1120px; display: flex; flex-direction: column; gap: 16px; margin: 0 auto; }
-.wizard-step > header h1 { margin: 0; font-size: 20px; letter-spacing: 0; }
+.wizard-step > header h1 { margin: 0; font-size: var(--size-title); letter-spacing: 0; }
 .wizard-step > header p { margin: 6px 0 0; color: var(--mute); line-height: var(--lh-prose); }
 .wizard-empty, .wizard-placeholder, .wizard-readonly { margin: 0; padding: 18px; border: 1px solid var(--line); background: var(--panel); color: var(--mute); }
 .wizard-placeholder { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; }
@@ -671,7 +711,7 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .clue-safety { margin: 0; padding: 9px 12px; border-left: 3px solid var(--ok); background: var(--ok-bg); color: var(--ok-ink); line-height: var(--lh-prose); }
 .clue-safety strong { font-weight: var(--weight-em); }
 .failure-evidence-heading { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
-.failure-evidence-heading h3 { margin: 0; font-size: var(--size-body); }
+.failure-evidence-heading h3 { margin: 0; font-size: var(--size-section); }
 .failure-evidence-heading p { margin: 3px 0 0; color: var(--mute); font-size: var(--size-meta); }
 /* 「这一类没有可改的地方」——它占的是按钮那一格，所以宽度要收住，别把标题挤成两行。 */
 .remediation-none { max-width: 42ch; margin: 0; color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-prose); text-align: right; }
@@ -762,6 +802,14 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }
 
+/* 1280 一档（P2）：原来只有 760 / 620 / 480，全是手机档，而这个产品实际跑在
+   笔记本与台式机上。这一档只做一件事——把左右内边距收一收，让那张宽表少滚一点。 */
+@media (max-width: 1280px) {
+  .content { padding: 12px; }
+  .kv { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
+  .drawer { width: 680px; }
+}
+
 @media (max-width: 760px) {
   .app-shell, .app-shell.is-collapsed { grid-template-columns: minmax(0, 1fr); }
   .sidebar { display: none; }
@@ -822,3 +870,4 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
   .evidence-grid { grid-template-columns: minmax(0, 1fr); }
   .live-progress-row { grid-template-columns: minmax(0, 1fr); }
 }
+

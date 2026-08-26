@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ICON } from "./components/DesignSystem";
 import { Maximize2, Minimize2, WrapText } from "lucide-react";
 
 import { formatSql, tokenize } from "./sql";
@@ -175,7 +176,7 @@ export function SqlEditor({
             title={wrapped ? "关掉软换行：长行改为横向滚动，行号回来" : "打开软换行：长行折行显示，行号会关掉"}
             onClick={() => setWrapped((current) => !current)}
           >
-            <WrapText size={15} />
+            <WrapText size={ICON.sm} />
             换行
           </button>
           <button
@@ -198,7 +199,7 @@ export function SqlEditor({
             aria-label={fullscreen ? "退出全屏" : "全屏编辑"}
             onClick={() => setFullscreen((current) => !current)}
           >
-            {fullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+            {fullscreen ? <Minimize2 size={ICON.sm} /> : <Maximize2 size={ICON.sm} />}
           </button>
         </span>
       </div>

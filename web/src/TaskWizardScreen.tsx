@@ -27,7 +27,7 @@ import {
 import type { BuilderColumn, BuilderSql, BuilderTable, PreviewResult } from "./api";
 import { messageFrom } from "./errors";
 import type { DatasourceOption } from "./entry";
-import { UpsertNote, UPSERT_NOTE_AHEAD } from "./components/DesignSystem";
+import { ICON, UpsertNote, UPSERT_NOTE_AHEAD } from "./components/DesignSystem";
 import { HighlightedSqlInput, SqlEditor } from "./SqlEditor";
 import { tokenize } from "./sql";
 import { Modal } from "./ui";
@@ -522,7 +522,7 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
       <aside className="wizard-context">
         <header>
           <strong>导入上下文</strong>
-          <button className="icon-button" type="button" title="退出向导" aria-label="退出向导" onClick={() => requestLeave(onCancel)}><X size={16} /></button>
+          <button className="icon-button" type="button" title="退出向导" aria-label="退出向导" onClick={() => requestLeave(onCancel)}><X size={ICON.md} /></button>
         </header>
 
         <div className="wizard-mode" role="group" aria-label="取数方式">
@@ -544,7 +544,7 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
               <strong>源端 · {model.context.sourceName}</strong>
               {draft.fetchMode === "table" && (
                 <button className="icon-button" type="button" title="刷新源表" aria-label="刷新源表" onClick={() => void loadTables()}>
-                  <RefreshCw className={busy === "tables" ? "is-spinning" : ""} size={15} />
+                  <RefreshCw className={busy === "tables" ? "is-spinning" : ""} size={ICON.sm} />
                 </button>
               )}
             </div>
@@ -578,10 +578,14 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
                   </label>
                 )}
                 <label className="tree-search">
-                  <Search size={14} aria-hidden="true" />
+                  <Search size={ICON.sm} aria-hidden="true" />
                   <input value={sourceFilter} placeholder="筛选 owner / 表" onChange={(event) => setSourceFilter(event.target.value)} />
                 </label>
-                <div className="schema-tree" role="tree" aria-label="源表">
+                {/* **不声称是 tree**（UX 评审 P2）：`role="tree"` 承诺的是 treeitem
+                    的整套键盘契约——上下左右移动、Home/End、展开折叠。这里是一组
+                    `<button>`，一条都没实现，读屏软件照着 tree 的规则去用只会更糟。
+                    它实际上是一个「披露式分组列表」：owner 行自己带 aria-expanded。 */}
+                <div className="schema-tree" role="group" aria-label="源表">
                   {sourceGroups.map(([owner, ownerTables]) => {
                     const open = expandedOwners.has(owner);
                     return <div className="schema-node" key={owner}>
@@ -590,7 +594,7 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
                         if (open) next.delete(owner); else next.add(owner);
                         return next;
                       })}>
-                        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        {open ? <ChevronDown size={ICON.sm} /> : <ChevronRight size={ICON.sm} />}
                         <span className="schema-name">{owner}</span><span className="schema-count">{ownerTables.length}</span>
                       </button>
                       {open && <div className="table-node-list">{ownerTables.map((table) => (
@@ -614,7 +618,7 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
               {/* 刷新**不再绑在「已经选了表」上**（UX 评审 P1-4）：在别处刚建完表回来刷一下
                   清单，正是没选表的时候最需要的动作。选了表就顺带把它的列也重读一遍。 */}
               <button className="icon-button" type="button" disabled={busy === "target"} title={busy === "target" ? "正在刷新" : draft.spec.target_table === "" ? "刷新目标表清单" : "刷新目标表清单与目标列"} aria-label="刷新目标表" onClick={refreshTarget}>
-                <RefreshCw className={busy === "target" ? "is-spinning" : ""} size={15} />
+                <RefreshCw className={busy === "target" ? "is-spinning" : ""} size={ICON.sm} />
               </button>
             </div>
             {targetOptions.length > 0 && (
@@ -649,16 +653,20 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
               </p>
             )}
             <label className="tree-search">
-              <Search size={14} aria-hidden="true" />
+              <Search size={ICON.sm} aria-hidden="true" />
               <input value={targetFilter} placeholder="筛选目标表" onChange={(event) => setTargetFilter(event.target.value)} />
               <span className="tree-count">{filteredTargets.length} / {targetTables.length}</span>
             </label>
-            <div className="schema-tree is-target" role="tree" aria-label="目标表">
+            {/* 目标表是**扁平的单选清单**，listbox / option 就是它本来的样子——
+                这一档不用降级，直接说对即可，选中状态也因此报得出去。 */}
+            <div className="schema-tree is-target" role="listbox" aria-label="目标表">
               {filteredTargets.map((table) => (
                 <button
                   className={`table-node ${draft.spec.target_table === table ? "is-selected" : ""}`}
                   key={table}
                   type="button"
+                  role="option"
+                  aria-selected={draft.spec.target_table === table}
                   onClick={() => selectTargetTable(table)}
                 >{table}</button>
               ))}
@@ -680,7 +688,7 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
             <li className={`is-${entry.state}`} aria-current={entry.state === "current" ? "step" : undefined} key={entry.step}>
               {/* 走过的步子打勾、当前那一步填实心（UX 评审 P1-7）：两者原来长得一模一样，
                   于是这条轨道说不出「我在哪儿」——而那正是它唯一的职责。 */}
-              <span>{entry.state === "done" ? <Check size={13} aria-label="已完成" /> : entry.step}</span>
+              <span>{entry.state === "done" ? <Check size={ICON.sm} aria-label="已完成" /> : entry.step}</span>
               <strong>{entry.label}</strong>
             </li>
           ))}
@@ -715,7 +723,7 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
             ) : draft.mode === "edit" ? (
               <Refusable reason={submitRefusal}>
                 <button className="button is-primary" type="button" disabled={submitRefusal !== null} onClick={() => void submit("save-only")}>
-                  {busy === "submit" ? <LoaderCircle className="is-spinning" size={15} /> : null}保存
+                  {busy === "submit" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : null}保存
                 </button>
               </Refusable>
             ) : (
@@ -725,7 +733,7 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
                 </Refusable>
                 <Refusable reason={submitRefusal}>
                   <button className="button is-primary" type="button" disabled={submitRefusal !== null} onClick={() => void submit("start")}>
-                    {busy === "submit" ? <LoaderCircle className="is-spinning" size={15} /> : null}开始导入
+                    {busy === "submit" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : null}开始导入
                   </button>
                 </Refusable>
               </>
@@ -816,7 +824,7 @@ function StepBody({
           <header>
             <div><strong>自定义 SQL</strong><span>这条语句就是发起时要执行的源端查询</span></div>
             <button className="button" type="button" disabled={(draft.spec.source_sql ?? "").trim() === "" || busy === "columns"} title={(draft.spec.source_sql ?? "").trim() === "" ? "先写好 SQL" : busy === "columns" ? "正在刷新结果列" : undefined} onClick={loadSourceColumns}>
-              {busy === "columns" ? <LoaderCircle className="is-spinning" size={15} /> : <RefreshCw size={15} />}刷新结果列
+              {busy === "columns" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : <RefreshCw size={ICON.sm} />}刷新结果列
             </button>
           </header>
           <SqlEditor
@@ -839,7 +847,7 @@ function StepBody({
               : <select aria-invalid={row.problem ? true : undefined} value={row.target} onChange={(event) => change({ type: "rename-target", source: row.source, target: event.target.value })}><option value="">请选择</option>{draft.targetColumns.map((column) => <option key={column.name}>{column.name}</option>)}</select>
             }{row.problem && <small>{row.problem}</small>}</>}</td>
             <td><input type="checkbox" disabled={!row.selected || row.target === "" || row.primaryKeyLock !== null} title={!row.selected ? "先勾选这一列" : row.target === "" ? "先选择目标列" : row.primaryKeyLock ?? undefined} checked={row.primaryKey} onChange={() => change({ type: "toggle-primary-key", target: row.target })} />{row.primaryKeyLock && <small className="lock-note">{row.primaryKeyLock}</small>}</td>
-            <td><button className="icon-button is-danger" type="button" title={`删除列 ${row.source}`} aria-label={`删除列 ${row.source}`} onClick={() => change({ type: "remove-column", source: row.source })}><Trash2 size={15} /></button></td>
+            <td><button className="icon-button is-danger" type="button" title={`删除列 ${row.source}`} aria-label={`删除列 ${row.source}`} onClick={() => change({ type: "remove-column", source: row.source })}><Trash2 size={ICON.sm} /></button></td>
           </tr>)}
         </tbody></table></div>
       )}
@@ -852,7 +860,7 @@ function StepBody({
       {model.whereEditable ? <div className="where-clause-editor"><HighlightedSqlInput value={model.where} placeholder="STATUS = 'ACTIVE' AND CREATED_AT >= DATE '2026-01-01'" label="WHERE 条件" rows={5} onChange={(clause) => change({ type: "where", clause })} /></div> : <div className="wizard-readonly">自定义 SQL 的过滤条件直接写在左侧 SQL 中。</div>}
       <section className="generated-sql"><header><div><strong>构建 SQL</strong><span>实际执行的源端查询</span></div></header>{sqlError ? <div className="form-error">{sqlError}</div> : sql ? <pre className="ddl-output"><HighlightedSql sql={sql.source_sql} /></pre> : <p className="spec-empty">正在生成最终查询。</p>}</section>
       <section className="preview-panel">
-        <header><div><strong>数据预览</strong><span>使用上方最终查询读取源端数据</span></div><button className="button" type="button" disabled={busy === "preview"} onClick={loadPreview}>{busy === "preview" ? <LoaderCircle className="is-spinning" size={15} /> : null}预览前 10 条</button></header>
+        <header><div><strong>数据预览</strong><span>使用上方最终查询读取源端数据</span></div><button className="button" type="button" disabled={busy === "preview"} onClick={loadPreview}>{busy === "preview" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : null}预览前 10 条</button></header>
         {model.preview.value ? <PreviewData preview={model.preview.value} /> : <p className="spec-empty">点击按钮后读取真实数据；修改查询条件后需重新预览。</p>}
       </section>
       <Blockers blockers={model.blockers} />
@@ -866,9 +874,17 @@ function StepBody({
     return <section className="wizard-step">
       <header><h1>目标表检查</h1><p>系统会核对列、类型、长度与主键，请根据检查结果判断是否需要调整目标表。</p></header>
       <div className="target-check-toolbar">
-        <strong>{busy === "check" ? "正在检查目标表" : missing ? "目标表尚不存在" : result?.ok ? "目标表检查通过" : "目标表需要处理"}</strong>
+        {/* 「目标表需要处理」原来是**兜底**：`result` 还是 null（一次都没查过）时
+            也写这句，等于把「不知道」说成了「有问题」（UX 评审 P2）。 */}
+        <strong>{
+          busy === "check" ? "正在检查目标表"
+          : missing ? "目标表尚不存在"
+          : result === null ? "尚未检查目标表"
+          : result.ok ? "目标表检查通过"
+          : `目标表需要处理（${result.findings.length} 项）`
+        }</strong>
         <button className="button" type="button" disabled={busy === "check" || busy === "target"} onClick={loadCheck}>
-          <RefreshCw className={busy === "check" ? "is-spinning" : ""} size={15} />重新检查
+          <RefreshCw className={busy === "check" ? "is-spinning" : ""} size={ICON.sm} />重新检查
         </button>
       </div>
       {checkError !== null && <div className="form-error" role="alert">{checkError}</div>}
@@ -883,7 +899,7 @@ function StepBody({
           </article>)}
         </div>}
         {result.suggested_ddl !== null && <section className="generated-sql target-check-ddl">
-          <header><div><strong>{missing ? "建表语句" : "建议建表语句"}</strong><span>完整 CREATE TABLE</span></div><button className="icon-button" type="button" title="复制建表语句" aria-label="复制建表语句" onClick={() => void navigator.clipboard.writeText(result.suggested_ddl ?? "")}><Copy size={15} /></button></header>
+          <header><div><strong>{missing ? "建表语句" : "建议建表语句"}</strong><span>完整 CREATE TABLE</span></div><button className="icon-button" type="button" title="复制建表语句" aria-label="复制建表语句" onClick={() => void navigator.clipboard.writeText(result.suggested_ddl ?? "")}><Copy size={ICON.sm} /></button></header>
           <pre className="ddl-output"><HighlightedSql sql={result.suggested_ddl} /></pre>
         </section>}
       </>}
@@ -943,7 +959,7 @@ function ConfirmTargetCheckCell({
     <strong>尚未检查</strong>
     {check.excused !== null && <span className="confirm-check-reason">{check.excused}</span>}
     <button className="button" type="button" disabled={busy} onClick={onCheck}>
-      {busy ? <LoaderCircle className="is-spinning" size={15} /> : <RefreshCw size={15} />}立即检查
+      {busy ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : <RefreshCw size={ICON.sm} />}立即检查
     </button>
   </span>;
 }

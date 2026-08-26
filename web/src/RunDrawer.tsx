@@ -9,6 +9,7 @@ import { messageFrom } from "./errors";
 import { FailureEvidence } from "./FailureEvidence";
 import {
   ErrorCodeTag,
+  ICON,
   SensitiveValue,
   TerminalBlock,
   UpsertNote,
@@ -102,7 +103,7 @@ export function RunDrawer({
             aria-label="关闭"
             onClick={onClose}
           >
-            <X size={18} aria-hidden="true" />
+            <X size={ICON.lg} aria-hidden="true" />
           </button>
           <h2 id="drawer-title">运行详情 · {task.name}</h2>
           <span className="sub">{run.run_record_id}</span>
@@ -181,7 +182,7 @@ export function RunDrawer({
 
           <section className="panel">
             <h3>行数核对</h3>
-            <div className="panel-body kv">
+            <div className="panel-body kv is-numeric">
               <Value label="源端读取" value={optionalCount(run.source_rows)} />
               <Value label="暂存写入" value={optionalCount(run.staged_rows)} />
               <Value
@@ -195,7 +196,7 @@ export function RunDrawer({
 
           <section className="panel">
             <h3>分段耗时</h3>
-            <div className="panel-body kv">
+            <div className="panel-body kv is-numeric">
               {/* 「开跑前计数」**单独一栏，不混进取数**（ADR-0043 §7）：把它揉进取数里，
                   下一个人看到的「取数慢」会是两件事的和。 */}
               <Value label="开跑前计数" value={milliseconds(run.precount_ms)} />
@@ -269,7 +270,7 @@ export function RunDrawer({
               disabled={cleaning}
               onClick={() => setCleanupConfirm(true)}
             >
-              <Trash2 size={14} aria-hidden="true" />
+              <Trash2 size={ICON.sm} aria-hidden="true" />
               {cleaning ? "正在清理" : "清理本次写入"}
             </button>
           )}
@@ -286,7 +287,7 @@ export function RunDrawer({
               title="重跑：按这个任务当前的定义再跑一次"
               onClick={() => onRerun(rerun.task)}
             >
-              <Play size={14} aria-hidden="true" />
+              <Play size={ICON.sm} aria-hidden="true" />
               重跑
             </button>
           )}
@@ -300,7 +301,7 @@ export function RunDrawer({
                 aria-label={`重跑（不可用）：${rerun.reason}`}
                 disabled
               >
-                <Play size={14} aria-hidden="true" />
+                <Play size={ICON.sm} aria-hidden="true" />
                 重跑
               </button>
             </span>
@@ -381,7 +382,7 @@ function CleanupDialog({
           onClick={onConfirm}
           disabled={busy}
         >
-          <Trash2 size={14} aria-hidden="true" />
+          <Trash2 size={ICON.sm} aria-hidden="true" />
           {busy
             ? "正在清理"
             : rows === null

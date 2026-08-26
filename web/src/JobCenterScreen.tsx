@@ -12,6 +12,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ICON } from "./components/DesignSystem";
 
 import { copyTaskCurl, deleteTask, startRun } from "./api";
 import type { Datasource, RunHistory, Task } from "./api";
@@ -400,13 +401,19 @@ export function JobCenterScreen({
       )}
 
       <section className="card table-card" id="jobs" aria-labelledby="jobs-title">
-        <div className="table-title-row">
-          <h1 className="table-title" id="jobs-title">
-            作业中心
-          </h1>
-          <span className="table-count">
-            {countLabel(tasks, filtered, refreshing)}
-          </span>
+        {/* 与数据源屏、Agent 屏**同一个卡头**（UX 评审 P2）：这里原来是另一套
+            （`.table-title-row` + `.table-count`），两套只在结构上不同，长得却几乎一样——
+            于是三屏的卡头高度、内边距、标题与副标题的间距各差一点，谁也说不清哪个是对的。
+            那块灰底标题是照参照物量的，留着，但改成三屏共有。 */}
+        <header className="card-header">
+          <div>
+            <h1 id="jobs-title">
+              作业中心
+            </h1>
+            <span className="card-subtitle">
+              {countLabel(tasks, filtered, refreshing)}
+            </span>
+          </div>
           <div className="table-toolbar">
             <span className="toolbar-icons">
               <button
@@ -419,13 +426,13 @@ export function JobCenterScreen({
               >
                 <RefreshCw
                   className={refreshing ? "is-spinning" : ""}
-                  size={17}
+                  size={ICON.md}
                   aria-hidden="true"
                 />
               </button>
             </span>
             <button className="button is-primary" type="button" onClick={onCreate}>
-              <Plus size={15} aria-hidden="true" />
+              <Plus size={ICON.sm} aria-hidden="true" />
               新建任务
             </button>
             {/* 未选中时**禁用**，不是能点了才报错（ADR-0043 §6，走查 X15）。 */}
@@ -446,7 +453,7 @@ export function JobCenterScreen({
               批量删除
             </button>
           </div>
-        </div>
+        </header>
 
         <JobResults
           tasks={tasks}
@@ -467,6 +474,7 @@ export function JobCenterScreen({
           onStart={onStart}
           onStop={onStop}
           onOpen={setOpenTaskId}
+          onClearFilters={() => applyFilters(EMPTY_TASK_FILTERS)}
           copiedTaskId={copyStatus?.error === null ? copyStatus.taskId : null}
           onCopyCurl={(task) => void copyCurl(task)}
           focusTaskId={focusTaskId}
@@ -603,6 +611,7 @@ function JobResults({
   onStart,
   onStop,
   onOpen,
+  onClearFilters,
   copiedTaskId,
   onCopyCurl,
   focusTaskId,
@@ -626,6 +635,7 @@ function JobResults({
   onStart: (task: Task) => void;
   onStop: (runRecordId: string) => void;
   onOpen: (taskId: string) => void;
+  onClearFilters: () => void;
   copiedTaskId: string | null;
   onCopyCurl: (task: Task) => void;
   focusTaskId: string | null;
@@ -642,12 +652,12 @@ function JobResults({
     return (
       <div className="empty-state">
         <div className="empty-icon">
-          <Database size={22} aria-hidden="true" />
+          <Database size={ICON.empty} aria-hidden="true" />
         </div>
         <h2>还没有任务</h2>
         <p>新建第一个 Oracle → MySQL 导入任务。</p>
         <button className="button is-primary" type="button" onClick={onCreate}>
-          <Plus size={15} aria-hidden="true" />
+          <Plus size={ICON.sm} aria-hidden="true" />
           新建任务
         </button>
       </div>
@@ -655,7 +665,16 @@ function JobResults({
   }
   if (filtered.length === 0) {
     // 空表格加一个孤零零的分页条不算回答（走查 X10）。
-    return <div className="no-results">没有匹配的任务</div>;
+    // **但也不能只说「没有」**（UX 评审 P2）：筛出零条的时候，人下一步一定是想把筛选
+    // 去掉，而唯一的路是回到上面那条筛选栏逐个还原。这里直接给一颗。
+    return (
+      <div className="no-results">
+        <span>没有匹配的任务</span>
+        <button className="text-button" type="button" onClick={onClearFilters}>
+          清除筛选
+        </button>
+      </div>
+    );
   }
 
   // 源 / 目标那两行下挂的是**数据源名字**，`datasource_id` 只在数据源屏出现（ADR-0039 §8）。
@@ -804,7 +823,7 @@ function JobResults({
                     {runAction.kind === "start" ? (
                       <ActionButton
                         label={runAction.disabled ? "正在发起" : "发起运行"}
-                        icon={<Play size={16} />}
+                        icon={<Play size={ICON.md} />}
                         disabled={runAction.disabled}
                         onClick={() => onStart(task)}
                       />
@@ -817,7 +836,7 @@ function JobResults({
                             ? `停止运行 ${runAction.runRecordId}`
                             : `停止运行（不可用）：${runAction.refusal}`
                         }
-                        icon={<Ban size={16} />}
+                        icon={<Ban size={ICON.md} />}
                         disabled={runAction.refusal !== null}
                         onClick={() => onStop(runAction.runRecordId)}
                       />
@@ -826,9 +845,9 @@ function JobResults({
                       label={copiedTaskId === task.task_id ? "cURL 已复制" : "复制 cURL"}
                       icon={
                         copiedTaskId === task.task_id ? (
-                          <Check size={16} />
+                          <Check size={ICON.md} />
                         ) : (
-                          <Copy size={16} />
+                          <Copy size={ICON.md} />
                         )
                       }
                       onClick={() => onCopyCurl(task)}
@@ -837,25 +856,25 @@ function JobResults({
                     {run !== undefined && (
                       <ActionButton
                         label="运行详情"
-                        icon={<Clock3 size={16} />}
+                        icon={<Clock3 size={ICON.md} />}
                         onClick={() => onOpen(task.task_id)}
                       />
                     )}
                     <ActionButton
                       label="编辑任务定义"
-                      icon={<Pencil size={16} />}
+                      icon={<Pencil size={ICON.md} />}
                       onClick={() => onEdit(task)}
                     />
                     <ActionButton
                       label="改名"
-                      icon={<Tag size={16} />}
+                      icon={<Tag size={ICON.md} />}
                       onClick={() => onRename(task)}
                     />
                     <span className="divider" />
                     <ActionButton
                       label="删除"
                       danger
-                      icon={<Trash2 size={16} />}
+                      icon={<Trash2 size={ICON.md} />}
                       onClick={() => onDelete(task)}
                     />
                   </span>

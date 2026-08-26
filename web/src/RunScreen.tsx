@@ -5,6 +5,7 @@ import { cancelRun, fetchRun } from "./api";
 import type { RunDetail, Task } from "./api";
 import {
   ErrorCodeTag,
+  ICON,
   PhaseLine,
   SensitiveValue,
   TerminalBlock,
@@ -134,7 +135,7 @@ export function RunScreen({
       <header className="card-header run-header">
         <div>
           <button className="back-button" type="button" onClick={onBack}>
-            <ArrowLeft size={15} aria-hidden="true" />
+            <ArrowLeft size={ICON.sm} aria-hidden="true" />
             返回任务
           </button>
           <h1 id="run-title">{task.name}</h1>
@@ -149,7 +150,7 @@ export function RunScreen({
               disabled={cancelRefusal !== null}
               onClick={() => void handleCancel()}
             >
-              <Ban size={15} aria-hidden="true" />
+              <Ban size={ICON.sm} aria-hidden="true" />
               取消运行
             </button>
             {cancelRefusal !== null && (
@@ -158,7 +159,7 @@ export function RunScreen({
           </span>
         ) : (
           <button className="button is-primary" type="button" onClick={onRelaunch}>
-            <Play size={15} aria-hidden="true" />
+            <Play size={ICON.sm} aria-hidden="true" />
             重新发起
           </button>
         )}
@@ -178,7 +179,7 @@ export function RunScreen({
 
       {detail === null || presentation === null ? (
         <div className="loading-state">
-          <RefreshCw className="is-spinning" size={16} aria-hidden="true" />
+          <RefreshCw className="is-spinning" size={ICON.md} aria-hidden="true" />
           正在读取运行详情...
         </div>
       ) : (

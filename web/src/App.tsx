@@ -8,6 +8,7 @@ import {
   Server,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ICON } from "./components/DesignSystem";
 import type { FormEvent } from "react";
 
 import {
@@ -677,9 +678,9 @@ export function App() {
             onClick={toggleSider}
           >
             {collapsed ? (
-              <Menu size={17} aria-hidden="true" />
+              <Menu size={ICON.md} aria-hidden="true" />
             ) : (
-              <PanelLeftClose size={17} aria-hidden="true" />
+              <PanelLeftClose size={ICON.md} aria-hidden="true" />
             )}
           </button>
           <span className="mobile-brand">db-qbs</span>
@@ -957,7 +958,7 @@ function AboutButton() {
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}
       >
-        <Info size={15} aria-hidden="true" />
+        <Info size={ICON.sm} aria-hidden="true" />
         关于
       </button>
       {open && (
@@ -1000,7 +1001,7 @@ function TaskEditGuardDialog({
     return (
       <Modal title="检查编辑条件" onClose={onClose} busy={false} narrow>
         <div className="modal-body entry-loading">
-          <LoaderCircle className="is-spinning" size={18} aria-hidden="true" />
+          <LoaderCircle className="is-spinning" size={ICON.lg} aria-hidden="true" />
           正在检查任务绑定的数据源
         </div>
       </Modal>

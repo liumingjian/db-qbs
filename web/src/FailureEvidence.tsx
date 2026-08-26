@@ -1,4 +1,5 @@
 import { Database, Pencil } from "lucide-react";
+import { ICON } from "./components/DesignSystem";
 
 import type { RunHistory } from "./api";
 import { remediationFor } from "./troubleshooting";
@@ -56,7 +57,7 @@ export function FailureEvidence({
             type="button"
             onClick={() => onEditTask(remediation.step)}
           >
-            <Pencil size={15} aria-hidden="true" />
+            <Pencil size={ICON.sm} aria-hidden="true" />
             {remediation.label}
           </button>
         )}
@@ -64,7 +65,7 @@ export function FailureEvidence({
             都不必替它转发一次导航，而它也因此可以被中键点开。 */}
         {remediation?.kind === "datasources" && (
           <a className="button is-ghost" href="#datasources">
-            <Database size={15} aria-hidden="true" />
+            <Database size={ICON.sm} aria-hidden="true" />
             {remediation.label}
           </a>
         )}

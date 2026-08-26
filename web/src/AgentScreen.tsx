@@ -1,5 +1,6 @@
 import { Pencil, Radio, RefreshCw, Trash2 } from "lucide-react";
 import { useState } from "react";
+import { ICON } from "./components/DesignSystem";
 import type { FormEvent } from "react";
 
 import {
@@ -102,7 +103,7 @@ export function AgentScreen({
           type="button"
           onClick={() => setDialog({ kind: "register" })}
         >
-          <Radio size={15} aria-hidden="true" />
+          <Radio size={ICON.sm} aria-hidden="true" />
           注册 Agent
         </button>
       </header>
@@ -116,7 +117,7 @@ export function AgentScreen({
       {!loading && agents.length === 0 && (
         <div className="empty-state">
           <div className="empty-icon">
-            <Radio size={22} aria-hidden="true" />
+            <Radio size={ICON.empty} aria-hidden="true" />
           </div>
           <h2>还没有注册目标端 Agent</h2>
           <p>
@@ -128,7 +129,7 @@ export function AgentScreen({
             type="button"
             onClick={() => setDialog({ kind: "register" })}
           >
-            <Radio size={15} aria-hidden="true" />
+            <Radio size={ICON.sm} aria-hidden="true" />
             注册 Agent
           </button>
         </div>
@@ -201,7 +202,7 @@ export function AgentScreen({
                               className={
                                 probing === agent.agent_id ? "is-spinning" : ""
                               }
-                              size={16}
+                              size={ICON.md}
                             />
                           }
                           disabled={probing === agent.agent_id}
@@ -210,14 +211,14 @@ export function AgentScreen({
                         <span className="divider" />
                         <ActionButton
                           label="编辑 Agent"
-                          icon={<Pencil size={16} />}
+                          icon={<Pencil size={ICON.md} />}
                           onClick={() => setDialog({ kind: "edit", agent })}
                         />
                         <span className="divider" />
                         <ActionButton
                           label="删除 Agent"
                           danger
-                          icon={<Trash2 size={16} />}
+                          icon={<Trash2 size={ICON.md} />}
                           onClick={() => setDialog({ kind: "delete", agent })}
                         />
                       </div>
