@@ -10,7 +10,7 @@ import {
   X,
 } from "lucide-react";
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
-import type { FormEvent, ReactNode } from "react";
+import type { FormEvent, ReactNode, RefObject } from "react";
 
 import {
   checkTargetTable,
@@ -39,7 +39,7 @@ import {
   toSpec,
   view,
 } from "./wizard";
-import type { Change, ConfirmTargetCheck, Draft, Loss } from "./wizard";
+import type { Change, ConfirmTargetCheck, Draft, Loss, RailEntry, Step } from "./wizard";
 
 export interface TaskWizardScreenProps {
   initial: Draft;
@@ -96,6 +96,10 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
   const [sql, setSql] = useState<BuilderSql | null>(null);
   const [sqlError, setSqlError] = useState<string | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
+  /** 换步时焦点要落到新那一步的标题上（#239）。 */
+  const headingRef = useRef<HTMLHeadingElement | null>(null);
+  const lastStep = useRef(initial.step);
+  const [announcement, setAnnouncement] = useState("");
   const model = view(draft);
   const advanceBlocked = model.step.blockers.length > 0;
   /** 最后一步为什么提交不了，或者 `null`。 */
@@ -163,6 +167,22 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [draft]);
+
+  /*
+   * 换了一步，焦点跟过去，顺带说一句到了第几步（#239）。
+   *
+   * 原来换步只改草稿：整块正文连同标题一起被换掉，焦点却还留在页脚那颗按钮上——
+   * 它所属的内容已经不在了；读屏的人则什么都没听见。焦点落到新标题上是「同一屏内换步」
+   * 的常规做法，不必假装发生了一次路由跳转。
+   */
+  useEffect(() => {
+    if (lastStep.current === draft.step) return;
+    const from = lastStep.current;
+    lastStep.current = draft.step;
+    headingRef.current?.focus();
+    setAnnouncement(stepAnnouncement(model.rail, from, draft.step));
+    // model.rail 只随 draft.step 变，不必进依赖表。
+  }, [draft.step]);
 
   async function loadTables() {
     const request = ++tableRequest.current;
@@ -707,8 +727,13 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
           ))}
         </ol>
 
+        {/* 全向导只此一处播报口（#239）：换到第几步、叫什么名字，以及向导替你折掉了哪一步——
+            不然轨道上那一格自己打了勾，人是不知道为什么的。不是错误，所以用 role="status"。 */}
+        <div className="wizard-live visually-hidden" role="status" aria-live="polite">{announcement}</div>
+
         <div className="wizard-step-scroll">
           <StepBody
+            headingRef={headingRef}
             draft={draft}
             sql={sql}
             sqlError={sqlError}
@@ -804,7 +829,24 @@ export function WizardConfirmDialog({ loss, leaving = false, onCancel, onConfirm
   </Modal>;
 }
 
+/**
+ * 播报词（#239）：到了第几步、这一步叫什么，以及中间被折掉的那些步。
+ *
+ * 目前只有第 3 步会折：目标表检查一次就过、且没过期时，它没什么可说的，向导直接跨过去
+ * （`checkIsSilent`）。跨过去这件事本身得说出来——轨道上那一格已经打了勾。
+ */
+function stepAnnouncement(rail: readonly RailEntry[], from: Step, to: Step): string {
+  const label = (step: Step) => rail.find((entry) => entry.step === step)?.label ?? "";
+  const low = Math.min(from, to);
+  const high = Math.max(from, to);
+  const folded = rail
+    .filter((entry) => entry.step > low && entry.step < high)
+    .map((entry) => `第 ${entry.step} 步「${entry.label}」无需处理，已跳过。`);
+  return `${folded.join("")}第 ${to} 步，共 ${rail.length} 步：${label(to)}`;
+}
+
 function StepBody({
+  headingRef,
   draft,
   sql,
   sqlError,
@@ -815,6 +857,7 @@ function StepBody({
   loadPreview,
   loadCheck,
 }: {
+  headingRef: RefObject<HTMLHeadingElement | null>;
   draft: Draft;
   sql: BuilderSql | null;
   sqlError: string | null;
@@ -828,7 +871,7 @@ function StepBody({
   const model = view(draft).step;
   if (model.step === 1) {
     return <section className="wizard-step">
-      <header><h1>选列与字段映射</h1><p>系统会先做同名匹配，请判断要搬哪些列，以及每一列应写到目标表的哪里。</p></header>
+      <header>{/* tabIndex={-1}：能用脚本聚焦，但不进 Tab 序（#239）。 */}<h1 ref={headingRef} tabIndex={-1}>选列与字段映射</h1><p>系统会先做同名匹配，请判断要搬哪些列，以及每一列应写到目标表的哪里。</p></header>
       {draft.fetchMode === "sql" && (
         /* 编辑器住在这里，不在左栏（UX 评审 P1-3）。宽度是主区的宽度，高度 420px 起，
            带行号、软换行开关、格式化、全屏——这里的 SQL 基本都是粘过来的，粘进来第一件事
@@ -869,7 +912,7 @@ function StepBody({
   }
   if (model.step === 2) {
     return <section className="wizard-step">
-      <header><h1>过滤与验证</h1><p>检查最终查询与样例数据，并判断是否需要补充 WHERE 条件。</p></header>
+      <header><h1 ref={headingRef} tabIndex={-1}>过滤与验证</h1><p>检查最终查询与样例数据，并判断是否需要补充 WHERE 条件。</p></header>
       {model.whereEditable ? <div className="where-clause-editor"><HighlightedSqlInput value={model.where} placeholder="STATUS = 'ACTIVE' AND CREATED_AT >= DATE '2026-01-01'" label="WHERE 条件" rows={5} onChange={(clause) => change({ type: "where", clause })} /></div> : <div className="wizard-readonly">自定义 SQL 的过滤条件直接写在左侧 SQL 中。</div>}
       <section className="generated-sql"><header><div><strong>构建 SQL</strong><span>实际执行的源端查询</span></div></header>{sqlError ? <div className="form-error">{sqlError}</div> : sql ? <pre className="ddl-output"><HighlightedSql sql={sql.source_sql} /></pre> : <p className="spec-empty">正在生成最终查询。</p>}</section>
       <section className="preview-panel">
@@ -885,7 +928,7 @@ function StepBody({
     // 那是一句话：这张表还没建。这一档只摆建表语句（UX 评审 P1-4）。
     const missing = !draft.targetTableExists && draft.spec.target_table.trim() !== "";
     return <section className="wizard-step">
-      <header><h1>目标表检查</h1><p>系统会核对列、类型、长度与主键，请根据检查结果判断是否需要调整目标表。</p></header>
+      <header><h1 ref={headingRef} tabIndex={-1}>目标表检查</h1><p>系统会核对列、类型、长度与主键，请根据检查结果判断是否需要调整目标表。</p></header>
       <div className="target-check-toolbar">
         {/* 「目标表需要处理」原来是**兜底**：`result` 还是 null（一次都没查过）时
             也写这句，等于把「不知道」说成了「有问题」（UX 评审 P2）。 */}
@@ -921,7 +964,7 @@ function StepBody({
   }
   const confirmView = model.confirm;
   return <section className="wizard-step">
-    <header><h1>确认并运行</h1><p>最后核对系统汇总的完整决定，并判断是否可以保存或开始导入。</p></header>
+    <header><h1 ref={headingRef} tabIndex={-1}>确认并运行</h1><p>最后核对系统汇总的完整决定，并判断是否可以保存或开始导入。</p></header>
     <label className="wizard-name">任务名<input value={taskName(draft)} onChange={(event) => change({ type: "task-name", name: event.target.value })} /></label>
     <dl className="wizard-confirm-grid">
       <div><dt>源端</dt><dd>{confirmView.sourceLabel}</dd></div>
