@@ -14,10 +14,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use db_qbs_source::http::{routes, Api, Method, Request, Response, RunState};
+use db_qbs_source::http::{routes, Access, Api, Method, Request, Response, RunState};
 use db_qbs_source::{
-    AgentStore, DatasourceStore, HistoryStore, OracleAccess, OracleRowSource, SourceColumn,
-    SourceConfig, SourceReadError, TaskSpec, TaskStore,
+    AgentStore, AuthStore, DatasourceStore, HistoryStore, OracleAccess, OracleRowSource,
+    SourceColumn, SourceConfig, SourceReadError, TaskSpec, TaskStore, SESSION_COOKIE,
 };
 use serde_json::Value;
 
@@ -86,6 +86,11 @@ struct Rig {
     agents: Arc<Mutex<AgentStore>>,
     history: HistoryStore,
     runs: Arc<Mutex<RunState>>,
+    auth: AuthStore,
+    /// 这台 rig 的会话票据。**每条请求默认都带着它**——`/api/*` 现在整片要求登录，
+    /// 不带就是 401，而这个文件里的用例问的几乎都不是「没登录会怎样」。
+    /// 真要问那一句的用例走 [`Rig::send_anonymous`]。
+    session: String,
 }
 
 impl Rig {
@@ -112,6 +117,8 @@ impl Rig {
             history_retention_days: 90,
             run_executable,
         };
+        let auth = AuthStore::open(&directory).unwrap();
+        let session = auth.issue_session(chrono::Utc::now()).unwrap().token;
         Self {
             config_path: directory.join("source.toml"),
             tasks: TaskStore::open(&directory).unwrap(),
@@ -119,6 +126,8 @@ impl Rig {
             agents: Arc::new(Mutex::new(AgentStore::open(&directory).unwrap())),
             history: HistoryStore::open(&directory).unwrap(),
             runs: Arc::new(Mutex::new(RunState::default())),
+            auth,
+            session,
             config,
             directory,
         }
@@ -143,11 +152,23 @@ impl Rig {
             agents: &self.agents,
             history: &self.history,
             runs: &self.runs,
+            auth: &self.auth,
             describe_source,
         }
     }
 
+    /// 给一条请求挂上这台 rig 的会话 cookie。手搓 `Request` 的用例也得过这一道。
+    fn authorized(&self, request: Request) -> Request {
+        request.with_header("Cookie", format!("{SESSION_COOKIE}={}", self.session))
+    }
+
     fn send(&self, method: Method, url: &str, body: &str) -> Response {
+        self.api()
+            .handle(&self.authorized(Request::new(method, url, body.as_bytes().to_vec())))
+    }
+
+    /// 不带任何 cookie 的一次请求：问的就是「门外的人看到什么」。
+    fn send_anonymous(&self, method: Method, url: &str, body: &str) -> Response {
         self.api()
             .handle(&Request::new(method, url, body.as_bytes().to_vec()))
     }
@@ -169,11 +190,12 @@ impl Rig {
             &TaskSpec,
         ) -> Result<Vec<SourceColumn>, SourceReadError>,
     ) -> Response {
-        self.api_with_describer(describe_source).handle(&Request::new(
-            Method::Post,
-            url,
-            body.as_bytes().to_vec(),
-        ))
+        self.api_with_describer(describe_source)
+            .handle(&self.authorized(Request::new(
+                Method::Post,
+                url,
+                body.as_bytes().to_vec(),
+            )))
     }
 
     fn put(&self, url: &str, body: &str) -> Response {
@@ -525,6 +547,24 @@ fn every_route_reaches_its_handler() {
             String::new(),
             200,
         ),
+        (
+            Method::Put,
+            "/api/password",
+            "/api/password".into(),
+            r#"{"current_password":"admin","new_password":"admin"}"#.into(),
+            200,
+        ),
+        // 会话那三条**排在最末，而且退出排最后**：`DELETE /api/session` 会把 rig
+        // 自己那张票销掉，排在中间会让它后面每一行都变成 401。
+        (Method::Get, "/api/session", "/api/session".into(), String::new(), 200),
+        (
+            Method::Post,
+            "/api/session",
+            "/api/session".into(),
+            r#"{"username":"admin","password":"admin"}"#.into(),
+            200,
+        ),
+        (Method::Delete, "/api/session", "/api/session".into(), String::new(), 200),
     ];
 
     for (method, pattern, url, body, expected) in &checks {
@@ -564,21 +604,25 @@ fn task_curl_is_complete_server_assembled_and_uses_the_public_request_origin() {
         "HOLDINGS",
         &("source-id".to_owned(), "target-id".to_owned()),
     );
-    let request = Request::new(
-        Method::Get,
-        &format!("/api/tasks/{task_id}/curl"),
-        Vec::new(),
-    )
-    .with_header("Host", "qbs.example.test:8443")
-    .with_header("X-Forwarded-Proto", "https");
+    let request = rig.authorized(
+        Request::new(
+            Method::Get,
+            &format!("/api/tasks/{task_id}/curl"),
+            Vec::new(),
+        )
+        .with_header("Host", "qbs.example.test:8443")
+        .with_header("X-Forwarded-Proto", "https"),
+    );
 
     let response = rig.api().handle(&request);
 
     assert_eq!(response.status, 200, "{}", response.body_text());
+    // **两条命令**：`/api/runs` 现在要会话，所以先登录换 cookie 再发起。
+    // 口令是占位符——这个接口不发票据，也从不回读口令。
     assert_eq!(
         rig.json(&response)["command"],
         format!(
-            "curl --request POST 'https://qbs.example.test:8443/api/runs' --header 'Content-Type: application/json' --data '{{\"task_id\":\"{task_id}\"}}'"
+            "curl --silent --show-error --cookie-jar '/tmp/db-qbs-session-{task_id}.cookie' --request POST 'https://qbs.example.test:8443/api/session' --header 'Content-Type: application/json' --data '{{\"username\":\"admin\",\"password\":\"改成你的口令\"}}' > /dev/null && curl --cookie '/tmp/db-qbs-session-{task_id}.cookie' --request POST 'https://qbs.example.test:8443/api/runs' --header 'Content-Type: application/json' --data '{{\"task_id\":\"{task_id}\"}}'; rm -f '/tmp/db-qbs-session-{task_id}.cookie'"
         )
     );
 }
@@ -593,12 +637,14 @@ fn task_curl_rejects_unknown_tasks_and_untrusted_origin_shapes() {
         "HOLDINGS",
         &("source-id".to_owned(), "target-id".to_owned()),
     );
-    let request = Request::new(
-        Method::Get,
-        &format!("/api/tasks/{task_id}/curl"),
-        Vec::new(),
-    )
-    .with_header("Host", "qbs.example.test/'bad");
+    let request = rig.authorized(
+        Request::new(
+            Method::Get,
+            &format!("/api/tasks/{task_id}/curl"),
+            Vec::new(),
+        )
+        .with_header("Host", "qbs.example.test/'bad"),
+    );
     assert_eq!(rig.api().handle(&request).status, 400);
 }
 
@@ -1943,4 +1989,276 @@ fn a_stopped_agent_breaks_every_target_side_link() {
     let agents = rig.json(&rig.get("/api/agents"));
     assert_eq!(agents[0]["status"], "offline", "{agents}");
     assert!(agents[0]["last_error"].is_string(), "{agents}");
+}
+
+// ---------------------------------------------------------------- 登录与会话
+//
+// 这一段问的全是「门」的事。它护住的是 **source 的 HTTP 面**——sink 那半边仍然
+// 没有鉴权，本文件一个字也证明不了那半边的安全。
+
+/// 每条路由都得声明自己归哪一档。**这张表和 `routes()` 两头对账**：
+/// 新加一条路由却不在这里写明它公开还是要登录，这条测试当场就红。
+#[test]
+fn every_route_declares_its_access() {
+    // 公开的**只有三条**，全是会话本身：没有它们，登录也会撞 401。
+    let public: [(Method, &str); 3] = [
+        (Method::Get, "/api/session"),
+        (Method::Post, "/api/session"),
+        (Method::Delete, "/api/session"),
+    ];
+    for (method, pattern) in &public {
+        let route = routes()
+            .iter()
+            .find(|route| route.method == *method && route.pattern == *pattern)
+            .unwrap_or_else(|| panic!("路由表里没有 {method:?} {pattern}"));
+        assert_eq!(
+            route.access,
+            Access::Public,
+            "{method:?} {pattern} 应当是公开的"
+        );
+    }
+    for route in routes() {
+        if public.contains(&(route.method, route.pattern)) {
+            continue;
+        }
+        assert_eq!(
+            route.access,
+            Access::Session,
+            "{:?} {} 不在公开清单里，就必须要求登录——新加路由请先想清楚它归哪一档",
+            route.method,
+            route.pattern
+        );
+    }
+}
+
+/// 没登录的人碰**每一条**要登录的路由，一律 401。
+///
+/// 判据直接从 `routes()` 现拿，不另抄一份清单：抄一份就会有漏掉的那一条，
+/// 而漏掉的那一条正是会被人走进来的那一条。
+#[test]
+fn every_session_route_refuses_an_anonymous_request() {
+    let rig = Rig::new();
+    for route in routes() {
+        if route.access == Access::Public {
+            continue;
+        }
+        let url = route.pattern.replace("{}", "some-id");
+        let response = rig.send_anonymous(route.method, &url, "{}");
+        assert_eq!(
+            response.status,
+            401,
+            "{:?} {} 放进了一个没登录的请求：{}",
+            route.method,
+            route.pattern,
+            response.body_text()
+        );
+    }
+}
+
+/// 没匹配上任何路由时，**没登录的人看到的也是 401，不是 404**。
+///
+/// 两者的差别足以让门外的人把整张路由表枚举出来——一条 404 就等于回答了
+/// 「这个路径存在吗」。登录之后照旧是 404，那才是它本来的意思。
+#[test]
+fn an_unknown_api_path_looks_the_same_as_a_real_one_from_outside() {
+    let rig = Rig::new();
+    assert_eq!(rig.send_anonymous(Method::Get, "/api/nope", "").status, 401);
+    let known = rig.send_anonymous(Method::Get, "/api/tasks", "");
+    assert_eq!(known.status, 401);
+    assert_eq!(rig.get("/api/nope").status, 404);
+}
+
+/// 出厂口令进得去，错口令进不去，而**两种失败回同一句话**。
+#[test]
+fn the_default_credentials_open_the_door_and_a_wrong_one_does_not() {
+    let rig = Rig::new();
+
+    let refused = rig.send_anonymous(
+        Method::Post,
+        "/api/session",
+        r#"{"username":"admin","password":"nope"}"#,
+    );
+    assert_eq!(refused.status, 401);
+    assert_eq!(rig.json(&refused)["error"]["message"], "账号或口令不正确");
+    assert!(refused.header("Set-Cookie").is_none(), "被拒的登录不许发票据");
+
+    // 账号不存在与口令不对**一字不差**：分开报只会告诉试口令的人账号叫什么。
+    let unknown_account = rig.send_anonymous(
+        Method::Post,
+        "/api/session",
+        r#"{"username":"root","password":"admin"}"#,
+    );
+    assert_eq!(unknown_account.status, 401);
+    assert_eq!(
+        rig.json(&unknown_account)["error"]["message"],
+        rig.json(&refused)["error"]["message"]
+    );
+
+    let accepted = rig.send_anonymous(
+        Method::Post,
+        "/api/session",
+        r#"{"username":"admin","password":"admin"}"#,
+    );
+    assert_eq!(accepted.status, 200, "{}", accepted.body_text());
+    let cookie = accepted.header("Set-Cookie").unwrap().to_owned();
+    assert!(cookie.starts_with("db_qbs_session="), "{cookie}");
+    // 三条属性缺一不可：`HttpOnly` 挡住脚本读票据，`SameSite=Strict` 挡住跨站带票，
+    // `Path=/` 让退出时那条 `Max-Age=0` 对得上、真的删得掉。
+    assert!(cookie.contains("HttpOnly"), "{cookie}");
+    assert!(cookie.contains("SameSite=Strict"), "{cookie}");
+    assert!(cookie.contains("Path=/"), "{cookie}");
+    // **没有 `Secure`**：现场是明文 HTTP，带上它 cookie 根本存不下来。
+    assert!(!cookie.contains("Secure"), "{cookie}");
+}
+
+/// 「我登着吗」这一句**没登录也问得出来**——首屏靠它决定摆登录页还是摆应用。
+#[test]
+fn the_session_probe_answers_from_outside_the_door() {
+    let rig = Rig::new();
+
+    let outside = rig.send_anonymous(Method::Get, "/api/session", "");
+    assert_eq!(outside.status, 200, "{}", outside.body_text());
+    assert_eq!(rig.json(&outside)["authenticated"], false);
+    assert!(rig.json(&outside)["username"].is_null());
+
+    let inside = rig.get("/api/session");
+    assert_eq!(inside.status, 200);
+    assert_eq!(rig.json(&inside)["authenticated"], true);
+    assert_eq!(rig.json(&inside)["username"], "admin");
+}
+
+/// 退出销的是**这一张票**，别处登着的同一个账号不受影响。
+#[test]
+fn logging_out_burns_one_ticket_and_leaves_the_others_alone() {
+    let rig = Rig::new();
+    let elsewhere = rig.auth.issue_session(chrono::Utc::now()).unwrap().token;
+    let elsewhere_cookie = format!("db_qbs_session={elsewhere}");
+
+    let goodbye = rig.delete("/api/session");
+    assert_eq!(goodbye.status, 200, "{}", goodbye.body_text());
+    assert!(goodbye.header("Set-Cookie").unwrap().contains("Max-Age=0"));
+
+    assert_eq!(rig.get("/api/tasks").status, 401, "退出之后这张票还认");
+    let still_in = rig.api().handle(
+        &Request::new(Method::Get, "/api/tasks", Vec::new())
+            .with_header("Cookie", elsewhere_cookie),
+    );
+    assert_eq!(still_in.status, 200, "另一处的登录被这次退出连坐了");
+}
+
+/// 退出是**幂等**的：没带票据也回 200。「你本来就没登着」不是一次失败。
+#[test]
+fn logging_out_twice_is_not_an_error() {
+    let rig = Rig::new();
+    assert_eq!(rig.delete("/api/session").status, 200);
+    assert_eq!(rig.send_anonymous(Method::Delete, "/api/session", "").status, 200);
+}
+
+/// 每一次带票据的请求都把 cookie 续一次期。
+///
+/// 服务端那份滑动窗口已经往前推了；cookie 不跟着续，浏览器就会在**登录满 8 小时**
+/// 那一刻把票据丢掉，于是「闲置 8 小时才踢」在用户那边变成「登录 8 小时必被踢」。
+#[test]
+fn every_authenticated_request_slides_the_cookie_forward() {
+    let rig = Rig::new();
+    let response = rig.get("/api/tasks");
+    assert_eq!(response.status, 200);
+    let cookie = response.header("Set-Cookie").unwrap();
+    assert!(cookie.contains(&format!("Max-Age={}", 8 * 60 * 60)), "{cookie}");
+}
+
+/// 改口令：要先输当前口令，改完**除了这一张之外的会话全部失效**。
+#[test]
+fn changing_the_password_keeps_this_session_and_burns_the_rest() {
+    let rig = Rig::new();
+    let elsewhere = rig.auth.issue_session(chrono::Utc::now()).unwrap().token;
+
+    let wrong = rig.put(
+        "/api/password",
+        r#"{"current_password":"nope","new_password":"新口令"}"#,
+    );
+    assert_eq!(wrong.status, 400);
+    assert_eq!(rig.json(&wrong)["error"]["message"], "当前口令不正确");
+
+    let empty = rig.put(
+        "/api/password",
+        r#"{"current_password":"admin","new_password":""}"#,
+    );
+    assert_eq!(empty.status, 400);
+    assert_eq!(rig.json(&empty)["error"]["message"], "新口令不能为空");
+
+    let changed = rig.put(
+        "/api/password",
+        r#"{"current_password":"admin","new_password":"新口令"}"#,
+    );
+    assert_eq!(changed.status, 200, "{}", changed.body_text());
+
+    // 改密的常见动机就是「我怀疑别处有人登着」，所以别处那张票必须当场作废。
+    let stale = rig.api().handle(
+        &Request::new(Method::Get, "/api/tasks", Vec::new())
+            .with_header("Cookie", format!("db_qbs_session={elsewhere}")),
+    );
+    assert_eq!(stale.status, 401, "改完口令，别处那张票还认");
+    // 而**发起这次改密的这一张留着**：改完口令立刻被自己踢出去毫无道理。
+    assert_eq!(rig.get("/api/tasks").status, 200);
+
+    assert_eq!(
+        rig.send_anonymous(
+            Method::Post,
+            "/api/session",
+            r#"{"username":"admin","password":"admin"}"#
+        )
+        .status,
+        401,
+        "旧口令改完还能登"
+    );
+    assert_eq!(
+        rig.send_anonymous(
+            Method::Post,
+            "/api/session",
+            r#"{"username":"admin","password":"新口令"}"#
+        )
+        .status,
+        200
+    );
+}
+
+/// 闲置**满 8 小时**才过期，而且窗口是**滑动**的：期间有请求就一直不过期。
+///
+/// 走 store 而不是走 HTTP：过期与否取决于「现在几点」，而 HTTP 那一层的现在
+/// 只能是真的现在。这条判据本身没有第二份实现。
+#[test]
+fn a_session_expires_only_after_eight_idle_hours() {
+    let rig = Rig::new();
+    let start = chrono::Utc::now();
+    let token = rig.auth.issue_session(start).unwrap().token;
+    let hours = |n: i64| start + chrono::Duration::hours(n);
+
+    assert!(rig.auth.authenticate(&token, hours(7)).unwrap(), "7 小时就被踢了");
+    // 上一句把窗口推到了第 7 小时，所以第 14 小时仍在窗口内——这就是「滑动」。
+    assert!(rig.auth.authenticate(&token, hours(14)).unwrap(), "窗口没有跟着往前滑");
+    assert!(
+        !rig.auth.authenticate(&token, hours(23)).unwrap(),
+        "闲置超过 8 小时还认"
+    );
+    // 过期的票据当场删掉：留着只会让这张表长成一个没人清的坟场。
+    assert!(!rig.auth.authenticate(&token, hours(23)).unwrap());
+}
+
+/// `reset-password` 的那一半：口令回到出厂值，**所有**会话一并作废。
+#[test]
+fn resetting_the_password_returns_to_the_factory_default_and_burns_every_session() {
+    let rig = Rig::new();
+    rig.auth.change_password("admin", "新口令", "").unwrap();
+    let token = rig.auth.issue_session(chrono::Utc::now()).unwrap().token;
+
+    rig.auth.reset_password().unwrap();
+
+    assert!(rig.auth.verify_password("admin", "admin").unwrap());
+    assert!(
+        !rig.auth
+            .authenticate(&token, chrono::Utc::now())
+            .unwrap(),
+        "重置之后旧会话还认——而跑这条命令的人正是进不去的那个"
+    );
 }

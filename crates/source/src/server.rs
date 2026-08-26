@@ -20,7 +20,7 @@ use tiny_http::Server;
 
 use crate::http::{emit, Api, AgentRegistry, Request, RunState, RUN_TASKS_DIRECTORY};
 use crate::{
-    fetch_agent_info, AgentStore, DatasourceStore, HistoryStore, SourceConfig, TaskStore,
+    fetch_agent_info, AgentStore, AuthStore, DatasourceStore, HistoryStore, SourceConfig, TaskStore,
     UnknownReason,
 };
 
@@ -35,6 +35,9 @@ pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
     let agent_store: AgentRegistry = Arc::new(Mutex::new(AgentStore::open(&config.data_dir)?));
     migrate_legacy_sink_base_url(&config, &agent_store, &datasource_store)?;
     let history_store = HistoryStore::open(&config.data_dir)?;
+    // 会话与口令跟任务、数据源同一个库、同一份 0600。**开在监听之前**：
+    // 端口一开就得有一道门，不能有一个「表还没建好、于是先放行」的窗口。
+    let auth_store = AuthStore::open(&config.data_dir)?;
     history_store.seal_incomplete(
         UnknownReason::ProcessDisappeared,
         Utc::now(),
@@ -52,14 +55,26 @@ pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
             "message": "source 长驻编排进程已启动",
         }),
     );
+    // 非 loopback 监听那条警告**没有作废，只是改了措辞**：门装上了，但它只装在
+    // source 这一面。sink 那半边照旧无鉴权且握着目标库的 `DELETE`；出厂口令若还没改，
+    // 这道门离「没有门」也只差两次输入。这条只落日志，界面上一个字都不提（所有者裁定）。
     if !is_loopback(&config.listen) {
+        let default_password = auth_store.uses_default_password()?;
         emit(
             LogLevel::Warn,
             LogEvent::SourceStarted,
             json!({
                 "listen": config.listen,
+                "default_password": default_password,
                 "message": format!(
-                    "本服务无鉴权；能连上者等价于持有**全部已配置数据源**的凭据与写权限：可对任一源库跑任意 SQL 并清空重写任一目标表；运行历史含源库真实业务值；当前监听地址：{}",
+                    "source 的 /api/* 已要求登录。{}此外**目标端 sink 仍然无鉴权**：能连上 sink 端口的人可绕过 source，直接清空重写任一目标表。运行历史含源库真实业务值；当前监听地址：{}",
+                    if default_password {
+                        // 出厂口令还在，这道门离「没有门」只差两次输入，所以
+                        // ADR-0037 §5 ③ 那句暴露面照旧成立，一个量词都不减。
+                        "但账号 admin 仍在使用**出厂口令**，能连上者试两次即可持有**全部已配置数据源**的凭据与写权限：可对任一源库跑任意 SQL 并清空重写任一目标表。"
+                    } else {
+                        ""
+                    },
                     config.listen
                 ),
             }),
@@ -78,6 +93,7 @@ pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
         agents: &agent_store,
         history: &history_store,
         runs: &runs,
+        auth: &auth_store,
         describe_source: crate::OracleRowSource::describe,
     };
 
@@ -236,17 +252,59 @@ fn handle_request(mut request: tiny_http::Request, state: &Api<'_>) {
     }
 }
 
-/// 进程入口的全部业务：认参数、读配置、开跑。二进制那边只剩把 `Result` 翻成退出码。
+/// 进程入口的全部业务：认参数、读配置、开跑或改口令。二进制那边只剩把 `Result` 翻成退出码。
 pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let config_path = parse_config_path(args)?;
-    let config = crate::load_source_config(Path::new(&config_path)).map_err(|e| e.to_string())?;
-    serve(config, PathBuf::from(config_path))
+    let command = parse_command(args)?;
+    let config = crate::load_source_config(Path::new(command.config_path())).map_err(|e| e.to_string())?;
+    match command {
+        Command::Serve { config_path } => serve(config, PathBuf::from(config_path)),
+        Command::ResetPassword { .. } => reset_password(&config),
+    }
 }
 
-fn parse_config_path(mut args: impl Iterator<Item = String>) -> Result<String, String> {
-    match (args.next().as_deref(), args.next(), args.next()) {
-        (Some("--config"), Some(path), None) => Ok(path),
-        _ => Err("用法：db-qbs-source --config <source.toml>".to_owned()),
+/// 忘了口令的**唯一**出路（所有者裁定）：在 source 主机上跑一次。
+///
+/// 它把口令送回出厂值并清空**所有**会话。权限等价是诚实的：能在这台主机上执行命令的人，
+/// 本来就读得到 `data_dir`、拿得到数据源密钥——这条命令没有多给他任何东西。
+///
+/// **它要服务停着跑**吗？不必。SQLite 自己扛并发写；但正在跑的进程内没有缓存，
+/// 下一个请求就会认新口令、并发现自己的票据已经没了。
+fn reset_password(config: &SourceConfig) -> Result<(), String> {
+    AuthStore::open(&config.data_dir)?.reset_password()?;
+    emit(
+        LogLevel::Warn,
+        LogEvent::SourceStarted,
+        json!({
+            "message": "口令已重置为出厂值（admin / admin），所有会话已失效",
+        }),
+    );
+    Ok(())
+}
+
+enum Command {
+    Serve { config_path: String },
+    ResetPassword { config_path: String },
+}
+
+impl Command {
+    fn config_path(&self) -> &str {
+        match self {
+            Self::Serve { config_path } | Self::ResetPassword { config_path } => config_path,
+        }
+    }
+}
+
+const USAGE: &str =
+    "用法：db-qbs-source --config <source.toml>
+      db-qbs-source reset-password --config <source.toml>";
+
+fn parse_command(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
+    match (args.next().as_deref(), args.next(), args.next(), args.next()) {
+        (Some("--config"), Some(path), None, None) => Ok(Command::Serve { config_path: path }),
+        (Some("reset-password"), Some(flag), Some(path), None) if flag == "--config" => {
+            Ok(Command::ResetPassword { config_path: path })
+        }
+        _ => Err(USAGE.to_owned()),
     }
 }
 

@@ -5,6 +5,7 @@
 //! 是**只有一个真进程才有意义**的那几样：监听与端口释放、SIGTERM、
 //! 启动期的配置迁移、重启时对未完成运行的封存。
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -12,6 +13,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -276,11 +278,17 @@ fn non_loopback_listen_emits_the_required_warning() {
     let message = warning["message"].as_str().unwrap();
     // 措辞按 ADR-0037 §5 ③ 加码：暴露面从「该 source 的」放大到「全部已配置数据源」，
     // 这句话本身是那条裁定的唯一可观测物，必须钉住，连带两个「任一」的量词。
+    //
+    // 装上登录之后这条**没有作废**，只是多了两个前提：一是全新部署仍在用出厂口令
+    // （所以「能连上」与「进得来」之间只隔两次输入），二是 sink 那半边根本没有门。
+    // 两句都得在，否则这条警告会变成一句「已经有鉴权了」的假安慰。
     for phrase in [
-        "无鉴权",
+        "已要求登录",
+        "出厂口令",
         "全部已配置数据源",
         "任一源库跑任意 SQL",
         "清空重写任一目标表",
+        "sink 仍然无鉴权",
         "运行历史含源库真实业务值",
         address.as_str(),
     ] {
@@ -410,11 +418,74 @@ fn get(port: u16, path: &str) -> std::io::Result<HttpResponse> {
 /// 外层耐心（分钟级），所以卡住时是本进程自己报出「哪条请求超时」，而不是被外层砍掉。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// 一次**带会话**的请求。`/api/*` 现在整片要求登录，所以这里先换一张票再发。
+///
+/// 票据按端口缓存：本文件里一个端口就是一台 source，而会话是落库的，
+/// 重启同一个端口上的 source 之后那张票仍然认得。撞上 401 就把缓存丢掉重来一次——
+/// 端口在测试之间会被回收，缓存里那张票可能属于上一台 source。
 fn request(
     port: u16,
     method: &str,
     path: &str,
     body: Option<&str>,
+) -> std::io::Result<HttpResponse> {
+    let cookie = session_cookie(port)?;
+    let response = raw_request(port, method, path, body, Some(&cookie))?;
+    if response.status != 401 {
+        return Ok(response);
+    }
+    forget_session_cookie(port);
+    let cookie = session_cookie(port)?;
+    raw_request(port, method, path, body, Some(&cookie))
+}
+
+fn session_cache() -> &'static Mutex<HashMap<u16, String>> {
+    static CACHE: OnceLock<Mutex<HashMap<u16, String>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn forget_session_cookie(port: u16) {
+    session_cache().lock().unwrap().remove(&port);
+}
+
+/// 登录换票。**出厂口令是 `admin / admin`**，而且它长期有效——
+/// 这里直接用它，正是因为产品不强制改。
+fn session_cookie(port: u16) -> std::io::Result<String> {
+    if let Some(cookie) = session_cache().lock().unwrap().get(&port) {
+        return Ok(cookie.clone());
+    }
+    let response = raw_request(
+        port,
+        "POST",
+        "/api/session",
+        Some(r#"{"username":"admin","password":"admin"}"#),
+        None,
+    )?;
+    if response.status != 200 {
+        return Err(std::io::Error::other(format!(
+            "登录 source 失败（HTTP {}）：{}",
+            response.status, response.body
+        )));
+    }
+    let cookie = response
+        .set_cookie
+        .as_deref()
+        .and_then(|header| header.split(';').next())
+        .ok_or_else(|| std::io::Error::other("登录成功却没有发回会话 cookie"))?
+        .to_owned();
+    session_cache()
+        .lock()
+        .unwrap()
+        .insert(port, cookie.clone());
+    Ok(cookie)
+}
+
+fn raw_request(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    cookie: Option<&str>,
 ) -> std::io::Result<HttpResponse> {
     let body = body.unwrap_or("");
     let address = SocketAddr::from(([127, 0, 0, 1], port));
@@ -426,10 +497,14 @@ fn request(
         .set_write_timeout(Some(REQUEST_TIMEOUT))
         .and_then(|()| stream.set_read_timeout(Some(REQUEST_TIMEOUT)))
         .map_err(|error| annotate(method, path, "设超时", error))?;
+    let cookie_header = match cookie {
+        Some(cookie) => format!("Cookie: {cookie}\r\n"),
+        None => String::new(),
+    };
     stream
         .write_all(
             format!(
-                "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n{cookie_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             )
             .as_bytes(),
@@ -461,9 +536,14 @@ fn read_response(stream: &mut TcpStream) -> std::io::Result<HttpResponse> {
         .unwrap()
         .parse::<u16>()
         .unwrap();
+    let set_cookie = head
+        .lines()
+        .find_map(|line| line.strip_prefix("Set-Cookie: "))
+        .map(str::to_owned);
     Ok(HttpResponse {
         status,
         body: body.to_owned(),
+        set_cookie,
     })
 }
 
@@ -621,4 +701,6 @@ fn temp_directory() -> PathBuf {
 struct HttpResponse {
     status: u16,
     body: String,
+    /// 登录那一条回话里的票据。别的响应上也有（每次请求都续期），这里只有登录用得着。
+    set_cookie: Option<String>,
 }

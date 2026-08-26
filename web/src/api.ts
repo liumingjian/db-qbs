@@ -380,6 +380,91 @@ export class ApiError extends Error {
   }
 }
 
+// ---------------------------------------------------------------- 登录与会话
+//
+// **这道门只装在 source 的 HTTP 面上。** 目标端 sink 仍然没有任何鉴权，
+// 能连上 sink 端口的人照旧可以绕过这里清空重写目标表——界面上看不见的这件事，
+// 不因为多了一个登录页而消失。
+
+export interface SessionState {
+  authenticated: boolean;
+  username: string | null;
+}
+
+type SessionLostListener = () => void;
+
+let sessionLostListener: SessionLostListener | null = null;
+
+/**
+ * 注册「票据没了」的唯一去处。整套界面只有 `App` 订阅它，收到就回登录页。
+ *
+ * 做成单个监听者而不是一串：这个事件的正确后果只有一个（整屏回到登录页），
+ * 允许多方各自反应，只会得到几个互相打架的跳转。
+ */
+export function onSessionLost(listener: SessionLostListener | null) {
+  sessionLostListener = listener;
+}
+
+function notifySessionLost() {
+  sessionLostListener?.();
+}
+
+/**
+ * 首屏问一句「我登着吗」。**这个接口没登录也答得出来**（回 `authenticated: false`），
+ * 所以首屏不必先撞一个 401 再从错误里反推。
+ */
+export async function fetchSession(): Promise<SessionState> {
+  const response = await fetch("/api/session", {
+    headers: { Accept: "application/json" },
+  });
+  return readJson<SessionState>(response, "读取登录状态失败");
+}
+
+/**
+ * 登录。票据是 `HttpOnly` 的 cookie，**前端一个字都碰不到**——
+ * 这里没有 token 可存，也没有 `localStorage` 可写。
+ */
+export async function login(
+  username: string,
+  password: string,
+): Promise<SessionState> {
+  const response = await fetch("/api/session", {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  // 这里的 401 是「口令不对」，不是「会话没了」，所以不广播。
+  return readJson<SessionState>(response, "登录失败", { ownsUnauthorized: true });
+}
+
+/** 退出登录。**只销这一张票**：同一个账号在别处登着的不受影响。 */
+export async function logout(): Promise<void> {
+  const response = await fetch("/api/session", {
+    method: "DELETE",
+    headers: { Accept: "application/json" },
+  });
+  await readJson<unknown>(response, "退出登录失败");
+}
+
+/**
+ * 改口令。**改完除了当前这一张之外的会话全部失效**，所以别处登着的浏览器
+ * 下一次请求就会被弹回登录页——这正是改口令这个动作该有的后果。
+ */
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<void> {
+  const response = await fetch("/api/password", {
+    method: "PUT",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  });
+  await readJson<unknown>(response, "修改口令失败");
+}
+
 export function emptySpec(): TaskSpec {
   return {
     owner: "",
@@ -806,7 +891,11 @@ async function postJson<T>(path: string, body: unknown, fallback: string): Promi
   return readJson<T>(response, fallback);
 }
 
-async function readJson<T>(response: Response, fallback: string): Promise<T> {
+async function readJson<T>(
+  response: Response,
+  fallback: string,
+  options: { ownsUnauthorized?: boolean } = {},
+): Promise<T> {
   let body: unknown;
   try {
     body = await response.json();
@@ -814,6 +903,15 @@ async function readJson<T>(response: Response, fallback: string): Promise<T> {
     body = undefined;
   }
   if (!response.ok) {
+    // 401 只有一个含义：**票据没了**（过期、被改密连坐、或者压根没登过）。
+    // 它在这一层统一广播，而不是让三十几个调用点各自认一遍——漏掉的那一个
+    // 会变成一屏「加载失败」，而真正该发生的是回到登录页。
+    //
+    // `ownsUnauthorized` 是登录接口自己的豁免：那里的 401 是「口令不对」，
+    // 不是「会话没了」，广播出去只会把用户正在填的表单清掉。
+    if (response.status === 401 && options.ownsUnauthorized !== true) {
+      notifySessionLost();
+    }
     const message = errorMessage(body) ?? `${fallback}（HTTP ${response.status}）`;
     throw new ApiError(message, response.status, body);
   }

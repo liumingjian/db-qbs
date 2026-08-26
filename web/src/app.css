@@ -60,6 +60,56 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .about-popover > header strong { font-size: var(--size-body); font-weight: var(--weight-em); }
 .about-popover > header span { color: var(--mute); font-size: var(--size-cap); }
 .about-panel { padding: var(--pad); }
+
+/* ---------------------------------------------------------------- 用户菜单
+   顶栏右上角那颗按钮展开的三行。它复用「关于」浮层的外壳（`.about-*`），
+   只多这几条：菜单项自己的行高与悬停底。 */
+/* 菜单那一屏比「关于」窄得多：520px 是给二十来行只读清单的，三行菜单撑在里面
+   会让每一项的可点区横跨半个屏幕，鼠标滑过去先经过一大片空白。 */
+.about-popover.is-menu { width: 260px; }
+.user-menu { display: flex; flex-direction: column; padding: 6px; }
+.user-menu button { height: 38px; display: flex; align-items: center; gap: 10px; padding: 0 10px; border: 0; border-radius: var(--radius); background: transparent; color: var(--text); cursor: pointer; font-size: var(--size-body); text-align: left; }
+.user-menu button:hover { background: var(--brand-dim); color: var(--brand); }
+/* 退出单独一组：菜单里唯一一个**做完就走**的动作，所以上面隔一道线。 */
+.user-menu button.is-parting { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); border-radius: 0 0 var(--radius) var(--radius); }
+.user-menu button.is-parting:hover { background: var(--crit-bg); color: var(--crit); }
+.user-menu-back { display: inline-flex; align-items: center; gap: 4px; }
+
+/* ---------------------------------------------------------------- 登录页
+   **整个产品里唯一的深色整屏**，也是唯一一屏不在应用外壳里。形态照 cover.png：
+   分屏、左宣传右卡片、深蓝底上压一枚更亮的大圆。
+   它自带一整套前景色（`--login-*`）——`--text` / `--dim` 是黑系的，压在 #101A5C 上
+   一个字都读不出来，与深色侧栏那条规矩同理（见文件头第 2 条）。 */
+.app-booting { min-height: 100vh; display: grid; place-items: center; background: var(--bg-outer); color: var(--mute); }
+.app-booting svg { animation: spin 1s linear infinite; }
+
+/* 两栏**各自定宽后整体居中**，而不是让宣传位撑满左半屏：撑满时它会被推到屏幕中线附近，
+   左边空出三分之一，与参考图那种「文案靠左、卡片靠右」的分屏读法正好相反。 */
+.login-screen { min-height: 100vh; display: grid; place-content: center; grid-template-columns: minmax(0, 620px) var(--login-card-w); align-items: center; gap: clamp(48px, 9vw, 150px); padding: 40px clamp(24px, 5vw, 72px); background: var(--login-bg); color: var(--login-text); }
+/* 那枚大圆。`background-image` 而不是一个绝对定位的方块：它不参与布局，
+   也就不会在窄屏上把卡片挤下去。 */
+.login-screen { background-image: radial-gradient(circle at 12% 22%, var(--login-bg-glow) 0, var(--login-bg-glow) 26%, transparent 26.5%); }
+
+.login-pitch { justify-self: start; }
+.login-pitch h1 { margin: 0 0 28px; font-size: clamp(30px, 4vw, 46px); font-weight: 400; line-height: 1.35; letter-spacing: 1px; }
+.login-pitch h1 strong { font-weight: 700; }
+.login-pitch p { margin: 0; max-width: 30em; color: var(--login-dim); font-size: var(--size-section); line-height: var(--lh-prose); }
+.login-version { display: inline-block; margin-top: 28px; color: var(--login-mute); font-family: var(--font-num); font-size: var(--size-meta); }
+
+.login-card { width: var(--login-card-w); display: flex; flex-direction: column; padding: 36px 32px 32px; border: 1px solid var(--login-card-line); border-radius: 12px; }
+.login-brand { margin-bottom: 30px; font-size: 40px; font-weight: 700; letter-spacing: -1px; }
+.login-field { position: relative; display: flex; align-items: center; gap: 8px; height: 42px; margin-bottom: 16px; padding: 0 12px; border-radius: var(--radius); background: var(--panel); color: var(--mute); }
+.login-field:focus-within { box-shadow: 0 0 0 2px var(--brand); }
+.login-field input { flex: 1; min-width: 0; height: 100%; border: 0; background: transparent; color: var(--text); font-size: var(--size-body); }
+.login-field input:focus { outline: 0; }
+.login-field input:disabled { color: var(--mute); }
+.login-reveal { display: inline-grid; place-items: center; padding: 0; border: 0; background: transparent; color: var(--mute); cursor: pointer; }
+.login-reveal:hover { color: var(--brand); }
+/* 失败那句话占一个**固定高度**，不挤动下面的按钮：按钮在报错的一瞬间往下跳，
+   正好赶上有人第二次点它。 */
+.login-error { min-height: 20px; margin-bottom: 8px; color: var(--warn); font-size: var(--size-meta); line-height: 20px; }
+.login-submit { width: 100%; height: 40px; letter-spacing: 4px; }
+
 .mobile-brand { display: none; font-weight: var(--weight-em); }
 .mobile-nav { display: none; }
 /* 宽屏是混合规则（评审 §2）：**表格屏居中收在 1800px 内**——27" 通栏时任务名在最左、
@@ -825,6 +875,11 @@ select, .page-size {
 }
 
 @media (max-width: 760px) {
+  /* 登录页在窄屏上**只留卡片**：左半屏那段话在一部手机上会把输入框推到折叠线以下，
+     而它是这一屏唯一要人动手的地方。版本号跟着宣传位一起走——它是「顺带看一眼」的信息。 */
+  .login-screen { grid-template-columns: minmax(0, 1fr); justify-items: center; padding: 24px; }
+  .login-pitch { display: none; }
+  .login-card { width: min(var(--login-card-w), 100%); }
   .app-shell, .app-shell.is-collapsed { grid-template-columns: minmax(0, 1fr); }
   .sidebar { display: none; }
   .fold-toggle { display: none; }

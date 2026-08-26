@@ -1,6 +1,5 @@
 import {
   Database,
-  Info,
   LoaderCircle,
   Menu,
   PanelLeftClose,
@@ -15,10 +14,13 @@ import {
   createTask,
   cancelRun,
   deleteTask,
+  fetchSession,
   listAgents,
   listDatasources,
   listRunHistory,
   listTasks,
+  logout,
+  onSessionLost,
   startRun,
   taskInputFrom,
   updateTask,
@@ -26,6 +28,7 @@ import {
 import type {
   Agent,
   RunHistory,
+  SessionState,
   Task,
   Datasource,
   TaskInput,
@@ -36,8 +39,10 @@ import { JobCenterScreen } from "./JobCenterScreen";
 import { latestRunByTask, runStatus } from "./listing";
 import { runHash, runRecordFromHash } from "./routes";
 import { RunScreen } from "./RunScreen";
-import { AboutPanel } from "./AboutPanel";
+import { ChangePasswordDialog } from "./ChangePasswordDialog";
 import { DatasourceScreen } from "./DatasourceScreen";
+import { LoginScreen } from "./LoginScreen";
+import { UserMenu } from "./UserMenu";
 import { entryNeedsDialog, evaluateEdit, evaluateEntry, gateFix, gateReason, preselect } from "./entry";
 import type { DatasourceOption, EntryFix, EntryGuard } from "./entry";
 import { TaskEntryDialog } from "./TaskEntryDialog";
@@ -176,7 +181,58 @@ function navIcon(page: NavigationPage, size: number) {
   }
 }
 
+/**
+ * 会话闸——**整套界面的第一道分叉**：登录页，还是工作台。
+ *
+ * 它是一层薄壳，把工作台整个包在里面而不是在工作台内部加判断。这样做的理由是
+ * 副作用：工作台一挂载就去读任务、数据源、agent 三份清单，而那三条现在全要登录。
+ * 若判断长在里面，没登录的人打开首页会先撞三个 401，再看见登录页——
+ * 而那三个 401 里恰好有一个会广播「票据没了」。整块不挂载，这个循环就不存在。
+ */
 export function App() {
+  /** `null` 是**第三种状态**：还没问出结果。它与「没登录」不是一回事—— */
+  /*  拿它当没登录会让每一次刷新都闪一下登录页，哪怕人一直登着。 */
+  const [session, setSession] = useState<SessionState | null>(null);
+
+  useEffect(() => {
+    // 问不出来（服务停了、网断了）时按**没登录**处理：这一屏至少还画得出来，
+    // 而画一个连不上后端的工作台只会得到满屏「加载失败」。
+    void fetchSession()
+      .then(setSession)
+      .catch(() => setSession({ authenticated: false, username: null }));
+  }, []);
+
+  useEffect(() => {
+    // 任何一条请求撞上 401 都从这里回到登录页。订阅只有这一处，见 `api.ts`。
+    onSessionLost(() => setSession({ authenticated: false, username: null }));
+    return () => onSessionLost(null);
+  }, []);
+
+  if (session === null) {
+    return (
+      <div className="app-booting">
+        <LoaderCircle size={ICON.lg} aria-hidden="true" />
+      </div>
+    );
+  }
+  if (!session.authenticated) {
+    return <LoginScreen onAuthenticated={setSession} />;
+  }
+  return (
+    <Workbench
+      username={session.username ?? "admin"}
+      onSignedOut={() => setSession({ authenticated: false, username: null })}
+    />
+  );
+}
+
+function Workbench({
+  username,
+  onSignedOut,
+}: {
+  username: string;
+  onSignedOut: () => void;
+}) {
   const [page, setPage] = useState<Page>(() =>
     pageFromHash(window.location.hash),
   );
@@ -234,6 +290,26 @@ export function App() {
    * 一条在飞不构成拦住其余每一行的理由。
    */
   const [startingTaskId, setStartingTaskId] = useState<string | null>(null);
+  const [changingPassword, setChangingPassword] = useState(false);
+  /**
+   * 改密成功后那一句。**不是错误，也不弹对话框**——对话框刚关掉，再弹一个只是多一次点击。
+   */
+  const [passwordChanged, setPasswordChanged] = useState(false);
+  /**
+   * 退出登录失败那一句。**失败时不回登录页**：服务端那张票还活着，
+   * 本地假装退出了只会让人以为自己已经登出，而实际上没有。
+   */
+  const [signOutError, setSignOutError] = useState<string | null>(null);
+
+  const signOut = useCallback(async () => {
+    setSignOutError(null);
+    try {
+      await logout();
+      onSignedOut();
+    } catch (error) {
+      setSignOutError(messageFrom(error));
+    }
+  }, [onSignedOut]);
 
   const loadList = useCallback(async () => {
     setRefreshing(true);
@@ -700,8 +776,13 @@ export function App() {
           </span>
           <span className="topbar-right">
             {/* 「当前工作台」那枚标签是个**常量**：它每一次渲染都写同样四个字，
-                既不说环境也不说身份。删掉（UX 评审 P1-12），位置让给「关于」。 */}
-            <AboutButton />
+                既不说环境也不说身份。删掉（UX 评审 P1-12），位置让给「关于」；
+                这一轮「关于」又并进了用户菜单——右上角一共只有这一格。 */}
+            <UserMenu
+              username={username}
+              onChangePassword={() => setChangingPassword(true)}
+              onLogout={() => void signOut()}
+            />
           </span>
         </header>
 
@@ -730,6 +811,35 @@ export function App() {
                 className="text-button"
                 type="button"
                 onClick={() => setStartError(null)}
+              >
+                知道了
+              </button>
+            </div>
+          )}
+
+          {signOutError !== null && (
+            <div className="notice is-error" role="alert">
+              <span>退出登录失败：{signOutError}（这台浏览器仍然登着）</span>
+              <button
+                className="text-button"
+                type="button"
+                onClick={() => void signOut()}
+              >
+                重试
+              </button>
+            </div>
+          )}
+
+          {passwordChanged && (
+            <div className="notice is-draft" role="status">
+              <span>
+                <strong>口令已修改。</strong>
+                这台浏览器继续登着；其它地方登着的同一个账号已经失效。
+              </span>
+              <button
+                className="text-button"
+                type="button"
+                onClick={() => setPasswordChanged(false)}
               >
                 知道了
               </button>
@@ -921,67 +1031,17 @@ export function App() {
             onDelete={() => handleDelete(dialog.task)}
           />
         )}
+        {changingPassword && (
+          <ChangePasswordDialog
+            onClose={() => setChangingPassword(false)}
+            onChanged={() => {
+              setChangingPassword(false);
+              setPasswordChanged(true);
+            }}
+          />
+        )}
       </main>
     </div>
-  );
-}
-
-/**
- * 顶栏右上角的「关于」（UX 评审 P1-12）。
- *
- * **不是模态**，所以不装焦点陷阱：它是一份读完就走的只读清单，把 Tab 圈在里面
- * 反而挡住了后面的界面。Escape 与点外面都关，打开时焦点进去、关掉时回到触发它的按钮。
- */
-function AboutButton() {
-  const [open, setOpen] = useState(false);
-  const wrap = useRef<HTMLSpanElement>(null);
-  const trigger = useRef<HTMLButtonElement>(null);
-  const panel = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    panel.current?.focus();
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setOpen(false);
-        trigger.current?.focus();
-      }
-    }
-    function handleMouseDown(event: MouseEvent) {
-      if (event.target instanceof Node && wrap.current?.contains(event.target) !== true) {
-        setOpen(false);
-      }
-    }
-    window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("mousedown", handleMouseDown);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("mousedown", handleMouseDown);
-    };
-  }, [open]);
-
-  return (
-    <span className="about-wrap" ref={wrap}>
-      <button
-        className="button is-ghost about-trigger"
-        type="button"
-        ref={trigger}
-        aria-expanded={open}
-        onClick={() => setOpen((current) => !current)}
-      >
-        <Info size={ICON.sm} aria-hidden="true" />
-        关于
-      </button>
-      {open && (
-        <div className="about-popover" ref={panel} role="dialog" aria-label="关于 db-qbs" tabIndex={-1}>
-          <header>
-            <strong>关于 db-qbs</strong>
-            <span>本版设置只读</span>
-          </header>
-          <AboutPanel />
-        </div>
-      )}
-    </span>
   );
 }
 
