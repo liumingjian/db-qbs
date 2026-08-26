@@ -34,6 +34,7 @@ import { messageFrom } from "./errors";
 import { AgentScreen } from "./AgentScreen";
 import { JobCenterScreen } from "./JobCenterScreen";
 import { latestRunByTask, runStatus } from "./listing";
+import { runHash, runRecordFromHash } from "./routes";
 import { RunScreen } from "./RunScreen";
 import { AboutPanel } from "./AboutPanel";
 import { DatasourceScreen } from "./DatasourceScreen";
@@ -71,27 +72,6 @@ type Page = NavigationPage | "wizard";
  * `#settings` 是这一轮加进来的：那一屏降成了顶栏右上角的「关于」浮层（UX 评审 P1-12）。
  */
 const RETIRED_HASHES = ["#history", "#/history", "#settings", "#/settings"];
-
-/**
- * 运行详情的地址（UX 评审 P1-6）。
- *
- * 它原来**没有地址**：整屏运行详情只是一个 `activeRun` state，唯一的入口是刚点完
- * 「发起运行」的那一次。刷新一页、发一条链接给同事、按一下浏览器后退，它就没了。
- *
- * 键是 `run_record_id` 而不是 `task_id`：这一屏摆的是**一次运行**，不是一个任务。
- * 按任务寻址的话，同一条链接在下一次运行之后指向的会是另一件事。
- */
-const RUN_HASH_PREFIX = "#runs/";
-
-export function runHash(runRecordId: string): string {
-  return `${RUN_HASH_PREFIX}${encodeURIComponent(runRecordId)}`;
-}
-
-function runRecordFromHash(hash: string): string | null {
-  return hash.startsWith(RUN_HASH_PREFIX)
-    ? decodeURIComponent(hash.slice(RUN_HASH_PREFIX.length))
-    : null;
-}
 
 function pageFromHash(hash: string): Page {
   if (runRecordFromHash(hash) !== null) {

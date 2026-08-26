@@ -17,7 +17,6 @@ import { ICON } from "./components/DesignSystem";
 import { copyTaskCurl, deleteTask, startRun } from "./api";
 import type { Datasource, RunHistory, Task } from "./api";
 import { messageFrom } from "./errors";
-import { runHash } from "./App";
 import { qualifiedTargetTable } from "./datasource";
 import { formatTimestamp, historyPresentation } from "./history";
 import {
@@ -33,6 +32,7 @@ import {
 } from "./listing";
 import type { LatestRunStatus, TaskFilters } from "./listing";
 import { progressOf } from "./progress";
+import { runHash } from "./routes";
 import { RunDrawer } from "./RunDrawer";
 import { sourceSummary } from "./spec";
 import { rowRunAction } from "./troubleshooting";
