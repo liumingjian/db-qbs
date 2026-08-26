@@ -123,6 +123,18 @@ describe("the mapping step UI", () => {
     expect(html).toContain('title="请先处理当前步骤中的问题"');
   });
 
+  it("names every mapping control by its column and its row's source column", () => {
+    // 屏幕阅读器逐行走这张表时，只听到「复选框、复选框、组合框」是没法用的。
+    const html = renderWizard(done(apply(mappingDraft(), { type: "rename-target", source: "C_NAME", target: "C_NAME" })));
+    expect(html).toContain('aria-label="同步 ID"');
+    expect(html).toContain('aria-label="同步 C_NAME"');
+    expect(html).toContain('aria-label="C_NAME 的目标列"');
+    expect(html).toContain('aria-label="ID 设为主键"');
+    expect(html).toContain('aria-label="C_NAME 设为主键"');
+    expect(html).toContain('<span class="visually-hidden">操作</span>');
+    expect(html).not.toContain('aria-label="操作"');
+  });
+
   it("reports both duplicate target rows and blocks advance", () => {
     let draft = done(apply(mappingDraft(), { type: "toggle-primary-key", target: "ID" }));
     draft = done(apply(draft, { type: "rename-target", source: "C_NAME", target: "ID" }));
