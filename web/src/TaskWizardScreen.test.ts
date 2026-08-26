@@ -132,8 +132,28 @@ describe("the mapping step UI", () => {
     const html = renderWizard(done(apply(mappingDraft(), { type: "toggle-column", source: "C_NAME" })));
     expect(html).toContain("自动匹配");
     expect(html).toContain('aria-label="删除列 ID"');
-    expect(html).toContain('title="先勾选这一列"');
-    expect(html).toContain('title="请先处理当前步骤中的问题"');
+    // 拒绝理由是**正文**，不是 title：只能悬停看到的解释，键盘用户拿不到（#238）。
+    expect(html).not.toContain('title="先勾选这一列"');
+    expect(html).not.toContain('title="请先处理当前步骤中的问题"');
+    expect(html).toContain(">先勾选这一列</small>");
+    expect(html).toContain(">请先处理当前步骤中的问题</small>");
+  });
+
+  it("hangs each refusal on the control it blocks as that control's description", () => {
+    const html = renderWizard(done(apply(mappingDraft(), { type: "toggle-column", source: "C_NAME" })));
+    for (const reason of ["先勾选这一列", "请先处理当前步骤中的问题"]) {
+      const note = new RegExp(`<small class="refusal-reason" id="([^"]+)">${reason}</small>`).exec(html);
+      expect(note).not.toBeNull();
+      expect(html).toContain(`aria-describedby="${note?.[1]}"`);
+    }
+  });
+
+  it("shows the SQL fetch refusal beside its own disabled button", () => {
+    const html = renderWizard({ ...openNew(SOURCE, TARGET), fetchMode: "sql" });
+    expect(html).not.toContain('title="先写好 SQL"');
+    const note = /<small class="refusal-reason" id="([^"]+)">先写好 SQL<\/small>/.exec(html);
+    expect(note).not.toBeNull();
+    expect(html).toContain(`aria-describedby="${note?.[1]}"`);
   });
 
   it("names every mapping control by its column and its row's source column", () => {
