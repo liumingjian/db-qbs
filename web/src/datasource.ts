@@ -16,6 +16,25 @@ export function connectionSummary(datasource: Datasource): string {
 }
 
 /**
+ * 目标表的**全限定名**：`库.表`。
+ *
+ * 只在「要动生产数据了」那两处二次确认里用（清理本次写入、批量发起）——那种时刻
+ * 一个光秃秃的 `ORDER_ITEM` 不够核对：同名表在几个库里都可能有一张，而确认框正是
+ * 用来确认「我要动的是不是那一张」的（2026-08 UX 评审 P0-2）。
+ *
+ * **认不出目标端就只给表名**，不编一个库名出来：拼不出全名是显示问题，
+ * 拼错一个库名会让人在确认框上核对一张根本不相干的表。
+ */
+export function qualifiedTargetTable(
+  datasource: Datasource | undefined,
+  targetTable: string,
+): string {
+  return datasource === undefined || datasource.kind !== "mysql"
+    ? targetTable
+    : `${datasource.database}.${targetTable}`;
+}
+
+/**
  * 「目标端 Agent」一栏（ADR-0044 §6）。
  *
  * Oracle 那半边**是空的，不是「无」**：源库由 source 直连，那一栏对它没有含义，

@@ -16,6 +16,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { copyTaskCurl, deleteTask, startRun } from "./api";
 import type { Datasource, RunHistory, Task } from "./api";
 import { messageFrom } from "./errors";
+import { qualifiedTargetTable } from "./datasource";
 import { formatTimestamp, historyPresentation } from "./history";
 import {
   datasourceFilterOptions,
@@ -100,7 +101,11 @@ export function JobCenterScreen({
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
-  const [bulkConfirm, setBulkConfirm] = useState(false);
+  /**
+   * 哪一个批量动作正等着二次确认。**发起和删除共用这一格**：两者互斥
+   * （同一批勾选，同一颗按钮群），分成两个布尔会多出「两个框同时开着」这种不可能态。
+   */
+  const [bulkConfirm, setBulkConfirm] = useState<"start" | "delete" | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkSummary, setBulkSummary] = useState<BulkSummary | null>(null);
   const [copyStatus, setCopyStatus] = useState<{
@@ -195,6 +200,8 @@ export function JobCenterScreen({
    *
    * **没有「这条任务要先填参数」这一支了**：发起的全部输入就是任务身份，
    * 所以批量发起与单条发起打的是同一个端点、走的是同一条路。
+   *
+   * 进来之前先过 `BulkStartDialog` 的二次确认（2026-08 UX 评审 P0-2）。
    */
   async function runBulkStart() {
     setBulkBusy(true);
@@ -209,6 +216,7 @@ export function JobCenterScreen({
       }
     }
     setBulkBusy(false);
+    setBulkConfirm(null);
     setBulkSummary({ verb: "发起", total: selectedTasks.length, ok, failures });
     onChanged();
   }
@@ -227,7 +235,7 @@ export function JobCenterScreen({
       }
     }
     setBulkBusy(false);
-    setBulkConfirm(false);
+    setBulkConfirm(null);
     setSelected(new Set());
     setBulkSummary({ verb: "删除", total: selectedTasks.length, ok, failures });
     onChanged();
@@ -419,7 +427,7 @@ export function JobCenterScreen({
               className="button"
               type="button"
               disabled={selectedTasks.length === 0 || bulkBusy}
-              onClick={() => void runBulkStart()}
+              onClick={() => setBulkConfirm("start")}
             >
               {bulkBusy ? "正在发起" : "批量发起"}
             </button>
@@ -427,7 +435,7 @@ export function JobCenterScreen({
               className="button is-danger"
               type="button"
               disabled={selectedTasks.length === 0 || bulkBusy}
-              onClick={() => setBulkConfirm(true)}
+              onClick={() => setBulkConfirm("delete")}
             >
               批量删除
             </button>
@@ -482,6 +490,7 @@ export function JobCenterScreen({
           task={openTask}
           run={openRun}
           tasks={tasks}
+          datasources={datasources}
           onClose={() => setOpenTaskId(null)}
           onRerun={(task) => {
             setOpenTaskId(null);
@@ -498,11 +507,21 @@ export function JobCenterScreen({
         />
       )}
 
-      {bulkConfirm && (
+      {bulkConfirm === "start" && (
+        <BulkStartDialog
+          tasks={selectedTasks}
+          datasources={datasources}
+          busy={bulkBusy}
+          onClose={() => setBulkConfirm(null)}
+          onConfirm={() => void runBulkStart()}
+        />
+      )}
+
+      {bulkConfirm === "delete" && (
         <BulkDeleteDialog
           tasks={selectedTasks}
           busy={bulkBusy}
-          onClose={() => setBulkConfirm(false)}
+          onClose={() => setBulkConfirm(null)}
           onConfirm={() => void runBulkDelete()}
         />
       )}
@@ -863,6 +882,72 @@ function formatDuration(milliseconds: number): string {
 }
 
 /**
+ * 批量发起的二次确认（2026-08 UX 评审 P0-2）。
+ *
+ * 单条「发起运行」照旧一按就跑——那是这屏最高频的动作，它当着人的面只动一张表，
+ * 而那张表就写在同一行上。**批量不是它的复数**：一颗按钮同时改写 N 张生产表，
+ * 而勾是分几页、隔几分钟点下的，按之前根本没有一处地方把「这批到底要写哪几张表」摆齐过。
+ * 这层不对称是故意的——摩擦要加在**看不清后果**的那一侧，不是加在每一次动作上。
+ *
+ * 列的是 **任务名 → 目标表**，不是任务名加 id：这一步要核对的是「会被改写的是哪几张表」。
+ * 目标表带库名（`qualifiedTargetTable`）——同名表在几个库里都可能有一张。
+ */
+function BulkStartDialog({
+  tasks,
+  datasources,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  tasks: Task[];
+  datasources: Datasource[];
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const byId = new Map(datasources.map((datasource) => [datasource.datasource_id, datasource]));
+  return (
+    <Modal title={`发起 ${tasks.length} 个任务`} onClose={onClose} busy={busy} narrow>
+      <div className="modal-body delete-copy">
+        <p>
+          将<strong>逐个发起</strong>下面这些任务，按主键写进各自的目标表。
+          一条失败不中断后面的，跑完给一行汇总。
+        </p>
+        <ul className="bulk-targets">
+          {tasks.map((task) => (
+            <li key={task.task_id}>
+              <span>{task.name}</span>
+              <span className="bulk-target-arrow" aria-hidden="true">→</span>
+              <span className="mono">
+                {qualifiedTargetTable(byId.get(task.target_datasource_id), task.spec.target_table)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <footer className="modal-footer">
+        <button
+          className="button is-ghost"
+          type="button"
+          onClick={onClose}
+          disabled={busy}
+        >
+          取消
+        </button>
+        <button
+          className="button is-primary"
+          type="button"
+          onClick={onConfirm}
+          disabled={busy}
+        >
+          {busy ? "正在发起" : `发起 ${tasks.length} 个任务`}
+        </button>
+      </footer>
+    </Modal>
+  );
+}
+
+/**
  * 批量删除的二次确认。**把要删的任务名逐条列全**（ADR-0043 §6，走查 X15）——
  * 「确定删除 3 个任务？」这句话让人无从核对自己勾中的到底是哪三个。
  */
@@ -902,12 +987,12 @@ function BulkDeleteDialog({
           取消
         </button>
         <button
-          className="button is-danger"
+          className="button is-danger is-solid"
           type="button"
           onClick={onConfirm}
           disabled={busy}
         >
-          {busy ? "正在删除" : "确认删除"}
+          {busy ? "正在删除" : `删除这 ${tasks.length} 个任务`}
         </button>
       </footer>
     </Modal>

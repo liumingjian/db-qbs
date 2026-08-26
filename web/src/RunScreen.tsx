@@ -8,6 +8,8 @@ import {
   PhaseLine,
   SensitiveValue,
   TerminalBlock,
+  UpsertNote,
+  UPSERT_NOTE_DONE,
 } from "./components/DesignSystem";
 import { messageFrom } from "./errors";
 import { FailureEvidence } from "./FailureEvidence";
@@ -277,6 +279,9 @@ function FinishedRun({
           )}
         </div>
         <RunConclusion detail={detail} presentation={presentation} />
+        {presentation.terminalEffect === "SWAPPED" && (
+          <UpsertNote text={UPSERT_NOTE_DONE} />
+        )}
       </section>
 
       {(presentation.kind === "failed" || presentation.kind === "mapping-failed") && (

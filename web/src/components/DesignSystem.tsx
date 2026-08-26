@@ -29,15 +29,44 @@ export function PhaseLine({ current }: { current: RunPhase | null }) {
   );
 }
 
+/**
+ * 轴二说的**不是「整表换过」**（2026-08 UX 评审 P0-1）。
+ *
+ * `SWAPPED` 是目标端的协议词，本义只是「这次写入被目标端认下了」；实际打的是
+ * `INSERT ... ON DUPLICATE KEY UPDATE`——**按主键合并**。原话「目标表已切换」把它读成了
+ * 一次整表替换，于是目标表会被当成源端的全量快照拿去用，而**源端删掉的行还留在里面**
+ * （CONTEXT.md 记的那笔刻意欠债）。标签本身照旧是一个词，长话在 `UpsertNote` 里。
+ *
+ * `DISCARDED` 一个字不动：那半边本来就是准的——目标表确实没被碰过。
+ */
 export function TerminalBlock({ effect }: { effect: "SWAPPED" | "DISCARDED" }) {
   return (
     <span className={`terminal-block is-${effect.toLowerCase()}`}>
       <span>{effect}</span>
       <span className="terminal-copy">
-        {effect === "SWAPPED" ? "目标表已切换" : "目标表未被触碰"}
+        {effect === "SWAPPED" ? "已按主键合并写入" : "目标表未被触碰"}
       </span>
     </span>
   );
+}
+
+/** 已经跑完时的说法：陈述这次写入到底做了什么。 */
+export const UPSERT_NOTE_DONE =
+  "按主键 upsert：新增和变更已写入；源端删除的行仍保留在目标表。";
+
+/** 还没跑时的说法（向导第 4 步）：同一件事的将来时。 */
+export const UPSERT_NOTE_AHEAD =
+  "按主键 upsert：新增和变更会写进目标表；源端删除的行不会跟着消失。";
+
+/**
+ * 跟在轴二后面的那一行长话——**语义常驻，不是错误也不是告警**。
+ *
+ * 它不着 --crit / --warn：这不是出了问题，是这个产品的写入语义本来如此。
+ * 常驻是有意的（不折叠、不「知道了」关掉）：这条边界每次都要读到，
+ * 一旦被收起来，第一次用的人就又只剩「SWAPPED」这一个词可读了。
+ */
+export function UpsertNote({ text }: { text: string }) {
+  return <p className="upsert-note">{text}</p>;
 }
 
 export function ErrorCodeTag({

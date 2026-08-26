@@ -192,8 +192,9 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
 **Tombstone**
    An in-memory record `sink` keeps for a finished run so that "what happened?" still has an answer
    after the swap. It records the **resource's final state**, not the run's, and has only two values:
-   `SWAPPED` (the target table now holds the new data) and `DISCARDED` (the target table was never
-   touched). **It is a diagnostic cache, not a state store** — only the most recent 32 are kept, and
+   `SWAPPED` (the target table has absorbed this run's rows — **merged by primary key**, per **Swap**
+   above; it does not mean the table was replaced wholesale) and `DISCARDED` (the target table was
+   never touched). **It is a diagnostic cache, not a state store** — only the most recent 32 are kept, and
    losing them costs no correctness, only diagnosability. **Run history does not absorb it**: a
    tombstone answers "did the target table move?", a question `source` asks and only `sink` can answer.
 

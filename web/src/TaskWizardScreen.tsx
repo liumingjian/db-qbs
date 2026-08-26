@@ -25,6 +25,7 @@ import {
 import type { BuilderSql, BuilderTable, PreviewResult } from "./api";
 import { messageFrom } from "./errors";
 import type { DatasourceOption } from "./entry";
+import { UpsertNote, UPSERT_NOTE_AHEAD } from "./components/DesignSystem";
 import { HighlightedSqlInput, SqlEditor } from "./SqlEditor";
 import { Modal } from "./ui";
 import {
@@ -785,6 +786,10 @@ function StepBody({
       <PreviewData preview={confirmView.preview} />
     </section>}
     <Blockers blockers={model.blockers} />
+    {/* 写入语义的常驻交底（2026-08 UX 评审 P0-1）：这一步是「开始导入」前的最后一屏，
+        而这个产品**只增量合并、不删**。不写清楚的话，第一次用的人会按「全量同步」去理解
+        自己刚配好的这张目标表。它不是告警，所以不着 --crit / --warn。 */}
+    <UpsertNote text={UPSERT_NOTE_AHEAD} />
   </section>;
 }
 

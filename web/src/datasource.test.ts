@@ -9,6 +9,7 @@ import {
   connectionSummary,
   deleteRefusalMessage,
   draftFrom,
+  qualifiedTargetTable,
   referenceCounts,
 } from "./datasource";
 import {
@@ -70,6 +71,17 @@ describe("connectionSummary", () => {
   it("各显各的，不拼一个假的统一连接串", () => {
     expect(connectionSummary(oracle)).toBe("//oracle:1521/ORCLPDB");
     expect(connectionSummary(mysql)).toBe("10.0.0.12:3306 / dw_stage");
+  });
+});
+
+describe("qualifiedTargetTable", () => {
+  it("MySQL 目标端把库名补全，删除对话框里那张表因此是可核对的", () => {
+    expect(qualifiedTargetTable(mysql, "ORDER_ITEM")).toBe("dw_stage.ORDER_ITEM");
+  });
+
+  it("认不出目标端时只给表名，不编一个库名出来", () => {
+    expect(qualifiedTargetTable(undefined, "ORDER_ITEM")).toBe("ORDER_ITEM");
+    expect(qualifiedTargetTable(oracle, "ORDER_ITEM")).toBe("ORDER_ITEM");
   });
 });
 
