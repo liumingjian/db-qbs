@@ -511,6 +511,38 @@ describe("derived values", () => {
     expect(editing.confirm.actions).toEqual(["save"]);
   });
 
+  it("does not report a check that never ran as 已通过", () => {
+    // 编辑态 + 目标端 agent 离线是 `canAdvance` 明确放行的一条路（不放行等于「先去把
+    // agent 救活才准改一行 WHERE」）。于是最后一屏会在**一次检查都没跑过**的情况下
+    // 被读到——原来它照样写「已通过」，因为空的 findings 与通过的 findings 长得一样。
+    const offline = view(openExisting(savedTask(), SOURCE, TARGET, false), 4).step;
+    if (offline.step !== 4) throw new Error("expected step 4");
+    expect(offline.confirm.targetCheck.state).toBe("unchecked");
+    expect(offline.confirm.targetCheck.excused).toContain("不在线");
+  });
+
+  it("reports a fresh passing check as passed, with no excuse attached", () => {
+    const checked = passingCheck(withTargetColumns(workedDraft()));
+    const step = view(checked, 4).step;
+    if (step.step !== 4) throw new Error("expected step 4");
+    expect(step.confirm.targetCheck).toEqual({
+      state: "passed",
+      findings: [],
+      excused: null,
+    });
+  });
+
+  it("goes back to 尚未检查 once the check the mapping changed under it goes stale", () => {
+    let draft = passingCheck(withTargetColumns(workedDraft()));
+    expect(view(draft, 4).step).toMatchObject({
+      confirm: { targetCheck: { state: "passed" } },
+    });
+    draft = done(apply(draft, { type: "toggle-column", source: "C_NAME" }));
+    const step = view(draft, 4).step;
+    if (step.step !== 4) throw new Error("expected step 4");
+    expect(step.confirm.targetCheck.state).toBe("unchecked");
+  });
+
   it("never offers a jump on the rail", () => {
     expect(view(workedDraft(), 1).rail.every((entry) => entry.jumpable === false)).toBe(true);
   });

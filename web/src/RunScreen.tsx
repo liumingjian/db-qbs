@@ -284,8 +284,14 @@ function FinishedRun({
         )}
       </section>
 
-      {(presentation.kind === "failed" || presentation.kind === "mapping-failed") && (
-        <FailureEvidence run={detail} onEditTask={onEditTask} />
+      {(presentation.kind === "failed" ||
+        presentation.kind === "mapping-failed" ||
+        presentation.kind === "unknown") && (
+        <FailureEvidence
+          run={detail}
+          variant={presentation.kind === "unknown" ? "unknown" : "failure"}
+          onEditTask={onEditTask}
+        />
       )}
 
       {mappingFailed && <PrecheckReports detail={detail} />}

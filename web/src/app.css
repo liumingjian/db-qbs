@@ -284,17 +284,26 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .delete-copy strong { font-weight: var(--weight-em); }
 /* 批量删除的二次确认把要删的任务名**逐条列全**，不是「确定删除 3 个任务？」（ADR-0043 §6）。 */
 .delete-copy ul { max-height: 220px; overflow: auto; margin: 6px 0 0; padding-left: 20px; color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-prose); }
-/* 批量发起的确认清单：一行一条「任务名 → 目标表」，箭头两侧各占一列，
-   目标表因此在竖直方向上对齐——要核对的正是这一竖列。 */
-.bulk-targets { max-height: 220px; overflow: auto; margin: 6px 0 0; padding: 0; list-style: none; color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-prose); }
-.bulk-targets li { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: baseline; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--line); }
+/* 批量发起的确认清单：一条一行任务名，目标表缩进在它下面另起一行。
+   **不并成一行**：自动生成的任务名本身就是「源表 → 目标表」，任何横向分隔符
+   （箭头、竖线）都会被读成那条链路的第三段。目标表是要核对的那一列，所以它齐头。 */
+.bulk-targets { max-height: 260px; overflow: auto; margin: 6px 0 0; padding: 0; list-style: none; line-height: var(--lh-prose); }
+.bulk-targets li { padding: 7px 0; border-bottom: 1px solid var(--line); }
 .bulk-targets li:last-child { border-bottom: 0; }
-.bulk-targets li > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bulk-target-arrow { color: var(--mute); }
-.bulk-targets .mono { color: var(--text); }
+.bulk-task-name { display: block; color: var(--text); overflow-wrap: anywhere; }
+.bulk-task-target { display: block; margin-top: 1px; padding-left: 14px; color: var(--mute); font-size: var(--size-meta); }
+.bulk-task-target .mono { color: var(--dim); overflow-wrap: anywhere; }
 /* 「清理是删除，不是还原」——这句是**否定一个天然的误读**，不是提示，所以着告警色
    而不是中性色：读的人此刻正准备按下一颗真的会删生产数据的按钮。 */
 .cleanup-warning { margin: 10px 0 0; padding: 9px 12px; border-left: 3px solid var(--crit); background: var(--crit-bg); color: var(--crit); line-height: var(--lh-prose); }
+/* 确认屏那一格「目标表检查」的三态（P0-3）。「尚未检查」不是失败，所以它着 --warn 而不是
+   --crit：还没做的事和做过没通过的事，在最后一屏上必须能一眼分开。 */
+.confirm-check.is-passed { color: var(--ok-ink); }
+.confirm-check.is-findings { color: var(--crit); }
+.confirm-check.is-unchecked { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.confirm-check.is-unchecked strong { color: var(--warn); font-weight: var(--weight-em); }
+.confirm-check-reason { color: var(--dim); font-size: var(--size-meta); }
+.confirm-check.is-unchecked .button { height: 26px; padding: 0 10px; font-size: var(--size-meta); }
 .modal-context { display: block; margin-top: 2px; color: var(--mute); font-size: var(--size-cap); }
 .entry-loading { display: flex; align-items: center; gap: 10px; color: var(--dim); }
 .entry-blocked { display: flex; flex-direction: column; gap: 6px; }
@@ -567,6 +576,12 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .run-result { display: flex; flex-direction: column; gap: 12px; }
 .run-result-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
 .failure-evidence { display: flex; flex-direction: column; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+/* 结局不明那一档（P0-4）：同一个组件、同一份栅格，只换标题与左边那道色——
+   它不是失败，是**待核对**，所以着告警色不着危险色。 */
+.failure-evidence.is-clues { border-left: 3px solid var(--warn); }
+/* 「重跑是安全的」着成功色：这句要压住的正是「不知道发生了什么所以不敢动」。 */
+.clue-safety { margin: 0; padding: 9px 12px; border-left: 3px solid var(--ok); background: var(--ok-bg); color: var(--ok-ink); line-height: var(--lh-prose); }
+.clue-safety strong { font-weight: var(--weight-em); }
 .failure-evidence-heading { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
 .failure-evidence-heading h3 { margin: 0; font-size: var(--size-body); }
 .failure-evidence-heading p { margin: 3px 0 0; color: var(--mute); font-size: var(--size-meta); }

@@ -1039,10 +1039,28 @@ export interface ConfirmView {
   mappings: ColumnMapping[];
   primaryKey: string[];
   targetTable: string;
-  findings: CheckFinding[];
+  targetCheck: ConfirmTargetCheck;
   preview: PreviewResult | null;
   /** What the bottom of the last step offers. Creating may run; editing saves. */
   actions: ("start" | "save-only" | "save")[];
+}
+
+/**
+ * The target-table check as the **last** screen has to state it: three states, not two.
+ *
+ * The confirmation page used to read `findings` alone, and an empty `findings` is what
+ * both "passed" and "never ran" look like. So the one screen standing between a draft
+ * and a production write reported a check that had not happened as a check that passed
+ * — on the exact path (`canAdvance` excuses step 3 while the target's agent is down)
+ * that guarantees it did not happen. Naming the state separately makes that
+ * indistinguishable pair distinguishable.
+ */
+export interface ConfirmTargetCheck {
+  /** `unchecked` = never ran, or ran against inputs that have since changed. */
+  state: "passed" | "findings" | "unchecked";
+  findings: CheckFinding[];
+  /** Why it could not run, when that is the reason. Only ever set on `unchecked`. */
+  excused: string | null;
 }
 
 export interface WizardView {
@@ -1148,10 +1166,7 @@ function stepView(draft: Draft, step: Step, blockers: Blocker[]): StepView {
           state: draft.check === null ? "none" : checkIsFresh(draft) ? "fresh" : "stale",
           value: checkIsFresh(draft) ? draft.check!.value : null,
         },
-        excused:
-          draft.mode === "edit" && !draft.targetAgentOnline
-            ? `目标端 Agent「${draft.target.name}」不在线，这一步查不了；保存不受影响，运行要等它回来`
-            : null,
+        excused: agentOfflineExcuse(draft),
         blockers,
       };
     case 4:
@@ -1165,7 +1180,7 @@ function stepView(draft: Draft, step: Step, blockers: Blocker[]): StepView {
           mappings: draft.spec.columns,
           primaryKey: draft.spec.primary_key,
           targetTable: draft.spec.target_table,
-          findings: checkIsFresh(draft) ? draft.check!.value.findings : [],
+          targetCheck: confirmTargetCheck(draft),
           preview: previewIsFresh(draft) ? draft.preview!.value : null,
           // The owner's #168 follow-up explicitly keeps save-only as the offline/fallback path.
           actions:
@@ -1178,6 +1193,31 @@ function stepView(draft: Draft, step: Step, blockers: Blocker[]): StepView {
         blockers,
       };
   }
+}
+
+/**
+ * Why the target-table check could not be run, or `null`.
+ *
+ * Editing ends in 保存, not a run, and the check cannot even be attempted while the
+ * target's agent is down — so `canAdvance` lets that case through step 3. Both step 3
+ * and the confirmation page state the same reason, from here, so they cannot drift.
+ */
+function agentOfflineExcuse(draft: Draft): string | null {
+  return draft.mode === "edit" && !draft.targetAgentOnline
+    ? `目标端 Agent「${draft.target.name}」不在线，这一步查不了；保存不受影响，运行要等它回来`
+    : null;
+}
+
+function confirmTargetCheck(draft: Draft): ConfirmTargetCheck {
+  if (!checkIsFresh(draft)) {
+    return { state: "unchecked", findings: [], excused: agentOfflineExcuse(draft) };
+  }
+  const result = draft.check!.value;
+  return {
+    state: result.ok ? "passed" : "findings",
+    findings: result.findings,
+    excused: null,
+  };
 }
 
 /**

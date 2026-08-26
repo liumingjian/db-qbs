@@ -1,7 +1,8 @@
 import { X } from "lucide-react";
-import { useEffect } from "react";
+import { useId, useRef } from "react";
 import type { ReactNode } from "react";
 
+import { useDialogFocus } from "./dialogFocus";
 import { PAGE_SIZE_OPTIONS } from "./listing";
 
 /**
@@ -10,6 +11,10 @@ import { PAGE_SIZE_OPTIONS } from "./listing";
  * 它们原来长在 `App.tsx` 里，数据源屏（ADR-0039 §1~§4）要用同一套对话框与表单行，
  * 于是搬到这里——**一个字都没改形态**，只换了住处。这不是新组件：
  * 设计系统的组件清单不因此增减（ADR-0039 §9「零设计系统改动」）。
+ *
+ * 2026-08（UX 评审 P0-5）**只补行为不改形态**：焦点管理挪进 `useDialogFocus`，
+ * 与运行详情抽屉共用同一份实现。原来这里只有一个 Escape 监听——`aria-modal="true"`
+ * 是一句关于行为的承诺，没有焦点陷阱时它是假的。
  */
 export function Modal({
   title,
@@ -26,15 +31,11 @@ export function Modal({
   wide?: boolean;
   children: ReactNode;
 }) {
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !busy) {
-        onClose();
-      }
-    }
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [busy, onClose]);
+  const dialog = useRef<HTMLElement | null>(null);
+  // 一层对话框一个标题 id。写死 `modal-title` 时，抽屉上再叠一个对话框
+  // （清理确认）就会有两个元素顶着同一个 id，辅助技术读到的是先出现的那一个。
+  const titleId = useId();
+  useDialogFocus(dialog, { onEscape: onClose, escapable: !busy });
 
   return (
     <div
@@ -48,12 +49,14 @@ export function Modal({
     >
       <section
         className={`modal ${narrow ? "is-narrow" : ""} ${wide ? "is-wide" : ""}`}
+        ref={dialog}
         role="dialog"
         aria-modal="true"
-        aria-labelledby="modal-title"
+        aria-labelledby={titleId}
+        tabIndex={-1}
       >
         <header className="modal-header">
-          <h2 id="modal-title">{title}</h2>
+          <h2 id={titleId}>{title}</h2>
           <button
             className="icon-button"
             type="button"

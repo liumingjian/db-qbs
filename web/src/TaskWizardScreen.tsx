@@ -37,7 +37,7 @@ import {
   toSpec,
   view,
 } from "./wizard";
-import type { Change, Draft, Loss } from "./wizard";
+import type { Change, ConfirmTargetCheck, Draft, Loss } from "./wizard";
 
 export interface TaskWizardScreenProps {
   initial: Draft;
@@ -779,7 +779,7 @@ function StepBody({
       <div><dt>WHERE</dt><dd>{confirmView.where}</dd></div>
       <div><dt>主键</dt><dd>{confirmView.primaryKey.join(", ")}</dd></div>
       <div className="is-wide"><dt>字段映射</dt><dd>{confirmView.mappings.map((mapping) => <span className="mapping-chip" key={mapping.source}>{mapping.source} → {mapping.target}</span>)}</dd></div>
-      <div className="is-wide"><dt>目标表检查</dt><dd>{confirmView.findings.length === 0 ? "已通过" : `${confirmView.findings.length} 项问题`}</dd></div>
+      <div className="is-wide"><dt>目标表检查</dt><dd><ConfirmTargetCheckCell check={confirmView.targetCheck} busy={busy === "check"} onCheck={loadCheck} /></dd></div>
     </dl>
     {confirmView.preview !== null && <section className="preview-panel">
       <header><div><strong>数据预览</strong><span>最终确认的源端样例数据</span></div></header>
@@ -791,6 +791,40 @@ function StepBody({
         自己刚配好的这张目标表。它不是告警，所以不着 --crit / --warn。 */}
     <UpsertNote text={UPSERT_NOTE_AHEAD} />
   </section>;
+}
+
+/**
+ * 最后一屏上「目标表检查」那一格（2026-08 UX 评审 P0-3）。
+ *
+ * 三态，不是两态。「没检查过」原来和「检查通过」在这里长得一模一样——都写「已通过」，
+ * 因为读的是空的 findings。而**恰恰是没检查过的那条路**（目标端 agent 离线，
+ * `canAdvance` 明确放行）最需要在这里被说出来：它是草稿与生产写入之间的最后一句话。
+ *
+ * 没检查过时把原因摆出来，并给一颗**当场就能检查**的按钮——原因写在这里而补救要退回
+ * 第 3 步，等于把人赶去找路。
+ */
+function ConfirmTargetCheckCell({
+  check,
+  busy,
+  onCheck,
+}: {
+  check: ConfirmTargetCheck;
+  busy: boolean;
+  onCheck: () => void;
+}) {
+  if (check.state === "passed") {
+    return <span className="confirm-check is-passed">已通过</span>;
+  }
+  if (check.state === "findings") {
+    return <span className="confirm-check is-findings">有 {check.findings.length} 处需要处理</span>;
+  }
+  return <span className="confirm-check is-unchecked">
+    <strong>尚未检查</strong>
+    {check.excused !== null && <span className="confirm-check-reason">{check.excused}</span>}
+    <button className="button" type="button" disabled={busy} onClick={onCheck}>
+      {busy ? <LoaderCircle className="is-spinning" size={15} /> : <RefreshCw size={15} />}立即检查
+    </button>
+  </span>;
 }
 
 function PreviewData({ preview }: { preview: PreviewResult }) {

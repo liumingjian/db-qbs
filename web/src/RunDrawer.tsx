@@ -1,9 +1,10 @@
 import { Play, Trash2, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useRef, useState } from "react";
 
 import { cleanupRun } from "./api";
 import type { Datasource, RunHistory, Task } from "./api";
 import { qualifiedTargetTable } from "./datasource";
+import { useDialogFocus } from "./dialogFocus";
 import { messageFrom } from "./errors";
 import { FailureEvidence } from "./FailureEvidence";
 import {
@@ -59,15 +60,10 @@ export function RunDrawer({
   const [cleaning, setCleaning] = useState(false);
   const [cleanupConfirm, setCleanupConfirm] = useState(false);
   const [cleanupError, setCleanupError] = useState<string | null>(null);
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    }
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+  const dialog = useRef<HTMLElement | null>(null);
+  // 焦点陷阱、初始焦点与关闭后的焦点归位，与对话框共用同一份实现（UX 评审 P0-5）。
+  // 清理确认框叠在这层上面时，按键归最上面那一层管——`useDialogFocus` 自己排的队。
+  useDialogFocus(dialog, { onEscape: onClose, escapable: !cleaning });
 
   const presentation = historyPresentation(run);
   const rerun = rerunAction(run, tasks);
@@ -91,9 +87,11 @@ export function RunDrawer({
       <div className="drawer-scrim" role="presentation" onMouseDown={onClose} />
       <aside
         className="drawer"
+        ref={dialog}
         role="dialog"
         aria-modal="true"
         aria-labelledby="drawer-title"
+        tabIndex={-1}
       >
         <header className="drawer-header">
           <button
@@ -168,9 +166,10 @@ export function RunDrawer({
             )}
           </section>
 
-          {presentation.kind === "failed" && (
+          {(presentation.kind === "failed" || presentation.kind === "unknown") && (
             <FailureEvidence
               run={run}
+              variant={presentation.kind === "unknown" ? "unknown" : "failure"}
               onEditTask={(step) => onEditTask(task, step)}
             />
           )}

@@ -889,8 +889,11 @@ function formatDuration(milliseconds: number): string {
  * 而勾是分几页、隔几分钟点下的，按之前根本没有一处地方把「这批到底要写哪几张表」摆齐过。
  * 这层不对称是故意的——摩擦要加在**看不清后果**的那一侧，不是加在每一次动作上。
  *
- * 列的是 **任务名 → 目标表**，不是任务名加 id：这一步要核对的是「会被改写的是哪几张表」。
- * 目标表带库名（`qualifiedTargetTable`）——同名表在几个库里都可能有一张。
+ * 列的是**任务名与它要写的那张表**，不是任务名加 id：这一步要核对的是「会被改写的是
+ * 哪几张表」。目标表带库名（`qualifiedTargetTable`）——同名表在几个库里都可能有一张。
+ *
+ * 两者之间写「写入」而不是一个箭头：自动生成的任务名**本身**就长成「源表 → 目标表」，
+ * 再夹一个箭头，一行里会出现两个方向不同的箭头，读起来像一条三段的链路。
  */
 function BulkStartDialog({
   tasks,
@@ -907,7 +910,7 @@ function BulkStartDialog({
 }) {
   const byId = new Map(datasources.map((datasource) => [datasource.datasource_id, datasource]));
   return (
-    <Modal title={`发起 ${tasks.length} 个任务`} onClose={onClose} busy={busy} narrow>
+    <Modal title={`发起 ${tasks.length} 个任务`} onClose={onClose} busy={busy}>
       <div className="modal-body delete-copy">
         <p>
           将<strong>逐个发起</strong>下面这些任务，按主键写进各自的目标表。
@@ -916,10 +919,12 @@ function BulkStartDialog({
         <ul className="bulk-targets">
           {tasks.map((task) => (
             <li key={task.task_id}>
-              <span>{task.name}</span>
-              <span className="bulk-target-arrow" aria-hidden="true">→</span>
-              <span className="mono">
-                {qualifiedTargetTable(byId.get(task.target_datasource_id), task.spec.target_table)}
+              <span className="bulk-task-name">{task.name}</span>
+              <span className="bulk-task-target">
+                写入{" "}
+                <span className="mono">
+                  {qualifiedTargetTable(byId.get(task.target_datasource_id), task.spec.target_table)}
+                </span>
               </span>
             </li>
           ))}
