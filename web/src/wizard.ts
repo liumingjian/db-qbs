@@ -86,6 +86,20 @@ export interface Draft {
   sourceColumns: readonly BuilderColumn[];
   targetColumns: readonly TargetColumn[];
   targetKeys: readonly TargetKey[];
+  /**
+   * Whether the last metadata read found the target table.
+   *
+   * `/api/target/columns` answers an empty list for a table that is not there —
+   * that is a fact, not an error (ADR-0038 §9) — and until this flag existed the
+   * wizard could not tell "not there" from "not read yet". A name typed for a
+   * table that does not exist yet is a legitimate way to work: the check on step
+   * 3 answers with a complete `CREATE TABLE`, which the person runs themselves.
+   * Auto-creation stays out of V1 (CONTEXT.md); this only stops the wizard from
+   * being a dead end before you get to the DDL.
+   *
+   * `true` until proven otherwise, so nothing changes before the read lands.
+   */
+  targetTableExists: boolean;
   preview: Fetched<PreviewResult> | null;
   check: Fetched<TargetCheckResult> | null;
 }
@@ -204,6 +218,7 @@ export function openNew(
     sourceColumns: [],
     targetColumns: [],
     targetKeys: [],
+    targetTableExists: true,
     preview: null,
     check: null,
   };
@@ -240,6 +255,7 @@ export function openExisting(
     sourceColumns: [],
     targetColumns: [],
     targetKeys: [],
+    targetTableExists: true,
     preview: null,
     check: null,
   };
@@ -425,6 +441,10 @@ function reduce(draft: Draft, change: Change): Reduced {
           hand: { ...draft.hand, targetTable: true },
           targetColumns: [],
           targetKeys: [],
+          // Nothing is known about the new name yet, and "does not exist" is a
+          // claim: carrying the previous table's verdict over would put a
+          // 尚不存在 chip on a table nobody has looked for.
+          targetTableExists: true,
           check: null,
         },
         cleared: [],
@@ -586,7 +606,15 @@ function reduce(draft: Draft, change: Change): Reduced {
       const inferred = inferPrimaryKey(change.keys, matched.columns);
       return {
         draft: withColumns(
-          { ...draft, targetColumns: change.columns, targetKeys: change.keys },
+          {
+            ...draft,
+            targetColumns: change.columns,
+            targetKeys: change.keys,
+            // An empty column list for a named table means the table is not
+            // there. With no name asked for, it means nothing.
+            targetTableExists:
+              draft.spec.target_table === "" || change.columns.length > 0,
+          },
           matched.columns,
           draft.hand.primaryKey || inferred === null ? matched.primary_key : inferred,
         ),
@@ -756,7 +784,10 @@ function lossOf(draft: Draft, cleared: readonly Cleared[]): Loss | null {
       .map((kind) => LOSS_LINES[kind](draft));
     return lines.length === 0
       ? null
-      : { headline: "离开会清掉这份还没保存的任务草稿：", lines };
+      // 草稿离开时写进 sessionStorage（UX 评审 P1-5），所以这里不再是一句告警。
+      // 留下这个对话框是为了**说出草稿里有什么**——它是「你还有一份没做完的东西」的回执，
+      // 不是一道关卡；真要扔掉的人在这个框上另有一颗按钮。
+      : { headline: "离开后这份还没保存的草稿会留着，回来接着改：", lines };
   }
   const lines = cleared
     .filter((kind): kind is Exclude<Cleared, "draft"> => kind !== "draft")
@@ -987,8 +1018,14 @@ export interface MappingRow {
   source: string;
   target: string;
   selected: boolean;
-  /** Read-only text plus the 自动匹配 mark, or a dropdown to be filled in. */
-  control: "auto" | "manual";
+  /**
+   * `auto` — read-only text plus the 自动匹配 mark.
+   * `manual` — a dropdown over the target table's real columns.
+   * `new` — a free-text box: the target table does not exist yet, so there is no
+   *   column list to pick from and the name typed here is the one the generated
+   *   `CREATE TABLE` will carry.
+   */
+  control: "auto" | "manual" | "new";
   primaryKey: boolean;
   /** Why the primary-key tick cannot be moved, or `null`. */
   primaryKeyLock: string | null;
@@ -1140,7 +1177,11 @@ function stepView(draft: Draft, step: Step, blockers: Blocker[]): StepView {
           source,
           target,
           selected: mapping !== undefined,
-          control: auto ? "auto" : "manual",
+          // A table that is not there yet has no column list to pick from, and
+          // the name in this box is the one the generated CREATE TABLE carries.
+          // Calling it 自动匹配 would claim a match against a table that has no
+          // columns to match; a dropdown would be empty.
+          control: draft.targetTableExists ? (auto ? "auto" : "manual") : "new",
           primaryKey: target !== "" && draft.spec.primary_key.includes(target),
           primaryKeyLock: locked,
           problem: problems.get(source) ?? null,

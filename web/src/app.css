@@ -258,6 +258,14 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 /* 批量动作跑完的那一行汇总（ADR-0043 §6）：串行跑完一次说清成败，不是只报最后一条。 */
 .bulk-summary { display: flex; align-items: center; justify-content: space-between; gap: var(--gap); margin-bottom: var(--gap); padding: 10px 14px; border-left: 3px solid var(--brand); border-radius: 0 var(--radius) var(--radius) 0; background: var(--brand-dim); color: var(--dim); line-height: var(--lh-prose); }
 .bulk-summary.is-failed { border-left-color: var(--crit); background: var(--crit-bg); }
+/* 「还有一份没做完的草稿」那一条（P1-5）。它**不是错误**——默认的 .notice 着 --crit，
+   而这条说的是「你有件事没做完」，所以换成品牌色的那一档。 */
+.notice.is-draft { border-left-color: var(--brand); background: var(--brand-dim); color: var(--dim); }
+.notice.is-draft strong { color: var(--text); }
+.notice-side { margin-left: 8px; color: var(--mute); font-size: var(--size-meta); }
+.notice-actions { flex: none; display: flex; align-items: center; gap: 14px; }
+.text-button.is-quiet { color: var(--mute); }
+.text-button.is-quiet:hover { color: var(--crit); }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
 
 /* ---------------------------------------------------------------- 对话框与表单 */
@@ -386,7 +394,11 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .sql-editor-toolbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .sql-editor-toolbar .spec-note { margin: 0; }
 .sql-editor-toolbar .button { flex: none; }
-.sql-input-shell { position: relative; }
+.sql-editor-tools { flex: none; display: flex; align-items: center; gap: 6px; }
+.sql-editor-tools .button { height: 28px; padding: 0 10px; font-size: var(--size-meta); }
+/* 开着的开关要看得出是开着的：`aria-pressed` 只说给辅助技术听。 */
+.sql-editor-tools .button.is-on { border-color: var(--brand); background: var(--brand-dim); color: var(--brand); }
+.sql-input-shell { position: relative; min-height: 0; flex: 1; }
 .sql-highlight, .sql-text-input { padding: 9px 10px; border: 1px solid transparent; border-radius: var(--radius); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.55; white-space: pre; tab-size: 2; }
 /* 着色层在下、只读、不吃事件；滚动由 textarea 的 onScroll 同步过来（见 SqlEditor.tsx）。 */
 .sql-highlight { position: absolute; inset: 0; overflow: hidden; margin: 0; background: var(--panel); color: var(--text); pointer-events: none; }
@@ -400,9 +412,30 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
    `!=` 画成 `≠`。这一格是该模式下唯一能看到查询的地方，显示的字符串必须**就是**执行的那个。
    两层都要关——只关一层，飘的就不只是字形，还有光标位置。 */
 .sql-text-input { position: relative; display: block; width: 100%; resize: vertical; overflow: auto; border-color: var(--line-strong); background: transparent; color: transparent; caret-color: var(--text); }
-/* 自定义 SQL 要写整条语句，WHERE 片段只写条件——两格的起始高度因此不同。 */
-.source-sql-editor .sql-text-input { min-height: 170px; }
-.where-clause-editor .sql-text-input { min-height: 92px; }
+/* 自定义 SQL 要写整条语句，WHERE 片段只写条件——两格的起始高度因此不同。
+   两个数都来自 UX 评审 P1-3。自定义 SQL 那格的**真实高度由行数定**（见 SqlEditor.tsx
+   的 `visibleRows`），这里的 220px 只是地板：粘进来之前它得看着像个能写东西的地方，
+   而不是一条缝。WHERE 从 92px 抬到 160px，因为它常常是三四行 AND 串起来的。 */
+.source-sql-editor .sql-text-input { min-height: 220px; }
+.where-clause-editor .sql-text-input { min-height: 160px; }
+
+/* ── 行号槽 ──────────────────────────────────────────────────────────────
+   第三层，**不进那两层里的任何一层**：塞进 `<pre>` 会让两层的字符流不同，
+   而两层字符流相同正是光标不飘的全部依据。它只跟着竖向滚动（同步在 SqlEditor.tsx）。 */
+.sql-gutter { position: absolute; z-index: 1; top: 1px; bottom: 1px; left: 1px; width: calc(var(--sql-gutter) + 20px); overflow: hidden; margin: 0; padding: 9px 8px 9px 0; border-right: 1px solid var(--line); background: var(--mute-bg); color: var(--mute); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.55; text-align: right; white-space: pre; pointer-events: none; user-select: none; }
+.sql-input-shell.has-gutter .sql-highlight,
+.sql-input-shell.has-gutter .sql-text-input { padding-left: calc(var(--sql-gutter) + 30px); }
+/* ── 软换行 ──────────────────────────────────────────────────────────────
+   两层用**同一套**换行属性，并且都写死 `scrollbar-gutter: stable`——滚动条那一条宽度
+   是唯一会让两层内容宽度分家的东西，两边都预留就再次相等，光标不飘这条不变式照旧成立。 */
+.sql-input-shell.is-wrapped .sql-highlight,
+.sql-input-shell.is-wrapped .sql-text-input { white-space: pre-wrap; overflow-wrap: anywhere; scrollbar-gutter: stable; }
+
+/* ── 全屏 ────────────────────────────────────────────────────────────────
+   Escape 退出，拦在向导那个「退出向导」监听之前（见 SqlEditor.tsx）。 */
+.source-sql-editor.is-fullscreen { position: fixed; z-index: 60; inset: 0; padding: 16px 20px 20px; background: var(--panel); }
+.source-sql-editor.is-fullscreen .sql-text-input { height: 100%; min-height: 0; resize: none; }
+.source-sql-editor.is-fullscreen .sql-highlight { inset: 0; }
 /* 字透明了，占位符和选区得单独交代，否则前者跟着一起消失、后者选中即看不见。 */
 .sql-text-input::placeholder { color: var(--mute); }
 .sql-text-input::selection { background: var(--brand-dim); }
@@ -488,10 +521,18 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .wizard-context-section:first-child { padding-top: 0; border-top: 0; }
 .wizard-context-title { min-height: 28px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .wizard-context-title strong, .wizard-summary > strong { font-size: var(--size-meta); font-weight: var(--weight-em); }
-.wizard-context .source-sql-editor { padding: 0; }
-.wizard-context .source-sql-editor .spec-note { display: none; }
-.wizard-context .source-sql-editor .sql-editor-toolbar { justify-content: flex-end; }
-.wizard-context .source-sql-editor .sql-text-input { min-height: 145px; }
+/* 自定义 SQL 编辑器已经搬进主区（P1-3），左栏这一格改放结果列。 */
+.wizard-side-empty { margin: 0; padding: 12px 0; color: var(--mute); font-size: var(--size-meta); line-height: var(--lh-prose); }
+.result-columns { display: flex; flex-direction: column; gap: 6px; }
+.result-columns-count { color: var(--mute); font-size: var(--size-cap); }
+.result-columns ul { max-height: 280px; overflow: auto; margin: 0; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.result-columns li { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 5px 9px; border-bottom: 1px solid var(--line); }
+.result-columns li:last-child { border-bottom: 0; }
+.result-columns li .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.result-columns li small { flex: none; color: var(--mute); font-family: var(--font-num); font-size: var(--size-cap); }
+/* 目标表还不存在时的那一行交底（P1-4）。是**事实陈述**不是错误：这条路是允许走的。 */
+.target-missing-note { display: flex; align-items: baseline; gap: 6px; margin: 0; color: var(--mute); font-size: var(--size-cap); line-height: var(--lh-prose); }
+.target-missing-note .field-badge { flex: none; margin-left: 0; }
 .wizard-select-label, .wizard-name { display: flex; flex-direction: column; gap: 6px; color: var(--dim); font-size: var(--size-meta); }
 .wizard-select-label select, .wizard-name input, .wizard-mapping select { height: var(--ctl-h); padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); }
 .wizard-context .schema-tree { max-height: 230px; }
@@ -519,7 +560,18 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .wizard-mapping tr.is-problem td { background: var(--crit-bg); }
 .wizard-mapping tr.is-problem select { border-color: var(--crit); }
 .wizard-mapping td small { display: block; max-width: 260px; margin-top: 3px; color: var(--crit); font-size: var(--size-cap); white-space: normal; }
+/* 主键为什么按不动**不是错误**——是目标表自己定了主键。跟着 --crit 走的话，
+   一张配得完全正确的映射表会有一整列红字。 */
+.wizard-mapping td small.lock-note { color: var(--mute); }
 .wizard-mapping .auto-mark { display: inline; margin-left: 5px; color: var(--ok); }
+/* 目标表还不存在时，目标列是**打出来的**（P1-4）：没有列清单可挑，这里打的名字
+   就是建表语句里的那个列名。标成「将新建」，不冒充一次匹配。 */
+.new-target-field { display: flex; align-items: center; gap: 7px; }
+.new-target-field input { min-width: 0; max-width: 260px; flex: 1; height: var(--ctl-h); padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); }
+.new-target-field input:focus { border-color: var(--brand); outline: 0; box-shadow: 0 0 0 2px var(--brand-dim); }
+.wizard-mapping .new-mark { display: inline; flex: none; margin: 0; color: var(--warn); white-space: nowrap; }
+/* 主区的 SQL 编辑卡：它是这一步的主角，不是一张附注卡。 */
+.wizard-sql-card .source-sql-editor { padding: 12px; }
 .wizard-mapping select { width: 100%; min-width: 140px; }
 .wizard-mapping-problems { display: flex; align-items: baseline; gap: 10px; padding: 10px 12px; border-left: 3px solid var(--crit); background: var(--crit-bg); color: var(--crit); }
 .wizard-mapping-problems strong { flex: none; font-size: var(--size-meta); }

@@ -543,8 +543,45 @@ describe("derived values", () => {
     expect(step.confirm.targetCheck.state).toBe("unchecked");
   });
 
+  it("treats a target table that does not exist yet as one made of the source columns", () => {
+    // `/api/target/columns` 对不存在的表回空清单而不是错误（ADR-0038 §9）。
+    // 原来这里等于死路：目标列一个都没有，映射那一列的下拉是空的，谁也走不下去。
+    let draft = done(apply(workedDraft(), { type: "target-table", table: "t_brand_new" }));
+    draft = done(apply(draft, { type: "target-columns-arrived", columns: [], keys: [] }));
+    expect(draft.targetTableExists).toBe(false);
+    expect(draft.spec.columns).toEqual([
+      { source: "ID", target: "ID" },
+      { source: "C_NAME", target: "C_NAME" },
+    ]);
+    const step = view(draft, 1).step;
+    if (step.step !== 1) throw new Error("expected step 1");
+    expect(step.rows.every((row) => row.control === "new")).toBe(true);
+  });
+
+  it("goes back to a known table the moment the target table changes", () => {
+    let draft = done(apply(workedDraft(), { type: "target-table", table: "t_brand_new" }));
+    draft = done(apply(draft, { type: "target-columns-arrived", columns: [], keys: [] }));
+    expect(draft.targetTableExists).toBe(false);
+    draft = done(apply(draft, { type: "target-table", table: "t_customer" }));
+    expect(draft.targetTableExists).toBe(true);
+  });
+
   it("never offers a jump on the rail", () => {
     expect(view(workedDraft(), 1).rail.every((entry) => entry.jumpable === false)).toBe(true);
+  });
+});
+
+describe("leaving the wizard", () => {
+  it("says the draft is kept, because it now is", () => {
+    // 草稿离开时写进 sessionStorage（UX 评审 P1-5），所以「离开会清掉」这句话不再成立。
+    const loss = leaving(workedDraft());
+    expect(loss).not.toBeNull();
+    expect(loss!.headline).toContain("留着");
+    expect(loss!.headline).not.toContain("清掉");
+  });
+
+  it("stays silent when there is nothing hand-made to keep", () => {
+    expect(leaving(openNew(SOURCE, TARGET))).toBeNull();
   });
 });
 

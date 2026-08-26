@@ -107,6 +107,51 @@ function writeCollapsed(collapsed: boolean) {
   }
 }
 
+const WIZARD_DRAFT_KEY = "db-qbs.wizard-draft";
+
+/**
+ * 没提交的向导草稿**存在 `sessionStorage`**（UX 评审 P1-5）。
+ *
+ * 原来每一条离开向导的路都会把草稿置空：点侧栏、改哈希、按 Escape、刷新页面。
+ * 而这份草稿是十几步操作和半打请求换来的——选表、读列、改映射、点主键、写条件、
+ * 跑预览、跑目标表检查。中途要去数据源屏确认一件事，回来就得从头再来一遍。
+ *
+ * 用 `sessionStorage` 不用 `localStorage`：草稿是**这一次工作的上下文**，
+ * 关掉标签页就该结束；一周后打开浏览器被一份忘光了的草稿迎面撞上，比丢了它更糟。
+ *
+ * 存不下就算了（隐私模式会直接抛）——这一次的编辑照旧，只是离开就没了，回到旧行为。
+ */
+function readWizardDraft(): Draft | null {
+  try {
+    const raw = window.sessionStorage.getItem(WIZARD_DRAFT_KEY);
+    if (raw === null) return null;
+    const draft = JSON.parse(raw) as Draft;
+    // 形状校验只做最外层：存进去的就是这个类型，这里防的是版本换代后的残留，
+    // 不是防篡改。读出一个不认识的形状时当作没有草稿，而不是把整屏带崩。
+    return typeof draft?.mode === "string" && typeof draft?.spec === "object"
+      ? draft
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeWizardDraft(draft: Draft) {
+  try {
+    window.sessionStorage.setItem(WIZARD_DRAFT_KEY, JSON.stringify(draft));
+  } catch {
+    // 存不下就算了。
+  }
+}
+
+function clearWizardDraft() {
+  try {
+    window.sessionStorage.removeItem(WIZARD_DRAFT_KEY);
+  } catch {
+    // 同上。
+  }
+}
+
 const NAV_ITEMS: readonly { page: NavigationPage; label: string }[] = [
   { page: "jobs", label: "作业中心" },
   { page: "datasources", label: "数据源" },
@@ -153,6 +198,14 @@ export function App() {
   const [runHistory, setRunHistory] = useState<RunHistory[]>([]);
   const [dialog, setDialog] = useState<DialogState>(null);
   const [wizardDraft, setWizardDraft] = useState<Draft | null>(null);
+  /**
+   * 存着的那份草稿，用来在作业中心摆出「你还有一份没做完的」那一条。
+   *
+   * 它跟着 `sessionStorage` 走，但**不是每一次按键都进 state**：向导每改一个字都会回调，
+   * 那样整个 App 会跟着重渲染。按键只写 ref 与存储，离开向导时才把它拿出来展示。
+   */
+  const [savedDraft, setSavedDraft] = useState<Draft | null>(readWizardDraft);
+  const savedDraftRef = useRef<Draft | null>(savedDraft);
   const wizardScreenRef = useRef<TaskWizardScreenHandle>(null);
   const pageRef = useRef(page);
   const wizardDraftRef = useRef(wizardDraft);
@@ -300,9 +353,15 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (page === "wizard" && wizardDraft === null) {
+    if (page !== "wizard" || wizardDraft !== null) return;
+    // 直接开 `#wizard`（刷新、书签、后退）时先看存着的草稿——那正是它存在的意义。
+    const stored = readWizardDraft();
+    if (stored === null) {
       window.location.replace("#jobs");
+      return;
     }
+    savedDraftRef.current = stored;
+    setWizardDraft(stored);
   }, [page, wizardDraft]);
 
   useEffect(() => {
@@ -317,19 +376,32 @@ export function App() {
     );
     if (source === undefined || target === undefined) return;
     setActiveRun(null);
-    setWizardDraft(openExisting(
+    const editing = openExisting(
       dialog.task,
       { datasource_id: source.datasource_id, name: source.name },
       { datasource_id: target.datasource_id, name: target.name },
       target.agentStatus === "online",
       dialog.requestedStep,
-    ));
+    );
+    savedDraftRef.current = editing;
+    setSavedDraft(null);
+    writeWizardDraft(editing);
+    setWizardDraft(editing);
     setDialog(null);
     setPage("wizard");
     window.location.hash = "wizard";
   }, [agents, datasources, datasourcesLoading, dialog]);
 
   const latestRuns = useMemo(() => latestRunByTask(runHistory), [runHistory]);
+  /** 存着的那份草稿，且它绑的两端数据源都还在。 */
+  const resumableDraft = useMemo(() => {
+    if (savedDraft === null) return null;
+    const known = (id: string) =>
+      datasources.some((datasource) => datasource.datasource_id === id);
+    return known(savedDraft.source.datasource_id) && known(savedDraft.target.datasource_id)
+      ? savedDraft
+      : null;
+  }, [datasources, savedDraft]);
   const editDatasourceOptions = useMemo(() => {
     if (wizardDraft === null) return { sources: [], targets: [] };
     const guard = evaluateEdit(
@@ -369,7 +441,11 @@ export function App() {
 
   function commitNavigation(nextPage: Page) {
     setActiveRun(null);
-    if (nextPage !== "wizard") setWizardDraft(null);
+    if (nextPage !== "wizard") {
+      setWizardDraft(null);
+      // 草稿不跟着走：它留在 sessionStorage 里，作业中心上摆一条回去的路。
+      setSavedDraft(savedDraftRef.current);
+    }
     setPage(nextPage);
     if (window.location.hash !== `#${nextPage}`) {
       navigationBypass.current = true;
@@ -378,6 +454,13 @@ export function App() {
   }
 
   async function handleWizardSubmit(draft: Draft, action: "start" | "save-only") {
+    // 存下来了就不再是草稿——两处返回路径共用这一句，漏一处就会在作业中心上
+    // 摆出一条指回已经保存过的东西的「继续编辑」。
+    function draftIsDone() {
+      savedDraftRef.current = null;
+      setSavedDraft(null);
+      clearWizardDraft();
+    }
     const input = {
       name: taskName(draft),
       source_datasource_id: draft.source.datasource_id,
@@ -389,6 +472,7 @@ export function App() {
       setTasks((currentTasks) =>
         currentTasks?.map((task) => task.task_id === updated.task_id ? updated : task) ?? [updated],
       );
+      draftIsDone();
       setFocusTaskId(updated.task_id);
       commitNavigation("jobs");
       void loadList();
@@ -403,6 +487,7 @@ export function App() {
         setStartError(`${created.name} 已保存，但发起失败：${messageFrom(error)}`);
       }
     }
+    draftIsDone();
     setFocusTaskId(created.task_id);
     commitNavigation("jobs");
     void loadList();
@@ -572,6 +657,45 @@ export function App() {
             </div>
           )}
 
+          {/* 「你还有一份没做完的」（UX 评审 P1-5）。草稿留在 sessionStorage 里，
+              这一条是它唯一一条可见的回去的路——不摆出来，留着等于没留。
+              两端数据源都还在才摆：指向一条已经删掉的数据源的草稿，接着改也是白改。 */}
+          {activeRun === null && page === "jobs" && resumableDraft !== null && (
+            <div className="notice is-draft">
+              <span>
+                有一份还没保存的任务草稿：
+                <strong>{taskName(resumableDraft)}</strong>
+                <span className="notice-side">停在第 {resumableDraft.step} 步</span>
+              </span>
+              <span className="notice-actions">
+                <button
+                  className="text-button"
+                  type="button"
+                  onClick={() => {
+                    savedDraftRef.current = resumableDraft;
+                    setSavedDraft(null);
+                    setWizardDraft(resumableDraft);
+                    setPage("wizard");
+                    window.location.hash = "wizard";
+                  }}
+                >
+                  继续编辑
+                </button>
+                <button
+                  className="text-button is-quiet"
+                  type="button"
+                  onClick={() => {
+                    savedDraftRef.current = null;
+                    setSavedDraft(null);
+                    clearWizardDraft();
+                  }}
+                >
+                  丢弃
+                </button>
+              </span>
+            </div>
+          )}
+
           {activeRun !== null && (
             <RunScreen
               task={activeRun.task}
@@ -619,6 +743,15 @@ export function App() {
               initial={wizardDraft}
               onCancel={() => commitNavigation("jobs")}
               onSubmit={handleWizardSubmit}
+              onDraftChange={(draft) => {
+                savedDraftRef.current = draft;
+                writeWizardDraft(draft);
+              }}
+              onDiscardDraft={() => {
+                savedDraftRef.current = null;
+                setSavedDraft(null);
+                clearWizardDraft();
+              }}
               sourceOptions={editDatasourceOptions.sources}
               targetOptions={editDatasourceOptions.targets}
             />
@@ -661,11 +794,16 @@ export function App() {
               const target = guard.targets.find((option) => option.datasource_id === targetDatasourceId);
               if (source === undefined || target === undefined) return;
               setDialog(null);
-              setWizardDraft(openNew(
+              const fresh = openNew(
                 { datasource_id: source.datasource_id, name: source.name },
                 { datasource_id: target.datasource_id, name: target.name },
                 target.agentStatus === "online",
-              ));
+              );
+              // 新建就是新建：存着的那份被这一份顶掉，不留两份让人猜哪个是哪个。
+              savedDraftRef.current = fresh;
+              setSavedDraft(null);
+              writeWizardDraft(fresh);
+              setWizardDraft(fresh);
               setPage("wizard");
               window.location.hash = "wizard";
             }}

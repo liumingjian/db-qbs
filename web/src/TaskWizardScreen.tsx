@@ -22,11 +22,12 @@ import {
   previewBuilderRows,
   previewErrorMessage,
 } from "./api";
-import type { BuilderSql, BuilderTable, PreviewResult } from "./api";
+import type { BuilderColumn, BuilderSql, BuilderTable, PreviewResult } from "./api";
 import { messageFrom } from "./errors";
 import type { DatasourceOption } from "./entry";
 import { UpsertNote, UPSERT_NOTE_AHEAD } from "./components/DesignSystem";
 import { HighlightedSqlInput, SqlEditor } from "./SqlEditor";
+import { tokenize } from "./sql";
 import { Modal } from "./ui";
 import {
   apply,
@@ -43,6 +44,13 @@ export interface TaskWizardScreenProps {
   initial: Draft;
   onCancel: () => void;
   onSubmit: (draft: Draft, action: "start" | "save-only") => Promise<void>;
+  /**
+   * 草稿每变一次就回一次（UX 评审 P1-5）。调用方拿它存盘，好让离开向导不再等于丢掉。
+   * 每一次按键都会调到——**调用方不要把它塞进 state**，否则整屏跟着重渲染。
+   */
+  onDraftChange?: (draft: Draft) => void;
+  /** 人在离开确认框上选了「丢弃」。调用方清掉存的那一份。 */
+  onDiscardDraft?: () => void;
   sourceOptions?: readonly DatasourceOption[];
   targetOptions?: readonly DatasourceOption[];
 }
@@ -56,7 +64,15 @@ type PendingConfirmation =
   | { kind: "leave"; intent: Change; loses: Loss; proceed: () => void };
 
 export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScreenProps>(function TaskWizardScreen(
-  { initial, onCancel, onSubmit, sourceOptions = [], targetOptions = [] },
+  {
+    initial,
+    onCancel,
+    onSubmit,
+    onDraftChange,
+    onDiscardDraft,
+    sourceOptions = [],
+    targetOptions = [],
+  },
   ref,
 ) {
   const [draft, setDraft] = useState(initial);
@@ -86,6 +102,7 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
   function commit(next: Draft) {
     draftRef.current = next;
     setDraft(next);
+    onDraftChange?.(next);
   }
 
   function requestChange(intent: Change) {
@@ -113,6 +130,14 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
     commit(confirm(draftRef.current, pending.intent));
     setPending(null);
     if (pending.kind === "leave") pending.proceed();
+  }
+
+  /** 「丢弃草稿并离开」——存的那一份也一起扔掉，不然下一屏又会摆出来。 */
+  function discardAndLeave() {
+    if (pending === null || pending.kind !== "leave") return;
+    onDiscardDraft?.();
+    setPending(null);
+    pending.proceed();
   }
 
   useImperativeHandle(ref, () => ({ requestLeave }), []);
@@ -272,8 +297,18 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
   }
 
   function refreshTarget() {
+    void reloadTargetTables();
+    if (draftRef.current.spec.target_table.trim() === "") return;
     requestChange({ type: "refresh-target-columns" });
     void loadTarget();
+  }
+
+  async function reloadTargetTables() {
+    try {
+      setTargetTables(await fetchTargetTables(draftRef.current.target.datasource_id));
+    } catch (loadError) {
+      setError(messageFrom(loadError));
+    }
   }
 
   async function loadPreview() {
@@ -388,11 +423,13 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
 
   useEffect(() => {
     if (
-      (draft.step === 1 || draft.step === 3) &&
-      draft.spec.target_table !== ""
-    ) {
-      void loadTarget();
-    }
+      (draft.step !== 1 && draft.step !== 3) ||
+      draft.spec.target_table.trim() === ""
+    ) return;
+    // 目标表名现在是**打出来的**（P1-4），不再只能点。每敲一个字母去读一次目标库的
+    // 元数据，等于把一次表名输入变成十几个请求——与自定义 SQL 那一路同一个节流。
+    const timer = window.setTimeout(() => void loadTarget(), 350);
+    return () => window.clearTimeout(timer);
   }, [draft.step, draft.target.datasource_id, draft.spec.target_table]);
 
   useEffect(() => {
@@ -449,6 +486,10 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
     const query = targetFilter.trim().toLocaleLowerCase();
     return targetTables.filter((table) => table.toLocaleLowerCase().includes(query));
   }, [targetFilter, targetTables]);
+
+  /** 已经查过、确认目标库里没有这张表。查之前不显示——那只是「还没查」。 */
+  const targetTableMissing =
+    draft.spec.target_table.trim() !== "" && !draft.targetTableExists;
 
   function selectTargetTable(table: string) {
     const alreadySelected = draftRef.current.spec.target_table === table;
@@ -513,12 +554,11 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
               </label>
             )}
             {draft.fetchMode === "sql" ? (
-              <SqlEditor
-                value={draft.spec.source_sql ?? ""}
-                placeholder="SELECT ID, NAME FROM APP.T_CUSTOMER"
-                onChange={(value) => requestChange({ type: "source-sql", sql: value })}
-                onFormat={(value) => requestChange({ type: "format-sql", sql: value })}
-              />
+              /* SQL 编辑器**搬到了主区**（UX 评审 P1-3）：300px 宽、145px 高的框放不下
+                 一条粘过来的语句。左栏这一格改成放**结果列**——原来这里在自定义 SQL 下
+                 是一整片空白（P1-9），而结果列正是「这条 SQL 到底取出了什么」的答案，
+                 右边勾列时要反复回头看的就是它。 */
+              <ResultColumns columns={draft.sourceColumns} busy={busy === "columns"} />
             ) : (
               <>
                 {dblinks.length > 0 && (
@@ -563,7 +603,9 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
           <section className="wizard-context-section">
             <div className="wizard-context-title">
               <strong>目标端 · {model.context.targetName}</strong>
-              <button className="icon-button" type="button" disabled={draft.spec.target_table === "" || busy === "target"} title={draft.spec.target_table === "" ? "先选择目标表" : busy === "target" ? "正在刷新目标列" : "刷新目标列"} aria-label="刷新目标列" onClick={refreshTarget}>
+              {/* 刷新**不再绑在「已经选了表」上**（UX 评审 P1-4）：在别处刚建完表回来刷一下
+                  清单，正是没选表的时候最需要的动作。选了表就顺带把它的列也重读一遍。 */}
+              <button className="icon-button" type="button" disabled={busy === "target"} title={busy === "target" ? "正在刷新" : draft.spec.target_table === "" ? "刷新目标表清单" : "刷新目标表清单与目标列"} aria-label="刷新目标表" onClick={refreshTarget}>
                 <RefreshCw className={busy === "target" ? "is-spinning" : ""} size={15} />
               </button>
             </div>
@@ -580,6 +622,23 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
                   {targetOptions.map((option) => <option key={option.datasource_id} value={option.datasource_id}>{option.name} · {option.connection}</option>)}
                 </select>
               </label>
+            )}
+            {/* 目标表可以**直接打字**，不只能从清单里挑（UX 评审 P1-4）。
+                打进一个还不存在的名字是正当用法：第 3 步会给出完整的 CREATE TABLE，
+                自己执行完再回来刷新。产品不替人建表这条边界没动（CONTEXT.md）。 */}
+            <label className="wizard-select-label">目标表
+              <input
+                value={draft.spec.target_table}
+                placeholder="从下面挑一张，或直接输入表名"
+                spellCheck={false}
+                onChange={(event) => requestChange({ type: "target-table", table: event.target.value })}
+              />
+            </label>
+            {targetTableMissing && (
+              <p className="target-missing-note">
+                <span className="field-badge is-inline">尚不存在</span>
+                这张表目标库里还没有。第 3 步会给出建表语句，运行前需要你自己执行。
+              </p>
             )}
             <label className="tree-search">
               <Search size={14} aria-hidden="true" />
@@ -662,24 +721,41 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
       {pending !== null && (
         <WizardConfirmDialog
           loss={pending.loses}
+          leaving={pending.kind === "leave"}
           onCancel={() => setPending(null)}
           onConfirm={acceptPending}
+          onDiscard={discardAndLeave}
         />
       )}
     </section>
   );
 });
 
-export function WizardConfirmDialog({ loss, onCancel, onConfirm }: {
+/**
+ * 两种确认共用这一个框：**一个改动会清掉什么**，和**离开时草稿里有什么**。
+ *
+ * 离开那一档在 UX 评审 P1-5 之后换了性质：草稿会存进 sessionStorage，所以它不再是
+ * 「你要丢掉这些东西吗」，而是「这些东西会留着，你要现在走吗」。主按钮因此叫
+ * **保留草稿并离开**，旁边多一颗真要扔掉的路——不给的话，那份草稿只能靠作业中心上
+ * 那条通知去扔，而人此刻就在这里，就是在做这个决定。
+ */
+export function WizardConfirmDialog({ loss, leaving = false, onCancel, onConfirm, onDiscard }: {
   loss: Loss;
+  leaving?: boolean;
   onCancel: () => void;
   onConfirm: () => void;
+  onDiscard?: () => void;
 }) {
   return <Modal title={loss.headline} onClose={onCancel} busy={false} narrow>
     <div className="modal-body wizard-loss"><ul>{loss.lines.map((line) => <li key={line}>{line}</li>)}</ul></div>
     <footer className="modal-footer">
       <button className="button is-ghost" type="button" onClick={onCancel}>取消</button>
-      <button className="button is-primary" type="button" onClick={onConfirm}>确认并继续</button>
+      {leaving && onDiscard !== undefined && (
+        <button className="button is-danger" type="button" onClick={onDiscard}>丢弃草稿并离开</button>
+      )}
+      <button className="button is-primary" type="button" onClick={onConfirm}>
+        {leaving ? "保留草稿并离开" : "确认并继续"}
+      </button>
     </footer>
   </Modal>;
 }
@@ -711,17 +787,36 @@ function StepBody({
     return <section className="wizard-step">
       <header><h1>选列与字段映射</h1><p>系统会先做同名匹配，请判断要搬哪些列，以及每一列应写到目标表的哪里。</p></header>
       {draft.fetchMode === "sql" && (
-        <button className="button" type="button" disabled={(draft.spec.source_sql ?? "").trim() === "" || busy === "columns"} title={(draft.spec.source_sql ?? "").trim() === "" ? "先在左侧填写 SQL" : busy === "columns" ? "正在刷新结果列" : undefined} onClick={loadSourceColumns}>
-          {busy === "columns" ? <LoaderCircle className="is-spinning" size={15} /> : <RefreshCw size={15} />}刷新结果列
-        </button>
+        /* 编辑器住在这里，不在左栏（UX 评审 P1-3）。宽度是主区的宽度，高度 420px 起，
+           带行号、软换行开关、格式化、全屏——这里的 SQL 基本都是粘过来的，粘进来第一件事
+           是通读一遍确认粘对了。 */
+        <section className="generated-sql wizard-sql-card">
+          <header>
+            <div><strong>自定义 SQL</strong><span>这条语句就是发起时要执行的源端查询</span></div>
+            <button className="button" type="button" disabled={(draft.spec.source_sql ?? "").trim() === "" || busy === "columns"} title={(draft.spec.source_sql ?? "").trim() === "" ? "先写好 SQL" : busy === "columns" ? "正在刷新结果列" : undefined} onClick={loadSourceColumns}>
+              {busy === "columns" ? <LoaderCircle className="is-spinning" size={15} /> : <RefreshCw size={15} />}刷新结果列
+            </button>
+          </header>
+          <SqlEditor
+            value={draft.spec.source_sql ?? ""}
+            placeholder="SELECT ID, NAME FROM APP.T_CUSTOMER"
+            onChange={(value) => change({ type: "source-sql", sql: value })}
+            onFormat={(value) => change({ type: "format-sql", sql: value })}
+          />
+        </section>
       )}
-      {model.rows.length === 0 ? <p className="wizard-empty">{draft.fetchMode === "sql" ? "先在左侧写好 SQL，系统会自动识别结果列。" : "先在左侧选择一张源表。"}</p> : (
+      {model.rows.length === 0 ? <p className="wizard-empty">{draft.fetchMode === "sql" ? "先写好上面的 SQL，系统会自动识别结果列。" : "先在左侧选择一张源表。"}</p> : (
         <div className="table-wrap"><table className="data-grid wizard-mapping"><thead><tr><th>同步</th><th>源列</th><th>目标列</th><th>主键</th><th aria-label="操作" /></tr></thead><tbody>
           {model.rows.map((row) => <tr className={row.problem ? "is-problem" : ""} key={row.source}>
             <td><input type="checkbox" checked={row.selected} onChange={() => change({ type: "toggle-column", source: row.source })} /></td>
             <td><span className="mono">{row.source}</span></td>
-            <td>{!row.selected ? "—" : <>{row.control === "auto" ? <span>{row.target} <small className="auto-mark">自动匹配</small></span> : <select aria-invalid={row.problem ? true : undefined} value={row.target} onChange={(event) => change({ type: "rename-target", source: row.source, target: event.target.value })}><option value="">请选择</option>{draft.targetColumns.map((column) => <option key={column.name}>{column.name}</option>)}</select>}{row.problem && <small>{row.problem}</small>}</>}</td>
-            <td><input type="checkbox" disabled={!row.selected || row.target === "" || row.primaryKeyLock !== null} title={!row.selected ? "先勾选这一列" : row.target === "" ? "先选择目标列" : row.primaryKeyLock ?? undefined} checked={row.primaryKey} onChange={() => change({ type: "toggle-primary-key", target: row.target })} />{row.primaryKeyLock && <small>{row.primaryKeyLock}</small>}</td>
+            <td>{!row.selected ? "—" : <>{
+              row.control === "auto" ? <span>{row.target} <small className="auto-mark">自动匹配</small></span>
+              /* 表还不存在时没有列清单可挑，这一格里打的名字就是建表语句里的列名。 */
+              : row.control === "new" ? <span className="new-target-field"><input aria-label={`${row.source} 的目标列名`} aria-invalid={row.problem ? true : undefined} value={row.target} spellCheck={false} onChange={(event) => change({ type: "rename-target", source: row.source, target: event.target.value })} /><small className="new-mark">将新建</small></span>
+              : <select aria-invalid={row.problem ? true : undefined} value={row.target} onChange={(event) => change({ type: "rename-target", source: row.source, target: event.target.value })}><option value="">请选择</option>{draft.targetColumns.map((column) => <option key={column.name}>{column.name}</option>)}</select>
+            }{row.problem && <small>{row.problem}</small>}</>}</td>
+            <td><input type="checkbox" disabled={!row.selected || row.target === "" || row.primaryKeyLock !== null} title={!row.selected ? "先勾选这一列" : row.target === "" ? "先选择目标列" : row.primaryKeyLock ?? undefined} checked={row.primaryKey} onChange={() => change({ type: "toggle-primary-key", target: row.target })} />{row.primaryKeyLock && <small className="lock-note">{row.primaryKeyLock}</small>}</td>
             <td><button className="icon-button is-danger" type="button" title={`删除列 ${row.source}`} aria-label={`删除列 ${row.source}`} onClick={() => change({ type: "remove-column", source: row.source })}><Trash2 size={15} /></button></td>
           </tr>)}
         </tbody></table></div>
@@ -733,7 +828,7 @@ function StepBody({
     return <section className="wizard-step">
       <header><h1>过滤与验证</h1><p>检查最终查询与样例数据，并判断是否需要补充 WHERE 条件。</p></header>
       {model.whereEditable ? <div className="where-clause-editor"><HighlightedSqlInput value={model.where} placeholder="STATUS = 'ACTIVE' AND CREATED_AT >= DATE '2026-01-01'" label="WHERE 条件" rows={5} onChange={(clause) => change({ type: "where", clause })} /></div> : <div className="wizard-readonly">自定义 SQL 的过滤条件直接写在左侧 SQL 中。</div>}
-      <section className="generated-sql"><header><div><strong>构建 SQL</strong><span>实际执行的源端查询</span></div></header>{sqlError ? <div className="form-error">{sqlError}</div> : sql ? <pre className="ddl-output">{sql.source_sql}</pre> : <p className="spec-empty">正在生成最终查询。</p>}</section>
+      <section className="generated-sql"><header><div><strong>构建 SQL</strong><span>实际执行的源端查询</span></div></header>{sqlError ? <div className="form-error">{sqlError}</div> : sql ? <pre className="ddl-output"><HighlightedSql sql={sql.source_sql} /></pre> : <p className="spec-empty">正在生成最终查询。</p>}</section>
       <section className="preview-panel">
         <header><div><strong>数据预览</strong><span>使用上方最终查询读取源端数据</span></div><button className="button" type="button" disabled={busy === "preview"} onClick={loadPreview}>{busy === "preview" ? <LoaderCircle className="is-spinning" size={15} /> : null}预览前 10 条</button></header>
         {model.preview.value ? <PreviewData preview={model.preview.value} /> : <p className="spec-empty">点击按钮后读取真实数据；修改查询条件后需重新预览。</p>}
@@ -743,10 +838,13 @@ function StepBody({
   }
   if (model.step === 3) {
     const result = model.check.value;
+    // 表根本不存在时，findings 会是「每一列都缺」——那不是一张要逐条读的清单，
+    // 那是一句话：这张表还没建。这一档只摆建表语句（UX 评审 P1-4）。
+    const missing = !draft.targetTableExists && draft.spec.target_table.trim() !== "";
     return <section className="wizard-step">
       <header><h1>目标表检查</h1><p>系统会核对列、类型、长度与主键，请根据检查结果判断是否需要调整目标表。</p></header>
       <div className="target-check-toolbar">
-        <strong>{busy === "check" ? "正在检查目标表" : result?.ok ? "目标表检查通过" : "目标表需要处理"}</strong>
+        <strong>{busy === "check" ? "正在检查目标表" : missing ? "目标表尚不存在" : result?.ok ? "目标表检查通过" : "目标表需要处理"}</strong>
         <button className="button" type="button" disabled={busy === "check" || busy === "target"} onClick={loadCheck}>
           <RefreshCw className={busy === "check" ? "is-spinning" : ""} size={15} />重新检查
         </button>
@@ -754,16 +852,17 @@ function StepBody({
       {checkError !== null && <div className="form-error" role="alert">{checkError}</div>}
       {model.check.state === "stale" && <div className="form-error" role="alert">映射或主键已变化，请重新检查目标表。</div>}
       {model.check.state === "none" && busy !== "check" && checkError === null && <p className="wizard-empty">等待目标表元数据与字段映射就绪。</p>}
+      {missing && <p className="wizard-placeholder"><strong>{draft.spec.target_table} 在目标库里还没有</strong>用下面这条语句建好它，再点「重新检查」。产品不会替你建表。</p>}
       {result !== null && !result.ok && <>
-        <div className="target-check-findings">
+        {!missing && <div className="target-check-findings">
           {result.findings.map((finding, index) => <article key={`${finding.kind}-${finding.column ?? "table"}-${index}`}>
             <header><strong>{finding.column ?? "目标表"}</strong><span>{finding.message}</span></header>
             <dl><div><dt>需要</dt><dd>{finding.expected}</dd></div><div><dt>当前</dt><dd>{finding.actual}</dd></div></dl>
           </article>)}
-        </div>
+        </div>}
         {result.suggested_ddl !== null && <section className="generated-sql target-check-ddl">
-          <header><div><strong>建议建表语句</strong><span>完整 CREATE TABLE</span></div><button className="icon-button" type="button" title="复制建表语句" aria-label="复制建表语句" onClick={() => void navigator.clipboard.writeText(result.suggested_ddl ?? "")}><Copy size={15} /></button></header>
-          <pre className="ddl-output">{result.suggested_ddl}</pre>
+          <header><div><strong>{missing ? "建表语句" : "建议建表语句"}</strong><span>完整 CREATE TABLE</span></div><button className="icon-button" type="button" title="复制建表语句" aria-label="复制建表语句" onClick={() => void navigator.clipboard.writeText(result.suggested_ddl ?? "")}><Copy size={15} /></button></header>
+          <pre className="ddl-output"><HighlightedSql sql={result.suggested_ddl} /></pre>
         </section>}
       </>}
       <Blockers blockers={model.blockers} />
@@ -825,6 +924,36 @@ function ConfirmTargetCheckCell({
       {busy ? <LoaderCircle className="is-spinning" size={15} /> : <RefreshCw size={15} />}立即检查
     </button>
   </span>;
+}
+
+/**
+ * 自定义 SQL 下左栏那一格：**这条 SQL 取出来的结果列**（UX 评审 P1-9）。
+ *
+ * 按表取数时这一格是表树，自定义 SQL 下原来什么都没有——而右边勾列、改名、点主键时
+ * 反复要回头确认的，正好就是「这条 SQL 到底产出了哪些列、什么类型」。
+ */
+function ResultColumns({ columns, busy }: { columns: readonly BuilderColumn[]; busy: boolean }) {
+  if (columns.length === 0) {
+    return <p className="wizard-side-empty">{busy ? "正在识别结果列…" : "写好右边的 SQL 后，这里会列出它的结果列。"}</p>;
+  }
+  return <div className="result-columns">
+    <span className="result-columns-count">结果列 {columns.length}</span>
+    <ul>
+      {columns.map((column) => <li key={column.name}>
+        <span className="mono">{column.name}</span>
+        <small>{column.data_type}</small>
+      </li>)}
+    </ul>
+  </div>;
+}
+
+/** 只读 SQL 的高亮：`.ddl-output` 与最终查询原来是纯文本，而令牌早就备好了。 */
+function HighlightedSql({ sql }: { sql: string }) {
+  return <>{tokenize(sql).map((token, index) =>
+    token.kind === "whitespace" || token.kind === "word"
+      ? token.text
+      : <span className={`sql-t-${token.kind}`} key={index}>{token.text}</span>,
+  )}</>;
 }
 
 function PreviewData({ preview }: { preview: PreviewResult }) {
