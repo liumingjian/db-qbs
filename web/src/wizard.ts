@@ -946,6 +946,59 @@ export function previewIsFresh(draft: Draft): boolean {
 const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_$#]*$/;
 
 /**
+ * What the "choose the data" screen (#245's first slot) is still missing: a source
+ * to read from, and a target table to write to.
+ *
+ * This is not a second gate. Step 1 has exactly one gate, `canAdvance(draft, 1)`,
+ * and this is its front half — split out rather than restated, so `canAdvance`
+ * reads it from here and the two cannot end up wording the same refusal
+ * differently or checking a narrower set. Its back half (at least one column, the
+ * mapping and primary-key rules) stays in `canAdvance`: the selection screen has
+ * no mapping table on it yet, so "not mapped to a target field" is not something
+ * the person standing on that screen can act on.
+ */
+function selectionProblems(draft: Draft): { kind: "error" | "todo"; message: string }[] {
+  const problems: { kind: "error" | "todo"; message: string }[] = [];
+  if (draft.fetchMode === "sql") {
+    if ((draft.spec.source_sql ?? "").trim() === "") {
+      problems.push({ kind: "todo", message: "自定义 SQL 不能为空" });
+    }
+    if (draft.spec.dblink !== undefined) {
+      problems.push({
+        kind: "error",
+        message: "自定义 SQL 已包含源端查询路径，不能同时设置 dblink",
+      });
+    }
+  } else {
+    if (draft.spec.owner === "" || draft.spec.table === "") {
+      problems.push({ kind: "todo", message: "请先选一张源表" });
+    } else if (!IDENTIFIER.test(draft.spec.owner) || !IDENTIFIER.test(draft.spec.table)) {
+      problems.push({ kind: "error", message: "源表名必须是未加引号的 Oracle 标识符" });
+    }
+  }
+  if (draft.spec.target_table.trim() === "") {
+    problems.push({ kind: "todo", message: "请先选目标表——字段映射要对着它才有意义" });
+  }
+  return problems;
+}
+
+/**
+ * The first reason the "choose the data" screen cannot be left, or `null`.
+ *
+ * `null` also answers "is this draft's data chosen yet?", which is how the wizard
+ * decides whether to open on the selection screen or straight on the mapping step.
+ *
+ * That screen is the component's own state — `Step` is still 1-4 and #245 changed
+ * none of it — but **whether it can be left is a rule about the draft**, so it
+ * lives here. A rule inside a component is a rule nobody can test in this project,
+ * and this one had already drifted: it was a hand-written copy of `canAdvance`'s
+ * step-1 gate with different wording and two checks missing.
+ */
+export function selectionBlocker(draft: Draft): string | null {
+  return selectionProblems(draft)[0]?.message ?? null;
+}
+
+/**
  * Why the next step is out of reach. Empty means it is reachable.
  *
  * Every reason that can be pinned to a column is, because "duplicate target
@@ -961,22 +1014,9 @@ export function canAdvance(draft: Draft, step: Step): Blocker[] {
     blockers.push({ step, kind: "todo", column, message });
 
   if (step === 1) {
-    if (draft.fetchMode === "sql") {
-      if ((draft.spec.source_sql ?? "").trim() === "") {
-        todo("自定义 SQL 不能为空");
-      }
-      if (draft.spec.dblink !== undefined) {
-        at("自定义 SQL 已包含源端查询路径，不能同时设置 dblink");
-      }
-    } else {
-      if (draft.spec.owner === "" || draft.spec.table === "") {
-        todo("请先选一张源表");
-      } else if (!IDENTIFIER.test(draft.spec.owner) || !IDENTIFIER.test(draft.spec.table)) {
-        at("源表名必须是未加引号的 Oracle 标识符");
-      }
-    }
-    if (draft.spec.target_table.trim() === "") {
-      todo("请先选目标表——字段映射要对着它才有意义");
+    for (const problem of selectionProblems(draft)) {
+      if (problem.kind === "error") at(problem.message);
+      else todo(problem.message);
     }
     if (draft.spec.columns.length === 0) {
       todo("至少要选一列");
