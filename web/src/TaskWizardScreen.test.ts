@@ -74,9 +74,11 @@ describe("the mapping step UI", () => {
   });
 
   it("puts the fetch mode first and marks the current rail step", () => {
-    const first = renderWizard(openNew(SOURCE, TARGET));
-    expect(first.indexOf('class="wizard-mode"')).toBeLessThan(
-      first.indexOf('class="wizard-context-scroll"'),
+    // 量的是「先说从哪儿取数、再给上下文」这个顺序。挑第 2 步的渲染态来量：
+    // 第 1 步要占满全宽、左栏上下文根本不出现，在那儿比先后只会拿到 -1。
+    const onMapping = renderWizard({ ...mappingDraft(), step: 2 });
+    expect(onMapping.indexOf('class="wizard-mode"')).toBeLessThan(
+      onMapping.indexOf('class="wizard-context-scroll"'),
     );
 
     for (const step of [1, 2, 3, 4] as Draft["step"][]) {
