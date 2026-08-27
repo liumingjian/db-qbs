@@ -637,26 +637,41 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .ddl-output { max-height: 280px; overflow: auto; margin: 0; padding: 12px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--mute-bg); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ---------------------------------------------------------------- 新建导入向导 */
- /* 左栏宽度**跟着视口走**。写死 300px 时，1366 上勉强够，2560 上还是 300——
-    源端数据源那一格（「核心库（Oracle 11g）· 10.30.0.5:1521/ORCL」）被截在半路，
-    两棵树各自开一条内滚动条，整栏看着又挤又碎。22vw 夹在 300–420 之间：
-    1366 → 300，1920 → 422→420，2560 → 420。 */
-.task-wizard { height: calc(100vh - var(--topbar-h)); min-height: 560px; display: grid; grid-template-columns: clamp(300px, 22vw, 420px) minmax(0, 1fr); overflow: hidden; background: var(--panel); }
+ /* 向导有**两种外壳**（#245）。
+    第 1 步「选择数据」占满主区全宽：源端与目标端左右对称两栏，左栏根本不出现。
+    选完之后左栏才回来，而且只剩步骤条 + 一小块只读摘要——宽度和内容是一起定的，
+    摘要塞得进 200px 正因为它没有任何表单控件。
+    宽度仍旧**跟着视口走**：写死 300px 时 1366 上勉强够，2560 上还是 300，那一格
+    （「核心库（Oracle 11g）· 10.30.0.5:1521/ORCL」）被截在半路。现在那些内容全搬去了
+    第 1 步的两栏里，这一栏因此从 clamp(300px, 22vw, 420px) 收到 14vw 那一档。 */
+.task-wizard { height: calc(100vh - var(--topbar-h)); min-height: 560px; display: grid; overflow: hidden; background: var(--panel); }
+.task-wizard.is-selection { grid-template-columns: minmax(0, 1fr); }
+.task-wizard.is-steps { grid-template-columns: clamp(200px, 14vw, 260px) minmax(0, 1fr); }
 .wizard-context { min-width: 0; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--line); background: var(--mute-bg); }
 .wizard-context > header { height: 48px; flex: none; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; border-bottom: 1px solid var(--line); }
-.wizard-mode { flex: none; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 12px 12px 0; }
-.wizard-mode button { height: var(--ctl-h); border: 1px solid var(--line-strong); background: var(--panel); color: var(--dim); cursor: pointer; }
+.wizard-context > header strong { font-size: var(--size-meta); font-weight: var(--weight-em); }
+/* 取数方式搬进了全宽的第 1 步，不再顶着左栏的宽度平分两格：按内容排，靠左。 */
+.wizard-mode { flex: none; display: flex; align-items: center; }
+.wizard-mode button { height: var(--ctl-h); padding: 0 clamp(14px, 1.4vw, 28px); border: 1px solid var(--line-strong); background: var(--panel); color: var(--dim); font: inherit; cursor: pointer; }
 .wizard-mode button + button { margin-left: -1px; }
 .wizard-mode button.is-active { position: relative; border-color: var(--brand); background: var(--brand-dim); color: var(--brand); font-weight: var(--weight-em); }
-/* 内边距从滚动容器搬到每一段自己身上：原来 `.wizard-context-scroll` 吃 12px、段落自己
-   padding-inline 为 0，于是段间那道 border-top 两端各缩进 12px，整栏的横线一条都不到边——
-   「凌乱和不规则」有一半是这个。现在线横贯整栏，段落内容仍然缩进 12px。 */
-.wizard-context-scroll { min-height: 0; flex: 1; overflow: auto; padding: 0; }
-.wizard-context-section { display: flex; flex-direction: column; gap: 9px; padding: 12px; border-top: 1px solid var(--line); }
-.wizard-context-section:first-child { border-top: 0; }
-.wizard-context-title { min-height: 28px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.wizard-context-title strong, .wizard-summary > strong { font-size: var(--size-meta); font-weight: var(--weight-em); }
-/* 自定义 SQL 编辑器已经搬进主区（P1-3），左栏这一格改放结果列。 */
+/* 摘要要贴在栏底，所以这一栏自己是竖 flex，滚动仍归它管。 */
+.wizard-context-scroll { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: auto; padding: 0; }
+
+/* ── 竖轨道 ─────────────────────────────────────────────────────
+   横轨道那一条只在第 1 步（全宽）用得上；收窄之后同样五格竖着排。 */
+.wizard-vrail { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 12px 8px; list-style: none; }
+.wizard-vrail li { min-width: 0; display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: var(--radius); color: var(--mute); }
+.wizard-vrail li > span { width: 24px; height: 24px; flex: none; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 50%; background: var(--panel); font-family: var(--font-num); font-size: var(--size-cap); }
+.wizard-vrail li > strong, .wizard-rail-back { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--size-meta); font-weight: var(--weight-em); }
+.wizard-vrail li.is-done, .wizard-vrail li.is-current { color: var(--brand); }
+.wizard-vrail li.is-done > span { border-color: var(--brand); color: var(--brand); }
+.wizard-vrail li.is-current { background: var(--brand-dim); }
+.wizard-vrail li.is-current > span { border-color: var(--brand); background: var(--brand); color: var(--on-solid); }
+/* 第 1 格是可点的：回去改源表 / 目标表 / SQL，不必倒着走一遍向导。 */
+.wizard-rail-back { padding: 0; border: 0; background: none; color: inherit; font-family: inherit; text-align: left; cursor: pointer; }
+.wizard-rail-back:hover { color: var(--brand); text-decoration: underline; }
+/* 自定义 SQL 编辑器住在第 1 步的源端卡片里，结果列是同一张卡的下半段。 */
 .wizard-side-empty { margin: 0; padding: 12px 0; color: var(--mute); font-size: var(--size-meta); line-height: var(--lh-prose); }
 .result-columns { display: flex; flex-direction: column; gap: 6px; }
 .result-columns-count { color: var(--mute); font-size: var(--size-cap); }
@@ -688,20 +703,16 @@ select, .page-size {
   background-repeat: no-repeat;
   padding-right: 26px;
 }
-/* 两棵树的高度**跟着视口走**。原来写死 230 / 180：1080 的屏上刚好，1440 的屏上
-   底下白空一大片，而树里恰恰还有看不见的表。26vh / 20vh 夹在两端之间——
-   768 高的笔记本上不塌（180 / 140 地板），1440 上各自长到 374 / 288。
-   不用 flex 去分剩余高度：那样两段会在内容比分到的高度还高时**溢出压住下一段**
-   （试过，源表那一列被目标端那一段盖住点不动了），整栏的滚动交给外层一条就够。 */
-.wizard-context .schema-tree { max-height: clamp(180px, 26vh, 420px); }
-.wizard-context .schema-tree.is-target { max-height: clamp(140px, 20vh, 320px); }
-
-/* 贴在栏底，不跟着上面的树飘。字号从 --size-cap 抬到 --size-meta：它是这一栏的结论，
-   原来比旁边任何一行都小。 */
-.wizard-summary { display: flex; flex-direction: column; gap: 5px; margin: 0 12px 12px; padding: 10px 12px; border-left: 3px solid var(--brand); border-radius: 0 var(--radius) var(--radius) 0; background: var(--mute-bg); color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-prose); }
-.wizard-summary > strong { color: var(--text); }
+/* 贴在栏底（`margin-top: auto`），不跟着上面的轨道飘。字号从 --size-cap 抬到 --size-meta：
+   它是这一栏的结论，原来比旁边任何一行都小。收窄到 200px 之后长表名只能换行——
+   `overflow-wrap: anywhere`，宁可折行也不横向截断。 */
+.wizard-summary { display: flex; flex-direction: column; gap: 5px; margin: auto 10px 12px; padding: 10px 12px; border-left: 3px solid var(--brand); border-radius: 0 var(--radius) var(--radius) 0; background: var(--panel); color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-prose); overflow-wrap: anywhere; }
+.wizard-summary-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.wizard-summary strong { color: var(--text); font-size: var(--size-meta); font-weight: var(--weight-em); }
+.wizard-summary-edit { flex: none; height: 24px; padding: 0 10px; font-size: var(--size-cap); }
 .wizard-main { min-width: 0; margin: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--panel); }
-.wizard-rail { min-height: 68px; flex: none; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; padding: 12px var(--pad-x); border-bottom: 1px solid var(--line); list-style: none; }
+/* 五格：`wizard.ts` 的四步，前面加上「选择数据」（#245）。 */
+.wizard-rail { min-height: 68px; flex: none; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin: 0; padding: 12px var(--pad-x); border-bottom: 1px solid var(--line); list-style: none; }
 .wizard-rail li { min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--mute); }
 .wizard-rail li::after { height: 1px; flex: 1; margin: 0 8px; background: var(--line-strong); content: ""; }
 .wizard-rail li:last-child::after { display: none; }
@@ -741,8 +752,37 @@ select, .page-size {
 .new-target-field input { min-width: 0; max-width: 420px; flex: 1; height: var(--ctl-h); padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); }
 .new-target-field input:focus { border-color: var(--brand); outline: 0; box-shadow: 0 0 0 2px var(--brand-dim); }
 .wizard-mapping .new-mark { display: inline; flex: none; margin: 0; color: var(--warn); white-space: nowrap; }
-/* 主区的 SQL 编辑卡：它是这一步的主角，不是一张附注卡。 */
-.wizard-sql-card .source-sql-editor { padding: 12px; }
+/* SQL 正文归第 1 步，映射步上只剩认一眼的只读回显（#245）。 */
+.wizard-sql-echo .ddl-output { max-height: 180px; overflow: auto; }
+.wizard-sql-echo > header .button { flex: none; height: 28px; padding: 0 12px; font-size: var(--size-meta); }
+
+/* ── 第 1 步「选择数据」：全宽双栏 ──────────────────────────────
+   超宽屏上不让一行拉到 3840px 那么长，也不留大片死白：居中一个跟着视口走的宽度。 */
+.wizard-selection { width: 100%; max-width: clamp(1040px, 94vw, 2400px); margin: 0 auto; }
+.wizard-selection-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+/* auto-fit：宽屏两栏对称，窄到放不下 380px 一栏时自己叠成一栏（1366 靠的就是这一条）。 */
+.wizard-panes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: clamp(12px, 1.4vw, 28px); align-items: stretch; }
+.wizard-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 10px; padding: clamp(12px, 1vw, 18px); border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.wizard-pane-head { min-height: 28px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.wizard-pane-head strong { font-size: var(--size-meta); font-weight: var(--weight-em); }
+/* 源端的控件行，结构与右栏的 `.wizard-select-label` 一致（说明 + 一行 --ctl-h 的控件），
+   两栏这一段因此等高，卡片的上沿才落在同一条线上。 */
+.wizard-pane-colbar { flex: none; display: flex; flex-direction: column; gap: 6px; color: var(--dim); font-size: var(--size-meta); }
+.wizard-pane-colbar-row { height: var(--ctl-h); display: flex; align-items: center; gap: 8px; }
+.wizard-pane-colbar-label { flex: none; }
+.wizard-pane-colbar-state { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--mute); }
+.wizard-pane-colbar .button { flex: none; height: 28px; padding: 0 10px; font-size: var(--size-meta); }
+.wizard-pane-colbar .refusal { flex: none; display: flex; flex-direction: row-reverse; align-items: center; gap: 8px; }
+.wizard-pane-colbar .refusal-reason { color: var(--mute); font-size: var(--size-cap); white-space: nowrap; }
+/* 卡片吃满两栏剩下的高度，下沿因此也在同一条线上。min-height 只管「至少多高」：
+   跟着视口走，不再是左栏时代那 220–300px 的窄条——树里恰恰还有看不见的表。 */
+.wizard-pane-card { min-height: clamp(280px, 46vh, 620px); flex: 1; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); }
+/* `.tree-search` 自带 flex: 1，在竖排的栏里会被拉高。 */
+.wizard-pane .tree-search { flex: none; }
+.wizard-pane-card .schema-tree, .wizard-pane-card .schema-tree.is-target { min-height: 0; flex: 1; max-height: none; overflow: auto; }
+.wizard-pane-result { min-height: 0; flex: none; display: flex; flex-direction: column; padding: 8px 10px; border-top: 1px solid var(--line); }
+.wizard-pane-result .result-columns ul { max-height: clamp(96px, 16vh, 220px); }
+.wizard-pane-result .wizard-side-empty { margin: 0; padding: 0; }
 /* 铺满之后「目标列」这一栏能宽到 800px；一个下拉拉那么长既不好点也不好看。 */
 .wizard-mapping select { width: 100%; min-width: 140px; max-width: 420px; }
 /* 同理，「同步」「主键」「删除」这三列装的是一个勾或一个图标，宽度是固定的；
@@ -944,7 +984,6 @@ select, .page-size {
   .topbar .breadcrumb, .topbar .environment { display: none; }
   .content { padding: 12px; }
   .content.is-wizard { padding: 0; }
-  .task-wizard { grid-template-columns: 240px minmax(0, 1fr); }
   .wizard-rail { padding-inline: 12px; }
   .wizard-rail li { gap: 4px; }
   .wizard-rail li::after { margin-inline: 4px; }
@@ -976,7 +1015,7 @@ select, .page-size {
 }
 
 @media (max-width: 620px) {
-  .task-wizard { height: calc(100vh - var(--topbar-h)); min-height: 560px; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(180px, 38%) minmax(0, 1fr); overflow: hidden; }
+  .task-wizard.is-steps { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(180px, 38%) minmax(0, 1fr); }
   .wizard-context { border-right: 0; border-bottom: 1px solid var(--line); }
   .wizard-main { min-height: 0; }
   .wizard-rail li > strong { display: none; }
