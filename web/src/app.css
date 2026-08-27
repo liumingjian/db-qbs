@@ -680,9 +680,6 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .result-columns li:last-child { border-bottom: 0; }
 .result-columns li .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 .result-columns li small { flex: none; color: var(--mute); font-family: var(--font-num); font-size: var(--size-cap); }
-/* 目标表还不存在时的那一行交底（P1-4）。是**事实陈述**不是错误：这条路是允许走的。 */
-.target-missing-note { display: flex; align-items: baseline; gap: 6px; margin: 0; color: var(--mute); font-size: var(--size-cap); line-height: var(--lh-prose); }
-.target-missing-note .field-badge { flex: none; margin-left: 0; }
 .wizard-select-label, .wizard-name { display: flex; flex-direction: column; gap: 6px; color: var(--dim); font-size: var(--size-meta); }
 .wizard-select-label select, .wizard-name input, .wizard-mapping select { height: var(--ctl-h); padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); }
 .wizard-select-label input, .wizard-select-label select { width: 100%; font-size: var(--size-body); }
@@ -774,6 +771,33 @@ select, .page-size {
 .wizard-pane-colbar .button { flex: none; height: 28px; padding: 0 10px; font-size: var(--size-meta); }
 .wizard-pane-colbar .refusal { flex: none; display: flex; flex-direction: row-reverse; align-items: center; gap: 8px; }
 .wizard-pane-colbar .refusal-reason { color: var(--mute); font-size: var(--size-cap); white-space: nowrap; }
+/* 刷新目标表这颗图标按钮也在控件行里（#249），别被 .tree-search 那类 flex: 1 拉宽。 */
+.wizard-pane-colbar .icon-button { flex: none; }
+/* ── 数据源行：数据源吃满剩余宽度，DBLINK 定宽跟在右边 ────────────
+   DBLINK 不存在时数据源自然吃满，行高恒为 --ctl-h；不新起一行，源端卡片就不会被顶下去。
+   反例（不要写）：把 DBLINK 做成 .wizard-pane 的又一个直接子元素——那是加了一整行，
+   源端卡片的上沿会比目标端低一个 --ctl-h 加一个 gap。 */
+.wizard-pane-dsrow { flex: none; display: flex; align-items: flex-end; gap: 10px; }
+.wizard-pane-ds-main { min-width: 0; flex: 1; }
+.wizard-pane-ds-dblink { flex: none; width: clamp(140px, 11vw, 190px); }
+/* 只有一个可选数据源时的只读回显：一行文本，高度与 <select> 同为 --ctl-h，两栏这一段
+   因此严格等高。不用 disabled 下拉（像坏了），也不留空占位块（读屏软件念到一段空洞）。 */
+.wizard-pane-ds-fixed { height: var(--ctl-h); min-width: 0; display: flex; align-items: center; margin: 0; overflow: hidden; color: var(--text); font-size: var(--size-meta); text-overflow: ellipsis; white-space: nowrap; }
+/* ── 目标表字段：徽标贴在框里当锚点 ──────────────────────────
+   「尚不存在」徽标绝对定位在输入框右端，不占独立行；解释那一段在两栏容器之外。
+   让出的 78px 只在徽标真的渲染时才留（`.has-badge`）——表存在时一个长表名不该白丢
+   一截可见宽度。 */
+.wizard-pane-target-input { position: relative; min-width: 0; flex: 1; display: block; }
+.wizard-pane-target-input input { width: 100%; height: var(--ctl-h); padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); }
+.wizard-pane-target-input input:focus { border-color: var(--brand); outline: 0; box-shadow: 0 0 0 2px var(--brand-dim); }
+.wizard-pane-target-input.has-badge input { padding-right: 78px; }
+/* 选择器写得比 `.field-badge.is-inline` 长一截是**故意的**：那一条把 margin-left 定成
+   6px，比这里短一个类名就轮不到这条，绝对定位的徽标会被那 6px 推着离右端偏一点。 */
+.wizard-pane-target-input .field-badge.wizard-pane-target-badge { position: absolute; top: 50%; right: 7px; margin-left: 0; transform: translateY(-50%); pointer-events: none; }
+/* 目标表还不存在时的那一行交底（P1-4）。是**事实陈述**不是错误：这条路是允许走的。
+   通栏一行，落在 .wizard-panes 之外：出现或消失都不动两栏的几何（#249）。 */
+.wizard-missing-note { margin: 0; padding: 9px 12px; border-left: 3px solid var(--warn-bd); background: var(--warn-bg); color: var(--warn); font-size: var(--size-meta); line-height: var(--lh-prose); }
+.wizard-missing-note strong { font-family: var(--font-num); font-weight: var(--weight-em); }
 /* 卡片吃满两栏剩下的高度，下沿因此也在同一条线上。min-height 只管「至少多高」：
    跟着视口走，不再是左栏时代那 220–300px 的窄条——树里恰恰还有看不见的表。 */
 .wizard-pane-card { min-height: clamp(280px, 46vh, 620px); flex: 1; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); }

@@ -92,7 +92,14 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
   const draftRef = useRef(initial);
   const [pending, setPending] = useState<PendingConfirmation | null>(null);
   const [tables, setTables] = useState<BuilderTable[]>([]);
-  const [dblinks, setDblinks] = useState<string[]>([]);
+  /*
+   * 清单要等一次请求才回来，但草稿里已经连着的那条现在就得摆出来：不然打开一份走
+   * DBLINK 的任务时，数据源行先渲染成「没有 DBLINK」的样子，清单到了再凭空多出一个
+   * 控件——条件出现的控件正是这套两栏布局的天敌（#249）。
+   */
+  const [dblinks, setDblinks] = useState<string[]>(
+    () => (initial.spec.dblink === undefined ? [] : [initial.spec.dblink]),
+  );
   const [targetTables, setTargetTables] = useState<string[]>([]);
   const [targetMetadataKey, setTargetMetadataKey] = useState<string | null>(null);
   const [sourceFilter, setSourceFilter] = useState("");
@@ -114,6 +121,13 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
   const headingRef = useRef<HTMLHeadingElement | null>(null);
   const lastStep = useRef(initial.step);
   const [announcement, setAnnouncement] = useState("");
+  /*
+   * 缺表提示搬到了两栏容器之外的通栏一行（#249），目标表输入框靠 aria-describedby
+   * 指过去——那段话因此需要一个稳定的 id，不能再是输入框旁边匿名的一句。
+   * 标签也随之从「包着输入框」变成 htmlFor，所以输入框自己也要一个 id。
+   */
+  const targetMissingNoteId = useId();
+  const targetTableInputId = useId();
   const model = view(draft);
   const advanceBlocked = model.step.blockers.length > 0;
   /** 第 1 步走不下去的理由，或者 `null`。 */
@@ -610,6 +624,29 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
   const targetTableMissing =
     draft.spec.target_table.trim() !== "" && !draft.targetTableExists;
 
+  /*
+   * 数据源行两侧同进同退（#249）。条件出现的行是这套两栏布局唯一的天敌：一侧多渲染
+   * 一行，两栏当场差出一个 --ctl-h 加一个 gap。
+   *
+   * 所以「有没有这一行」由两侧合起来定，「这一行里放什么」才各自定：可选项多于一个
+   * 给下拉，只有一个（或这一侧压根没拿到清单）给标签 + 一行只读文本，两者同高。
+   * 不用 disabled 下拉——那看着像坏了；也不留空占位块——那是给读屏软件的一段空洞。
+   *
+   * 两侧都空是另一回事：那说明压根没有部署信息（没登录、清单还没到），不是「只有一个
+   * 数据源」，此时两侧一起不渲染，仍旧是齐的。
+   */
+  const showDatasourceRow = sourceOptions.length > 0 || targetOptions.length > 0;
+  const sourcePicksDatasource = sourceOptions.length > 1;
+  const targetPicksDatasource = targetOptions.length > 1;
+  function boundLabel(
+    options: readonly DatasourceOption[],
+    datasourceId: string,
+    fallbackName: string,
+  ): string {
+    const bound = options.find((candidate) => candidate.datasource_id === datasourceId);
+    return bound === undefined ? fallbackName : `${bound.name} · ${bound.connection}`;
+  }
+
   function selectTargetTable(table: string) {
     const alreadySelected = draftRef.current.spec.target_table === table;
     requestChange({ type: "target-table", table });
@@ -760,29 +797,44 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
 
       <div className="wizard-panes">
         <section className="wizard-pane" aria-label="源端">
+          {/* 表头只留「源端」：名字由下面的数据源行统一负责，不再重复一遍（#249）。 */}
           <header className="wizard-pane-head">
-            <strong>源端 · {model.context.sourceName}</strong>
+            <strong>源端</strong>
           </header>
           {/* 新建时也给（UX 评审 P1-10）：这两个下拉原来只在编辑态出现，于是新建路上
               选错了源库只能退回去从头再来一遍。改动本身有清空规则守着（Rule 1 / Rule 3），
               真会丢东西时向导自己会拦一道。 */}
-          {sourceOptions.length > 0 && (
-            <label className="wizard-select-label">源端数据源
-              <select value={draft.source.datasource_id} onChange={(event) => {
-                const option = sourceOptions.find((candidate) => candidate.datasource_id === event.target.value);
-                if (option !== undefined) requestChange({ type: "source-datasource", datasource: option });
-              }}>
-                {sourceOptions.map((option) => <option key={option.datasource_id} value={option.datasource_id}>{option.name} · {option.connection}</option>)}
-              </select>
-            </label>
-          )}
-          {draft.fetchMode === "table" && dblinks.length > 0 && (
-            <label className="wizard-select-label">DBLINK
-              <select value={draft.spec.dblink ?? ""} onChange={(event) => requestChange({ type: "dblink", dblink: event.target.value })}>
-                <option value="">本地库</option>
-                {dblinks.map((dblink) => <option key={dblink}>{dblink}</option>)}
-              </select>
-            </label>
+          {showDatasourceRow && (
+            /* DBLINK 住在数据源这一行里（#249）：数据源吃满剩余宽度，DBLINK 定宽跟在
+               右边，没有 DBLINK 时数据源自然吃满，行高恒为 --ctl-h。
+               反例（不要写）：把 DBLINK 做成源端栏的又一个直接子元素——那是凭数据多出
+               一整行，源端卡片的上沿会比目标端低一截，正是这次要修的病。 */
+            <div className="wizard-pane-dsrow">
+              {sourcePicksDatasource ? (
+                <label className="wizard-select-label wizard-pane-ds-main">源端数据源
+                  <select value={draft.source.datasource_id} onChange={(event) => {
+                    const option = sourceOptions.find((candidate) => candidate.datasource_id === event.target.value);
+                    if (option !== undefined) requestChange({ type: "source-datasource", datasource: option });
+                  }}>
+                    {sourceOptions.map((option) => <option key={option.datasource_id} value={option.datasource_id}>{option.name} · {option.connection}</option>)}
+                  </select>
+                </label>
+              ) : (
+                <div className="wizard-select-label wizard-pane-ds-main">源端数据源
+                  <p className="wizard-pane-ds-fixed">{boundLabel(sourceOptions, draft.source.datasource_id, model.context.sourceName)}</p>
+                </div>
+              )}
+              {/* 仍旧走 `requestChange({ type: "dblink" })`：换 DBLINK 会清掉源表与映射
+                  （`wizard.ts` 的清空规则 2），确认框由那条规则推出来，屏幕不自己判断。 */}
+              {draft.fetchMode === "table" && dblinks.length > 0 && (
+                <label className="wizard-select-label wizard-pane-ds-dblink">DBLINK
+                  <select value={draft.spec.dblink ?? ""} onChange={(event) => requestChange({ type: "dblink", dblink: event.target.value })}>
+                    <option value="">本地库</option>
+                    {dblinks.map((dblink) => <option key={dblink}>{dblink}</option>)}
+                  </select>
+                </label>
+              )}
+            </div>
           )}
           {sourceColbar}
           {sourceCard}
@@ -790,48 +842,65 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
 
         <section className="wizard-pane" aria-label="目标端">
           <header className="wizard-pane-head">
-            <strong>目标端 · {model.context.targetName}</strong>
-            {/* 刷新**不再绑在「已经选了表」上**（UX 评审 P1-4）：在别处刚建完表回来刷一下
-                清单，正是没选表的时候最需要的动作。选了表就顺带把它的列也重读一遍。 */}
-            {/* 「正在刷新」是**按不动的理由**，挂在 title 上等于永远不显示（#238）：
-                按钮此刻正是禁用的。剩下那句是按得动时的提示，留在 title 上没问题。 */}
-            <Refusable reason={busy === "target" ? "正在刷新" : null}>{(describedBy) => (
-              <button className="icon-button" type="button" disabled={busy === "target"} title={busy === "target" ? undefined : draft.spec.target_table === "" ? "刷新目标表清单" : "刷新目标表清单与目标列"} aria-label="刷新目标表" aria-describedby={describedBy} onClick={refreshTarget}>
-                <RefreshCw className={busy === "target" ? "is-spinning" : ""} size={ICON.sm} />
-              </button>
-            )}</Refusable>
+            <strong>目标端</strong>
           </header>
-          {targetOptions.length > 0 && (
-            <label className="wizard-select-label">目标端数据源
-              <select value={draft.target.datasource_id} onChange={(event) => {
-                const option = targetOptions.find((candidate) => candidate.datasource_id === event.target.value);
-                if (option !== undefined) requestChange({
-                  type: "target-datasource",
-                  datasource: option,
-                  online: option.agentStatus === "online",
-                });
-              }}>
-                {targetOptions.map((option) => <option key={option.datasource_id} value={option.datasource_id}>{option.name} · {option.connection}</option>)}
-              </select>
-            </label>
+          {/* 数据源行同进同退：右栏走同一个容器、同一套条件，两栏这一段因此严格同高。 */}
+          {showDatasourceRow && (
+            <div className="wizard-pane-dsrow">
+              {targetPicksDatasource ? (
+                <label className="wizard-select-label wizard-pane-ds-main">目标端数据源
+                  <select value={draft.target.datasource_id} onChange={(event) => {
+                    const option = targetOptions.find((candidate) => candidate.datasource_id === event.target.value);
+                    if (option !== undefined) requestChange({
+                      type: "target-datasource",
+                      datasource: option,
+                      online: option.agentStatus === "online",
+                    });
+                  }}>
+                    {targetOptions.map((option) => <option key={option.datasource_id} value={option.datasource_id}>{option.name} · {option.connection}</option>)}
+                  </select>
+                </label>
+              ) : (
+                <div className="wizard-select-label wizard-pane-ds-main">目标端数据源
+                  <p className="wizard-pane-ds-fixed">{boundLabel(targetOptions, draft.target.datasource_id, model.context.targetName)}</p>
+                </div>
+              )}
+            </div>
           )}
-          {/* 目标表可以**直接打字**，不只能从清单里挑（UX 评审 P1-4）。
-              打进一个还不存在的名字是正当用法：第 4 步会给出完整的 CREATE TABLE，
-              自己执行完再回来刷新。产品不替人建表这条边界没动（CONTEXT.md）。 */}
-          <label className="wizard-select-label">目标表
-            <input
-              value={draft.spec.target_table}
-              placeholder="从下面挑一张，或直接输入表名"
-              spellCheck={false}
-              onChange={(event) => requestChange({ type: "target-table", table: event.target.value })}
-            />
-          </label>
-          {targetTableMissing && (
-            <p className="target-missing-note">
-              <span className="field-badge is-inline">尚不存在</span>
-              这张表目标库里还没有。第 4 步会给出建表语句，运行前需要你自己执行。
-            </p>
-          )}
+          {/* 目标端的控件行：与源端的控件行同结构同高（说明 + 一行 --ctl-h 的控件），
+              刷新目标表这颗按钮从面板表头搬到了这里（#249）——刷新动作要和它刷新的那个
+              状态在同一行，原来它挂在表头里，离目标表清单隔着一整段。
+              目标表可以**直接打字**，不只能从清单里挑（UX 评审 P1-4）：打进一个还不存在
+              的名字是正当用法，第 4 步会给出完整的 CREATE TABLE，自己执行完再回来刷新。
+              产品不替人建表这条边界没动（CONTEXT.md）。 */}
+          <div className="wizard-pane-colbar">
+            <label className="wizard-pane-colbar-label" htmlFor={targetTableInputId}>目标表</label>
+            <div className="wizard-pane-colbar-row">
+              {/* 「尚不存在」徽标贴在输入框右端当锚点，绝对定位、不占独立行；解释那一段
+                  在两栏容器之外，由 aria-describedby 连过去。留出的 78px 只在徽标真的
+                  渲染时才让——表存在时长表名不该白丢一截字段宽度。 */}
+              <span className={targetTableMissing ? "wizard-pane-target-input has-badge" : "wizard-pane-target-input"}>
+                <input
+                  id={targetTableInputId}
+                  value={draft.spec.target_table}
+                  placeholder="从下面挑一张，或直接输入表名"
+                  spellCheck={false}
+                  aria-describedby={targetTableMissing ? targetMissingNoteId : undefined}
+                  onChange={(event) => requestChange({ type: "target-table", table: event.target.value })}
+                />
+                {targetTableMissing && <span className="field-badge is-inline wizard-pane-target-badge">尚不存在</span>}
+              </span>
+              {/* 刷新**不再绑在「已经选了表」上**（UX 评审 P1-4）：在别处刚建完表回来刷一下
+                  清单，正是没选表的时候最需要的动作。选了表就顺带把它的列也重读一遍。 */}
+              {/* 「正在刷新」是**按不动的理由**，挂在 title 上等于永远不显示（#238）：
+                  按钮此刻正是禁用的。剩下那句是按得动时的提示，留在 title 上没问题。 */}
+              <Refusable reason={busy === "target" ? "正在刷新" : null}>{(describedBy) => (
+                <button className="icon-button" type="button" disabled={busy === "target"} title={busy === "target" ? undefined : draft.spec.target_table === "" ? "刷新目标表清单" : "刷新目标表清单与目标列"} aria-label="刷新目标表" aria-describedby={describedBy} onClick={refreshTarget}>
+                  <RefreshCw className={busy === "target" ? "is-spinning" : ""} size={ICON.sm} />
+                </button>
+              )}</Refusable>
+            </div>
+          </div>
           <div className="wizard-pane-card">
             <label className="tree-search wizard-pane-card-head">
               <Search size={ICON.sm} aria-hidden="true" />
@@ -855,6 +924,16 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
           </div>
         </section>
       </div>
+
+      {/* 通栏一行，落在 `.wizard-panes` **之外**（#249）：它出现或消失都不再动两栏的
+          几何——原来它挤在目标端控件行与卡片之间，一命中就把目标端的卡片往下推两行
+          中文的高度，两栏当场不齐。
+          也不收进 title：#238 立的规矩是理由要是看得见的一行字。 */}
+      {targetTableMissing && (
+        <p className="wizard-missing-note" id={targetMissingNoteId}>
+          <strong>{draft.spec.target_table}</strong> 这张表目标库里还没有。第 4 步会给出建表语句，运行前需要你自己执行。
+        </p>
+      )}
     </section>
   );
 
