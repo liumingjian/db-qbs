@@ -798,14 +798,56 @@ select, .page-size {
    通栏一行，落在 .wizard-panes 之外：出现或消失都不动两栏的几何（#249）。 */
 .wizard-missing-note { margin: 0; padding: 9px 12px; border-left: 3px solid var(--warn-bd); background: var(--warn-bg); color: var(--warn); font-size: var(--size-meta); line-height: var(--lh-prose); }
 .wizard-missing-note strong { font-family: var(--font-num); font-weight: var(--weight-em); }
-/* 卡片吃满两栏剩下的高度，下沿因此也在同一条线上。min-height 只管「至少多高」：
-   跟着视口走，不再是左栏时代那 220–300px 的窄条——树里恰恰还有看不见的表。 */
+/* ---------------------------------------------------------------- 两栏取数区的框线
+   **这套布局唯一的天敌是条件出现的行**：某一栏多出一段只在特定数据下才渲染的东西，
+   对齐当场就破，本次三处修补病根完全相同——DBLINK 另起一行、缺表提示挤在控件行与卡片
+   之间、只有一个数据源时整行消失（三处的按法见上面 `.wizard-pane-dsrow`、
+   `.wizard-pane-ds-fixed`、`.wizard-missing-note`）。
+
+   三条规矩，少一条两栏就不齐：
+
+   1. **一层框。** 边线只由 `.wizard-pane-card` 画一次。卡里的 SQL 输入框、源表树、
+      目标表清单、结果列一律交出自己的 border、border-radius 和内缩；SQL 工具条与两处
+      筛选框改成卡头——同高（`--ctl-h`）、同一条底线、同一块灰底。
+   2. **行对行。** 两栏都是「表头 / 数据源 / 控件行 / 卡片」四段，逐段同高，
+      两张卡片的上沿因此落在同一条线上。
+   3. **两栏等高、卡片吃满剩余高度。** `.wizard-panes` 的 align-items: stretch 让矮的
+      那一栏跟着高的那一栏长，卡片 flex: 1 把多出来的高度全吃掉，两张卡的下沿因此也在同
+      一条线上。卡片要有高度下限，免得只有两三张表时缩成一条缝；内容多的时候在卡内滚动
+      （卡片 overflow: hidden，滚的是里面那一段），不许把栏撑长——一栏被撑长，规矩 3 当场
+      失效，下沿又参差。
+
+   **「两层框」长什么样**（这一版之前就是这样，别再写回去）：源表树自己带一圈
+   `1px solid var(--line)`（`.schema-tree`），筛选框自己带一圈 `1px solid var(--line-strong)`
+   加圆角（`.tree-search`），外面再套一层卡片的边线——一栏里数得出三条竖线，两两相距
+   10–12px 的内缩，而且左右两栏内缩得还不一样宽（左栏是 textarea 的 12px，右栏是树的 10px）。
+   1440 的屏上并排看过去像四条没对齐的轨道，这正是「带高亮的 SQL 输入框」那一节里
+   `.where-clause-card` 当年被点名的同一种毛病。
+   还有一层容易漏掉的框：`.tree-search:focus-within` 的那圈 box-shadow。卡头不把它按掉，
+   光标一落进筛选框，第二个框就又长出来了。 */
 .wizard-pane-card { min-height: clamp(280px, 46vh, 620px); flex: 1; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); }
+/* 卡头：左栏是 SQL 工具条，右栏是筛选框，两者写在同一条规则里，是为了「同高、同底线、
+   同底色」这句话只有一处可改。工具条那一支把全屏择出去——那是浮层，一概不碰。 */
+.wizard-pane-card > .wizard-pane-card-head,
+.wizard-pane-card .source-sql-editor:not(.is-fullscreen) .sql-editor-toolbar { height: var(--ctl-h); flex: none; display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: var(--mute-bg); }
+.wizard-pane-card > .wizard-pane-card-head:focus-within { box-shadow: none; }
 /* `.tree-search` 自带 flex: 1，在竖排的栏里会被拉高。 */
 .wizard-pane .tree-search { flex: none; }
-.wizard-pane-card .schema-tree, .wizard-pane-card .schema-tree.is-target { min-height: 0; flex: 1; max-height: none; overflow: auto; }
+/* 编辑器交出内边距和自己那层框，高度整块归卡片管（`SqlEditor.tsx` 的 `visibleRows`
+   因此在面板里降为初始值，见那边的注释）。`resize: vertical` 一并去掉：手动把左栏拖高
+   一截，两栏的下沿当场错开，而下沿同线正是这一版要买的东西。
+   全屏那一档是 position: fixed 的浮层，尺寸由 inset 定，`:not(.is-fullscreen)` 把它择出去。 */
+.wizard-pane-card .source-sql-editor:not(.is-fullscreen) { min-height: 0; flex: 1; gap: 0; padding: 0; }
+.wizard-pane-card .sql-input-shell { min-height: 0; flex: 1; }
+.wizard-pane-card .source-sql-editor:not(.is-fullscreen) .sql-text-input { height: 100%; min-height: 0; border-color: transparent; border-radius: 0; resize: none; }
+.wizard-pane-card .source-sql-editor:not(.is-fullscreen) .sql-highlight { border-radius: 0; }
+/* 两棵树交出自己的框与圆角，在卡片剩下的高度里滚动。`height: auto` 是给 `.is-target`
+   那一档兜底的：它另有一个 max-height，不一起解掉的话卡片下半截会空出来。 */
+.wizard-pane-card .schema-tree, .wizard-pane-card .schema-tree.is-target { min-height: 0; flex: 1; height: auto; max-height: none; overflow: auto; border: 0; border-radius: 0; }
+/* 结果列是同一张卡的下半段——它是这条 SQL 的产物，另起一张卡只会把左栏拉得比右栏长。
+   只用一条内部分隔线隔开，清单本身也不留边框。 */
 .wizard-pane-result { min-height: 0; flex: none; display: flex; flex-direction: column; padding: 8px 10px; border-top: 1px solid var(--line); }
-.wizard-pane-result .result-columns ul { max-height: clamp(96px, 16vh, 220px); }
+.wizard-pane-result .result-columns ul { height: auto; max-height: clamp(96px, 16vh, 220px); border: 0; border-radius: 0; }
 .wizard-pane-result .wizard-side-empty { margin: 0; padding: 0; }
 /* 铺满之后「目标列」这一栏能宽到 800px；一个下拉拉那么长既不好点也不好看。 */
 .wizard-mapping select { width: 100%; min-width: 140px; max-width: 420px; }

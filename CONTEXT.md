@@ -430,3 +430,6 @@ gets paid off and when lives in the issue tracker, not here.
    a hard gate.
 9. **An upsert never deletes.** Rows removed at the source stay in the target table forever; see
    **Swap**.
+10. **The wizard's first-step two-pane geometry is a CSS-only invariant** — one row that renders only
+   for certain data breaks the alignment; the rules and the worked counter-example live in the
+   「两栏取数区的框线」 section of `web/src/app.css`.
