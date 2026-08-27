@@ -116,8 +116,10 @@ describe("the mapping step UI", () => {
   });
 
   it("offers described datasource changes only while editing", () => {
+    // 数据源两行住在第 1 步「选择数据」里（#245），所以拿一份还没选完数据的草稿来渲染——
+    // 选完了的草稿开在映射步上，那一屏本来就没有这两行。
     const edit = renderToStaticMarkup(createElement(TaskWizardScreen, {
-      initial: { ...mappingDraft(), mode: "edit", taskId: "task-1" },
+      initial: { ...openNew(SOURCE, TARGET), mode: "edit", taskId: "task-1" },
       onCancel: () => undefined,
       onSubmit: async () => undefined,
       sourceOptions: [{ ...SOURCE, connection: "prod/orcl", agentName: "", agentStatus: null }],
@@ -127,7 +129,7 @@ describe("the mapping step UI", () => {
     expect(edit).toContain("生产 Oracle · prod/orcl");
     expect(edit).toContain("目标端数据源");
     expect(edit).toContain("报表 MySQL · report/mysql");
-    expect(renderWizard(mappingDraft())).not.toContain("源端数据源");
+    expect(renderWizard(openNew(SOURCE, TARGET))).not.toContain("源端数据源");
   });
 
   it("distinguishes settled rows, exposes deletion, and explains disabled controls", () => {
@@ -347,7 +349,8 @@ describe("leaving the wizard", () => {
     // 容器自己可聚焦（tabindex="-1"）：不然刚打开、还没按过 Tab 时焦点在 body 上，
     // Escape 派发的目标在容器外面，这条路要先按一下 Tab 才通。
     const html = renderWizard(openNew(SOURCE, TARGET));
-    expect(html).toContain('<section class="task-wizard" tabindex="-1"');
+    // class 上多了 is-selection / is-steps（#245），容器是哪一个仍旧看 task-wizard。
+    expect(html).toMatch(/<section class="task-wizard[^"]*" tabindex="-1"/);
   });
 
   it("does not explain a busy refresh in a tooltip on the button it disables", () => {
