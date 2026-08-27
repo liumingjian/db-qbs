@@ -1038,16 +1038,18 @@ select, .page-size {
    笔记本与台式机上。这一档只做一件事——把左右内边距收一收，让那张宽表少滚一点。 */
 @media (max-width: 1280px) {
   .content { padding: 12px; }
-  /* 左栏在这一档定宽 240px。改版前它就在（是 `.task-wizard` 上的那一条），#245 只是
-     把它挂到 `.is-steps` 上——选择屏根本没有左栏，不该被它改到。
-     不删掉改吃 clamp 的地板：1280 上 14vw 只有 179px，落到地板 200px，等于顺手把
-     「1280 断点下窄轨道再收一档」那件事做了，而那件事在 #245 的 Out of Scope 里。 */
-  .task-wizard.is-steps { grid-template-columns: 240px minmax(0, 1fr); }
   .kv { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
   .drawer { width: 680px; }
 }
 
 @media (max-width: 760px) {
+  /* 左栏在这一档定宽 240px。改版前这条就在这个块里（写在 `.task-wizard` 上），#245 只是
+     把它挂到 `.is-steps` 上——选择屏根本没有左栏，不该被它改到。
+     它属于 760 这一档，不是 1280：#245 说「1280 断点这次不动」，而「1280 断点下窄轨道
+     再收一档」明写在 Out of Scope 里，要先看真实内容在 1280 上的样子。往 1280 里补一条
+     `.task-wizard` 规则——哪怕是把轨道**放宽**回 240px——同样是动了那一档，一样越界。 */
+  .task-wizard.is-steps { grid-template-columns: 240px minmax(0, 1fr); }
+
   /* 登录页在窄屏上**只留卡片**：左半屏那段话在一部手机上会把输入框推到折叠线以下，
      而它是这一屏唯一要人动手的地方。版本号跟着宣传位一起走——它是「顺带看一眼」的信息。 */
   .login-screen { grid-template-columns: minmax(0, 1fr); justify-items: center; padding: 24px; }
