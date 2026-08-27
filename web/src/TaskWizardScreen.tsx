@@ -768,12 +768,6 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
             </div>
           </section>
 
-          <section className="wizard-summary">
-            <strong>当前选择</strong>
-            <span>{model.context.sourceLabel}</span>
-            <span>{model.context.targetTable}</span>
-            {model.context.summary.map((line) => <span key={line}>{line}</span>)}
-          </section>
         </div>
       </aside>
 
@@ -950,14 +944,14 @@ function StepBody({
   const model = view(draft).step;
   if (model.step === 1) {
     return <section className="wizard-step">
-      <header>{/* tabIndex={-1}：能用脚本聚焦，但不进 Tab 序（#239）。 */}<h1 ref={headingRef} tabIndex={-1}>选列与字段映射</h1><p>系统会先做同名匹配，请判断要搬哪些列，以及每一列应写到目标表的哪里。</p></header>
+      <header>{/* tabIndex={-1}：能用脚本聚焦，但不进 Tab 序（#239）。 */}<h1 ref={headingRef} tabIndex={-1}>选列与字段映射</h1></header>
       {draft.fetchMode === "sql" && (
         /* 编辑器住在这里，不在左栏（UX 评审 P1-3）。宽度是主区的宽度，高度 420px 起，
            带行号、软换行开关、格式化、全屏——这里的 SQL 基本都是粘过来的，粘进来第一件事
            是通读一遍确认粘对了。 */
         <section className="generated-sql wizard-sql-card">
           <header>
-            <div><strong>自定义 SQL</strong><span>这条语句就是发起时要执行的源端查询</span></div>
+            <div><strong>自定义 SQL</strong></div>
             {/* 理由原来挂在这颗**自己就是 `disabled`** 的按钮的 `title` 上，一个字都显示不出来
                 （#238）。跟底下那几颗一样，交给 `Refusable` 写成旁边的一行字。 */}
             <Refusable reason={(draft.spec.source_sql ?? "").trim() === "" ? "先写好 SQL" : busy === "columns" ? "正在刷新结果列" : null}>{(describedBy) => (
@@ -974,7 +968,7 @@ function StepBody({
           />
         </section>
       )}
-      {model.rows.length === 0 ? <p className="wizard-empty">{draft.fetchMode === "sql" ? "先写好上面的 SQL，系统会自动识别结果列。" : "先在左侧选择一张源表。"}</p> : (
+      {model.rows.length === 0 ? <p className="wizard-empty">{draft.fetchMode === "sql" ? "尚未识别结果列" : "未选择源表"}</p> : (
         <div className="table-wrap"><table className="data-grid wizard-mapping"><thead><tr><th>同步</th><th>源列</th><th>目标列</th><th>主键</th><th><span className="visually-hidden">操作</span></th></tr></thead><tbody>
           {model.rows.map((row) => <tr className={row.problem ? "is-problem" : ""} key={row.source}>
             <td><input type="checkbox" aria-label={`同步 ${row.source}`} checked={row.selected} onChange={() => change({ type: "toggle-column", source: row.source })} /></td>
@@ -999,12 +993,15 @@ function StepBody({
   }
   if (model.step === 2) {
     return <section className="wizard-step">
-      <header><h1 ref={headingRef} tabIndex={-1}>过滤与验证</h1><p>检查最终查询与样例数据，并判断是否需要补充 WHERE 条件。</p></header>
-      {model.whereEditable ? <div className="where-clause-editor"><HighlightedSqlInput value={model.where} placeholder="STATUS = 'ACTIVE' AND CREATED_AT >= DATE '2026-01-01'" label="WHERE 条件" rows={5} onChange={(clause) => change({ type: "where", clause })} /></div> : <div className="wizard-readonly">自定义 SQL 的过滤条件直接写在左侧 SQL 中。</div>}
-      <section className="generated-sql"><header><div><strong>构建 SQL</strong><span>实际执行的源端查询</span></div></header>{sqlError ? <div className="form-error">{sqlError}</div> : sql ? <pre className="ddl-output"><HighlightedSql sql={sql.source_sql} /></pre> : <p className="spec-empty">正在生成最终查询。</p>}</section>
+      <header><h1 ref={headingRef} tabIndex={-1}>过滤与验证</h1></header>
+      {/* 这一格原来是个没有边框的 padding 容器，于是它的文本框和下面「构建 SQL」的卡
+          边线各自差 12px。改成和邻居同规格的卡：表头把「这里只写条件、不写 WHERE」
+          这句原来只在 aria-label 里的话摆到明面上。 */}
+      {model.whereEditable ? <section className="where-clause-card"><header><div><strong>WHERE 条件</strong><span>只写条件本身，不用写 WHERE 关键字</span></div></header><div className="where-clause-editor"><HighlightedSqlInput value={model.where} placeholder="STATUS = 'ACTIVE' AND CREATED_AT >= DATE '2026-01-01'" label="WHERE 条件" rows={5} onChange={(clause) => change({ type: "where", clause })} /></div></section> : <div className="wizard-readonly">过滤条件写在自定义 SQL 中</div>}
+      <section className="generated-sql"><header><div><strong>构建 SQL</strong></div></header>{sqlError ? <div className="form-error">{sqlError}</div> : sql ? <pre className="ddl-output"><HighlightedSql sql={sql.source_sql} /></pre> : <p className="spec-empty">正在生成最终查询。</p>}</section>
       <section className="preview-panel">
-        <header><div><strong>数据预览</strong><span>使用上方最终查询读取源端数据</span></div><button className="button" type="button" disabled={busy === "preview"} onClick={loadPreview}>{busy === "preview" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : null}预览前 10 条</button></header>
-        {model.preview.value ? <PreviewData preview={model.preview.value} /> : <p className="spec-empty">点击按钮后读取真实数据；修改查询条件后需重新预览。</p>}
+        <header><div><strong>数据预览</strong></div><button className="button" type="button" disabled={busy === "preview"} onClick={loadPreview}>{busy === "preview" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : null}预览前 10 条</button></header>
+        {model.preview.value ? <PreviewData preview={model.preview.value} /> : <p className="spec-empty">尚未预览</p>}
       </section>
       <Blockers blockers={model.blockers} />
     </section>;
@@ -1015,7 +1012,7 @@ function StepBody({
     // 那是一句话：这张表还没建。这一档只摆建表语句（UX 评审 P1-4）。
     const missing = !draft.targetTableExists && draft.spec.target_table.trim() !== "";
     return <section className="wizard-step">
-      <header><h1 ref={headingRef} tabIndex={-1}>目标表检查</h1><p>系统会核对列、类型、长度与主键，请根据检查结果判断是否需要调整目标表。</p></header>
+      <header><h1 ref={headingRef} tabIndex={-1}>目标表检查</h1></header>
       <div className="target-check-toolbar">
         {/* 「目标表需要处理」原来是**兜底**：`result` 还是 null（一次都没查过）时
             也写这句，等于把「不知道」说成了「有问题」（UX 评审 P2）。 */}
@@ -1033,7 +1030,7 @@ function StepBody({
       {checkError !== null && <div className="form-error" role="alert">{checkError}</div>}
       {model.check.state === "stale" && <div className="form-error" role="alert">映射或主键已变化，请重新检查目标表。</div>}
       {model.check.state === "none" && busy !== "check" && checkError === null && <p className="wizard-empty">等待目标表元数据与字段映射就绪。</p>}
-      {missing && <p className="wizard-placeholder"><strong>{draft.spec.target_table} 在目标库里还没有</strong>用下面这条语句建好它，再点「重新检查」。产品不会替你建表。</p>}
+      {missing && <p className="wizard-placeholder"><strong>{draft.spec.target_table} 在目标库里还没有</strong>用下面这条语句建好它，再点「重新检查」。</p>}
       {result !== null && !result.ok && <>
         {!missing && <div className="target-check-findings">
           {result.findings.map((finding, index) => <article key={`${finding.kind}-${finding.column ?? "table"}-${index}`}>
@@ -1050,8 +1047,12 @@ function StepBody({
     </section>;
   }
   const confirmView = model.confirm;
+  /* 勾选之外的源列——**别处没有一处说过它们**。第 1 步是一张勾选表，看得见的是「勾了什么」；
+     没勾的那些只在这里被点名一次，而它们恰恰是跑完之后才想起来的那批。 */
+  const carried = new Set(confirmView.mappings.map((mapping) => mapping.source));
+  const dropped = draft.sourceColumns.filter((column) => !carried.has(column.name));
   return <section className="wizard-step">
-    <header><h1 ref={headingRef} tabIndex={-1}>确认并运行</h1><p>最后核对系统汇总的完整决定，并判断是否可以保存或开始导入。</p></header>
+    <header><h1 ref={headingRef} tabIndex={-1}>确认并运行</h1></header>
     <label className="wizard-name">任务名<input value={taskName(draft)} onChange={(event) => change({ type: "task-name", name: event.target.value })} /></label>
     <dl className="wizard-confirm-grid">
       <div><dt>源端</dt><dd>{confirmView.sourceLabel}</dd></div>
@@ -1059,12 +1060,12 @@ function StepBody({
       <div><dt>WHERE</dt><dd>{confirmView.where}</dd></div>
       <div><dt>主键</dt><dd>{confirmView.primaryKey.join(", ")}</dd></div>
       <div className="is-wide"><dt>字段映射</dt><dd>{confirmView.mappings.map((mapping) => <span className="mapping-chip" key={mapping.source}>{mapping.source} → {mapping.target}</span>)}</dd></div>
+      <div><dt>写入方式</dt><dd>按主键 upsert</dd></div>
+      {/* agent 离线原来要等点了「开始导入」才知道——那是最贵的一次发现。 */}
+      <div><dt>目标端 Agent</dt><dd><span className={draft.targetAgentOnline ? "confirm-check is-passed" : "confirm-check is-warn"}>{draft.targetAgentOnline ? "在线" : "离线"}</span></dd></div>
+      <div className="is-wide"><dt>不搬的列</dt><dd>{dropped.length === 0 ? <span className="confirm-none">源表所有列都会搬</span> : dropped.map((column) => <span className="mapping-chip is-dropped" key={column.name}>{column.name}</span>)}</dd></div>
       <div className="is-wide"><dt>目标表检查</dt><dd><ConfirmTargetCheckCell check={confirmView.targetCheck} busy={busy === "check"} onCheck={loadCheck} /></dd></div>
     </dl>
-    {confirmView.preview !== null && <section className="preview-panel">
-      <header><div><strong>数据预览</strong><span>最终确认的源端样例数据</span></div></header>
-      <PreviewData preview={confirmView.preview} />
-    </section>}
     <Blockers blockers={model.blockers} />
     {/* 写入语义的常驻交底（2026-08 UX 评审 P0-1）：这一步是「开始导入」前的最后一屏，
         而这个产品**只增量合并、不删**。不写清楚的话，第一次用的人会按「全量同步」去理解
@@ -1115,7 +1116,7 @@ function ConfirmTargetCheckCell({
  */
 function ResultColumns({ columns, busy }: { columns: readonly BuilderColumn[]; busy: boolean }) {
   if (columns.length === 0) {
-    return <p className="wizard-side-empty">{busy ? "正在识别结果列…" : "写好右边的 SQL 后，这里会列出它的结果列。"}</p>;
+    return <p className="wizard-side-empty">{busy ? "正在识别结果列…" : "尚未识别结果列"}</p>;
   }
   return <div className="result-columns">
     <span className="result-columns-count">结果列 {columns.length}</span>

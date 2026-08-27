@@ -266,7 +266,15 @@ describe("the preview step UI", () => {
     expect(html).toContain("9 ms");
   });
 
-  it("keeps the fresh preview visible on final confirmation", () => {
+  /**
+   * 最后一屏**不再重复数据预览**。
+   *
+   * 原来这一条叫 "keeps the fresh preview visible on final confirmation"，断言的是
+   * 第 3 步跑出来的样例数据要一路带到第 4 步。那个决定被推翻了：同一份预览在
+   * 「过滤与验证」看过一次，最后一屏再放一遍并不增加判断依据，反而把真正该被看见的
+   * 东西挤下去。这里改成守住新的约定——预览不在，而**不会搬过去的列**在。
+   */
+  it("drops the preview from final confirmation and names the columns left behind", () => {
     let draft = done(apply(mappingDraft(), { type: "toggle-primary-key", target: "ID" }));
     draft = done(apply(draft, { type: "advance" }));
     draft = done(apply(draft, {
@@ -286,9 +294,27 @@ describe("the preview step UI", () => {
     draft = done(apply(draft, { type: "advance" }));
 
     const html = renderWizard(draft);
-    expect(html).toContain("最终确认的源端样例数据");
-    expect(html).toContain("Alice");
-    expect(html).toContain("7 ms");
+    expect(html).not.toContain('class="preview-panel"');
+    expect(html).not.toContain("Alice");
+    /* 两列都勾着，所以这一格说的是「一列都没落下」。 */
+    expect(html).toContain("源表所有列都会搬");
+  });
+
+  it("names the unmapped source columns on final confirmation", () => {
+    let draft = done(apply(mappingDraft(), { type: "toggle-primary-key", target: "ID" }));
+    /* C_NAME 取消勾选：它不会过线，而在此之前没有任何一屏说过这件事。 */
+    draft = done(apply(draft, { type: "toggle-column", source: "C_NAME" }));
+    draft = done(apply(draft, { type: "advance" }));
+    draft = done(apply(draft, { type: "advance" }));
+    draft = done(apply(draft, {
+      type: "check-arrived",
+      check: { ok: true, findings: [], suggested_ddl: null },
+    }));
+    draft = done(apply(draft, { type: "advance" }));
+
+    const html = renderWizard(draft);
+    expect(html).toContain("不搬的列");
+    expect(html).toContain("C_NAME");
   });
 });
 

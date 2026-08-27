@@ -218,11 +218,6 @@ export function SqlEditorPanel({
         <FullscreenFocusTrap panel={panelRef} onExit={() => onFullscreen(false)} />
       )}
       <div className="sql-editor-toolbar">
-        {/* 卡片标题已经写着「自定义 SQL」，这里不再挂一个同名标签。 */}
-        <small className="spec-note">
-          读取列后可以只勾要搬的列。实际执行时会在这条 SQL 外层套一层投影，
-          只取勾选的列并改名成目标字段——没勾的列不会过线。
-        </small>
         <span className="sql-editor-tools">
           <button
             className={`button is-ghost ${wrapped ? "is-on" : ""}`}
