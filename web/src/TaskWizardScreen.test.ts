@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { BuilderColumn, TargetColumn } from "./api";
+import type { DatasourceOption } from "./entry";
 import { SqlEditorPanel } from "./SqlEditor";
 import { TaskEntryDialog } from "./TaskEntryDialog";
 import { TaskWizardScreen, WizardConfirmDialog } from "./TaskWizardScreen";
@@ -52,11 +53,33 @@ function mappingDraft(): Draft {
   }));
 }
 
-function renderWizard(draft: Draft): string {
+const SOURCE_OPTION = { ...SOURCE, connection: "prod/orcl", agentName: "", agentStatus: null } as const;
+const SOURCE_OPTION_2 = {
+  datasource_id: "ds-oracle-2", name: "备库 Oracle", connection: "standby/orcl", agentName: "", agentStatus: null,
+} as const;
+const TARGET_OPTION = {
+  ...TARGET, connection: "report/mysql", agentName: "sink-1", agentStatus: "online",
+} as const;
+const TARGET_OPTION_2 = {
+  datasource_id: "ds-mysql-2", name: "分析 MySQL", connection: "olap/mysql", agentName: "sink-2", agentStatus: "online",
+} as const;
+
+/**
+ * 唯一的渲染缝。数据源清单是可选的：不给就是「压根没拿到部署信息」，两侧的数据源行
+ * 一起不渲染——那与「恰好只有一个可选数据源」是两回事（#249）。
+ */
+function renderWizard(
+  draft: Draft,
+  options: {
+    sourceOptions?: readonly DatasourceOption[];
+    targetOptions?: readonly DatasourceOption[];
+  } = {},
+): string {
   return renderToStaticMarkup(createElement(TaskWizardScreen, {
     initial: draft,
     onCancel: () => undefined,
     onSubmit: async () => undefined,
+    ...options,
   }));
 }
 
@@ -138,6 +161,88 @@ describe("the mapping step UI", () => {
     expect(edit).toContain("目标端数据源");
     expect(edit).toContain("报表 MySQL · report/mysql");
     expect(renderWizard(openNew(SOURCE, TARGET))).not.toContain("源端数据源");
+  });
+
+  it("keeps DBLINK inside the source datasource row instead of a row of its own", () => {
+    // 多一整行就多一个 --ctl-h 加一个 gap，源端卡片的上沿当场比目标端低一截（#249）。
+    const html = renderWizard(
+      done(apply(openNew(SOURCE, TARGET), { type: "dblink", dblink: "FIN_LINK" })),
+      { sourceOptions: [SOURCE_OPTION, SOURCE_OPTION_2], targetOptions: [TARGET_OPTION] },
+    );
+    const rowStart = html.indexOf('<div class="wizard-pane-dsrow">');
+    const colbar = html.indexOf('class="wizard-pane-colbar"', rowStart);
+    // 先证明两个锚点都真的在，免得下面切出来的是一段空串（空串什么都「不包含」）。
+    expect(rowStart).toBeGreaterThanOrEqual(0);
+    expect(colbar).toBeGreaterThan(rowStart);
+    const row = html.slice(rowStart, colbar);
+    expect(row).toContain("源端数据源");
+    expect(row).toContain("DBLINK");
+    expect(row).toContain("FIN_LINK");
+    // 没有 DBLINK 的库不多这一行，也不多这一个控件。
+    expect(renderWizard(openNew(SOURCE, TARGET), { sourceOptions: [SOURCE_OPTION] }))
+      .not.toContain("DBLINK");
+  });
+
+  it("anchors the missing-table badge at the field but explains it outside the two panes", () => {
+    const html = renderWizard({
+      ...done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t_customer" })),
+      targetTableExists: false,
+    });
+    // 徽标在字段旁：它就在目标表输入框那个定位容器里。切之前先证明两个锚点都真的在，
+    // 免得切出来的是一段空串——空串什么都「不包含」，那种断言是空转的。
+    const fieldStart = html.indexOf('<span class="wizard-pane-target-input has-badge">');
+    const fieldEnd = html.indexOf('<button class="icon-button"', fieldStart);
+    expect(fieldStart).toBeGreaterThanOrEqual(0);
+    expect(fieldEnd).toBeGreaterThan(fieldStart);
+    const field = html.slice(fieldStart, fieldEnd);
+    expect(field).toContain(">尚不存在</span>");
+    // 解释在两栏容器**之外**：两栏收尾的 </div> 之后紧跟着它，出现或消失都不动两栏几何。
+    const note = /<p class="wizard-missing-note" id="([^"]+)">/.exec(html);
+    expect(note).not.toBeNull();
+    expect(html).toContain('<div class="wizard-panes">');
+    expect(html).toContain(`</section></div><p class="wizard-missing-note" id="${note?.[1]}">`);
+    // 而且这个 id 是输入框自己指过去的那一个（#238：理由是看得见的一行字，不是 title）。
+    expect(field).toContain(`aria-describedby="${note?.[1]}"`);
+  });
+
+  it("renders equivalent datasource info on both sides when one side has a single option", () => {
+    const html = renderWizard(openNew(SOURCE, TARGET), {
+      sourceOptions: [SOURCE_OPTION],
+      targetOptions: [TARGET_OPTION, TARGET_OPTION_2],
+    });
+    // 两侧同进同退：数据源行各一段，一侧下拉、一侧只读文本，都不缺。
+    expect(html.match(/class="wizard-pane-dsrow"/g)).toHaveLength(2);
+    expect(html).toContain('<p class="wizard-pane-ds-fixed">生产 Oracle · prod/orcl</p>');
+    expect(html).toContain("目标端数据源");
+    expect(html).toContain("报表 MySQL · report/mysql");
+    // 没得选的那侧不摆一个 disabled 下拉：整屏只此一个 <select>，就是目标端那一个。
+    expect(html.match(/<select/g)).toHaveLength(1);
+    expect(html).toMatch(/目标端数据源<select/);
+  });
+
+  it("stops repeating the datasource name in the pane headers", () => {
+    const html = renderWizard(openNew(SOURCE, TARGET), {
+      sourceOptions: [SOURCE_OPTION, SOURCE_OPTION_2],
+      targetOptions: [TARGET_OPTION, TARGET_OPTION_2],
+    });
+    // 名字由数据源行统一负责，表头只报这是哪一栏。
+    expect(html).toContain('<header class="wizard-pane-head"><strong>源端</strong></header>');
+    expect(html).toContain('<header class="wizard-pane-head"><strong>目标端</strong></header>');
+    expect(html).not.toContain("源端 · 生产 Oracle");
+    expect(html).not.toContain("目标端 · 报表 MySQL");
+  });
+
+  it("names what the source control row reports in each fetch mode", () => {
+    // 控件行报的是「现在选中的是什么」，刷新按钮就摆在它报的那个状态旁边。
+    const sql = renderWizard(done(apply(openNew(SOURCE, TARGET), { type: "fetch-mode", fetchMode: "sql" })));
+    expect(sql).toContain('<span class="wizard-pane-colbar-label">结果列</span>');
+    expect(sql).toContain("刷新结果列");
+    expect(sql).not.toContain('<span class="wizard-pane-colbar-label">源表</span>');
+
+    const byTable = renderWizard(openNew(SOURCE, TARGET));
+    expect(byTable).toContain('<span class="wizard-pane-colbar-label">源表</span>');
+    expect(byTable).toContain("刷新源表");
+    expect(byTable).not.toContain('<span class="wizard-pane-colbar-label">结果列</span>');
   });
 
   it("distinguishes settled rows, exposes deletion, and explains disabled controls", () => {
