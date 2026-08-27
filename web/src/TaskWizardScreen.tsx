@@ -9,8 +9,8 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import { forwardRef, useEffect, useId, useImperativeHandle, useMemo, useRef, useState } from "react";
+import type { FormEvent, ReactNode, RefObject } from "react";
 
 import {
   checkTargetTable,
@@ -25,6 +25,7 @@ import {
   previewErrorMessage,
 } from "./api";
 import type { BuilderColumn, BuilderSql, BuilderTable, PreviewResult } from "./api";
+import { overlayOwnsKeyboard } from "./dialogFocus";
 import { messageFrom } from "./errors";
 import type { DatasourceOption } from "./entry";
 import { ICON, UpsertNote, UPSERT_NOTE_AHEAD } from "./components/DesignSystem";
@@ -34,12 +35,14 @@ import {
   apply,
   canAdvance,
   confirm,
+  foldedSteps,
   leaving,
+  leavingConfirmation,
   taskName,
   toSpec,
   view,
 } from "./wizard";
-import type { Change, ConfirmTargetCheck, Draft, Loss } from "./wizard";
+import type { Change, ConfirmTargetCheck, Draft, Loss, RailEntry, Step } from "./wizard";
 
 export interface TaskWizardScreenProps {
   initial: Draft;
@@ -96,6 +99,12 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
   const [sql, setSql] = useState<BuilderSql | null>(null);
   const [sqlError, setSqlError] = useState<string | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
+  /** Escape 只在这块容器里算数（#242）。 */
+  const containerRef = useRef<HTMLElement | null>(null);
+  /** 换步时焦点要落到新那一步的标题上（#239）。 */
+  const headingRef = useRef<HTMLHeadingElement | null>(null);
+  const lastStep = useRef(initial.step);
+  const [announcement, setAnnouncement] = useState("");
   const model = view(draft);
   const advanceBlocked = model.step.blockers.length > 0;
   /** 最后一步为什么提交不了，或者 `null`。 */
@@ -119,13 +128,9 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
     setPending({ kind: "change", intent: result.intent, loses: result.loses });
   }
 
+  /** 离开向导一律先问一句（#242）；问什么、值不值得问，都是 `wizard.ts` 的规矩。 */
   function requestLeave(proceed: () => void) {
-    const current = draftRef.current;
-    const loses = leaving(current);
-    if (loses === null) {
-      proceed();
-      return;
-    }
+    const loses = leavingConfirmation(draftRef.current);
     setPending({ kind: "leave", intent: { type: "leave" }, loses, proceed });
   }
 
@@ -146,13 +151,62 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
 
   useImperativeHandle(ref, () => ({ requestLeave }), []);
 
+  /*
+   * Escape 退出向导，但只在**向导容器里**按的那一下算数（#242）。
+   *
+   * 原来这个监听挂在 window 上，于是任何一下 Escape 都是「退出向导」——包括收起一个原生
+   * `<select>` 的弹出层、或者关掉浏览器的自动填充下拉，这两样这一屏上都有。人以为自己
+   * 关掉的是刚弹出来的那个东西，整屏没了。挂到容器上之后，容器外面按的 Escape 根本到不了
+   * 这里；容器里开着浮层时，按键归最上面那一层管（`useDialogFocus` 自己排的队），
+   * Escape 只收起那一层——全屏 SQL 编辑器为此额外拦一道捕获阶段的日子也就到头了。
+   */
   useEffect(() => {
+    const container = containerRef.current;
+    if (container === null) return;
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && pending === null) requestLeave(onCancel);
+      if (event.key !== "Escape" || overlayOwnsKeyboard()) return;
+      event.preventDefault();
+      /*
+       * 这一下 Escape 到这里就为止了，不再往上走。
+       *
+       * 少了这一句，按 Escape 的效果是**什么都没发生**：`requestLeave` 里的 setState 在
+       * 原生事件里当场冲刷，确认框同步挂上，`useDialogFocus` 随即往 window 上装它自己的
+       * 按键监听——而这同一个 Escape 才刚走到向导容器，还没冒泡到 window。于是它接着撞上
+       * 那个刚装好的监听，被当成「收起最上面那一层」，确认框在同一次派发里又被关掉了。
+       * 人看到的是一闪都没闪，Escape 像是坏的。
+       *
+       * 这不是把全屏编辑器那道捕获阶段的拦截换个地方装回来：那一道是抢在别人**之前**把
+       * 事件掐掉，这一句是「这下按键我已经处理完了」，上面不该再有人拿同一下做第二件事。
+       * 浮层当家时上面那个 `return` 先走，这一句根本轮不到。
+       *
+       * **这一句只在 `useDialogFocus` 把监听装在 window 上、且走冒泡阶段时才管用**
+       * （见 `dialogFocus.ts`）：那样它才排在这块容器**后面**，才拦得住。哪天把那个
+       * 监听改成捕获阶段，或者改挂到浮层自己的容器上，这一句就拦不到它了，Escape 会
+       * 重新变成「一闪都没闪」——搬之前先回来读这一段。
+       */
+      event.stopPropagation();
+      requestLeave(onCancel);
     }
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onCancel, pending]);
+    container.addEventListener("keydown", handleKeyDown);
+    /*
+     * 挂完监听先把焦点收进来。
+     *
+     * 不收的话，刚打开向导、还没按过 Tab 时焦点在 `<body>` 上，Escape 派发的目标在容器
+     * 外面，压根到不了上面那个监听——退出向导这条路要先按一下 Tab 才通。收进来的是容器
+     * 自己（`tabIndex={-1}`：能用脚本聚焦，不进 Tab 序），不抢任何一个控件，也不必假装
+     * 换了一步；「容器外面按的 Escape 不退出向导」这条照旧成立，外面依然到不了这里。
+     * 焦点已经在里面、或者上头压着一层浮层（进向导时的那个对话框）时，让开。
+     */
+    if (
+      !overlayOwnsKeyboard() &&
+      !(document.activeElement instanceof Node && container.contains(document.activeElement))
+    ) {
+      container.focus();
+    }
+    return () => container.removeEventListener("keydown", handleKeyDown);
+    // requestLeave 只碰 ref 与 setState，身份变了也没有新东西可读。
+    // 确认框自己就是队列里的一层，`pending` 因此不必再进依赖表。
+  }, [onCancel]);
 
   useEffect(() => {
     if (leaving(draft) === null) return;
@@ -163,6 +217,24 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [draft]);
+
+  /*
+   * 换了一步，焦点跟过去，顺带说一句到了第几步（#239）。
+   *
+   * 原来换步只改草稿：整块正文连同标题一起被换掉，焦点却还留在页脚那颗按钮上——
+   * 它所属的内容已经不在了；读屏的人则什么都没听见。焦点落到新标题上是「同一屏内换步」
+   * 的常规做法，不必假装发生了一次路由跳转。
+   */
+  useEffect(() => {
+    if (lastStep.current === draft.step) return;
+    const from = lastStep.current;
+    lastStep.current = draft.step;
+    headingRef.current?.focus();
+    setAnnouncement(
+      stepAnnouncement(model.rail, draft.step, foldedSteps(draft, from, draft.step)),
+    );
+    // model.rail 只随 draft.step 变，不必进依赖表。
+  }, [draft.step]);
 
   async function loadTables() {
     const request = ++tableRequest.current;
@@ -505,6 +577,20 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
     requestChange({ type: "advance" });
   }
 
+  /**
+   * 步骤主体就是一张表单（#240）：在输入框里敲回车，等于按了这一步的主操作——
+   * 前三步是「下一步」，最后一步是「保存」或「开始导入」。这一步不让走时主按钮
+   * 是禁用的，浏览器不会替禁用的默认按钮提交；这里再挡一道，回车便越不过拒绝理由。
+   */
+  function submitStep(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (draft.step < 4) {
+      if (!advanceBlocked) advance();
+      return;
+    }
+    if (submitRefusal === null) void submit(draft.mode === "edit" ? "save-only" : "start");
+  }
+
   async function submit(action: "start" | "save-only") {
     setBusy("submit");
     setError(null);
@@ -517,7 +603,13 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
   }
 
   return (
-    <section className="task-wizard" aria-label={draft.mode === "edit" ? "编辑任务" : "新建导入"}>
+    <section
+      className="task-wizard"
+      ref={containerRef}
+      /* 只为了让 Escape 一进来就有地方落（见上面那个监听），不进 Tab 序。 */
+      tabIndex={-1}
+      aria-label={draft.mode === "edit" ? "编辑任务" : "新建导入"}
+    >
       <aside className="wizard-context">
         <header>
           <strong>导入上下文</strong>
@@ -616,9 +708,13 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
               <strong>目标端 · {model.context.targetName}</strong>
               {/* 刷新**不再绑在「已经选了表」上**（UX 评审 P1-4）：在别处刚建完表回来刷一下
                   清单，正是没选表的时候最需要的动作。选了表就顺带把它的列也重读一遍。 */}
-              <button className="icon-button" type="button" disabled={busy === "target"} title={busy === "target" ? "正在刷新" : draft.spec.target_table === "" ? "刷新目标表清单" : "刷新目标表清单与目标列"} aria-label="刷新目标表" onClick={refreshTarget}>
-                <RefreshCw className={busy === "target" ? "is-spinning" : ""} size={ICON.sm} />
-              </button>
+              {/* 「正在刷新」是**按不动的理由**，挂在 title 上等于永远不显示（#238）：
+                  按钮此刻正是禁用的。剩下那句是按得动时的提示，留在 title 上没问题。 */}
+              <Refusable reason={busy === "target" ? "正在刷新" : null}>{(describedBy) => (
+                <button className="icon-button" type="button" disabled={busy === "target"} title={busy === "target" ? undefined : draft.spec.target_table === "" ? "刷新目标表清单" : "刷新目标表清单与目标列"} aria-label="刷新目标表" aria-describedby={describedBy} onClick={refreshTarget}>
+                  <RefreshCw className={busy === "target" ? "is-spinning" : ""} size={ICON.sm} />
+                </button>
+              )}</Refusable>
             </div>
             {targetOptions.length > 0 && (
               <label className="wizard-select-label">目标端数据源
@@ -672,16 +768,10 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
             </div>
           </section>
 
-          <section className="wizard-summary">
-            <strong>当前选择</strong>
-            <span>{model.context.sourceLabel}</span>
-            <span>{model.context.targetTable}</span>
-            {model.context.summary.map((line) => <span key={line}>{line}</span>)}
-          </section>
         </div>
       </aside>
 
-      <div className="wizard-main">
+      <form className="wizard-main" noValidate onSubmit={submitStep}>
         <ol className="wizard-rail" aria-label="导入步骤">
           {model.rail.map((entry) => (
             <li className={`is-${entry.state}`} aria-current={entry.state === "current" ? "step" : undefined} key={entry.step}>
@@ -693,8 +783,13 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
           ))}
         </ol>
 
+        {/* 全向导只此一处播报口（#239）：换到第几步、叫什么名字，以及向导替你折掉了哪一步——
+            不然轨道上那一格自己打了勾，人是不知道为什么的。不是错误，所以用 role="status"。 */}
+        <div className="wizard-live visually-hidden" role="status" aria-live="polite">{announcement}</div>
+
         <div className="wizard-step-scroll">
           <StepBody
+            headingRef={headingRef}
             draft={draft}
             sql={sql}
             sqlError={sqlError}
@@ -714,32 +809,32 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
           </button>
           <span className="wizard-footer-actions">
             {draft.step < 4 ? (
-              <Refusable reason={advanceBlocked ? "请先处理当前步骤中的问题" : null}>
-                <button className="button is-primary" type="button" disabled={advanceBlocked} onClick={advance}>
+              <Refusable reason={advanceBlocked ? "请先处理当前步骤中的问题" : null}>{(describedBy) => (
+                <button className="button is-primary" type="submit" disabled={advanceBlocked} aria-describedby={describedBy}>
                   {draft.step === 3 ? "查看确认页" : "下一步"}
                 </button>
-              </Refusable>
+              )}</Refusable>
             ) : draft.mode === "edit" ? (
-              <Refusable reason={submitRefusal}>
-                <button className="button is-primary" type="button" disabled={submitRefusal !== null} onClick={() => void submit("save-only")}>
+              <Refusable reason={submitRefusal}>{(describedBy) => (
+                <button className="button is-primary" type="submit" disabled={submitRefusal !== null} aria-describedby={describedBy}>
                   {busy === "submit" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : null}保存
                 </button>
-              </Refusable>
+              )}</Refusable>
             ) : (
               <>
-                <Refusable reason={submitRefusal}>
-                  <button className="button" type="button" disabled={submitRefusal !== null} onClick={() => void submit("save-only")}>只保存</button>
-                </Refusable>
-                <Refusable reason={submitRefusal}>
-                  <button className="button is-primary" type="button" disabled={submitRefusal !== null} onClick={() => void submit("start")}>
+                <Refusable reason={submitRefusal}>{(describedBy) => (
+                  <button className="button" type="button" disabled={submitRefusal !== null} aria-describedby={describedBy} onClick={() => void submit("save-only")}>只保存</button>
+                )}</Refusable>
+                <Refusable reason={submitRefusal}>{(describedBy) => (
+                  <button className="button is-primary" type="submit" disabled={submitRefusal !== null} aria-describedby={describedBy}>
                     {busy === "submit" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : null}开始导入
                   </button>
-                </Refusable>
+                )}</Refusable>
               </>
             )}
           </span>
         </footer>
-      </div>
+      </form>
       {pending !== null && (
         <WizardConfirmDialog
           loss={pending.loses}
@@ -762,11 +857,24 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
  * 那条通知去扔，而人此刻就在这里，就是在做这个决定。
  */
 /**
- * 按不动的按钮**自己不会解释自己**：浏览器不给 `disabled` 控件派发指针事件，
- * 挂在按钮上的 `title` 一个字都不会显示（UX 评审 P1-11）。理由挂外层。
+ * 按不动的按钮**自己不会解释自己**：浏览器不给 `disabled` 控件派发指针事件，挂在控件
+ * 上的 `title` 一个字都不会显示（UX 评审 P1-11）；挂到外层 `<span>` 上也只救得了鼠标——
+ * 禁用的按钮不在 Tab 序里，只用键盘的人永远碰不到那句解释（#238）。
+ *
+ * 所以理由不再是提示气泡，而是**控件旁边的一行可见文字**，再用 `aria-describedby`
+ * 认到控件头上，当它的可访问描述。控件可以继续禁用：理由不再依赖「够得着它」。
  */
-function Refusable({ reason, children }: { reason: string | null; children: ReactNode }) {
-  return reason === null ? <>{children}</> : <span className="disabled-action" title={reason}>{children}</span>;
+function Refusable({ reason, children }: {
+  reason: string | null;
+  children: (describedBy: string | undefined) => ReactNode;
+}) {
+  const reasonId = useId();
+  return reason === null ? <>{children(undefined)}</> : (
+    <span className="refusal">
+      {children(reasonId)}
+      <small className="refusal-reason" id={reasonId}>{reason}</small>
+    </span>
+  );
 }
 
 export function WizardConfirmDialog({ loss, leaving = false, onCancel, onConfirm, onDiscard }: {
@@ -777,7 +885,11 @@ export function WizardConfirmDialog({ loss, leaving = false, onCancel, onConfirm
   onDiscard?: () => void;
 }) {
   return <Modal title={loss.headline} onClose={onCancel} busy={false} narrow>
-    <div className="modal-body wizard-loss"><ul>{loss.lines.map((line) => <li key={line}>{line}</li>)}</ul></div>
+    <div className="modal-body wizard-loss">
+      {loss.lines.length === 0
+        ? <p>这份还没保存的草稿会留着，回来接着改。</p>
+        : <ul>{loss.lines.map((line) => <li key={line}>{line}</li>)}</ul>}
+    </div>
     <footer className="modal-footer">
       <button className="button is-ghost" type="button" onClick={onCancel}>取消</button>
       {leaving && onDiscard !== undefined && (
@@ -790,7 +902,24 @@ export function WizardConfirmDialog({ loss, leaving = false, onCancel, onConfirm
   </Modal>;
 }
 
+/**
+ * 播报词（#239）：到了第几步、这一步叫什么，以及路上被折掉的那些步。
+ *
+ * 折掉哪几步不在这里数：中间隔着一步不等于向导跳过了它——往回走更不是。
+ * 那是 `foldedSteps()` 照着真正的折叠信号（`checkIsSilent`）给的答案，这里只负责念出来。
+ */
+function stepAnnouncement(
+  rail: readonly RailEntry[],
+  to: Step,
+  folded: readonly Step[],
+): string {
+  const label = (step: Step) => rail.find((entry) => entry.step === step)?.label ?? "";
+  const skipped = folded.map((step) => `第 ${step} 步「${label(step)}」无需处理，已跳过。`);
+  return `${skipped.join("")}第 ${to} 步，共 ${rail.length} 步：${label(to)}`;
+}
+
 function StepBody({
+  headingRef,
   draft,
   sql,
   sqlError,
@@ -801,6 +930,7 @@ function StepBody({
   loadPreview,
   loadCheck,
 }: {
+  headingRef: RefObject<HTMLHeadingElement | null>;
   draft: Draft;
   sql: BuilderSql | null;
   sqlError: string | null;
@@ -814,17 +944,21 @@ function StepBody({
   const model = view(draft).step;
   if (model.step === 1) {
     return <section className="wizard-step">
-      <header><h1>选列与字段映射</h1><p>系统会先做同名匹配，请判断要搬哪些列，以及每一列应写到目标表的哪里。</p></header>
+      <header>{/* tabIndex={-1}：能用脚本聚焦，但不进 Tab 序（#239）。 */}<h1 ref={headingRef} tabIndex={-1}>选列与字段映射</h1></header>
       {draft.fetchMode === "sql" && (
         /* 编辑器住在这里，不在左栏（UX 评审 P1-3）。宽度是主区的宽度，高度 420px 起，
            带行号、软换行开关、格式化、全屏——这里的 SQL 基本都是粘过来的，粘进来第一件事
            是通读一遍确认粘对了。 */
         <section className="generated-sql wizard-sql-card">
           <header>
-            <div><strong>自定义 SQL</strong><span>这条语句就是发起时要执行的源端查询</span></div>
-            <button className="button" type="button" disabled={(draft.spec.source_sql ?? "").trim() === "" || busy === "columns"} title={(draft.spec.source_sql ?? "").trim() === "" ? "先写好 SQL" : busy === "columns" ? "正在刷新结果列" : undefined} onClick={loadSourceColumns}>
-              {busy === "columns" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : <RefreshCw size={ICON.sm} />}刷新结果列
-            </button>
+            <div><strong>自定义 SQL</strong></div>
+            {/* 理由原来挂在这颗**自己就是 `disabled`** 的按钮的 `title` 上，一个字都显示不出来
+                （#238）。跟底下那几颗一样，交给 `Refusable` 写成旁边的一行字。 */}
+            <Refusable reason={(draft.spec.source_sql ?? "").trim() === "" ? "先写好 SQL" : busy === "columns" ? "正在刷新结果列" : null}>{(describedBy) => (
+              <button className="button" type="button" disabled={(draft.spec.source_sql ?? "").trim() === "" || busy === "columns"} aria-describedby={describedBy} onClick={loadSourceColumns}>
+                {busy === "columns" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : <RefreshCw size={ICON.sm} />}刷新结果列
+              </button>
+            )}</Refusable>
           </header>
           <SqlEditor
             value={draft.spec.source_sql ?? ""}
@@ -834,18 +968,22 @@ function StepBody({
           />
         </section>
       )}
-      {model.rows.length === 0 ? <p className="wizard-empty">{draft.fetchMode === "sql" ? "先写好上面的 SQL，系统会自动识别结果列。" : "先在左侧选择一张源表。"}</p> : (
-        <div className="table-wrap"><table className="data-grid wizard-mapping"><thead><tr><th>同步</th><th>源列</th><th>目标列</th><th>主键</th><th aria-label="操作" /></tr></thead><tbody>
+      {model.rows.length === 0 ? <p className="wizard-empty">{draft.fetchMode === "sql" ? "尚未识别结果列" : "未选择源表"}</p> : (
+        <div className="table-wrap"><table className="data-grid wizard-mapping"><thead><tr><th>同步</th><th>源列</th><th>目标列</th><th>主键</th><th><span className="visually-hidden">操作</span></th></tr></thead><tbody>
           {model.rows.map((row) => <tr className={row.problem ? "is-problem" : ""} key={row.source}>
-            <td><input type="checkbox" checked={row.selected} onChange={() => change({ type: "toggle-column", source: row.source })} /></td>
+            <td><input type="checkbox" aria-label={`同步 ${row.source}`} checked={row.selected} onChange={() => change({ type: "toggle-column", source: row.source })} /></td>
             <td><span className="mono">{row.source}</span></td>
             <td>{!row.selected ? "—" : <>{
               row.control === "auto" ? <span>{row.target} <small className="auto-mark">自动匹配</small></span>
               /* 表还不存在时没有列清单可挑，这一格里打的名字就是建表语句里的列名。 */
               : row.control === "new" ? <span className="new-target-field"><input aria-label={`${row.source} 的目标列名`} aria-invalid={row.problem ? true : undefined} value={row.target} spellCheck={false} onChange={(event) => change({ type: "rename-target", source: row.source, target: event.target.value })} /><small className="new-mark">将新建</small></span>
-              : <select aria-invalid={row.problem ? true : undefined} value={row.target} onChange={(event) => change({ type: "rename-target", source: row.source, target: event.target.value })}><option value="">请选择</option>{draft.targetColumns.map((column) => <option key={column.name}>{column.name}</option>)}</select>
+              : <select aria-label={`${row.source} 的目标列`} aria-invalid={row.problem ? true : undefined} value={row.target} onChange={(event) => change({ type: "rename-target", source: row.source, target: event.target.value })}><option value="">请选择</option>{draft.targetColumns.map((column) => <option key={column.name}>{column.name}</option>)}</select>
             }{row.problem && <small>{row.problem}</small>}</>}</td>
-            <td><input type="checkbox" disabled={!row.selected || row.target === "" || row.primaryKeyLock !== null} title={!row.selected ? "先勾选这一列" : row.target === "" ? "先选择目标列" : row.primaryKeyLock ?? undefined} checked={row.primaryKey} onChange={() => change({ type: "toggle-primary-key", target: row.target })} />{row.primaryKeyLock && <small className="lock-note">{row.primaryKeyLock}</small>}</td>
+            {/* 主键锁定的那句话本来就是可见的，另外两句却只在 `title` 里——而这颗勾选框
+                三种情况下都是 `disabled`，`title` 谁都看不到（#238）。三句合到同一条路上。 */}
+            <td><Refusable reason={!row.selected ? "先勾选这一列" : row.target === "" ? "先选择目标列" : row.primaryKeyLock}>{(describedBy) => (
+              <input type="checkbox" aria-label={`${row.source} 设为主键`} disabled={!row.selected || row.target === "" || row.primaryKeyLock !== null} aria-describedby={describedBy} checked={row.primaryKey} onChange={() => change({ type: "toggle-primary-key", target: row.target })} />
+            )}</Refusable></td>
             <td><button className="icon-button is-danger" type="button" title={`删除列 ${row.source}`} aria-label={`删除列 ${row.source}`} onClick={() => change({ type: "remove-column", source: row.source })}><Trash2 size={ICON.sm} /></button></td>
           </tr>)}
         </tbody></table></div>
@@ -855,12 +993,15 @@ function StepBody({
   }
   if (model.step === 2) {
     return <section className="wizard-step">
-      <header><h1>过滤与验证</h1><p>检查最终查询与样例数据，并判断是否需要补充 WHERE 条件。</p></header>
-      {model.whereEditable ? <div className="where-clause-editor"><HighlightedSqlInput value={model.where} placeholder="STATUS = 'ACTIVE' AND CREATED_AT >= DATE '2026-01-01'" label="WHERE 条件" rows={5} onChange={(clause) => change({ type: "where", clause })} /></div> : <div className="wizard-readonly">自定义 SQL 的过滤条件直接写在左侧 SQL 中。</div>}
-      <section className="generated-sql"><header><div><strong>构建 SQL</strong><span>实际执行的源端查询</span></div></header>{sqlError ? <div className="form-error">{sqlError}</div> : sql ? <pre className="ddl-output"><HighlightedSql sql={sql.source_sql} /></pre> : <p className="spec-empty">正在生成最终查询。</p>}</section>
+      <header><h1 ref={headingRef} tabIndex={-1}>过滤与验证</h1></header>
+      {/* 这一格原来是个没有边框的 padding 容器，于是它的文本框和下面「构建 SQL」的卡
+          边线各自差 12px。改成和邻居同规格的卡：表头把「这里只写条件、不写 WHERE」
+          这句原来只在 aria-label 里的话摆到明面上。 */}
+      {model.whereEditable ? <section className="where-clause-card"><header><div><strong>WHERE 条件</strong><span>只写条件本身，不用写 WHERE 关键字</span></div></header><div className="where-clause-editor"><HighlightedSqlInput value={model.where} placeholder="STATUS = 'ACTIVE' AND CREATED_AT >= DATE '2026-01-01'" label="WHERE 条件" rows={5} onChange={(clause) => change({ type: "where", clause })} /></div></section> : <div className="wizard-readonly">过滤条件写在自定义 SQL 中</div>}
+      <section className="generated-sql"><header><div><strong>构建 SQL</strong></div></header>{sqlError ? <div className="form-error">{sqlError}</div> : sql ? <pre className="ddl-output"><HighlightedSql sql={sql.source_sql} /></pre> : <p className="spec-empty">正在生成最终查询。</p>}</section>
       <section className="preview-panel">
-        <header><div><strong>数据预览</strong><span>使用上方最终查询读取源端数据</span></div><button className="button" type="button" disabled={busy === "preview"} onClick={loadPreview}>{busy === "preview" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : null}预览前 10 条</button></header>
-        {model.preview.value ? <PreviewData preview={model.preview.value} /> : <p className="spec-empty">点击按钮后读取真实数据；修改查询条件后需重新预览。</p>}
+        <header><div><strong>数据预览</strong></div><button className="button" type="button" disabled={busy === "preview"} onClick={loadPreview}>{busy === "preview" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : null}预览前 10 条</button></header>
+        {model.preview.value ? <PreviewData preview={model.preview.value} /> : <p className="spec-empty">尚未预览</p>}
       </section>
       <Blockers blockers={model.blockers} />
     </section>;
@@ -871,7 +1012,7 @@ function StepBody({
     // 那是一句话：这张表还没建。这一档只摆建表语句（UX 评审 P1-4）。
     const missing = !draft.targetTableExists && draft.spec.target_table.trim() !== "";
     return <section className="wizard-step">
-      <header><h1>目标表检查</h1><p>系统会核对列、类型、长度与主键，请根据检查结果判断是否需要调整目标表。</p></header>
+      <header><h1 ref={headingRef} tabIndex={-1}>目标表检查</h1></header>
       <div className="target-check-toolbar">
         {/* 「目标表需要处理」原来是**兜底**：`result` 还是 null（一次都没查过）时
             也写这句，等于把「不知道」说成了「有问题」（UX 评审 P2）。 */}
@@ -889,7 +1030,7 @@ function StepBody({
       {checkError !== null && <div className="form-error" role="alert">{checkError}</div>}
       {model.check.state === "stale" && <div className="form-error" role="alert">映射或主键已变化，请重新检查目标表。</div>}
       {model.check.state === "none" && busy !== "check" && checkError === null && <p className="wizard-empty">等待目标表元数据与字段映射就绪。</p>}
-      {missing && <p className="wizard-placeholder"><strong>{draft.spec.target_table} 在目标库里还没有</strong>用下面这条语句建好它，再点「重新检查」。产品不会替你建表。</p>}
+      {missing && <p className="wizard-placeholder"><strong>{draft.spec.target_table} 在目标库里还没有</strong>用下面这条语句建好它，再点「重新检查」。</p>}
       {result !== null && !result.ok && <>
         {!missing && <div className="target-check-findings">
           {result.findings.map((finding, index) => <article key={`${finding.kind}-${finding.column ?? "table"}-${index}`}>
@@ -906,8 +1047,12 @@ function StepBody({
     </section>;
   }
   const confirmView = model.confirm;
+  /* 勾选之外的源列——**别处没有一处说过它们**。第 1 步是一张勾选表，看得见的是「勾了什么」；
+     没勾的那些只在这里被点名一次，而它们恰恰是跑完之后才想起来的那批。 */
+  const carried = new Set(confirmView.mappings.map((mapping) => mapping.source));
+  const dropped = draft.sourceColumns.filter((column) => !carried.has(column.name));
   return <section className="wizard-step">
-    <header><h1>确认并运行</h1><p>最后核对系统汇总的完整决定，并判断是否可以保存或开始导入。</p></header>
+    <header><h1 ref={headingRef} tabIndex={-1}>确认并运行</h1></header>
     <label className="wizard-name">任务名<input value={taskName(draft)} onChange={(event) => change({ type: "task-name", name: event.target.value })} /></label>
     <dl className="wizard-confirm-grid">
       <div><dt>源端</dt><dd>{confirmView.sourceLabel}</dd></div>
@@ -915,12 +1060,12 @@ function StepBody({
       <div><dt>WHERE</dt><dd>{confirmView.where}</dd></div>
       <div><dt>主键</dt><dd>{confirmView.primaryKey.join(", ")}</dd></div>
       <div className="is-wide"><dt>字段映射</dt><dd>{confirmView.mappings.map((mapping) => <span className="mapping-chip" key={mapping.source}>{mapping.source} → {mapping.target}</span>)}</dd></div>
+      <div><dt>写入方式</dt><dd>按主键 upsert</dd></div>
+      {/* agent 离线原来要等点了「开始导入」才知道——那是最贵的一次发现。 */}
+      <div><dt>目标端 Agent</dt><dd><span className={draft.targetAgentOnline ? "confirm-check is-passed" : "confirm-check is-warn"}>{draft.targetAgentOnline ? "在线" : "离线"}</span></dd></div>
+      <div className="is-wide"><dt>不搬的列</dt><dd>{dropped.length === 0 ? <span className="confirm-none">源表所有列都会搬</span> : dropped.map((column) => <span className="mapping-chip is-dropped" key={column.name}>{column.name}</span>)}</dd></div>
       <div className="is-wide"><dt>目标表检查</dt><dd><ConfirmTargetCheckCell check={confirmView.targetCheck} busy={busy === "check"} onCheck={loadCheck} /></dd></div>
     </dl>
-    {confirmView.preview !== null && <section className="preview-panel">
-      <header><div><strong>数据预览</strong><span>最终确认的源端样例数据</span></div></header>
-      <PreviewData preview={confirmView.preview} />
-    </section>}
     <Blockers blockers={model.blockers} />
     {/* 写入语义的常驻交底（2026-08 UX 评审 P0-1）：这一步是「开始导入」前的最后一屏，
         而这个产品**只增量合并、不删**。不写清楚的话，第一次用的人会按「全量同步」去理解
@@ -971,7 +1116,7 @@ function ConfirmTargetCheckCell({
  */
 function ResultColumns({ columns, busy }: { columns: readonly BuilderColumn[]; busy: boolean }) {
   if (columns.length === 0) {
-    return <p className="wizard-side-empty">{busy ? "正在识别结果列…" : "写好右边的 SQL 后，这里会列出它的结果列。"}</p>;
+    return <p className="wizard-side-empty">{busy ? "正在识别结果列…" : "尚未识别结果列"}</p>;
   }
   return <div className="result-columns">
     <span className="result-columns-count">结果列 {columns.length}</span>

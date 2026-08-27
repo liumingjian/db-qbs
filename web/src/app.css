@@ -115,9 +115,16 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 /* 宽屏是混合规则（评审 §2）：**表格屏居中收在 1800px 内**——27" 通栏时任务名在最左、
    操作在最右，读一行要横扫 2000px 以上，而九列里真正有信息的部分只占中间一段。
    **向导与运行详情通栏**：映射表、SQL、证据栅格都是越宽越好读的东西。 */
-.content { flex: 1; width: 100%; max-width: 1800px; margin: 0 auto; padding: var(--pad); }
-.content.is-wide { max-width: none; }
-.content.is-wizard { min-height: 0; max-width: none; padding: 0; }
+/* 内容区**铺满**，不居中。原来是 `max-width: 1800px; margin: 0 auto`，于是 2560 的屏上
+   左右各空出 250px 的死白，而参照物（x2doris / Ant Pro）从来是铺满的——那圈留白不是
+   设计，是没设计。要收的是「行长过长不好读」，那由散文块自己的 max-width 收（见
+   `.settings-copy p`、`.target-side-note` 等），不该由整幅内容区代劳：这一屏的主体是
+   表格和 SQL，它们越宽越好用。
+   左右内边距改成随视口走的 clamp：窄屏 16px 贴边省地方，宽屏最多 40px，不再是死的 16。 */
+.content { flex: 1; width: 100%; margin: 0; padding: var(--pad) var(--pad-x); }
+/* `is-wide` 原来的作用是解除上面那条 max-width。现在没有 max-width 可解，它就成了空转。
+   留着是因为 `App.tsx` 还在挂它，删 class 属于另一件事；这里明说它不再有效果。 */
+.content.is-wizard { min-height: 0; padding: 0; }
 
 /* 折叠：256 ⇄ 48。折叠后图标**居中**——参照物这里没跟着改 padding-left，选中的蓝块被
    48px 切成一条竖边，那是它的渲染瑕疵不是它的设计（ADR-0043 文末自决 2）。 */
@@ -191,8 +198,14 @@ a.button { text-decoration: none; }
 .icon-button.is-tool:hover { color: var(--brand); }
 .icon-button:disabled { color: var(--mute); }
 .icon-button:disabled:hover { background: transparent; }
-/* 禁用按钮的悬停提示挂在这一层：浏览器不给 disabled 控件派发指针事件。 */
+/* 禁用按钮的悬停提示挂在这一层：浏览器不给 disabled 控件派发指针事件。**只救得了鼠标**
+   ——禁用的按钮不在 Tab 序里，只用键盘的人碰不到那句提示；新写的拒绝理由因此走下面的
+   `.refusal`，这一条留给还在用 title 的旧调用方（`ui.tsx` 的 ActionButton）。 */
 .disabled-action { display: inline-flex; }
+/* 被拦住的控件和拦它的那句理由住在这一层：理由是**看得见的一行字**，不是悬停提示
+   （#238）。理由跟在控件后面，一行摆不下就换行，不把控件挤窄。 */
+.refusal { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.refusal-reason { color: var(--mute); }
 .text-button { padding: 0; border: 0; background: transparent; color: var(--brand); cursor: pointer; }
 
 /* ---------------------------------------------------------------- 数据表 */
@@ -279,7 +292,9 @@ pre.drawer-sql,
 
 /* ---------------------------------------------------------------- 迁移进度
    只有一个整数百分比 + 一条细条：向下取整、不带小数、不附行数（ADR-0043 §7）。 */
-.progress { min-width: 120px; display: flex; align-items: center; gap: 8px; }
+/* 上限是内容区铺满之后补的：这一列没有自己的宽度，铺满后它会一路长到 500px 以上，
+   而一条 500px 的进度条既不好读也不好看。120–260 是它作为「一眼看出几成」的可用区间。 */
+.progress { min-width: 120px; max-width: 260px; display: flex; align-items: center; gap: 8px; }
 .progress-track { flex: 1; height: 6px; border-radius: 3px; background: var(--title-bg); overflow: hidden; }
 .progress-fill { display: block; height: 100%; border-radius: 3px; background: var(--brand); }
 .progress-fill.is-ok { background: var(--ok); }
@@ -491,6 +506,15 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
    高亮是**透明字 textarea 压在着色 `<pre>` 上**：两层必须逐像素同框，否则光标会飘。
    下面那条 `.sql-highlight, .sql-text-input` 的合并选择器就是这个约束本身——
    字体、字号、行高、内边距、边框宽度、`white-space` 六项只要有一项分开写，迟早分开改。 */
+/* 「过滤与验证」那一步的三张卡原来只有两张是卡：WHERE 这一格是个**光秃秃的 padding
+   容器**，没有边框，于是它里面的文本框比下面「构建 SQL」的卡边线各自内缩 12px，
+   两条竖线错开——所有者点名的就是这处。现在它和 `.generated-sql` 同一副骨架：
+   同样的边框、同样的圆角、同样的表头，边线因此逐像素对齐。 */
+.where-clause-card { overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); }
+.where-clause-card > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.where-clause-card > header > div { display: flex; flex-direction: column; gap: 2px; }
+.where-clause-card strong { font-size: var(--size-body); font-weight: var(--weight-em); }
+.where-clause-card header span { color: var(--mute); font-size: var(--size-meta); }
 .source-sql-editor, .where-clause-editor { display: flex; flex-direction: column; gap: 8px; padding: 12px; }
 .where-clause-editor .spec-note { padding: 0; }
 .where-clause-editor .spec-note .mono { color: var(--dim); }
@@ -535,7 +559,8 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .sql-input-shell.is-wrapped .sql-text-input { white-space: pre-wrap; overflow-wrap: anywhere; scrollbar-gutter: stable; }
 
 /* ── 全屏 ────────────────────────────────────────────────────────────────
-   Escape 退出，拦在向导那个「退出向导」监听之前（见 SqlEditor.tsx）。 */
+   盖住整页，因此按对话框报（`role="dialog"` + `aria-modal`），焦点陷阱与焦点归位
+   走 `useDialogFocus`，与对话框、运行详情抽屉同一份实现（见 SqlEditor.tsx）。 */
 .source-sql-editor.is-fullscreen { position: fixed; z-index: 60; inset: 0; padding: 16px 20px 20px; background: var(--panel); }
 .source-sql-editor.is-fullscreen .sql-text-input { height: 100%; min-height: 0; resize: none; }
 .source-sql-editor.is-fullscreen .sql-highlight { inset: 0; }
@@ -612,16 +637,23 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .ddl-output { max-height: 280px; overflow: auto; margin: 0; padding: 12px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--mute-bg); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ---------------------------------------------------------------- 新建导入向导 */
-.task-wizard { height: calc(100vh - var(--topbar-h)); min-height: 560px; display: grid; grid-template-columns: 300px minmax(0, 1fr); overflow: hidden; background: var(--panel); }
+ /* 左栏宽度**跟着视口走**。写死 300px 时，1366 上勉强够，2560 上还是 300——
+    源端数据源那一格（「核心库（Oracle 11g）· 10.30.0.5:1521/ORCL」）被截在半路，
+    两棵树各自开一条内滚动条，整栏看着又挤又碎。22vw 夹在 300–420 之间：
+    1366 → 300，1920 → 422→420，2560 → 420。 */
+.task-wizard { height: calc(100vh - var(--topbar-h)); min-height: 560px; display: grid; grid-template-columns: clamp(300px, 22vw, 420px) minmax(0, 1fr); overflow: hidden; background: var(--panel); }
 .wizard-context { min-width: 0; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--line); background: var(--mute-bg); }
 .wizard-context > header { height: 48px; flex: none; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; border-bottom: 1px solid var(--line); }
 .wizard-mode { flex: none; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 12px 12px 0; }
 .wizard-mode button { height: var(--ctl-h); border: 1px solid var(--line-strong); background: var(--panel); color: var(--dim); cursor: pointer; }
 .wizard-mode button + button { margin-left: -1px; }
 .wizard-mode button.is-active { position: relative; border-color: var(--brand); background: var(--brand-dim); color: var(--brand); font-weight: var(--weight-em); }
-.wizard-context-scroll { min-height: 0; flex: 1; overflow: auto; padding: 12px; }
-.wizard-context-section { display: flex; flex-direction: column; gap: 9px; padding: 12px 0; border-top: 1px solid var(--line); }
-.wizard-context-section:first-child { padding-top: 0; border-top: 0; }
+/* 内边距从滚动容器搬到每一段自己身上：原来 `.wizard-context-scroll` 吃 12px、段落自己
+   padding-inline 为 0，于是段间那道 border-top 两端各缩进 12px，整栏的横线一条都不到边——
+   「凌乱和不规则」有一半是这个。现在线横贯整栏，段落内容仍然缩进 12px。 */
+.wizard-context-scroll { min-height: 0; flex: 1; overflow: auto; padding: 0; }
+.wizard-context-section { display: flex; flex-direction: column; gap: 9px; padding: 12px; border-top: 1px solid var(--line); }
+.wizard-context-section:first-child { border-top: 0; }
 .wizard-context-title { min-height: 28px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .wizard-context-title strong, .wizard-summary > strong { font-size: var(--size-meta); font-weight: var(--weight-em); }
 /* 自定义 SQL 编辑器已经搬进主区（P1-3），左栏这一格改放结果列。 */
@@ -656,12 +688,20 @@ select, .page-size {
   background-repeat: no-repeat;
   padding-right: 26px;
 }
-.wizard-context .schema-tree { max-height: 230px; }
-.wizard-context .schema-tree.is-target { max-height: 180px; }
-.wizard-summary { display: flex; flex-direction: column; gap: 6px; padding: 11px; border-left: 3px solid var(--brand); background: var(--panel); color: var(--mute); font-size: var(--size-cap); line-height: var(--lh-prose); }
+/* 两棵树的高度**跟着视口走**。原来写死 230 / 180：1080 的屏上刚好，1440 的屏上
+   底下白空一大片，而树里恰恰还有看不见的表。26vh / 20vh 夹在两端之间——
+   768 高的笔记本上不塌（180 / 140 地板），1440 上各自长到 374 / 288。
+   不用 flex 去分剩余高度：那样两段会在内容比分到的高度还高时**溢出压住下一段**
+   （试过，源表那一列被目标端那一段盖住点不动了），整栏的滚动交给外层一条就够。 */
+.wizard-context .schema-tree { max-height: clamp(180px, 26vh, 420px); }
+.wizard-context .schema-tree.is-target { max-height: clamp(140px, 20vh, 320px); }
+
+/* 贴在栏底，不跟着上面的树飘。字号从 --size-cap 抬到 --size-meta：它是这一栏的结论，
+   原来比旁边任何一行都小。 */
+.wizard-summary { display: flex; flex-direction: column; gap: 5px; margin: 0 12px 12px; padding: 10px 12px; border-left: 3px solid var(--brand); border-radius: 0 var(--radius) var(--radius) 0; background: var(--mute-bg); color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-prose); }
 .wizard-summary > strong { color: var(--text); }
-.wizard-main { min-width: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--panel); }
-.wizard-rail { min-height: 68px; flex: none; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; padding: 12px var(--pad); border-bottom: 1px solid var(--line); list-style: none; }
+.wizard-main { min-width: 0; margin: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--panel); }
+.wizard-rail { min-height: 68px; flex: none; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; padding: 12px var(--pad-x); border-bottom: 1px solid var(--line); list-style: none; }
 .wizard-rail li { min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--mute); }
 .wizard-rail li::after { height: 1px; flex: 1; margin: 0 8px; background: var(--line-strong); content: ""; }
 .wizard-rail li:last-child::after { display: none; }
@@ -674,10 +714,13 @@ select, .page-size {
 .wizard-rail li.is-current { color: var(--brand); }
 .wizard-rail li.is-current > strong { font-weight: var(--weight-em); }
 .wizard-rail li.is-current > span { border-color: var(--brand); background: var(--brand); color: var(--on-solid); box-shadow: 0 0 0 3px var(--brand-dim); }
-.wizard-step-scroll { min-height: 0; flex: 1; overflow: auto; padding: var(--pad); background: var(--bg); }
-.wizard-step { max-width: 1120px; display: flex; flex-direction: column; gap: 16px; margin: 0 auto; }
+.wizard-step-scroll { min-height: 0; flex: 1; overflow: auto; padding: var(--pad) var(--pad-x); background: var(--bg); }
+/* 铺满，不居中。`max-width: 1120px; margin: 0 auto` 在 1366 上看不出来，在 1920 上左右
+   各空 300px，在 2560 上各空 570px——这一步的主体是映射表和 SQL，它们要的就是宽度。
+   收行长是**散文的事**：只有下面标题那句说明限到 80ch，其余照旧铺开。 */
+.wizard-step { max-width: none; display: flex; flex-direction: column; gap: 16px; margin: 0; }
 .wizard-step > header h1 { margin: 0; font-size: var(--size-title); letter-spacing: 0; }
-.wizard-step > header p { margin: 6px 0 0; color: var(--mute); line-height: var(--lh-prose); }
+.wizard-step > header p { max-width: 80ch; margin: 6px 0 0; color: var(--mute); line-height: var(--lh-prose); }
 .wizard-empty, .wizard-placeholder, .wizard-readonly { margin: 0; padding: 18px; border: 1px solid var(--line); background: var(--panel); color: var(--mute); }
 .wizard-placeholder { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; }
 .wizard-placeholder strong { color: var(--text); }
@@ -687,18 +730,27 @@ select, .page-size {
 .wizard-mapping tr.is-problem select { border-color: var(--crit); }
 .wizard-mapping td small { display: block; max-width: 260px; margin-top: 3px; color: var(--crit); font-size: var(--size-cap); white-space: normal; }
 /* 主键为什么按不动**不是错误**——是目标表自己定了主键。跟着 --crit 走的话，
-   一张配得完全正确的映射表会有一整列红字。 */
-.wizard-mapping td small.lock-note { color: var(--mute); }
+   一张配得完全正确的映射表会有一整列红字。上面 `.refusal-reason` 已经写过同一句 color，
+   这一条不是重复：映射表里 `.wizard-mapping td small` 的 --crit 权重更高，压得住它，
+   所以这里得再写一遍把颜色抢回来。两条都不能删。 */
+.wizard-mapping td small.refusal-reason { color: var(--mute); }
 .wizard-mapping .auto-mark { display: inline; margin-left: 5px; color: var(--ok); }
 /* 目标表还不存在时，目标列是**打出来的**（P1-4）：没有列清单可挑，这里打的名字
    就是建表语句里的那个列名。标成「将新建」，不冒充一次匹配。 */
 .new-target-field { display: flex; align-items: center; gap: 7px; }
-.new-target-field input { min-width: 0; max-width: 260px; flex: 1; height: var(--ctl-h); padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); }
+.new-target-field input { min-width: 0; max-width: 420px; flex: 1; height: var(--ctl-h); padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-family: var(--font-num); font-size: var(--size-meta); }
 .new-target-field input:focus { border-color: var(--brand); outline: 0; box-shadow: 0 0 0 2px var(--brand-dim); }
 .wizard-mapping .new-mark { display: inline; flex: none; margin: 0; color: var(--warn); white-space: nowrap; }
 /* 主区的 SQL 编辑卡：它是这一步的主角，不是一张附注卡。 */
 .wizard-sql-card .source-sql-editor { padding: 12px; }
-.wizard-mapping select { width: 100%; min-width: 140px; }
+/* 铺满之后「目标列」这一栏能宽到 800px；一个下拉拉那么长既不好点也不好看。 */
+.wizard-mapping select { width: 100%; min-width: 140px; max-width: 420px; }
+/* 同理，「同步」「主键」「删除」这三列装的是一个勾或一个图标，宽度是固定的；
+   不写死的话铺满后的富余会平摊给它们，勾就飘到列中间离表头老远。剩下的宽度
+   全给「源列 / 目标列」——那两列才是要读要改的。 */
+.wizard-mapping th:nth-child(1), .wizard-mapping td:nth-child(1) { width: 64px; }
+.wizard-mapping th:nth-child(4), .wizard-mapping td:nth-child(4) { width: 72px; }
+.wizard-mapping th:nth-child(5), .wizard-mapping td:nth-child(5) { width: 56px; }
 .wizard-mapping-problems { display: flex; align-items: baseline; gap: 10px; padding: 10px 12px; border-left: 3px solid var(--crit); background: var(--crit-bg); color: var(--crit); }
 .wizard-mapping-problems strong { flex: none; font-size: var(--size-meta); }
 .wizard-mapping-problems ul { margin: 0; padding-left: 18px; line-height: var(--lh-prose); }
@@ -710,7 +762,9 @@ select, .page-size {
 .wizard-todos li::before { flex: none; color: var(--line-strong); content: "\25A2"; }
 .wizard-loss ul { margin: 0; padding-left: 20px; color: var(--dim); line-height: var(--lh-prose); }
 .wizard-name { max-width: 520px; color: var(--text); font-weight: var(--weight-em); }
-.wizard-confirm-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; margin: 0; padding: 1px; background: var(--line); }
+/* auto-fit 而不是写死 2 列：铺满之后，两列在 2560 上就是两条 1000px 宽的横幅，
+   一个键值对占满一整条。按 320px 一格自动分，1366 上仍是 2–3 列，2560 上是 5–6 列。 */
+.wizard-confirm-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1px; margin: 0; padding: 1px; background: var(--line); }
 .wizard-confirm-grid > div { min-width: 0; padding: 13px; background: var(--panel); }
 .wizard-confirm-grid > div.is-wide { grid-column: 1 / -1; }
 .wizard-confirm-grid dt { color: var(--mute); font-size: var(--size-cap); }
@@ -729,7 +783,7 @@ select, .page-size {
 .target-check-findings dt { color: var(--mute); font-size: var(--size-cap); }
 .target-check-findings dd { margin: 2px 0 0; overflow-wrap: anywhere; font-family: var(--font-num); font-size: var(--size-meta); }
 .target-check-ddl > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.wizard-footer { min-height: 60px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px var(--pad); border-top: 1px solid var(--line); background: var(--panel); }
+.wizard-footer { min-height: 60px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px var(--pad-x); border-top: 1px solid var(--line); background: var(--panel); }
 .wizard-footer-actions { display: flex; align-items: center; gap: 8px; }
 .job-grid tr.is-new-task td { animation: new-task-highlight 1.8s ease-out; }
 @keyframes new-task-highlight { 0%, 45% { background: var(--info-bg); } 100% { background: var(--panel); } }
@@ -940,3 +994,9 @@ select, .page-size {
   .live-progress-row { grid-template-columns: minmax(0, 1fr); }
 }
 
+
+/* 最后一屏新补的两格（确认页去掉数据预览之后）。 */
+.confirm-check.is-warn { color: var(--warn); font-weight: var(--weight-em); }
+.confirm-none { color: var(--dim); font-size: var(--size-meta); }
+/* 没勾的列：与 `.mapping-chip` 同形，但删除线 + 灰底，一眼看出「这些不会过线」。 */
+.mapping-chip.is-dropped { border-style: dashed; color: var(--mute); text-decoration: line-through; }

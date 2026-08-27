@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import type { RefObject } from "react";
 import { ICON } from "./components/DesignSystem";
 import { Maximize2, Minimize2, WrapText } from "lucide-react";
 
+import { useDialogFocus } from "./dialogFocus";
 import { formatSql, tokenize } from "./sql";
 
 /**
@@ -122,6 +124,15 @@ export function HighlightedSqlInput({
   );
 }
 
+type SqlEditorProps = {
+  value: string;
+  placeholder: string;
+  /** 人改了 SQL——结果列可能不再是同一批，调用方要清掉已读的列。 */
+  onChange: (next: string) => void;
+  /** 只动了空白（`formatSql` 的不变式），语义与结果列都没变，调用方**不该**清列。 */
+  onFormat: (next: string) => void;
+};
+
 /**
  * 自定义 SQL 的编辑器。
  *
@@ -133,23 +144,58 @@ export function HighlightedSqlInput({
  * 软换行**默认关**：SQL 的缩进是它的结构，折行会把对齐好的 `SELECT` 列表打散。
  * 要读一条没格式化过的长语句时再开，或者直接按「格式化」。
  */
-export function SqlEditor({
+export function SqlEditor(props: SqlEditorProps) {
+  const [fullscreen, setFullscreen] = useState(false);
+
+  // 全屏时按 Escape 是收起全屏，这件事**没有**单独的监听：全屏层挂着的时候它就是
+  // `useDialogFocus` 排队里最上面那一层，按键归它管（见下面的 `FullscreenFocusTrap`）。
+  // 这里原来还有一段捕获阶段的拦截，专门抢在向导那个 window 级退出监听之前
+  // `stopImmediatePropagation`；向导的监听收进向导容器、并且会向这个队列让路之后，
+  // 那段拦截就只是第二道机制了，已随 #242 撤掉。
+  return <SqlEditorPanel {...props} fullscreen={fullscreen} onFullscreen={setFullscreen} />;
+}
+
+/**
+ * 全屏那一层的焦点陷阱、初始焦点与收起后的焦点归位，与对话框、运行详情抽屉共用同一份实现
+ * （`useDialogFocus`，UX 评审 P0-5 那次立的规矩；本次是 #241 的采纳）。
+ *
+ * 单独做成一个组件，是因为 `useDialogFocus` 只认**挂载与卸载**——而全屏是同一个
+ * `SqlEditor` 里的一个 state。让这层只在全屏时挂载，进全屏就等于入队、退全屏就等于出队，
+ * 按键因此天然归最上面那一层管；卸载时它把焦点还给开全屏的那个按钮。
+ *
+ * 它不渲染任何东西：全屏面板还是原来那个 `div`，class 一换即可，DOM 不重建——重建的话
+ * 「开全屏」那个按钮会连人带焦点一起没掉，退出时就没有可归位的目标了。
+ */
+function FullscreenFocusTrap({
+  panel,
+  onExit,
+}: {
+  panel: RefObject<HTMLDivElement | null>;
+  onExit: () => void;
+}) {
+  useDialogFocus(panel, { onEscape: onExit });
+  return null;
+}
+
+/**
+ * 编辑器的样子。全屏与否由外面给，是为了让 `renderToStaticMarkup` 的测试能直接渲染全屏态——
+ * 那个状态平时只有点一下全屏按钮才到得了，而这套测试没有 DOM、点不了。
+ */
+export function SqlEditorPanel({
   value,
   placeholder,
   onChange,
   onFormat,
-}: {
-  value: string;
-  placeholder: string;
-  /** 人改了 SQL——结果列可能不再是同一批，调用方要清掉已读的列。 */
-  onChange: (next: string) => void;
-  /** 只动了空白（`formatSql` 的不变式），语义与结果列都没变，调用方**不该**清列。 */
-  onFormat: (next: string) => void;
+  fullscreen,
+  onFullscreen,
+}: SqlEditorProps & {
+  fullscreen: boolean;
+  onFullscreen: (next: boolean) => void;
 }) {
+  const panelRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const formatted = useMemo(() => formatSql(value), [value]);
   const [wrapped, setWrapped] = useState(false);
-  const [fullscreen, setFullscreen] = useState(false);
   // **跟着语句长**，上下都有界：十行以下的语句不该配一个半屏高的空框，
   // 而两百行的语句也不该把下面的映射表推到三屏之外——超过上界的用全屏读。
   const visibleRows = useMemo(
@@ -157,33 +203,21 @@ export function SqlEditor({
     [value],
   );
 
-  // 全屏时 Escape 归这里管，而且要在向导那个 window 上的退出监听之前拦下来：
-  // 否则按一下 Escape 是「退出整个向导」，而人只是想收起全屏。捕获阶段先跑，
-  // `stopImmediatePropagation` 把同一目标上剩下的监听也挡掉。
-  useEffect(() => {
-    if (!fullscreen) {
-      return;
-    }
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key !== "Escape") {
-        return;
-      }
-      event.stopImmediatePropagation();
-      event.preventDefault();
-      setFullscreen(false);
-    }
-    window.addEventListener("keydown", handleKeyDown, true);
-    return () => window.removeEventListener("keydown", handleKeyDown, true);
-  }, [fullscreen]);
-
   return (
-    <div className={`source-sql-editor ${fullscreen ? "is-fullscreen" : ""}`}>
+    <div
+      className={`source-sql-editor ${fullscreen ? "is-fullscreen" : ""}`}
+      ref={panelRef}
+      /* 全屏是一层盖住整页的浮层，就得照浮层报：有陷阱撑着，`aria-modal` 才不是空话。 */
+      role={fullscreen ? "dialog" : undefined}
+      aria-modal={fullscreen ? true : undefined}
+      aria-label={fullscreen ? "自定义 SQL 全屏编辑" : undefined}
+      /* 里面没有可聚焦元素时的兜底落点，与对话框同形。 */
+      tabIndex={fullscreen ? -1 : undefined}
+    >
+      {fullscreen && (
+        <FullscreenFocusTrap panel={panelRef} onExit={() => onFullscreen(false)} />
+      )}
       <div className="sql-editor-toolbar">
-        {/* 卡片标题已经写着「自定义 SQL」，这里不再挂一个同名标签。 */}
-        <small className="spec-note">
-          读取列后可以只勾要搬的列。实际执行时会在这条 SQL 外层套一层投影，
-          只取勾选的列并改名成目标字段——没勾的列不会过线。
-        </small>
         <span className="sql-editor-tools">
           <button
             className={`button is-ghost ${wrapped ? "is-on" : ""}`}
@@ -213,7 +247,7 @@ export function SqlEditor({
             type="button"
             title={fullscreen ? "退出全屏（Esc）" : "全屏编辑"}
             aria-label={fullscreen ? "退出全屏" : "全屏编辑"}
-            onClick={() => setFullscreen((current) => !current)}
+            onClick={() => onFullscreen(!fullscreen)}
           >
             {fullscreen ? <Minimize2 size={ICON.sm} /> : <Maximize2 size={ICON.sm} />}
           </button>

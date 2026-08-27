@@ -102,8 +102,10 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    not through a draft. Its rules live in one module (`web/src/wizard.ts`), never in the screens:
    what a change clears, whether that clearing is worth a confirmation, when a fetched result goes
    stale, and whether the next step may be entered. A **hand-made** value is one the person typed or
-   ticked, or one loaded from a saved task when editing; a derived value is not. Only hand-made values
-   are worth a confirmation before they are cleared.
+   ticked, or one loaded from a saved task when editing; a derived value is not. A cascading change is
+   worth a confirmation only when it clears a hand-made value. **Leaving is always worth one** — whether
+   anything in the draft is worth keeping is the person's judgement, not the wizard's; hand-made values
+   are merely what that question can *list*, and listing nothing is not a reason to skip it.
 
 **Filter Clause**
    One field, `where_clause`: **a free-form fragment spliced verbatim after `WHERE`**, not including

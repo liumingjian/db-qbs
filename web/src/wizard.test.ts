@@ -6,8 +6,10 @@ import {
   canAdvance,
   checkIsFresh,
   confirm,
+  foldedSteps,
   historyDivider,
   leaving,
+  leavingConfirmation,
   openExisting,
   openNew,
   previewIsFresh,
@@ -637,8 +639,40 @@ describe("leaving the wizard", () => {
     expect(loss!.headline).not.toContain("清掉");
   });
 
-  it("stays silent when there is nothing hand-made to keep", () => {
+  it("has nothing to list on a draft with nothing hand-made in it", () => {
     expect(leaving(openNew(SOURCE, TARGET))).toBeNull();
+  });
+
+  it("still asks when it has nothing to list", () => {
+    // 列不出东西不是放行的理由：「里面有没有值得留的东西」是人自己的判断（#242）。
+    const question = leavingConfirmation(openNew(SOURCE, TARGET));
+    expect(question.headline).toBe("要离开这个向导吗？");
+    expect(question.lines).toEqual([]);
+    // 列得出来的时候还是列，问句不换。
+    expect(leavingConfirmation(workedDraft())).toEqual(leaving(workedDraft()));
+  });
+});
+
+describe("what the wizard folded past", () => {
+  it("counts only the steps it actually skipped", () => {
+    const passed = passingCheck(withTargetColumns(workedDraft()));
+    expect(foldedSteps(passed, 2, 4)).toEqual([3]);
+    // 走过去的那一步不是跳过的。
+    expect(foldedSteps(passed, 2, 3)).toEqual([]);
+    expect(foldedSteps(passed, 1, 2)).toEqual([]);
+  });
+
+  it("counts nothing when the step it passed still has something to say", () => {
+    // 第 3 步没折，人是从 2 一路走到 4 的——中间隔着一步不等于跳过了它。
+    const unchecked = withTargetColumns(workedDraft());
+    expect(foldedSteps(unchecked, 2, 4)).toEqual([]);
+  });
+
+  it("counts nothing when going back", () => {
+    // 往回走从来不是跳过：说「已跳过」会把一件没发生的事念给读屏的人听。
+    const passed = passingCheck(withTargetColumns(workedDraft()));
+    expect(foldedSteps(passed, 4, 2)).toEqual([]);
+    expect(foldedSteps(passed, 3, 3)).toEqual([]);
   });
 });
 

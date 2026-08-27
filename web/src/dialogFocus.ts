@@ -103,6 +103,20 @@ export function useDialogFocus(
 /** Innermost first. Identity objects, so two overlays can never collide. */
 const openDialogs: object[] = [];
 
+/**
+ * Whether an overlay currently owns the keyboard.
+ *
+ * For the one Escape listener that is *not* an overlay: the wizard's own, bound to
+ * the wizard container (#242). Everything on this stack renders inside that
+ * container, so its keydown bubbles through — and Escape there means "close the
+ * topmost layer", never "leave the wizard". Asking the stack is how that listener
+ * defers; the alternative is what the fullscreen SQL editor used to do, a
+ * capture-phase `stopImmediatePropagation` racing to get in first.
+ */
+export function overlayOwnsKeyboard(): boolean {
+  return openDialogs.length > 0;
+}
+
 const FOCUSABLE_SELECTOR = [
   "a[href]",
   "button:not([disabled])",
