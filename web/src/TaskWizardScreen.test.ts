@@ -74,11 +74,19 @@ describe("the mapping step UI", () => {
   });
 
   it("puts the fetch mode first and marks the current rail step", () => {
-    // 量的是「先说从哪儿取数、再给上下文」这个顺序。挑第 2 步的渲染态来量：
-    // 第 1 步要占满全宽、左栏上下文根本不出现，在那儿比先后只会拿到 -1。
-    const onMapping = renderWizard({ ...mappingDraft(), step: 2 });
-    expect(onMapping.indexOf('class="wizard-mode"')).toBeLessThan(
-      onMapping.indexOf('class="wizard-context-scroll"'),
+    // 量的是「先说从哪儿取数、再给上下文」这个顺序。改版之后取数方式住在选择屏、
+    // 左栏上下文住在第 2 步之后，两者再也不同屏——拿一个去比另一个只会拿到 -1，
+    // 而 `-1 < 任何下标` 恒真，那条断言就成了空转。所以改成各在自己的屏上量：
+    // 选择屏里取数方式在两栏之前，第 2 步之后左栏上下文确实还在。
+    const onSelection = renderWizard(openNew(SOURCE, TARGET));
+    const mode = onSelection.indexOf('class="wizard-mode"');
+    const panes = onSelection.indexOf('class="wizard-panes"');
+    expect(mode).toBeGreaterThanOrEqual(0);
+    expect(panes).toBeGreaterThanOrEqual(0);
+    expect(mode).toBeLessThan(panes);
+
+    expect(renderWizard({ ...mappingDraft(), step: 2 })).toContain(
+      'class="wizard-context-scroll"',
     );
 
     for (const step of [1, 2, 3, 4] as Draft["step"][]) {
