@@ -708,7 +708,9 @@ select, .page-size {
 .wizard-summary strong { color: var(--text); font-size: var(--size-meta); font-weight: var(--weight-em); }
 .wizard-summary-edit { flex: none; height: 24px; padding: 0 10px; font-size: var(--size-cap); }
 .wizard-main { min-width: 0; margin: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--panel); }
-/* 五格：`wizard.ts` 的四步，前面加上「选择数据」（#245）。 */
+/* 五格：`wizard.ts` 的四步，前面加上「选择数据」（#245）。CSS 数不到那个 +1，
+   所以这个 5 是 `TaskWizardScreen.tsx` 里 `SELECTION_SLOT` 那条注释点名的唯一一处
+   手写副本——步数真变了，这里也得跟着改。 */
 .wizard-rail { min-height: 68px; flex: none; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin: 0; padding: 12px var(--pad-x); border-bottom: 1px solid var(--line); list-style: none; }
 .wizard-rail li { min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--mute); }
 .wizard-rail li::after { height: 1px; flex: 1; margin: 0 8px; background: var(--line-strong); content: ""; }
@@ -754,8 +756,11 @@ select, .page-size {
 .wizard-sql-echo > header .button { flex: none; height: 28px; padding: 0 12px; font-size: var(--size-meta); }
 
 /* ── 第 1 步「选择数据」：全宽双栏 ──────────────────────────────
-   超宽屏上不让一行拉到 3840px 那么长，也不留大片死白：居中一个跟着视口走的宽度。 */
-.wizard-selection { width: 100%; max-width: clamp(1040px, 94vw, 2400px); margin: 0 auto; }
+   **铺满内容区**，不设上限、不居中。这一屏是两栏对称的，宽度多出来的部分两栏平分，
+   越宽两边的清单越读得开——不像一行长文本，没有「太长了看不下去」这回事。
+   试过给它 max-width: clamp(1040px, 94vw, 2400px) 居中：2560 上左右各留一条死白，
+   而两栏里的源表树正缺那点宽度（story 1「内容区铺满宽屏」，commit 03821fd）。 */
+.wizard-selection { width: 100%; }
 .wizard-selection-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 /* auto-fit：宽屏两栏对称，窄到放不下 380px 一栏时自己叠成一栏（1366 靠的就是这一条）。 */
 .wizard-panes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: clamp(12px, 1.4vw, 28px); align-items: stretch; }
@@ -795,8 +800,11 @@ select, .page-size {
    6px，比这里短一个类名就轮不到这条，绝对定位的徽标会被那 6px 推着离右端偏一点。 */
 .wizard-pane-target-input .field-badge.wizard-pane-target-badge { position: absolute; top: 50%; right: 7px; margin-left: 0; transform: translateY(-50%); pointer-events: none; }
 /* 目标表还不存在时的那一行交底（P1-4）。是**事实陈述**不是错误：这条路是允许走的。
+   所以它是中性的一行小字（--mute / --size-cap），跟它取代的 `.target-missing-note` 一样。
+   试过给它告警色的左边框加浅黄底：那就是把「你可以接着走」画成「你这儿出了问题」，
+   而人接下来什么都不用改——徽标已经在字段旁说了「尚不存在」，这一行只是把话说完。
    通栏一行，落在 .wizard-panes 之外：出现或消失都不动两栏的几何（#249）。 */
-.wizard-missing-note { margin: 0; padding: 9px 12px; border-left: 3px solid var(--warn-bd); background: var(--warn-bg); color: var(--warn); font-size: var(--size-meta); line-height: var(--lh-prose); }
+.wizard-missing-note { margin: 0; color: var(--mute); font-size: var(--size-cap); line-height: var(--lh-prose); }
 .wizard-missing-note strong { font-family: var(--font-num); font-weight: var(--weight-em); }
 /* ---------------------------------------------------------------- 两栏取数区的框线
    **这套布局唯一的天敌是条件出现的行**：某一栏多出一段只在特定数据下才渲染的东西，
@@ -1030,6 +1038,11 @@ select, .page-size {
    笔记本与台式机上。这一档只做一件事——把左右内边距收一收，让那张宽表少滚一点。 */
 @media (max-width: 1280px) {
   .content { padding: 12px; }
+  /* 左栏在这一档定宽 240px。改版前它就在（是 `.task-wizard` 上的那一条），#245 只是
+     把它挂到 `.is-steps` 上——选择屏根本没有左栏，不该被它改到。
+     不删掉改吃 clamp 的地板：1280 上 14vw 只有 179px，落到地板 200px，等于顺手把
+     「1280 断点下窄轨道再收一档」那件事做了，而那件事在 #245 的 Out of Scope 里。 */
+  .task-wizard.is-steps { grid-template-columns: 240px minmax(0, 1fr); }
   .kv { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
   .drawer { width: 680px; }
 }
