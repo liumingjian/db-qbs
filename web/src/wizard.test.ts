@@ -13,6 +13,7 @@ import {
   openExisting,
   openNew,
   previewIsFresh,
+  selectionBlocker,
   taskName,
   toSpec,
   view,
@@ -272,6 +273,82 @@ describe("when a change is worth asking about", () => {
     const loss = leaving(workedDraft());
     expect(loss?.lines).toContain("已选的 2 列");
     expect(loss?.headline).toContain("离开");
+  });
+});
+
+describe("the selection gate", () => {
+  // 五步里的第 1 步「选择数据」（#245）。它是屏幕的本地状态，但**走不走得下去是草稿的
+  // 规矩**，所以住在 wizard.ts 里；从前它是组件里一份措辞不同、条目更少的手抄件。
+
+  it("asks for a source table, and stops asking once one is picked", () => {
+    const fresh = openNew(SOURCE, TARGET);
+    expect(selectionBlocker(fresh)).toBe("请先选一张源表");
+
+    // 挑源表顺带把目标表填成同名（清空规则 4 里的 prefilled），于是这一步当场就选完了。
+    const picked = done(apply(fresh, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
+    expect(picked.spec.target_table).toBe("T_CUSTOMER");
+    expect(selectionBlocker(picked)).toBeNull();
+  });
+
+  it("asks for the target table when it has been emptied out again", () => {
+    let draft = done(apply(openNew(SOURCE, TARGET), { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
+    draft = done(apply(draft, { type: "target-table", table: "" }));
+    expect(draft.spec.owner).toBe("APP");
+    expect(selectionBlocker(draft)).toBe("请先选目标表——字段映射要对着它才有意义");
+
+    draft = done(apply(draft, { type: "target-table", table: "t_customer" }));
+    expect(selectionBlocker(draft)).toBeNull();
+  });
+
+  it("asks for the SQL body instead when that is how the data is fetched", () => {
+    let draft = done(apply(openNew(SOURCE, TARGET), { type: "fetch-mode", fetchMode: "sql" }));
+    draft = done(apply(draft, { type: "target-table", table: "t_customer" }));
+    // 目标表填了也不算完：这一路的源端是 SQL 正文，源表那一条根本不适用。
+    expect(selectionBlocker(draft)).toBe("自定义 SQL 不能为空");
+
+    draft = done(apply(draft, { type: "source-sql", sql: "SELECT ID FROM APP.T_CUSTOMER" }));
+    expect(selectionBlocker(draft)).toBeNull();
+  });
+
+  it("keeps asking while only the target table is missing", () => {
+    let draft = done(apply(openNew(SOURCE, TARGET), { type: "fetch-mode", fetchMode: "sql" }));
+    draft = done(apply(draft, { type: "source-sql", sql: "SELECT ID FROM APP.T_CUSTOMER" }));
+    expect(draft.spec.target_table).toBe("");
+    expect(selectionBlocker(draft)).toBe("请先选目标表——字段映射要对着它才有意义");
+  });
+
+  it("says the same thing the advance gate says, never a second opinion", () => {
+    // 两处措辞一旦分家，同一件事就会被说成两件（评审 c8）。所以这一条不是「都非空」，
+    // 而是：它说的每一句，第 1 步的门槛也在说，而且是同一句。
+    const emptyTarget = done(apply(
+      done(apply(openNew(SOURCE, TARGET), { type: "source-table", owner: "APP", table: "T_CUSTOMER" })),
+      { type: "target-table", table: "" },
+    ));
+    const drafts: Draft[] = [
+      openNew(SOURCE, TARGET),
+      emptyTarget,
+      done(apply(openNew(SOURCE, TARGET), { type: "fetch-mode", fetchMode: "sql" })),
+      workedDraft(),
+    ];
+    const refusals: string[] = [];
+    for (const draft of drafts) {
+      const refusal = selectionBlocker(draft);
+      if (refusal === null) continue;
+      refusals.push(refusal);
+      expect(canAdvance(draft, 1).map((blocker) => blocker.message)).toContain(refusal);
+    }
+    // 先证明真有几条走进了上面那个断言：全 null 的话这条测试什么都没量。
+    expect(refusals.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("lets the mapping step own everything about the mapping", () => {
+    // 选完了数据的草稿这里就放行，哪怕映射还没做完——选择屏上根本没有映射表，
+    // 拿「至少要选一列」去拦一个刚挑完表的人，说的不是他此刻能做的事。
+    let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t_customer" }));
+    draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
+    expect(draft.spec.columns).toHaveLength(0);
+    expect(selectionBlocker(draft)).toBeNull();
+    expect(canAdvance(draft, 1).map((blocker) => blocker.message)).toContain("至少要选一列");
   });
 });
 

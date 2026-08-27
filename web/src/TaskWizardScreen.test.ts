@@ -6,7 +6,7 @@ import type { BuilderColumn, TargetColumn } from "./api";
 import type { DatasourceOption } from "./entry";
 import { SqlEditorPanel } from "./SqlEditor";
 import { TaskEntryDialog } from "./TaskEntryDialog";
-import { TaskWizardScreen, WizardConfirmDialog } from "./TaskWizardScreen";
+import { sqlEcho, TaskWizardScreen, WizardConfirmDialog } from "./TaskWizardScreen";
 import { apply, canAdvance, leaving, leavingConfirmation, openNew, view } from "./wizard";
 import type { Applied, Draft } from "./wizard";
 
@@ -218,6 +218,16 @@ describe("the mapping step UI", () => {
     // 没得选的那侧不摆一个 disabled 下拉：整屏只此一个 <select>，就是目标端那一个。
     expect(html.match(/<select/g)).toHaveLength(1);
     expect(html).toMatch(/目标端数据源<select/);
+  });
+
+  it("says the connection is unknown rather than quietly dropping it", () => {
+    // 这一行的形状是「名字 · 连接串」。一侧有清单、另一侧没有，正是这一行存在的理由，
+    // 而没清单的那一侧连接串这个进程压根没拿到——退回只报名字，两侧看着都是一行字，
+    // 人却读不出这两行说的详略根本不同。
+    const html = renderWizard(openNew(SOURCE, TARGET), {
+      targetOptions: [TARGET_OPTION, TARGET_OPTION_2],
+    });
+    expect(html).toContain('<p class="wizard-pane-ds-fixed">生产 Oracle · 连接串未知</p>');
   });
 
   it("stops repeating the datasource name in the pane headers", () => {
@@ -464,6 +474,23 @@ describe("leaving the wizard", () => {
     const html = renderWizard(openNew(SOURCE, TARGET));
     // class 上多了 is-selection / is-steps（#245），容器是哪一个仍旧看 task-wizard。
     expect(html).toMatch(/<section class="task-wizard[^"]*" tabindex="-1"/);
+  });
+
+  it("echoes the first six lines of the SQL and says how many there are in all", () => {
+    // 映射步上那块只读回显只为「认一眼这是不是我写的那段」（#245），不是读全文。
+    const short = "SELECT ID,\n       C_NAME\n  FROM APP.T_CUSTOMER";
+    expect(sqlEcho(short)).toBe(short);
+    // 正好六行还是原样，第七行才开始截——边界上多截一行少截一行都在这儿露出来。
+    const six = ["1", "2", "3", "4", "5", "6"].join("\n");
+    expect(sqlEcho(six)).toBe(six);
+    const eight = ["1", "2", "3", "4", "5", "6", "7", "8"].join("\n");
+    expect(sqlEcho(eight)).toBe("1\n2\n3\n4\n5\n6\n…（共 8 行）");
+    // 行数报的是**全文**的行数，不是截出来那几行的。
+    expect(sqlEcho(eight)).not.toContain("共 6 行");
+    // 前后的空白不算内容：只有空白的一段就是「还没写」，不是一段看不见的 SQL。
+    expect(sqlEcho("   \n  ")).toBe("（还没写）");
+    expect(sqlEcho("")).toBe("（还没写）");
+    expect(sqlEcho(`\n${short}\n\n`)).toBe(short);
   });
 
   it("does not explain a busy refresh in a tooltip on the button it disables", () => {
