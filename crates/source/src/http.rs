@@ -771,6 +771,7 @@ fn handle_get_run(
             &json!({
                 "run_record_id": run_record_id,
                 "run_id": record.run_id,
+                "task_name": record.task_name,
                 "source_sql": record.source_sql,
                 "evidence": record.evidence,
                 "staging_table": record.staging_table,
@@ -987,6 +988,10 @@ fn start_run(
         &task.spec.source_sql(),
         Utc::now(),
     );
+    // 名字也钉在这一行上：它是展示标签，改名随时可能发生，而这条记录说的是
+    // 「当时那次运行」。回头去任务表现取，改一次名就会把过去所有运行记录的名字
+    // 一起改写（#259）。
+    history.task_name = task.name.clone();
     history.evidence = RunEvidence {
         source: Some(SourceEvidence {
             datasource_id: task.source_datasource_id.clone(),

@@ -330,3 +330,53 @@ fn opening_an_old_history_schema_adds_empty_evidence_without_inventing_facts() {
     );
     fs::remove_dir_all(directory).unwrap();
 }
+
+/// 名字快照原样存回原样读出，`save` 也不许把它改掉（#259）。
+#[test]
+fn the_task_name_snapshot_round_trips_and_save_leaves_it_alone() {
+    let suffix = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "db-qbs-run-task-name-test-{}-{suffix}",
+        std::process::id()
+    ));
+    fs::create_dir(&directory).unwrap();
+    let store = HistoryStore::open(&directory).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 25, 12, 0, 0).unwrap();
+    let mut history = RunHistory::accepted("record-name", "task-1", SOURCE_SQL, now);
+    history.task_name = "持仓明细".to_owned();
+    store.insert(&history, now, 90).unwrap();
+
+    let mut stored = store.get("record-name").unwrap().unwrap();
+    assert_eq!(stored.task_name, "持仓明细");
+    // 后续的落盘走的是同一条 UPDATE：它写别的字段，不该顺手动这一份快照。
+    stored.message = Some("later failure".to_owned());
+    store.save(&stored, now, 90).unwrap();
+    assert_eq!(store.get("record-name").unwrap().unwrap().task_name, "持仓明细");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+/// 老库里没有这一列：迁出来是空串，不是拿当前任务名补写的假快照（#259）。
+#[test]
+fn opening_an_old_history_schema_leaves_the_task_name_empty() {
+    let suffix = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "db-qbs-run-task-name-migration-test-{}-{suffix}",
+        std::process::id()
+    ));
+    fs::create_dir(&directory).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 25, 12, 0, 0).unwrap();
+    let store = HistoryStore::open(&directory).unwrap();
+    let mut history = RunHistory::accepted("old-record", "task-1", SOURCE_SQL, now);
+    history.task_name = "持仓明细".to_owned();
+    store.insert(&history, now, 90).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(directory.join("db-qbs.sqlite3")).unwrap();
+    connection
+        .execute("ALTER TABLE run_history DROP COLUMN task_name", [])
+        .unwrap();
+    drop(connection);
+
+    let reopened = HistoryStore::open(&directory).unwrap();
+    assert_eq!(reopened.get("old-record").unwrap().unwrap().task_name, "");
+    fs::remove_dir_all(directory).unwrap();
+}

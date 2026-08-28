@@ -18,6 +18,7 @@ macro_rules! history_params {
             ":run_record_id": $history.run_record_id,
             ":run_id": $history.run_id,
             ":task_id": $history.task_id,
+            ":task_name": $history.task_name,
             ":staging_table": $history.staging_table,
             ":started_at": $history.started_at,
             ":started_at_ms": $history.started_at_ms,
@@ -140,6 +141,15 @@ pub struct RunHistory {
     pub run_record_id: String,
     pub run_id: Option<String>,
     pub task_id: String,
+    /// 开跑那一刻的任务名称快照。
+    ///
+    /// 名称在产品里只是展示标签：不唯一、不参与任何标识，随时可以在向导里改。
+    /// 认领一次运行靠的是 `task_id`；名称如果每次展示都回头去任务表现取，
+    /// 改一次名就会把**过去所有**运行记录上的名字一起改掉——历史于是不再是历史。
+    /// 所以这一份和 `source_sql` 同一性质：当时是什么就永远是什么。
+    ///
+    /// 空串表示这条历史早于本字段（老库迁移后的默认值），展示层这时才回退到当前名称。
+    pub task_name: String,
     /// 当次**实际执行**的源端 SQL 快照。
     ///
     /// 它与任务定义现算的那份性质根本不同：这份回答「当时执行了什么」，是审计事实，
@@ -209,6 +219,7 @@ impl RunHistory {
             run_record_id: run_record_id.to_owned(),
             run_id: None,
             task_id: task_id.to_owned(),
+            task_name: String::new(),
             source_sql: source_sql.to_owned(),
             evidence: RunEvidence::default(),
             staging_table: None,
@@ -436,6 +447,7 @@ impl HistoryStore {
                     run_record_id       TEXT PRIMARY KEY NOT NULL,
                     run_id              TEXT,
                     task_id             TEXT NOT NULL,
+                    task_name           TEXT NOT NULL DEFAULT '',
                     source_sql          TEXT NOT NULL DEFAULT '',
                     staging_table       TEXT,
                     started_at          TEXT NOT NULL,
@@ -484,6 +496,8 @@ impl HistoryStore {
                  );",
             )
             .map_err(|error| format!("初始化 SQLite 运行历史表失败：{error}"))?;
+        // 老库里没有这一列：迁移出来的行拿空串，展示层据此回退到当前名称。
+        ensure_text_column(&connection, "task_name")?;
         ensure_json_column(&connection, "mapping_issues", "[]")?;
         ensure_json_column(&connection, "evidence", "{}")?;
         ensure_nullable_text_column(&connection, "failure_kind")?;
@@ -507,7 +521,7 @@ impl HistoryStore {
         transaction
             .execute(
                 "INSERT INTO run_history (
-                    run_record_id, run_id, task_id, source_sql, staging_table,
+                    run_record_id, run_id, task_id, task_name, source_sql, staging_table,
                     started_at, started_at_ms, finished_at, outcome, target_table_effect, stage,
                     source_rows, staged_rows, sink_reported_rows, purged_rows, source_batches,
                     received_batches, total_rows, precount_ms,
@@ -515,7 +529,7 @@ impl HistoryStore {
                     source_code, sink_code, [column], [value], message, unknown_reason,
                     failure_kind, seq, rows_pushed, bytes, ms, last_ts, mapping_issues, evidence
                  ) VALUES (
-                    :run_record_id, :run_id, :task_id, :source_sql, :staging_table,
+                    :run_record_id, :run_id, :task_id, :task_name, :source_sql, :staging_table,
                     :started_at, :started_at_ms, :finished_at, :outcome, :target_table_effect,
                     :stage, :source_rows, :staged_rows, :sink_reported_rows, :purged_rows,
                     :source_batches, :received_batches, :total_rows, :precount_ms,
@@ -548,7 +562,7 @@ impl HistoryStore {
         transaction
             .execute(
                 "UPDATE run_history SET
-                    run_id=:run_id, task_id=:task_id,
+                    run_id=:run_id, task_id=:task_id, task_name=:task_name,
                     source_sql=:source_sql,
                     staging_table=:staging_table, started_at=:started_at,
                     started_at_ms=:started_at_ms, finished_at=:finished_at, outcome=:outcome,
@@ -793,7 +807,23 @@ fn retention_cutoff(now: DateTime<Utc>, retention_days: u64) -> Option<DateTime<
     now.checked_sub_signed(TimeDelta::try_days(days)?)
 }
 
+/// 补一列非空 TEXT，老库迁移出来的行拿空串。
+///
+/// 空串在这里是**实话**：那些运行跑完的时候还没有这一列可记，拿当前的值补写过去
+/// 才是造假。展示层看见空串就回退，看见内容就照抄。
+fn ensure_text_column(connection: &Connection, name: &str) -> Result<(), String> {
+    ensure_column_with_default(connection, name, "")
+}
+
 fn ensure_json_column(connection: &Connection, name: &str, default: &str) -> Result<(), String> {
+    ensure_column_with_default(connection, name, default)
+}
+
+fn ensure_column_with_default(
+    connection: &Connection,
+    name: &str,
+    default: &str,
+) -> Result<(), String> {
     let exists: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('run_history') WHERE name = ?1)",
@@ -878,7 +908,7 @@ fn number(value: &Value, key: &str) -> Option<u64> {
 }
 
 const HISTORY_SELECT: &str = "SELECT
-    run_record_id, run_id, task_id, source_sql, staging_table, started_at,
+    run_record_id, run_id, task_id, task_name, source_sql, staging_table, started_at,
     started_at_ms, finished_at, outcome, target_table_effect, stage, source_rows, staged_rows,
     sink_reported_rows, purged_rows, source_batches, received_batches, fetch_ms, push_ms,
     total_rows, precount_ms,
@@ -892,6 +922,7 @@ fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunHistory> {
         run_record_id: row.get("run_record_id")?,
         run_id: row.get("run_id")?,
         task_id: row.get("task_id")?,
+        task_name: row.get("task_name")?,
         source_sql: row.get("source_sql")?,
         evidence: json_object_from_row(row, "evidence")?,
         staging_table: row.get("staging_table")?,
