@@ -1,6 +1,8 @@
 use std::fs::{self, OpenOptions, Permissions};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use rand::RngCore;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -45,8 +47,15 @@ impl TaskInput {
     }
 }
 
+/// 任务表的门。
+///
+/// 连接进了 `Mutex`：`rusqlite::Connection` 是 `Send` 而**不是** `Sync`，
+/// 多线程 accept 循环（#255）要求 `Api` 整体 `Sync`，一个裸连接直接编译不过。
+/// 两条路里选了它，没选运行历史那种「每次调用重开一个连接」：
+/// 任务表的每次访问都是一条毫秒级的本地语句，重开连接的开销反而更大；
+/// 而**锁只在一条 SQL 的时长内攥着**，Oracle 那些十几秒的阻塞取数一律在锁外。
 pub struct TaskStore {
-    connection: Connection,
+    connection: Mutex<Connection>,
 }
 
 impl TaskStore {
@@ -80,7 +89,23 @@ impl TaskStore {
             )
             .map_err(|error| format!("初始化 SQLite 任务表失败：{error}"))?;
 
-        Ok(Self { connection })
+        // 同一个库文件此刻被四个连接（任务、数据源、鉴权、运行历史）分头打开，
+        // 多线程之后它们会真的撞上。忙等待跟运行历史取同一个 5 秒。
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(|error| format!("配置 SQLite 忙等待失败：{error}"))?;
+
+        Ok(Self {
+            connection: Mutex::new(connection),
+        })
+    }
+
+    /// 攥住连接。锁中毒（持锁线程 panic）只可能出在这几条 SQL 里，
+    /// 那时库的状态已经不可信，报错比 `into_inner()` 硬闯诚实。
+    fn connection(&self) -> Result<MutexGuard<'_, Connection>, String> {
+        self.connection
+            .lock()
+            .map_err(|_| "SQLite 任务库的锁已损坏".to_owned())
     }
 
     pub fn create(&self, input: TaskInput) -> Result<Task, String> {
@@ -92,7 +117,7 @@ impl TaskStore {
             target_datasource_id: input.target_datasource_id,
             spec: input.spec,
         };
-        self.connection
+        self.connection()?
             .execute(
                 "INSERT INTO tasks (task_id, name, source_datasource_id, target_datasource_id, spec)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -109,8 +134,8 @@ impl TaskStore {
     }
 
     pub fn list(&self) -> Result<Vec<Task>, String> {
-        let mut statement = self
-            .connection
+        let connection = self.connection()?;
+        let mut statement = connection
             .prepare(
                 "SELECT task_id, name, source_datasource_id, target_datasource_id, spec
                    FROM tasks ORDER BY rowid",
@@ -125,7 +150,7 @@ impl TaskStore {
     }
 
     pub fn get(&self, task_id: &str) -> Result<Option<Task>, String> {
-        self.connection
+        self.connection()?
             .query_row(
                 "SELECT task_id, name, source_datasource_id, target_datasource_id, spec
                    FROM tasks WHERE task_id = ?1",
@@ -139,7 +164,7 @@ impl TaskStore {
     pub fn update(&self, task_id: &str, input: TaskInput) -> Result<Option<Task>, String> {
         input.validate()?;
         let updated_rows = self
-            .connection
+            .connection()?
             .execute(
                 "UPDATE tasks
                     SET name = ?2, source_datasource_id = ?3, target_datasource_id = ?4, spec = ?5
@@ -163,7 +188,7 @@ impl TaskStore {
         let Some(task) = self.get(task_id)? else {
             return Ok(None);
         };
-        self.connection
+        self.connection()?
             .execute("DELETE FROM tasks WHERE task_id = ?1", [task_id])
             .map_err(|error| format!("删除 SQLite 任务失败：{error}"))?;
         Ok(Some(task))
@@ -174,8 +199,8 @@ impl TaskStore {
 /// 悬空引用会把失败推迟到发起运行那一刻才炸，那时用户手上只有一条「连不上」。
 impl TaskStore {
     pub fn names_referencing(&self, datasource_id: &str) -> Result<Vec<String>, String> {
-        let mut statement = self
-            .connection
+        let connection = self.connection()?;
+        let mut statement = connection
             .prepare(
                 "SELECT name FROM tasks
                   WHERE source_datasource_id = ?1 OR target_datasource_id = ?1
