@@ -709,11 +709,17 @@ fn handle_start_run(request: &Request, state: &Api<'_>) -> HttpResponse {
 }
 
 fn handle_cancel_run(runs: &RunRegistry, run_record_id: &str) -> HttpResponse {
-    let runs = match runs.lock() {
-        Ok(runs) => runs,
+    // 锁只用来**抄一份**这条 run 此刻的阶段与 PID，随即松手（#255）。判阶段、发信号、
+    // 拼回话都在锁外做：`kill(2)` 本身不阻塞，但攥着这把锁的每一微秒，
+    // 别的线程的 `/api/runs` 与运行详情都在排队。
+    let snapshot = match runs.lock() {
+        Ok(registry) => registry
+            .active_runs
+            .get(run_record_id)
+            .map(|run| (run.stage, run.child_pid)),
         Err(_) => return internal_error("run 控制锁已损坏".to_owned()),
     };
-    let Some(run) = runs.active_runs.get(run_record_id) else {
+    let Some((run_stage, child_pid)) = snapshot else {
         return not_found();
     };
     let refused = |message: &str| json_response(409, &json!({ "error": { "message": message } }));
@@ -721,7 +727,7 @@ fn handle_cancel_run(runs: &RunRegistry, run_record_id: &str) -> HttpResponse {
     // 那条封口点不变量。**理由**另说：拒绝的原因分三种，所以按变体挑话，
     // 而不是对 `abort_allowed` 取反。这里不写通配分支，于是将来往闭集里加一格
     // 会在这儿变成编译错误，而不是悄悄落进「说不清为什么」的那一句。
-    let Some(stage) = run.stage else {
+    let Some(stage) = run_stage else {
         return refused("run 尚未进入可取消阶段");
     };
     if !stage.abort_allowed() {
@@ -734,7 +740,7 @@ fn handle_cancel_run(runs: &RunRegistry, run_record_id: &str) -> HttpResponse {
             RunStage::Preparing | RunStage::Streaming => "run 尚未进入可取消阶段",
         });
     }
-    let Some(pid) = run.child_pid else {
+    let Some(pid) = child_pid else {
         return internal_error("run 子进程尚未登记".to_owned());
     };
     match send_sigterm(pid) {
