@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 use db_qbs_source::http::{routes, Access, Api, Method, Request, Response, RunState};
 use db_qbs_source::{
     AgentStore, AuthStore, DatasourceStore, HistoryStore, OracleAccess, OracleRowSource,
-    RunLogStore, SourceColumn, SourceConfig, SourceReadError, TaskSpec, TaskStore, SESSION_COOKIE,
+    RunLogStore, ScheduleState, SourceColumn, SourceConfig, SourceReadError, TaskSpec, TaskStore,
+    SESSION_COOKIE,
 };
 use serde_json::Value;
 
@@ -87,6 +88,7 @@ struct Rig {
     history: HistoryStore,
     run_logs: RunLogStore,
     runs: Arc<Mutex<RunState>>,
+    schedule: db_qbs_source::ScheduleRegistry,
     auth: AuthStore,
     /// 这台 rig 的会话票据。**每条请求默认都带着它**——`/api/*` 现在整片要求登录，
     /// 不带就是 401，而这个文件里的用例问的几乎都不是「没登录会怎样」。
@@ -128,6 +130,7 @@ impl Rig {
             history: HistoryStore::open(&directory).unwrap(),
             run_logs: RunLogStore::open(&directory).unwrap(),
             runs: Arc::new(Mutex::new(RunState::default())),
+            schedule: Arc::new(Mutex::new(ScheduleState::default())),
             auth,
             session,
             config,
@@ -155,6 +158,7 @@ impl Rig {
             history: &self.history,
             run_logs: &self.run_logs,
             runs: &self.runs,
+            schedule: &self.schedule,
             auth: &self.auth,
             describe_source,
         }
@@ -415,6 +419,13 @@ fn every_route_reaches_its_handler() {
             "/api/builder/schedule",
             "/api/builder/schedule".into(),
             r#"{"cron":"0 2 * * *"}"#.into(),
+            200,
+        ),
+        (
+            Method::Get,
+            "/api/schedule",
+            "/api/schedule".into(),
+            String::new(),
             200,
         ),
         (Method::Get, "/api/agents", "/api/agents".into(), String::new(), 200),

@@ -36,7 +36,7 @@ use crate::{
     validate_source_sql, Agent, AgentEndpoint, AgentEvidence, AgentInput, AgentStore, AuthStore,
     ColumnPrecision, DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess,
     OracleRowSource, RowSource, RunEvidence, RunHistory, RunLogStore, RunLogWriter,
-    RunParametersEvidence,
+    RunParametersEvidence, RunTrigger, ScheduleRegistry,
     SourceColumn, SourceConfig, SourceEvidence, SourceReadError, TargetCheckRequest,
     TargetCheckResult, TargetConnection, TargetEvidence, Task, TaskConfig, TaskInput, TaskSpec,
     TaskStore, UnknownReason, RUN_LOG_PAGE_LIMIT, SESSION_IDLE_SECONDS, USERNAME,
@@ -60,10 +60,32 @@ pub struct RunState {
     active_runs: HashMap<String, ActiveRun>,
 }
 
+impl RunState {
+    /// 这个任务此刻有没有一次运行在飞。互斥键就是任务本身，见 [`ActiveRun::task_id`]。
+    pub fn has_active_run(&self, task_id: &str) -> bool {
+        self.active_runs.values().any(|run| run.task_id == task_id)
+    }
+
+    /// 这台 agent 上此刻有几次**由本进程发起**的运行在飞（#266）。
+    ///
+    /// 它是并发额度那笔账的分子。分母（额度）由 agent 自报；分子在这里数，
+    /// 因为目标库只经 agent 访问、而每一次访问都是本进程拉起来的——
+    /// 除了它自己开的这些 run，source 侧没有第二个来源。
+    pub fn in_flight_for_agent(&self, agent_id: &str) -> usize {
+        self.active_runs
+            .values()
+            .filter(|run| run.agent_id == agent_id)
+            .count()
+    }
+}
+
 pub struct ActiveRun {
     /// 互斥键的**全部**：一个任务同时只许有一次运行在飞。
     /// 运行参数链退役之后，「同任务 + 同参数集」这个复合键退化成了任务本身。
     task_id: String,
+    /// 这次运行发往哪台 agent。**它不是互斥键**，只用来数并发额度那笔账（#266）：
+    /// 额度是**每台 agent** 的，所以分子也必须按 agent 分开数。
+    agent_id: String,
     child_pid: Option<u32>,
     /// 判定用的那一份，**是枚举不是字符串**：能不能取消这次运行由它一个人说了算
     /// （`RunStage::abort_allowed`）。子进程报来一个认不出的拼写时它是 `None`，
@@ -75,6 +97,17 @@ pub struct ActiveRun {
 enum StartRunError {
     AlreadyRunning,
     Internal(String),
+}
+
+/// 一次**调度派发**的三种结局（#266）。
+///
+/// 三分而不是二分，是因为「这次没发出去」有两种性质完全不同的原因：额度满了是**等**，
+/// 等一会儿就好；数据源解不开、agent 不在线、这个任务又被人手动跑起来了是**不发**，
+/// 再等也不会自己变好。前者留在队里（界面上看得见排队原因），后者落一行历史说清楚。
+pub(crate) enum DispatchOutcome {
+    Started(String),
+    Waiting(String),
+    Refused(String),
 }
 /// agent 注册表被后台探测线程与请求线程共用，所以它是 `Arc<Mutex<...>>`——
 /// 底下是一条 SQLite 连接，`rusqlite::Connection` 不是 `Sync`。
@@ -215,6 +248,10 @@ pub struct Api<'a> {
     /// 折叠会丢掉认不出来的事件，而排障要的恰恰是折叠之前的那份原文。
     pub run_logs: &'a RunLogStore,
     pub runs: &'a RunRegistry,
+    /// 调度器此刻的状态（#266）。HTTP 面**只读**它——写它的是那条调度线程。
+    /// 它在这里的唯一理由是「排队中的任务在界面上看得见」：队列活在一条后台线程的
+    /// 内存里，不摆到 `Api` 上就没有任何一个请求答得出「它在等什么」。
+    pub schedule: &'a ScheduleRegistry,
     /// 登录、会话与口令。**只护得到这个进程的 HTTP 面**——sink 那半边仍然没有鉴权。
     pub auth: &'a AuthStore,
     pub describe_source: fn(&OracleAccess, &TaskSpec) -> Result<Vec<SourceColumn>, SourceReadError>,
@@ -426,6 +463,9 @@ pub fn routes() -> &'static [Route] {
             // 自己写的那一行是不是他以为的那个意思。
             Route::new(Post, "/api/builder/schedule", |_state, request, _id| {
                 handle_schedule_preview(request)
+            }),
+            Route::new(Get, "/api/schedule", |state, _request, _id| {
+                handle_schedule_state(state)
             }),
             Route::new(Get, "/api/agents", |state, _request, _id| {
                 handle_list_agents(state)
@@ -732,6 +772,7 @@ fn handle_start_run(request: &Request, state: &Api<'_>) -> HttpResponse {
         state.history,
         state.run_logs,
         state.runs,
+        RunTrigger::Manual,
     ) {
         Ok(run_record_id) => json_response(202, &json!({ "run_record_id": run_record_id })),
         Err(StartRunError::AlreadyRunning) => json_response(
@@ -976,6 +1017,61 @@ fn agent_endpoint(agent: &Agent) -> AgentEndpoint {
     }
 }
 
+/// 调度器派一次活（#266）。**与「立即运行」那颗按钮走同一条路**——解两端连接、
+/// 当场核对 agent、再 `start_run`——只在两处不同：结局是三分的
+/// [`DispatchOutcome`]（要能表达「排队等着」），以及运行历史上记的是
+/// [`RunTrigger::Scheduled`]。
+///
+/// 额度那一关**开在这里，不在 agent 那一头**：额度满时不发请求、留在队里，
+/// 而不是推过去吃一个 `RUN_QUOTA_EXCEEDED`。分母是 agent 自报的那份额度，
+/// 没自报（旧 agent）就按**一次一个**——那是唯一一个绝不会被拒的取值。
+pub(crate) fn dispatch_scheduled_run(state: &Api<'_>, task: &Task) -> DispatchOutcome {
+    let access = match oracle_access(state, &task.source_datasource_id) {
+        Ok(access) => access,
+        Err(error) => return DispatchOutcome::Refused(error),
+    };
+    let target = match state
+        .datasources
+        .target_connection(&task.target_datasource_id)
+    {
+        Ok(target) => target,
+        Err(error) => return DispatchOutcome::Refused(error),
+    };
+    let agent = match resolve_target_agent(state, &task.target_datasource_id) {
+        Ok(agent) => agent,
+        Err(error) => return DispatchOutcome::Refused(error),
+    };
+    let quota = agent.max_concurrent_runs.unwrap_or(1) as usize;
+    let in_flight = match state.runs.lock() {
+        Ok(runs) => runs.in_flight_for_agent(&agent.agent_id),
+        Err(_) => return DispatchOutcome::Refused("run 控制锁已损坏".to_owned()),
+    };
+    if in_flight >= quota {
+        return DispatchOutcome::Waiting(format!(
+            "目标端 agent「{}」的并发额度已满（在飞 {in_flight}，上限 {quota}），排队等待",
+            agent.name
+        ));
+    }
+    match start_run(
+        state.config,
+        state.config_path,
+        task,
+        access,
+        target,
+        agent_endpoint(&agent),
+        state.history,
+        state.run_logs,
+        state.runs,
+        RunTrigger::Scheduled,
+    ) {
+        Ok(run_record_id) => DispatchOutcome::Started(run_record_id),
+        Err(StartRunError::AlreadyRunning) => {
+            DispatchOutcome::Refused("上次尚未结束，本次跳过".to_owned())
+        }
+        Err(StartRunError::Internal(error)) => DispatchOutcome::Refused(error),
+    }
+}
+
 fn start_run(
     config: &SourceConfig,
     config_path: &Path,
@@ -986,6 +1082,7 @@ fn start_run(
     history_store: &HistoryStore,
     run_log_store: &RunLogStore,
     runs: &RunRegistry,
+    trigger: RunTrigger,
 ) -> Result<String, StartRunError> {
     let run_record_id = generate_run_record_id();
     // 历史里钉的是**当次实际执行**的语句文本：规格以后改了它也不跟着变。
@@ -999,6 +1096,9 @@ fn start_run(
     // 「当时那次运行」。回头去任务表现取，改一次名就会把过去所有运行记录的名字
     // 一起改写（#259）。
     history.task_name = task.name.clone();
+    // 谁发起的也钉在这一行上（#266）：夜里那次是自动跑的还是有人手动补的，
+    // 事后只有这一列答得出来。
+    history.trigger = trigger.as_str().to_owned();
     history.evidence = RunEvidence {
         source: Some(SourceEvidence {
             datasource_id: task.source_datasource_id.clone(),
@@ -1026,7 +1126,7 @@ fn start_run(
             source_sql: task.spec.source_sql(),
         }),
     };
-    register_active_run(runs, &run_record_id, &task.task_id)?;
+    register_active_run(runs, &run_record_id, &task.task_id, &agent.agent_id)?;
     if let Err(error) = history_store.insert(&history, Utc::now(), config.history_retention_days) {
         remove_active_run(runs, &run_record_id);
         return Err(StartRunError::Internal(error));
@@ -1228,6 +1328,7 @@ fn register_active_run(
     runs: &RunRegistry,
     run_record_id: &str,
     task_id: &str,
+    agent_id: &str,
 ) -> Result<(), StartRunError> {
     let mut runs = runs
         .lock()
@@ -1239,6 +1340,7 @@ fn register_active_run(
         run_record_id.to_owned(),
         ActiveRun {
             task_id: task_id.to_owned(),
+            agent_id: agent_id.to_owned(),
             child_pid: None,
             stage: None,
         },
@@ -1258,7 +1360,7 @@ fn remove_live_history(runs: &RunRegistry, run_record_id: &str) {
     }
 }
 
-fn generate_run_record_id() -> String {
+pub(crate) fn generate_run_record_id() -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut bytes = [0_u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
@@ -2176,6 +2278,37 @@ fn handle_schedule_preview(request: &Request) -> HttpResponse {
             "next_fire_times": upcoming
                 .iter()
                 .map(|fire| fire.format(SCHEDULE_TIME_FORMAT).to_string())
+                .collect::<Vec<_>>(),
+        }),
+    )
+}
+
+/// 调度器此刻在干什么（#266）：每个任务的下一次触发时刻，以及**排队中的那些**。
+///
+/// 排队这一段是本票的验收项之一——额度满时任务在 source 侧等着，如果只活在后台线程的
+/// 内存里，界面上就只剩「什么都没发生」。`waiting_reason` 是给人看的一句话，
+/// 直接来自上一次派发尝试。
+///
+/// 时区与「下次触发」预览同一份口径：`source` 那台机器的本地时区，而且写出来。
+fn handle_schedule_state(state: &Api<'_>) -> HttpResponse {
+    let now = Local::now();
+    let (queued, next_fires) = match state.schedule.lock() {
+        Ok(schedule) => (schedule.queue_view(), schedule.next_fires()),
+        Err(_) => return internal_error("调度器状态锁已损坏".to_owned()),
+    };
+    json_response(
+        200,
+        &json!({
+            "timezone": now.format("%Z").to_string(),
+            "utc_offset": now.format("%:z").to_string(),
+            "now": now.format(SCHEDULE_TIME_FORMAT).to_string(),
+            "queued": queued,
+            "next_fire_times": next_fires
+                .into_iter()
+                .map(|(task_id, next_fire_time)| json!({
+                    "task_id": task_id,
+                    "next_fire_time": next_fire_time,
+                }))
                 .collect::<Vec<_>>(),
         }),
     )

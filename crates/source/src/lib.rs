@@ -16,6 +16,7 @@ mod oracle_source;
 mod protocol;
 mod run_history;
 mod run_log_store;
+mod scheduler;
 pub mod server;
 mod secret;
 mod sql_builder;
@@ -60,7 +61,12 @@ pub use protocol::{
 };
 pub use run_history::{
     expired_history_indices, fold_history_lines, AgentEvidence, HistoryChange, HistoryStore,
-    RunEvidence, RunHistory, RunParametersEvidence, SourceEvidence, TargetEvidence, UnknownReason,
+    RunEvidence, RunHistory, RunParametersEvidence, RunTrigger, SourceEvidence, TargetEvidence,
+    UnknownReason,
+};
+// 到点派活的那条常驻线程（#266）。行为定义在 `scheduler.rs` 模块头。
+pub use scheduler::{
+    scheduler_loop, DueOccurrence, QueuedOccurrence, ScheduleRegistry, ScheduleState,
 };
 pub use run_log_store::{
     truncate_business_values, RunLogLine, RunLogStore, RunLogWriter, BUSINESS_VALUE_MAX_CHARS,
