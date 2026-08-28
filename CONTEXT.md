@@ -147,11 +147,20 @@ branches on the version.
    A **display label on a task, nothing more**: it is not unique, it takes part in no identity, and
    nothing is looked up by it — `task_id` is what identifies a task. It is edited **in the wizard**,
    alongside everything else the task is made of, and saved with it; a hand-typed name is never
-   overwritten by a later table change (a mapping can be wrong, a label cannot).
+   overwritten by a later table change (a mapping can be wrong, a label cannot). It is **the wizard's
+   first step**, and **editing a task offers 保存 on every step**, because renaming has to stay
+   reachable: the name depends on nothing, and there is no second route to it. Put the field last and
+   every gate in front of it becomes a gate on renaming — a target table that drifted in the database
+   blocks the target-table step, and a task nobody can rename is the result. The per-step gates guard
+   *walking the wizard*; the only gate on saving is that the name is not empty.
    Because it is a label that may change at any time, **each run-history row snapshots the name it
    was started under** (`task_name`, beside the `source_sql` snapshot) — reading the name off the
    task at display time would rename every past run the moment someone renames the task. Rows written
    before that column existed carry an empty string, and only those fall back to the current name.
+   The same reasoning covers **how the run wrote**: a run's evidence snapshots the primary key and
+   the write mode it ran under, and the run detail states its write semantics from those, never from
+   the task's current definition — otherwise editing a task rewrites what every past run claims to
+   have done.
 
 **Schedule**
    Two fields on the task definition: a **five-field cron expression** and an **enable switch**.
