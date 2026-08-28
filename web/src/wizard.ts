@@ -1232,8 +1232,6 @@ export interface MappingRow {
    */
   control: "auto" | "manual" | "new";
   primaryKey: boolean;
-  /** Why the primary-key tick cannot be moved, or `null`. */
-  primaryKeyLock: string | null;
   /** The row's own problem, or `null`. */
   problem: string | null;
 }
@@ -1261,6 +1259,14 @@ export type StepView =
       step: 1;
       rows: MappingRow[];
       orphans: string[];
+      /**
+       * 主键那一列为什么整根点不动，或 `null`。
+       *
+       * **一句，不是一行一句。** 理由从来只由草稿决定（写入模式，或目标表已定义的主键），
+       * 每一行拿到的都是同一个字符串；逐行渲染它等于把同一句话抄进每一格，
+       * 「主键」那一列因此宽到把整张表撑开。界面把它渲染在表头，行里指过去。
+       */
+      primaryKeyLock: string | null;
       /** 写入模式那一格。它就摆在主键那一列旁边，两个决定一起做。 */
       write: WriteView;
       blockers: Blocker[];
@@ -1296,8 +1302,13 @@ export interface WriteView {
   statementLabel: string;
   /** 跟着语句与模式一起走的那句交底，永远不缺席。 */
   note: string;
-  /** 清空模式下主键区域被灰掉的理由；追加写时是 `null`（#264）。 */
-  primaryKeyLock: string | null;
+  /**
+   * 清空模式下主键那一列整根灰掉（#264）。
+   *
+   * 这里只答「灰不灰」：**理由是 `StepView` 的 `primaryKeyLock`**，全表一句，
+   * 两处各存一份文案的话，改口径时必然漏掉一处。
+   */
+  primaryKeyDimmed: boolean;
 }
 
 function writeView(draft: Draft): WriteView {
@@ -1308,11 +1319,9 @@ function writeView(draft: Draft): WriteView {
     statement,
     statementLabel: writeStatementLabel(statement),
     note: writeSemanticsNote(statement, draft.spec.write_mode),
-    // 清空模式下主键那一列点不动，而**灰掉必须自带理由**——一个没有解释的禁用
-    // 控件读起来就是「这里坏了」（#264）。
-    primaryKeyLock: clearsTarget(draft.spec.write_mode)
-      ? CLEAR_MODE_PRIMARY_KEY_NOTE
-      : null,
+    // 清空模式下主键那一列点不动。**灰掉必须自带理由**——一个没有解释的禁用控件
+    // 读起来就是「这里坏了」（#264）；那句理由由 `lockedPrimaryKey` 给，摆在表头。
+    primaryKeyDimmed: clearsTarget(draft.spec.write_mode),
   };
 }
 
@@ -1433,11 +1442,10 @@ function stepView(draft: Draft, step: Step, blockers: Blocker[]): StepView {
           // columns to match; a dropdown would be empty.
           control: draft.targetTableExists ? (auto ? "auto" : "manual") : "new",
           primaryKey: target !== "" && draft.spec.primary_key.includes(target),
-          primaryKeyLock: locked,
           problem: problems.get(source) ?? null,
         };
       });
-      return { step: 1, rows, orphans, write: writeView(draft), blockers };
+      return { step: 1, rows, orphans, primaryKeyLock: locked, write: writeView(draft), blockers };
     }
     case 2:
       return {

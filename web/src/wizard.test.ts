@@ -481,10 +481,9 @@ describe("the advance gate", () => {
 
     const step = view(draft, 1).step;
     if (step.step !== 1) throw new Error("expected step 1");
-    expect(step.write.primaryKeyLock).toBe(CLEAR_MODE_PRIMARY_KEY_NOTE);
-    for (const row of step.rows) {
-      expect(row.primaryKeyLock).toBe(CLEAR_MODE_PRIMARY_KEY_NOTE);
-    }
+    expect(step.write.primaryKeyDimmed).toBe(true);
+    // 一句，不是一行一句：理由挂在这一步上，界面把它渲染在表头那一格。
+    expect(step.primaryKeyLock).toBe(CLEAR_MODE_PRIMARY_KEY_NOTE);
     // 灰掉的是「选」，不是「记」：主键仍按目标表实际定义的那一份记下来，
     // 因为写入语句还得靠它——清空一个字都没改语句的选择。
     expect(toSpec(draft).primary_key).toEqual(["ID"]);
@@ -526,7 +525,7 @@ describe("the advance gate", () => {
     const back = done(apply(draft, { type: "write-mode", mode: "APPEND" }));
     const step = view(back, 1).step;
     if (step.step !== 1) throw new Error("expected step 1");
-    expect(step.write.primaryKeyLock).toBeNull();
+    expect(step.write.primaryKeyDimmed).toBe(false);
     expect(toSpec(back).write_mode).toBe("APPEND");
   });
 
@@ -708,7 +707,7 @@ describe("derived values", () => {
     expect(draft.spec.primary_key).toEqual(["ID"]);
     const step = view(draft, 1).step;
     if (step.step !== 1) throw new Error("expected step 1");
-    expect(step.rows[0].primaryKeyLock).toBe("目标表已定义主键（ID），按它锁定");
+    expect(step.primaryKeyLock).toBe("目标表已定义主键（ID），按它锁定");
   });
 
   it("does not overwrite a primary key the person ticked themselves", () => {
@@ -718,7 +717,7 @@ describe("derived values", () => {
     expect(draft.spec.primary_key).toEqual(["ID"]);
     const step = view(draft, 1).step;
     if (step.step !== 1) throw new Error("expected step 1");
-    expect(step.rows[0].primaryKeyLock).toBeNull();
+    expect(step.primaryKeyLock).toBeNull();
   });
 
   it("renders a same-name match read-only and everything else as a dropdown", () => {
@@ -759,7 +758,7 @@ describe("derived values", () => {
     const step = view(draft, 1).step;
     if (step.step !== 1) throw new Error("expected step 1");
     expect(draft.spec.primary_key).toEqual([]);
-    expect(step.rows[0].primaryKeyLock).toBeNull();
+    expect(step.primaryKeyLock).toBeNull();
   });
 
   it("drops a primary-key entry whose target field stops existing", () => {

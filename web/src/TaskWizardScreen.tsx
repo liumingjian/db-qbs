@@ -1277,6 +1277,10 @@ function StepBody({
   loadCheck: () => void;
 }) {
   const model = view(draft).step;
+  // 清空模式下每一行的主键勾选框都是同一个理由被锁上的，那句话因此只写在表头一格里，
+  // 每行只用 `aria-describedby` 指过去（#264 原本是逐行渲染一份，同一句话抄一百遍，
+  // 把「主键」那一列撑到整张表都跟着变宽）。
+  const pkLockId = useId();
   if (model.step === 1) {
     return <section className="wizard-step">
       <header>{/* tabIndex={-1}：能用脚本聚焦，但不进 Tab 序（#239）。 */}<h1 ref={headingRef} tabIndex={-1}>选列与字段映射</h1></header>
@@ -1306,7 +1310,7 @@ function StepBody({
         /* 清空模式下整根「主键」列灰掉，理由就写在表头那一格里（#264）：
            灰掉本身不解释任何事，一个没有理由的禁用控件读起来就是「这里坏了」。
            每颗勾选框的 `Refusable` 也带着同一句话，两处说的是同一份常量。 */
-        <div className="table-wrap"><table className={`data-grid wizard-mapping${model.write.primaryKeyLock === null ? "" : " is-pk-locked"}`}><thead><tr><th>同步</th><th>源列</th><th>目标列</th><th className="pk-head">主键{model.write.primaryKeyLock !== null && <small>{model.write.primaryKeyLock}</small>}</th><th><span className="visually-hidden">操作</span></th></tr></thead><tbody>
+        <div className="table-wrap"><table className={`data-grid wizard-mapping${model.write.primaryKeyDimmed ? " is-pk-locked" : ""}`}><thead><tr><th>同步</th><th>源列</th><th>目标列</th><th className="pk-head">主键{model.primaryKeyLock !== null && <small id={pkLockId}>{model.primaryKeyLock}</small>}</th><th><span className="visually-hidden">操作</span></th></tr></thead><tbody>
           {model.rows.map((row) => <tr className={row.problem ? "is-problem" : ""} key={row.source}>
             <td><input type="checkbox" aria-label={`同步 ${row.source}`} checked={row.selected} onChange={() => change({ type: "toggle-column", source: row.source })} /></td>
             <td><span className="mono">{row.source}</span></td>
@@ -1316,10 +1320,11 @@ function StepBody({
               : row.control === "new" ? <span className="new-target-field"><input aria-label={`${row.source} 的目标列名`} aria-invalid={row.problem ? true : undefined} value={row.target} spellCheck={false} onChange={(event) => change({ type: "rename-target", source: row.source, target: event.target.value })} /><small className="new-mark">将新建</small></span>
               : <select aria-label={`${row.source} 的目标列`} aria-invalid={row.problem ? true : undefined} value={row.target} onChange={(event) => change({ type: "rename-target", source: row.source, target: event.target.value })}><option value="">请选择</option>{draft.targetColumns.map((column) => <option key={column.name}>{column.name}</option>)}</select>
             }{row.problem && <small>{row.problem}</small>}</>}</td>
-            {/* 主键锁定的那句话本来就是可见的，另外两句却只在 `title` 里——而这颗勾选框
-                三种情况下都是 `disabled`，`title` 谁都看不到（#238）。三句合到同一条路上。 */}
-            <td><Refusable reason={!row.selected ? "先勾选这一列" : row.target === "" ? "先选择目标列" : row.primaryKeyLock}>{(describedBy) => (
-              <input type="checkbox" aria-label={`${row.source} 设为主键`} disabled={!row.selected || row.target === "" || row.primaryKeyLock !== null} aria-describedby={describedBy} checked={row.primaryKey} onChange={() => change({ type: "toggle-primary-key", target: row.target })} />
+            {/* 这颗勾选框三种情况下都是 `disabled`，而 `title` 谁都看不到（#238），
+                所以理由必须读得到。两句是逐行不同的，写在行里；第三句「锁定」全表同文，
+                只写在表头，行里指过去就够了。 */}
+            <td><Refusable reason={!row.selected ? "先勾选这一列" : row.target === "" ? "先选择目标列" : null}>{(describedBy) => (
+              <input type="checkbox" aria-label={`${row.source} 设为主键`} disabled={!row.selected || row.target === "" || model.primaryKeyLock !== null} aria-describedby={describedBy ?? (model.primaryKeyLock === null ? undefined : pkLockId)} checked={row.primaryKey} onChange={() => change({ type: "toggle-primary-key", target: row.target })} />
             )}</Refusable></td>
             <td><button className="icon-button is-danger" type="button" title={`删除列 ${row.source}`} aria-label={`删除列 ${row.source}`} onClick={() => change({ type: "remove-column", source: row.source })}><Trash2 size={ICON.sm} /></button></td>
           </tr>)}
