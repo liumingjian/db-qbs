@@ -11,8 +11,12 @@ import {
   TerminalBlock,
   UnknownConclusion,
   UpsertNote,
-  UPSERT_NOTE_DONE,
 } from "./components/DesignSystem";
+import {
+  writeSemanticsDone,
+  writeStatementLabel,
+  writeStatementOf,
+} from "./writeMode";
 import { messageFrom } from "./errors";
 import { FailureEvidence } from "./FailureEvidence";
 import { runIdPresentation } from "./history";
@@ -192,6 +196,7 @@ export function RunScreen({
             <FinishedRun
               detail={detail}
               presentation={presentation}
+              task={task}
               onEditTask={onEditTask}
             />
           )}
@@ -226,6 +231,12 @@ function RunIdentity({ task, detail }: { task: Task; detail: RunDetail }) {
         value={runIdPresentation(detail)}
       />
       <DetailValue label="所属任务" value={task.task_id} />
+      {/* 写入方式在运行详情上必须看得见（#261）：一条跑完的记录，光看行数看不出
+          这次是「合并」还是「又追加了一份」。 */}
+      <DetailValue
+        label="写入方式"
+        value={writeStatementLabel(writeStatementOf(task.spec.primary_key))}
+      />
       <DetailValue label="暂存表" value={detail.staging_table ?? "—"} />
     </dl>
   );
@@ -293,10 +304,13 @@ function LiveRun({
 function FinishedRun({
   detail,
   presentation,
+  task,
   onEditTask,
 }: {
   detail: RunDetail & { live: false };
   presentation: RunPresentation;
+  /** 写入方式那句交底读的是任务定义，不是这一次运行的结果（#261）。 */
+  task: Task;
   onEditTask: (step: Step) => void;
 }) {
   const mappingFailed = presentation.kind === "mapping-failed";
@@ -312,8 +326,11 @@ function FinishedRun({
           )}
         </div>
         <RunConclusion detail={detail} presentation={presentation} />
+        {/* 说法跟着写法走（#261）：无主键那条路上「按主键 upsert」是句假话。 */}
         {presentation.terminalEffect === "SWAPPED" && (
-          <UpsertNote text={UPSERT_NOTE_DONE} />
+          <UpsertNote
+            text={writeSemanticsDone(writeStatementOf(task.spec.primary_key))}
+          />
         )}
       </section>
 

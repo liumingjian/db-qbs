@@ -30,6 +30,13 @@ import type {
   TaskSpec,
 } from "./api";
 import { matchSameNameTargets, sourceSummary, whereSummary } from "./spec";
+import {
+  writeSemanticsNote,
+  writeStatementLabel,
+  writeStatementOf,
+  WRITE_MODES,
+} from "./writeMode";
+import type { WriteMode, WriteStatement } from "./writeMode";
 
 export type Mode = "create" | "edit";
 export type Step = 1 | 2 | 3 | 4;
@@ -118,6 +125,7 @@ export type Change =
   | { type: "remove-column"; source: string }
   | { type: "rename-target"; source: string; target: string }
   | { type: "toggle-primary-key"; target: string }
+  | { type: "write-mode"; mode: WriteMode }
   | { type: "where"; clause: string }
   | { type: "task-name"; name: string }
   | { type: "refresh-target-columns" }
@@ -547,6 +555,14 @@ function reduce(draft: Draft, change: Change): Reduced {
         cleared: [],
       };
     }
+
+    case "write-mode":
+      // 写入模式是纯粹的记录：它不清空任何东西，也不改任何一列。
+      // 语句形状由目标表有没有主键决定，模式只说「这一次是追加还是清空后导入」。
+      return {
+        draft: { ...draft, spec: { ...draft.spec, write_mode: change.mode } },
+        cleared: [],
+      };
 
     case "toggle-primary-key": {
       const primary_key = draft.spec.primary_key.includes(change.target)
@@ -1056,9 +1072,12 @@ export function canAdvance(draft: Draft, step: Step): Blocker[] {
       }
     }
 
-    if (draft.spec.columns.length > 0 && draft.spec.primary_key.length === 0) {
-      at("主键必选：至少要勾一列作为 upsert 的去重键");
-    }
+    // 主键不再是必选（#261）。一列都不勾是一个**有含义的选择**——目标表没有可合并的
+    // 唯一约束，这个任务写纯 INSERT。挡在这里等于把「我就是要往流水表里追加」这条
+    // 合法路径重新关掉，而需求方明确不要为它加勾选框。
+    //
+    // 代价（重跑翻倍）不靠拦，靠说：写入模式那一格就在这张表旁边，它下面那句
+    // `writeSemanticsNote` 会当场改口，第 3 步的预检结论和第 4 步的确认页再各说一遍。
     const seen = new Set<string>();
     for (const name of draft.spec.primary_key) {
       if (!seen.add(name.toUpperCase())) {
@@ -1169,7 +1188,14 @@ export interface RailEntry {
 }
 
 export type StepView =
-  | { step: 1; rows: MappingRow[]; orphans: string[]; blockers: Blocker[] }
+  | {
+      step: 1;
+      rows: MappingRow[];
+      orphans: string[];
+      /** 写入模式那一格。它就摆在主键那一列旁边，两个决定一起做。 */
+      write: WriteView;
+      blockers: Blocker[];
+    }
   | {
       step: 2;
       where: string;
@@ -1185,6 +1211,35 @@ export type StepView =
     }
   | { step: 4; confirm: ConfirmView; blockers: Blocker[] };
 
+/**
+ * 写入那一格：选的是什么，落到的语句是什么，以及那句必须被读到的话。
+ *
+ * 「模式」和「语句」是两件事，界面上也分成两行摆：上面一行是**可选的**（今天只有
+ * 一档），下面一行是**推导出来的**，人改不了它——它只由目标表有没有主键决定。
+ * 把它们并成一个下拉框会让人以为「无主键」是自己选的，而它不是。
+ */
+export interface WriteView {
+  /** 可选的模式清单，直接来自 `WRITE_MODES`。 */
+  modes: readonly { mode: WriteMode; label: string; hint: string }[];
+  mode: WriteMode;
+  /** 推导出来的语句形状。 */
+  statement: WriteStatement;
+  statementLabel: string;
+  /** 跟着语句走的那句交底，永远不缺席。 */
+  note: string;
+}
+
+function writeView(draft: Draft): WriteView {
+  const statement = writeStatementOf(draft.spec.primary_key);
+  return {
+    modes: WRITE_MODES,
+    mode: draft.spec.write_mode,
+    statement,
+    statementLabel: writeStatementLabel(statement),
+    note: writeSemanticsNote(statement),
+  };
+}
+
 export interface ConfirmView {
   name: string;
   nameGenerated: boolean;
@@ -1192,6 +1247,8 @@ export interface ConfirmView {
   where: string;
   mappings: ColumnMapping[];
   primaryKey: string[];
+  /** 最后一屏上的写入那一格，与第 1 步读的是同一份。 */
+  write: WriteView;
   targetTable: string;
   targetCheck: ConfirmTargetCheck;
   preview: PreviewResult | null;
@@ -1304,7 +1361,7 @@ function stepView(draft: Draft, step: Step, blockers: Blocker[]): StepView {
           problem: problems.get(source) ?? null,
         };
       });
-      return { step: 1, rows, orphans, blockers };
+      return { step: 1, rows, orphans, write: writeView(draft), blockers };
     }
     case 2:
       return {
@@ -1337,6 +1394,7 @@ function stepView(draft: Draft, step: Step, blockers: Blocker[]): StepView {
           where: whereSummary(draft.spec),
           mappings: draft.spec.columns,
           primaryKey: draft.spec.primary_key,
+          write: writeView(draft),
           targetTable: draft.spec.target_table,
           targetCheck: confirmTargetCheck(draft),
           preview: previewIsFresh(draft) ? draft.preview!.value : null,
@@ -1404,6 +1462,7 @@ export function toSpec(draft: Draft): TaskSpec {
     table: draft.fetchMode === "sql" ? "" : draft.spec.table,
     target_table: draft.spec.target_table.trim(),
     columns: draft.spec.columns.map((mapping) => ({ ...mapping })),
+    write_mode: draft.spec.write_mode,
     primary_key: [...draft.spec.primary_key],
     where_clause: draft.fetchMode === "sql" ? "" : (draft.spec.where_clause ?? ""),
   };
@@ -1445,8 +1504,10 @@ export function historyDivider(before: Task, draft: Draft): string | null {
     changes.push("列与映射");
   }
   if (JSON.stringify(before.spec.primary_key) !== JSON.stringify(after.primary_key)) {
+    // 主键动了就是写法动了（#261）：从有到无，重跑从幂等变成翻倍。
     changes.push("主键");
   }
+  if (before.spec.write_mode !== after.write_mode) changes.push("写入模式");
   if ((before.spec.where_clause ?? "") !== (after.where_clause ?? "")) {
     changes.push("过滤条件");
   }

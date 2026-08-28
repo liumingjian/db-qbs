@@ -383,16 +383,48 @@ describe("the advance gate", () => {
     ]);
   });
 
-  it("blocks on a missing primary key and says so", () => {
+  it("no longer blocks on a missing primary key — it states the consequence instead", () => {
+    // #261：一列都不勾是合法的，它就是「目标表无主键，纯追加写」。挡在这里等于把
+    // 「我就是要往流水表里追加」这条路重新关掉，而需求方明确不要为它加勾选框。
     let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t" }));
     draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
     draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
-    expect(canAdvance(draft, 1)).toContainEqual({
-      step: 1,
-      kind: "error",
-      column: null,
-      message: "主键必选：至少要勾一列作为 upsert 的去重键",
-    });
+
+    expect(draft.spec.primary_key).toEqual([]);
+    expect(canAdvance(draft, 1)).toEqual([]);
+
+    // 代价不靠拦，靠说：写入那一格当场改口，而且就在主键那一列旁边。
+    const step = view(draft, 1).step;
+    if (step.step !== 1) throw new Error("expected step 1");
+    expect(step.write.statement).toBe("insert");
+    expect(step.write.statementLabel).toBe("纯追加写");
+    expect(step.write.note).toContain("重跑会产生重复数据");
+  });
+
+  it("switches the write statement the moment a primary key is ticked", () => {
+    let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t" }));
+    draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
+    draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
+    draft = done(apply(draft, { type: "toggle-primary-key", target: "ID" }));
+
+    const step = view(draft, 1).step;
+    if (step.step !== 1) throw new Error("expected step 1");
+    expect(step.write.statement).toBe("upsert");
+    expect(step.write.note).toContain("源端删除的行");
+    // 模式那一格没动过：语句由主键决定，模式是另一件事。
+    expect(step.write.mode).toBe("APPEND");
+  });
+
+  it("carries the write mode into the saved spec and names it when it moves", () => {
+    let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t" }));
+    draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
+    draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
+
+    expect(toSpec(draft).write_mode).toBe("APPEND");
+    // 写入模式不清空任何东西：改它不该把已选的列或主键抹掉。
+    const before = toSpec(draft);
+    const after = done(apply(draft, { type: "write-mode", mode: "APPEND" }));
+    expect(toSpec(after)).toEqual(before);
   });
 
   it("catches the target field shapes the server would reject", () => {
@@ -799,9 +831,17 @@ describe("opening a saved task", () => {
   });
 
   it("falls back to the earliest failed prerequisite", () => {
+    // 空主键**不再是**一条失败的前置条件（#261），所以这里换成一条真的过不了的：
+    // 目标字段留空，第 1 步照旧拦得住。
     const broken = savedTask();
-    broken.spec.primary_key = [];
+    broken.spec.columns = [{ source: "ID", target: "" }];
     expect(openExisting(broken, SOURCE, TARGET, true, 3).step).toBe(1);
+  });
+
+  it("opens a saved append-only task straight through, because empty is a value", () => {
+    const keyless = savedTask();
+    keyless.spec.primary_key = [];
+    expect(canAdvance(openExisting(keyless, SOURCE, TARGET, true, 1), 1)).toEqual([]);
   });
 
   it("stops a confirmation-page request at the missing target check", () => {
@@ -844,6 +884,7 @@ function savedTask(): Task {
         { source: "ID", target: "ID" },
         { source: "C_NAME", target: "C_NAME" },
       ],
+      write_mode: "APPEND",
       primary_key: ["ID"],
       where_clause: "STATUS = 1",
     },

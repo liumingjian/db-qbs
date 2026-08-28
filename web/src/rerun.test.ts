@@ -52,6 +52,7 @@ function spec(): TaskSpec {
     table: "T_ORDERS",
     target_table: "ORDERS",
     columns: [{ source: "ID", target: "ID" }],
+    write_mode: "APPEND",
     primary_key: ["ID"],
     where_clause: "STATUS = 'OK'",
   };

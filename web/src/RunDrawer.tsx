@@ -11,8 +11,12 @@ import {
   TerminalBlock,
   UnknownConclusion,
   UpsertNote,
-  UPSERT_NOTE_DONE,
 } from "./components/DesignSystem";
+import {
+  writeSemanticsDone,
+  writeStatementLabel,
+  writeStatementOf,
+} from "./writeMode";
 import { formatTimestamp, historyPresentation, runIdPresentation } from "./history";
 import { PrecheckReports } from "./PrecheckReports";
 import { HighlightedSql } from "./SqlEditor";
@@ -131,7 +135,9 @@ export function RunDrawer({
                   <div className="success-conclusion">{presentation.conclusion}</div>
                 )}
                 {presentation.terminalEffect === "SWAPPED" && (
-                  <UpsertNote text={UPSERT_NOTE_DONE} />
+                  <UpsertNote
+                    text={writeSemanticsDone(writeStatementOf(task.spec.primary_key))}
+                  />
                 )}
                 {presentation.kind === "live" && (
                   <div className="drawer-note">{presentation.conclusion}</div>
@@ -196,6 +202,10 @@ export function RunDrawer({
               <Value
                 label="主键"
                 value={task.spec.primary_key.join(", ") || "—"}
+              />
+              <Value
+                label="写入方式"
+                value={writeStatementLabel(writeStatementOf(task.spec.primary_key))}
               />
               <Value label="条件" value={whereSummary(task.spec)} />
             </div>

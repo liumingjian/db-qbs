@@ -1,3 +1,5 @@
+import type { WriteMode } from "./writeMode";
+
 export type ColumnPrecision = Record<string, [number, number]>;
 
 /**
@@ -18,7 +20,14 @@ export interface TaskSpec {
   table: string;
   target_table: string;
   /**
-   * upsert 的去重键，必选。存的是**目标列名**，与 `columns[].target` 同一个名字空间。
+   * 写入模式（#261）。今天只有「追加写」一档，`WRITE_MODES` 是它的清单。
+   */
+  write_mode: WriteMode;
+  /**
+   * 去重键，**可以为空**（#261）。存的是**目标列名**，与 `columns[].target` 同一个名字空间。
+   *
+   * 它同时是任务定义记下的**写入语义**：非空 = 按主键 upsert，空 = 目标表没有可合并的
+   * 唯一约束，本任务是纯追加写、重跑会产生重复数据。派生只有一处，`writeStatementOf`。
    */
   primary_key: string[];
   columns: ColumnMapping[];
@@ -53,6 +62,14 @@ export interface TargetCheckResult {
   ok: boolean;
   findings: CheckFinding[];
   suggested_ddl: string | null;
+  /**
+   * 预检的**结论**，与 `findings` 分开（#261）：不阻塞，但必须被读到。
+   *
+   * `findings` 是「这里不对，去改」，`ok` 就是它空不空；结论说的是「通过了，而这次
+   * 通过意味着什么」。目前唯一一条是无主键 → 纯追加写。**服务端为空时整个字段不出现**，
+   * 所以每个读它的地方都得 `?? []`。
+   */
+  notes?: string[];
 }
 
 /**
@@ -478,6 +495,7 @@ export function emptySpec(): TaskSpec {
     table: "",
     target_table: "",
     columns: [],
+    write_mode: "APPEND",
     primary_key: [],
     where_clause: "",
   };
