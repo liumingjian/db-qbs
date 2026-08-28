@@ -5,6 +5,7 @@ use chrono::{TimeDelta, TimeZone, Utc};
 use db_qbs_source::{
     expired_history_indices, fold_history_lines, AgentEvidence, ColumnMapping, HistoryStore,
     RunEvidence, RunHistory, RunParametersEvidence, SourceEvidence, TargetEvidence, UnknownReason,
+    WriteMode,
 };
 
 const SOURCE_SQL: &str = "SELECT a.ID AS ID\n  FROM APP.ORDERS a\n WHERE D_BIZ = DATE '2026-08-14'";
@@ -39,6 +40,7 @@ fn evidence() -> RunEvidence {
                 target: "ID".to_owned(),
             }],
             primary_key: vec!["ID".to_owned()],
+            write_mode: WriteMode::Append,
             source_sql: SOURCE_SQL.to_owned(),
         }),
     }

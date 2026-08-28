@@ -13,7 +13,7 @@ import {
   UpsertNote,
 } from "./components/DesignSystem";
 import {
-  writeSemanticsDone,
+  runWriteSemantics,
   writeStatementLabel,
   writeStatementOf,
 } from "./writeMode";
@@ -142,12 +142,7 @@ export function RunDrawer({
                 {/* 说法跟着写法与模式一起走（#261/#264）。`DISCARDED` 不挂这一行。 */}
                 {presentation.terminalEffect !== null &&
                   presentation.terminalEffect !== "DISCARDED" && (
-                    <UpsertNote
-                      text={writeSemanticsDone(
-                        writeStatementOf(task.spec.primary_key),
-                        task.spec.write_mode,
-                      )}
-                    />
+                    <UpsertNote text={runWriteSemantics(run.evidence, task.spec)} />
                   )}
                 {presentation.kind === "live" && (
                   <div className="drawer-note">{presentation.conclusion}</div>

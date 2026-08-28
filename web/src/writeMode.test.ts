@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
+import type { RunEvidence, TaskSpec } from "./api";
 import {
   APPEND_ONLY_CONCLUSION,
   clearsTarget,
   CLEAR_MODE_PRIMARY_KEY_NOTE,
+  runWriteSemantics,
+  runWriteView,
   targetHasUniqueKey,
   writeSemanticsDone,
   writeSemanticsNote,
@@ -98,5 +101,49 @@ describe("targetHasUniqueKey", () => {
     expect(targetHasUniqueKey([])).toBe(false);
     expect(targetHasUniqueKey([{ name: "PRIMARY", columns: ["ID"] }])).toBe(true);
     expect(targetHasUniqueKey([{ name: "uk_code", columns: ["CODE"] }])).toBe(true);
+  });
+});
+
+describe("运行详情说的是当时那一次", () => {
+  const spec: TaskSpec = {
+    owner: "APP",
+    table: "T_CUSTOMER",
+    target_table: "t_customer",
+    write_mode: "CLEAR_THEN_IMPORT",
+    schedule_enabled: false,
+    primary_key: [],
+    columns: [{ source: "ID", target: "ID" }],
+  };
+  const evidence: RunEvidence = {
+    parameters: {
+      target_table: "t_customer",
+      columns: [{ source: "ID", target: "ID" }],
+      primary_key: ["ID"],
+      write_mode: "APPEND",
+      source_sql: "SELECT 1 FROM DUAL",
+    },
+  };
+
+  it("读的是那一行上的快照，任务后来改成什么样都不改写过去", () => {
+    // 这一次跑的时候有主键、是追加写；今天任务的主键被清空、改成了先清空再导入。
+    expect(runWriteView(evidence, spec)).toEqual({ statement: "upsert", mode: "APPEND" });
+    expect(runWriteSemantics(evidence, spec)).toBe(
+      writeSemanticsDone("upsert", "APPEND"),
+    );
+  });
+
+  it("早于 #264 的历史行没有 write_mode，按当时唯一的那一档读", () => {
+    const older: RunEvidence = {
+      parameters: { ...evidence.parameters!, write_mode: undefined },
+    };
+    expect(runWriteView(older, spec).mode).toBe("APPEND");
+  });
+
+  it("整份运行证据都缺席的老记录才回退到当前定义——没有快照可读时它是唯一比空白好的答案", () => {
+    expect(runWriteView(undefined, spec)).toEqual({
+      statement: "insert",
+      mode: "CLEAR_THEN_IMPORT",
+    });
+    expect(runWriteView({}, spec).statement).toBe("insert");
   });
 });

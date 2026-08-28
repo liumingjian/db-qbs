@@ -231,6 +231,7 @@ function evidenceFor(task: TaskRow): Json {
       target_table: task.spec.target_table,
       columns: task.spec.columns,
       primary_key: task.spec.primary_key,
+      write_mode: task.spec.write_mode,
       source_sql: generateSql(task.spec),
     },
   };

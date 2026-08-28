@@ -1126,6 +1126,7 @@ fn start_run(
             target_table: task.spec.target_table.clone(),
             columns: task.spec.columns.clone(),
             primary_key: task.spec.primary_key.clone(),
+            write_mode: task.spec.write_mode,
             source_sql: task.spec.source_sql(),
         }),
     };
