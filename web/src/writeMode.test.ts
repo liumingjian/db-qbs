@@ -1,7 +1,7 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-
 import { describe, expect, it } from "vitest";
+
+// Rust 那份的原文，`?raw` 读进来（见 `globals.d.ts`）。
+import precheckSource from "../../crates/sink/src/precheck.rs?raw";
 
 import type { RunEvidence, TaskSpec } from "./api";
 import {
@@ -156,11 +156,7 @@ describe("与目标端预检的那句结论逐字一致", () => {
     // 同一句话必须在两端各有一份（见 `APPEND_ONLY_CONCLUSION` 的注释：说这句话的
     // 地方大多没有服务端的回答可读）。两份一致过去只由一行注释守着，而注释拦不住
     // 任何人改一个字——这里把 Rust 那份读出来直接比。
-    const precheck = readFileSync(
-      fileURLToPath(new URL("../../crates/sink/src/precheck.rs", import.meta.url)),
-      "utf8",
-    );
-    const matched = precheck.match(
+    const matched = precheckSource.match(
       /pub const APPEND_ONLY_CONCLUSION: &str =\s*"([^"]*)";/,
     );
     expect(matched, "precheck.rs 里应当有 APPEND_ONLY_CONCLUSION").not.toBeNull();
