@@ -506,7 +506,6 @@ export function JobCenterScreen({
           task={openTask}
           run={openRun}
           tasks={tasks}
-          datasources={datasources}
           onClose={() => setOpenTaskId(null)}
           onRerun={(task) => {
             setOpenTaskId(null);
@@ -515,10 +514,6 @@ export function JobCenterScreen({
           onEditTask={(task, step) => {
             setOpenTaskId(null);
             onEditFailure(task, step);
-          }}
-          onCleaned={() => {
-            setOpenTaskId(null);
-            onChanged();
           }}
         />
       )}
