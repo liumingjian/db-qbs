@@ -327,16 +327,16 @@ describe("the mapping step UI", () => {
     }
   });
 
-  it("says why the primary-key column is locked once, in its header", () => {
-    // 理由由草稿决定，每一行拿到的都是同一句话。逐行渲染它会把「主键」那一列
-    // 撑到整张表跟着变宽——所以它只出现一次，行里用 aria-describedby 指过去。
+  it("says why the primary-key column is locked once, outside the table", () => {
+    // 理由由草稿决定，每一行拿到的都是同一句话；它也不在表头那一格里——写进表里
+    // 的任何一格都会把「主键」这一列撑宽。摆在表外占满一行，行里指过去。
     const draft = done(apply(mappingDraft(), {
       type: "target-columns-arrived",
       columns: [targetColumn("ID", 1), targetColumn("C_NAME", 2)],
       keys: [{ name: "PRIMARY", columns: ["ID"] }],
     }));
     const html = renderWizard(draft);
-    const note = /<small id="([^"]+)">目标表已定义主键（ID），按它锁定<\/small>/.exec(html);
+    const note = /<p class="mapping-lock-note" id="([^"]+)">主键：目标表已定义主键（ID），按它锁定<\/p>/.exec(html);
     expect(note).not.toBeNull();
     expect(html.split("按它锁定")).toHaveLength(2);
     // 两行的勾选框都读得到它，一行一份副本却一份都不存在。

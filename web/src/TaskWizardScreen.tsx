@@ -1304,11 +1304,17 @@ function StepBody({
           目标表那一屏离它有一整个步骤的距离，把模式摆到那里，人会在还没有列清单、
           因而还看不见主键的时候先选写法。 */}
       <WriteModeCard write={model.write} change={change} />
+      {/* 锁定的理由摆在表**外**，占满整行（#264 原来写在表头那一格里，那一列因此
+          宽到与邻列不成比例——一句三十几个字的话，无论怎么换行都撑得起一整列）。
+          它照旧是可见正文，行里的勾选框用 aria-describedby 指过来。 */}
+      {model.primaryKeyLock !== null && (
+        <p className="mapping-lock-note" id={pkLockId}>主键：{model.primaryKeyLock}</p>
+      )}
       {model.rows.length === 0 ? <p className="wizard-empty">{draft.fetchMode === "sql" ? "尚未识别结果列" : "未选择源表"}</p> : (
         /* 清空模式下整根「主键」列灰掉，理由就写在表头那一格里（#264）：
            灰掉本身不解释任何事，一个没有理由的禁用控件读起来就是「这里坏了」。
            每颗勾选框的 `Refusable` 也带着同一句话，两处说的是同一份常量。 */
-        <div className="table-wrap"><table className={`data-grid wizard-mapping${model.write.primaryKeyDimmed ? " is-pk-locked" : ""}`}><thead><tr><th>同步</th><th>源列</th><th>目标列</th><th className="pk-head">主键{model.primaryKeyLock !== null && <small id={pkLockId}>{model.primaryKeyLock}</small>}</th><th><span className="visually-hidden">操作</span></th></tr></thead><tbody>
+        <div className="table-wrap"><table className={`data-grid wizard-mapping${model.write.primaryKeyDimmed ? " is-pk-locked" : ""}`}><thead><tr><th>同步</th><th>源列</th><th>目标列</th><th className="pk-head">主键</th><th><span className="visually-hidden">操作</span></th></tr></thead><tbody>
           {model.rows.map((row) => <tr className={row.problem ? "is-problem" : ""} key={row.source}>
             <td><input type="checkbox" aria-label={`同步 ${row.source}`} checked={row.selected} onChange={() => change({ type: "toggle-column", source: row.source })} /></td>
             <td><span className="mono">{row.source}</span></td>
