@@ -164,6 +164,7 @@ fn valid_task() -> &'static str {
      { source = \"D_BIZ\", target = \"D_BIZ\" },\n\
      ]\n\
      write_mode = \"APPEND\"\n\
+     schedule_enabled = false\n\
      primary_key = [\"ID\"]\n\
      where_clause = \"D_BIZ = DATE '2026-08-14'\"\n\
      \n\

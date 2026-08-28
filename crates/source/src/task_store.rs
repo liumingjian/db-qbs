@@ -36,7 +36,10 @@ pub struct TaskInput {
 }
 
 impl TaskInput {
-    fn validate(&self) -> Result<(), String> {
+    /// 任务定义能不能被存下来。**理由是给人看的一句话**，因此它必须能走到 400 上去——
+    /// 存储层把它和「SQLite 写不动了」混成同一个 `Err(String)`，HTTP 那边就只能一律 500，
+    /// 而 500 说的是「服务端坏了」，不是「你写的这条 cron 不合法」（#265）。
+    pub fn validate(&self) -> Result<(), String> {
         if self.source_datasource_id.trim().is_empty() {
             return Err("必须选一个源端数据源".to_owned());
         }
@@ -344,6 +347,8 @@ mod tests {
             owner: "HTBR45".to_owned(),
             table: "T_R_FR_ASTSTAT".to_owned(),
             write_mode: WriteMode::Append,
+            schedule_cron: None,
+            schedule_enabled: false,
             columns: vec![mapping("ID"), mapping("D_BIZ")],
             primary_key: vec!["ID".to_owned()],
             where_clause: Some("D_BIZ = DATE '2026-08-14'".to_owned()),
@@ -489,6 +494,69 @@ mod tests {
         let store = TaskStore::open(&directory).unwrap();
         assert!(store.list().unwrap().is_empty());
         assert_eq!(store.get("pre-write-mode").unwrap(), None);
+
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// #265 又给任务定义加了两个标量，其中 `schedule_enabled` 同样是**必填**——于是
+    /// 刚经历过 #261 那次丢弃的任务行，在这一票落地时再一次反序列化不出来，整表再丢一次。
+    ///
+    /// 两票的形状改动是刻意排在一起落的（#265 的票面写着这件事）：一次部署里合并进来，
+    /// 用户只会看见一次「任务没了」，而不是两次。这条测试钉的是代价本身，
+    /// 不是丢弃的次数——次数由合并节奏决定，代价由这里说清。
+    #[test]
+    fn a_task_row_that_predates_the_schedule_fields_is_dropped_whole() {
+        let directory = temp_directory();
+        let database = directory.join(DATABASE_FILE);
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE tasks (
+                    task_id              TEXT PRIMARY KEY NOT NULL,
+                    name                 TEXT NOT NULL,
+                    source_datasource_id TEXT NOT NULL,
+                    target_datasource_id TEXT NOT NULL,
+                    spec                 TEXT NOT NULL
+                );
+                INSERT INTO tasks VALUES (
+                    'pre-schedule', 'pre schedule task', 'src1', 'tgt1',
+                    '{\"owner\":\"HTBR45\",\"table\":\"T\",\"target_table\":\"M\",\"write_mode\":\"APPEND\",\"columns\":[{\"source\":\"ID\",\"target\":\"ID\"}],\"primary_key\":[\"ID\"]}'
+                );",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = TaskStore::open(&directory).unwrap();
+        assert!(store.list().unwrap().is_empty());
+        assert_eq!(store.get("pre-schedule").unwrap(), None);
+
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// 调度两个字段存得下、读得回，而且**存的是原文**：`0 2 * * *` 读回来还是
+    /// `0 2 * * *`，不是某个解析后的等价物。人写的那一行才是真相源。
+    #[test]
+    fn the_schedule_fields_round_trip_as_written() {
+        let directory = temp_directory();
+        let store = TaskStore::open(&directory).unwrap();
+        let created = store
+            .create(TaskInput {
+                name: "nightly".to_owned(),
+                source_datasource_id: "src1".to_owned(),
+                target_datasource_id: "tgt1".to_owned(),
+                spec: TaskSpec {
+                    schedule_cron: Some("0 2 * * *".to_owned()),
+                    schedule_enabled: true,
+                    ..sample_spec()
+                },
+            })
+            .unwrap();
+
+        let read_back = store.get(&created.task_id).unwrap().unwrap();
+        assert_eq!(read_back.spec.schedule_cron.as_deref(), Some("0 2 * * *"));
+        assert!(read_back.spec.schedule_enabled);
 
         drop(store);
         std::fs::remove_dir_all(directory).unwrap();

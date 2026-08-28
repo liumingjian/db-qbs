@@ -194,7 +194,7 @@ fn seed_datasources(port: u16) -> (String, String) {
 fn task_json(name: &str, target_table: &str, datasources: &(String, String)) -> String {
     let (source_datasource_id, target_datasource_id) = datasources;
     format!(
-        r#"{{"name":"{name}","source_datasource_id":"{source_datasource_id}","target_datasource_id":"{target_datasource_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"{target_table}","columns":[{{"source":"ID","target":"ID"}},{{"source":"D_BIZ","target":"D_BIZ"}}],"write_mode":"APPEND","primary_key":["ID"],"where_clause":"D_BIZ = DATE '2026-08-14'"}}}}"#
+        r#"{{"name":"{name}","source_datasource_id":"{source_datasource_id}","target_datasource_id":"{target_datasource_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"{target_table}","columns":[{{"source":"ID","target":"ID"}},{{"source":"D_BIZ","target":"D_BIZ"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"],"where_clause":"D_BIZ = DATE '2026-08-14'"}}}}"#
     )
 }
 

@@ -14,6 +14,8 @@ use std::collections::BTreeSet;
 use db_qbs_shared::{WriteMode, WriteStatement};
 use serde::{Deserialize, Serialize};
 
+use crate::cron::CronSchedule;
+
 /// 一列的映射：源列名 → 目标列名。
 ///
 /// 「默认同名映射」就是 `target` 预填成 `source`——那不是将就的默认值，它就是恒等映射的
@@ -53,6 +55,23 @@ pub struct TaskSpec {
     ///
     /// 它是标量，和 [`Self::where_clause`] 一样**必须排在 `columns` 之前**。
     pub write_mode: WriteMode,
+    /// 调度用的**五字段 cron 表达式**（#265），按**服务器本地时区**解读。
+    ///
+    /// `None` 或空白 = 这个任务没有周期，只能手动发起。语法与语义只有一份定义，
+    /// [`crate::CronSchedule`]；这里存的是**原文**，不是解析结果——人写的那一行是真相源，
+    /// 存下解析结果等于让任务定义里多一份会和原文漂开的派生物。
+    ///
+    /// 它是标量，和 [`Self::where_clause`] 一样**必须排在 `columns` 之前**。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_cron: Option<String>,
+    /// 调度的启停开关（#265）。
+    ///
+    /// 它和 [`Self::schedule_cron`] 是两件事，因此是两个字段：把表达式清空来「暂停」，
+    /// 等于让人为了停一次而丢掉自己写好的那一行。开着但没有表达式是自相矛盾的，
+    /// [`Self::validate`] 拒绝它。
+    ///
+    /// 它是标量，同样**必须排在 `columns` 之前**。
+    pub schedule_enabled: bool,
     /// 去重用的主键列，**可以为空**（#261）。存的是**目标列名**——与
     /// [`ColumnMapping::target`]、过线报文、sink 侧比对同一个名字空间。
     ///
@@ -198,7 +217,34 @@ impl TaskSpec {
                 return Err(format!("主键列 {column} 不在选中的列里"));
             }
         }
+        // 调度（#265）。语法由 `CronSchedule::parse` 说了算，它的 `Err` 就是给人看的那句话，
+        // 原样带出去——在这里另写一句「cron 表达式不合法」会把真正的原因盖掉。
+        // 拒绝发生在**保存**这一刻，不是等到该跑的那一刻：一个永远不会响的闹钟不该被存下来。
+        if let Some(expression) = self.schedule_expression() {
+            CronSchedule::parse(expression)?;
+        } else if self.schedule_enabled {
+            return Err("启用了周期调度就必须写一条 cron 表达式".to_owned());
+        }
         Ok(())
+    }
+
+    /// 去掉首尾空白之后的 cron 表达式；空白等同于没配。与 [`Self::where_fragment`] 同一套口径。
+    pub fn schedule_expression(&self) -> Option<&str> {
+        self.schedule_cron
+            .as_deref()
+            .map(str::trim)
+            .filter(|expression| !expression.is_empty())
+    }
+
+    /// 解析好的周期，只在**开关开着且表达式配了**的时候才有。
+    ///
+    /// 这是「这个任务此刻会不会被自动发起」唯一的判据——#266 的调度器读它，界面上的
+    /// 「下次触发」也读它。开关与表达式各判各的会让两边在「开着但没表达式」上分叉。
+    pub fn active_schedule(&self) -> Option<CronSchedule> {
+        if !self.schedule_enabled {
+            return None;
+        }
+        CronSchedule::parse(self.schedule_expression()?).ok()
     }
 }
 
