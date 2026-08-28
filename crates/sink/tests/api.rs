@@ -52,6 +52,7 @@ impl Rig {
                 name: "fixture".to_owned(),
                 version: "0.0.0-test".to_owned(),
                 mysql: None,
+                max_concurrent_runs: None,
             },
             destination,
         }

@@ -53,6 +53,12 @@ pub struct Agent {
     /// `DEFAULT CHARSET=utf8mb4`，字符序交给目标库自己的默认值——那正是本票之前的行为，
     /// 也是唯一一个不掺猜测的退化。
     pub mysql_collation: Option<String>,
+    /// agent 自报的并发额度（`sink.toml` 的 `max_concurrent_runs`，#260）。
+    ///
+    /// **`None` 是「这台 agent 没说」**——旧版本 agent 不带这个字段。调度器读到 `None`
+    /// 时按**一次一个**派发（#266）：那是唯一一个绝不会撞上 `RUN_QUOTA_EXCEEDED` 的取值，
+    /// 而拿 sink 的默认值 4 顶上就是猜——那台 agent 完全可能配着 2。
+    pub max_concurrent_runs: Option<u32>,
 }
 
 /// agent 的在线状态。**三档，不是两档**：`Mismatch` 与 `Offline` 分开报，
@@ -123,6 +129,8 @@ impl AgentStore {
         // 版本」，与新 agent 从没被探到过是同一档，处置也一样。
         ensure_nullable_text_column(&connection, "mysql_version")?;
         ensure_nullable_text_column(&connection, "mysql_collation")?;
+        // #266 之前建的库没有这一列，老记录补出来是 `NULL` =「这台 agent 还没报过额度」。
+        ensure_nullable_integer_column(&connection, "max_concurrent_runs")?;
         Ok(Self { connection })
     }
 
@@ -148,12 +156,13 @@ impl AgentStore {
                 .mysql
                 .as_ref()
                 .map(|mysql| mysql.utf8mb4_collation.clone()),
+            max_concurrent_runs: reported_quota(info),
         };
         self.connection
             .execute(
                 "INSERT INTO agents (agent_id, name, base_url, instance_id, version, last_seen_at, status, last_error,
-                                     mysql_version, mysql_collation)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)",
+                                     mysql_version, mysql_collation, max_concurrent_runs)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?10)",
                 params![
                     agent.agent_id,
                     agent.name,
@@ -164,6 +173,7 @@ impl AgentStore {
                     agent.status.as_str(),
                     agent.mysql_version,
                     agent.mysql_collation,
+                    agent.max_concurrent_runs,
                 ],
             )
             .map_err(|error| format!("写入 SQLite agent 失败：{error}"))?;
@@ -196,12 +206,14 @@ impl AgentStore {
                 .mysql
                 .as_ref()
                 .map(|mysql| mysql.utf8mb4_collation.clone()),
+            max_concurrent_runs: reported_quota(info),
         };
         self.connection
             .execute(
                 "UPDATE agents SET name = ?2, base_url = ?3, instance_id = ?4, version = ?5,
                                    last_seen_at = ?6, status = ?7, last_error = NULL,
-                                   mysql_version = ?8, mysql_collation = ?9
+                                   mysql_version = ?8, mysql_collation = ?9,
+                                   max_concurrent_runs = ?10
                  WHERE agent_id = ?1",
                 params![
                     agent.agent_id,
@@ -213,6 +225,7 @@ impl AgentStore {
                     agent.status.as_str(),
                     agent.mysql_version,
                     agent.mysql_collation,
+                    agent.max_concurrent_runs,
                 ],
             )
             .map_err(|error| format!("更新 SQLite agent 失败：{error}"))?;
@@ -224,7 +237,7 @@ impl AgentStore {
             .connection
             .prepare(
                 "SELECT agent_id, name, base_url, instance_id, version, last_seen_at, status, last_error,
-                        mysql_version, mysql_collation
+                        mysql_version, mysql_collation, max_concurrent_runs
                  FROM agents ORDER BY rowid",
             )
             .map_err(|error| format!("准备 SQLite agent 列表查询失败：{error}"))?;
@@ -240,7 +253,7 @@ impl AgentStore {
         self.connection
             .query_row(
                 "SELECT agent_id, name, base_url, instance_id, version, last_seen_at, status, last_error,
-                        mysql_version, mysql_collation
+                        mysql_version, mysql_collation, max_concurrent_runs
                  FROM agents WHERE agent_id = ?1",
                 [agent_id],
                 agent_from_row,
@@ -296,6 +309,13 @@ impl AgentStore {
                 existing.mysql_collation.clone(),
             ),
         };
+        // 额度与上面同一条规则：只有探通且身份对得上才更新，否则留住上一次那份。
+        let max_concurrent_runs = match result {
+            Ok(info) if info.agent_id == existing.instance_id || existing.instance_id.is_empty() => {
+                reported_quota(info)
+            }
+            _ => existing.max_concurrent_runs,
+        };
         let (status, last_error, version, last_seen_at) = match result {
             Ok(info)
                 if info.agent_id == existing.instance_id || existing.instance_id.is_empty() =>
@@ -333,7 +353,8 @@ impl AgentStore {
             .execute(
                 "UPDATE agents SET instance_id = ?2, version = ?3, last_seen_at = ?4,
                                    status = ?5, last_error = ?6,
-                                   mysql_version = ?7, mysql_collation = ?8
+                                   mysql_version = ?7, mysql_collation = ?8,
+                                   max_concurrent_runs = ?9
                  WHERE agent_id = ?1",
                 params![
                     agent_id,
@@ -344,6 +365,7 @@ impl AgentStore {
                     last_error,
                     mysql_version,
                     mysql_collation,
+                    max_concurrent_runs,
                 ],
             )
             .map_err(|error| format!("更新 SQLite agent 探测结果失败：{error}"))?;
@@ -369,8 +391,8 @@ impl AgentStore {
         self.connection
             .execute(
                 "INSERT INTO agents (agent_id, name, base_url, instance_id, version, last_seen_at, status, last_error,
-                                     mysql_version, mysql_collation)
-                 VALUES (?1, '默认', ?2, '', '', NULL, 'offline', '尚未探测', NULL, NULL)",
+                                     mysql_version, mysql_collation, max_concurrent_runs)
+                 VALUES (?1, '默认', ?2, '', '', NULL, 'offline', '尚未探测', NULL, NULL, NULL)",
                 params![agent_id, normalize_base_url(base_url)?],
             )
             .map_err(|error| format!("迁移 sink_base_url 失败：{error}"))?;
@@ -394,6 +416,30 @@ fn ensure_nullable_text_column(connection: &Connection, name: &str) -> Result<()
         .execute(&format!("ALTER TABLE agents ADD COLUMN {name} TEXT"), [])
         .map_err(|error| format!("迁移 SQLite agent 列 {name} 失败：{error}"))?;
     Ok(())
+}
+
+/// 补一列可空 INTEGER（#266）。与上面那条同一条路子，只差列的类型。
+fn ensure_nullable_integer_column(connection: &Connection, name: &str) -> Result<(), String> {
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agents') WHERE name = ?1)",
+            [name],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("检查 SQLite agent 列 {name} 失败：{error}"))?;
+    if exists {
+        return Ok(());
+    }
+    connection
+        .execute(&format!("ALTER TABLE agents ADD COLUMN {name} INTEGER"), [])
+        .map_err(|error| format!("迁移 SQLite agent 列 {name} 失败：{error}"))?;
+    Ok(())
+}
+
+/// agent 自报的并发额度，收成入库的类型。没报就是 `None`，**不补默认值**。
+fn reported_quota(info: &AgentInfo) -> Option<u32> {
+    info.max_concurrent_runs
+        .map(|quota| u32::try_from(quota).unwrap_or(u32::MAX))
 }
 
 /// 名字留空就用 agent 自报的那一个。**名字不作判据**，所以随便退化都不伤正确性。
@@ -471,6 +517,7 @@ fn agent_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
         last_error: row.get("last_error")?,
         mysql_version: row.get("mysql_version")?,
         mysql_collation: row.get("mysql_collation")?,
+        max_concurrent_runs: row.get("max_concurrent_runs")?,
     })
 }
 
@@ -514,6 +561,7 @@ mod tests {
             name: "target-a".to_owned(),
             version: "0.1.0".to_owned(),
             mysql: None,
+            max_concurrent_runs: None,
         }
     }
 

@@ -579,6 +579,7 @@ fn agent_info_shape() {
             name: "target-a".to_owned(),
             version: "0.1.0".to_owned(),
             mysql: None,
+            max_concurrent_runs: None,
         },
         json!({
             "agent_id": "6f1a9c2d4e8b47f0a1b2c3d4e5f60718",
@@ -602,6 +603,7 @@ fn agent_info_carries_the_observed_mysql_when_there_is_one() {
                 version: "5.7.44-log".to_owned(),
                 utf8mb4_collation: "utf8mb4_general_ci".to_owned(),
             }),
+            max_concurrent_runs: Some(4),
         },
         json!({
             "agent_id": "6f1a9c2d4e8b47f0a1b2c3d4e5f60718",
@@ -611,6 +613,7 @@ fn agent_info_carries_the_observed_mysql_when_there_is_one() {
                 "version": "5.7.44-log",
                 "utf8mb4_collation": "utf8mb4_general_ci",
             },
+            "max_concurrent_runs": 4,
         }),
     );
 }
