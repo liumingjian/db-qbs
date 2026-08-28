@@ -466,13 +466,6 @@ impl Drop for Rig {
                 left_behind.push(format!("table {table}: {error}"));
             }
         }
-        // The swap writes the ledger, and the ledger outlives the staging table.
-        if let Err(error) = self.plain.query_drop(format!(
-            "DELETE FROM `{}`.`__db_qbs_write_ledger` WHERE target_table LIKE '{}%'",
-            self.database, self.prefix
-        )) {
-            left_behind.push(format!("ledger rows: {error}"));
-        }
         if !left_behind.is_empty() {
             eprintln!("!! {} left behind {}", self.prefix, left_behind.join("; "));
         }

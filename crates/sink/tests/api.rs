@@ -131,16 +131,6 @@ fn every_route_reaches_its_handler() {
             open_body("20260814091531_b4e20d"),
             200,
         ),
-        // `primary_key` 空 → 400，不必真连目标端。
-        (
-            Method::Post,
-            "/v1/runs/cleanup",
-            "/v1/runs/cleanup".into(),
-            format!(
-                r#"{{"run_id":"{run_id}","target_table":"T_POSITION","target":{UNREACHABLE_TARGET},"primary_key":[]}}"#
-            ),
-            400,
-        ),
         (
             Method::Post,
             "/v1/target/test-connection",
@@ -237,19 +227,67 @@ fn every_route_reaches_its_handler() {
 }
 
 /// 表里的先后**不承重**：字面量样式永远压过带占位的样式。
+///
+/// 从前这条测试的主语是 `/v1/runs/cleanup`——「撤销运行」那条路由，#256 已整套移除，
+/// 表里眼下再没有会被 `/v1/runs/{}` 吃掉的字面量。性质仍然要钉住：**下一条**写进
+/// `/v1/runs/` 底下的字面量路由必须走自己的 handler，而不是被当成一个 run id。
+/// 所以这里不再点名某条路由，而是从 `routes()` 现推：谁会被同方法的占位样式盖住，
+/// 就把谁的真实 URL 送进 `Api::handle`，看它到没到自己家。
 #[test]
 fn literal_patterns_win_over_placeholder_patterns() {
     let rig = Rig::new();
 
-    // `cleanup` 从前靠写在按 run id 分发的那一支之前才不会被当成一个 run id。
-    let cleanup = rig.post("/v1/runs/cleanup", "{}");
-    assert_eq!(cleanup.status, 400, "{}", cleanup.body_text());
-    assert!(!cleanup.body_text().contains(UNROUTED));
-
-    // 同一段路径换成 GET 就只剩按 run id 那条路由——它是个认不出的 run。
-    let as_a_run = rig.get("/v1/runs/cleanup");
+    // 占位那一趟确实在跑：认不出的 run id 落到 `/v1/runs/{}`，而不是通用 404。
+    let as_a_run = rig.get("/v1/runs/20260814091599_zzzzzz");
     assert_eq!(as_a_run.status, 404);
     assert_eq!(rig.json(&as_a_run)["error"]["code"], "RUN_UNKNOWN");
+    assert!(!as_a_run.body_text().contains(UNROUTED));
+
+    // 字面量那一趟压得住：凡是会被占位样式盖住的字面量路由，都必须自己接住。
+    let table = routes::<Fixture>();
+    for route in &table {
+        if route.has_placeholder() {
+            continue;
+        }
+        let shadowed = table.iter().any(|other| {
+            other.has_placeholder()
+                && other.method == route.method
+                && placeholder_covers(other.pattern, route.pattern)
+        });
+        if !shadowed {
+            continue;
+        }
+        let response = match route.method {
+            Method::Get => rig.get(route.pattern),
+            Method::Post => rig.post(route.pattern, "{}"),
+            Method::Other => continue,
+        };
+        assert!(
+            !response.body_text().contains(UNROUTED),
+            "{} 被占位样式吃掉了",
+            route.pattern
+        );
+        assert_ne!(
+            rig.json(&response)["error"]["code"],
+            "RUN_UNKNOWN",
+            "{} 被当成了一个 run id",
+            route.pattern
+        );
+    }
+}
+
+/// 带占位的样式 `pattern` 会不会把字面量路径 `path` 也吃下去。
+///
+/// 测试自备一份匹配规则，和路由自反那几条一个路子：库里那份是被测对象，
+/// 拿它自己校自己等于什么都没校。
+fn placeholder_covers(pattern: &str, path: &str) -> bool {
+    let pattern = pattern.split('/').collect::<Vec<_>>();
+    let path = path.split('/').collect::<Vec<_>>();
+    pattern.len() == path.len()
+        && pattern
+            .iter()
+            .zip(&path)
+            .all(|(expected, actual)| *expected == "{}" || expected == actual)
 }
 
 /// 路由表里不许有两行同方法同样式——重复的那条永远是死的。

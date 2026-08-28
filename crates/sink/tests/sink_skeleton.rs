@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 use db_qbs_sink::test_support::InMemoryDestination;
 use db_qbs_sink::{
     build_staging_ddl, check_connection_settings, precheck, precheck_with_primary_key,
-    BatchPayload, CleanupRunRequest, CreateStagingError, DropStagingError, OpenOutcome,
-    OpenRunRequest, RangeCheckColumn, RangeCheckResult, SinkConfig, SinkService, SourceColumn,
-    TargetCheckKind, TargetCheckRequest, TargetColumn, TargetConnection, TargetKey,
+    CreateStagingError, DropStagingError, OpenOutcome, OpenRunRequest, RangeCheckColumn,
+    RangeCheckResult, SinkConfig, SinkService, SourceColumn, TargetCheckKind, TargetCheckRequest,
+    TargetColumn, TargetConnection, TargetKey,
 };
 
 const RUN_ID: &str = "20260814091530_a3f19c";
@@ -780,78 +780,6 @@ fn target_check_reuses_the_run_precheck_conclusion_and_never_invents_ddl() {
     assert!(result.ok);
     assert!(result.findings.is_empty());
     assert_eq!(result.suggested_ddl, None);
-}
-
-#[test]
-fn cleaning_an_older_run_keeps_a_key_written_by_a_later_run() {
-    let (sources, targets) = valid_columns();
-    let destination = Arc::new(InMemoryDestination {
-        columns: targets,
-        ..InMemoryDestination::default()
-    });
-    let service = SinkService::new("qbs", destination.clone());
-    let mut first = open_request(sources.clone());
-    first.run_id = RUN_ID.to_owned();
-    service.open(first.clone()).unwrap();
-    service
-        .write_batch(
-            RUN_ID,
-            BatchPayload {
-                seq: 1,
-                rows: vec![
-                    vec![
-                        Some("1".into()),
-                        Some("first-only".into()),
-                        Some("2026-08-01".into()),
-                    ],
-                    vec![
-                        Some("2".into()),
-                        Some("first".into()),
-                        Some("2026-08-02".into()),
-                    ],
-                ],
-            },
-        )
-        .unwrap();
-    service.commit(RUN_ID, 1, 2).unwrap();
-
-    let later_run = "20260814091531_b4e20d";
-    let mut second = open_request(sources);
-    second.run_id = later_run.to_owned();
-    service.open(second).unwrap();
-    service
-        .write_batch(
-            later_run,
-            BatchPayload {
-                seq: 1,
-                rows: vec![vec![
-                    Some("9".into()),
-                    Some("later".into()),
-                    Some("2026-08-02".into()),
-                ]],
-            },
-        )
-        .unwrap();
-    service.commit(later_run, 1, 1).unwrap();
-
-    let cleaned = service
-        .cleanup(CleanupRunRequest {
-            run_id: RUN_ID.to_owned(),
-            target_table: "T_POSITION".to_owned(),
-            target: first.target,
-            primary_key: vec!["D_BIZ".to_owned()],
-        })
-        .unwrap();
-
-    assert_eq!(cleaned.deleted_rows, 1);
-    assert_eq!(
-        destination.target_row_values("T_POSITION"),
-        vec![vec![
-            Some("9".into()),
-            Some("later".into()),
-            Some("2026-08-02".into())
-        ],]
-    );
 }
 
 #[test]

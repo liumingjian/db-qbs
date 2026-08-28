@@ -6,12 +6,12 @@
 //! `SinkService` 接缝后面进程内直调了，只有路由这一层还够不着（#200，跟着 #198 走）。
 //!
 //! 路由表是**数据**（`routes()`），不是一串 `if`。匹配分两趟：字面量样式先走一趟，
-//! 带占位的样式后走一趟，所以 `/v1/runs/cleanup` 不可能被 `/v1/runs/{}` 吃掉，
-//! **无论表里怎么排**——声明顺序不承重。
+//! 带占位的样式后走一趟，所以像 `/v1/runs/commit` 这样的字面量路由不可能被
+//! `/v1/runs/{}` 吃掉，**无论表里怎么排**——声明顺序不承重。
 
 use std::io;
 
-use db_qbs_shared::{write_log_line_with_fields, AgentInfo, CleanupRunRequest, LogEvent, LogLevel};
+use db_qbs_shared::{write_log_line_with_fields, AgentInfo, LogEvent, LogLevel};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -162,7 +162,7 @@ fn match_pattern<'a>(pattern: &str, path: &'a str) -> Option<&'a str> {
 /// 全部 v1 路由。**表里的先后不承重**——`Api::handle` 分两趟走，字面量永远压过占位。
 ///
 /// 表按 `F` 现造：handler 是 `fn(&Api<'_, F>, ..)`，泛型函数里放不下一份
-/// `static`。十一条路由的一次 `Vec`，与它后面那次 MySQL 往返比可以忽略。
+/// `static`。十条路由的一次 `Vec`，与它后面那次 MySQL 往返比可以忽略。
 pub fn routes<F: DestinationFactory>() -> Vec<Route<F>> {
     use Method::{Get, Post};
     vec![
@@ -171,9 +171,6 @@ pub fn routes<F: DestinationFactory>() -> Vec<Route<F>> {
         }),
         Route::new(Post, "/v1/runs", |api, request, _run_id| {
             handle_open(request, api.service)
-        }),
-        Route::new(Post, "/v1/runs/cleanup", |api, request, _run_id| {
-            handle_cleanup(request, api.service)
         }),
         Route::new(
             Post,
@@ -221,7 +218,7 @@ impl<F: DestinationFactory> Api<'_, F> {
     /// 这个 crate 的 HTTP 面**唯一**的入口。
     ///
     /// 两趟匹配：先字面量样式，再带占位的样式。这就是「顺序不承重」的全部机制——
-    /// 从前 `/v1/runs/cleanup` 要靠写在按 run id 分发的那一支之前才不被吃掉，
+    /// 从前 `/v1/runs/` 下的字面量路由要靠写在按 run id 分发的那一支之前才不被吃掉，
     /// 现在即便把表倒过来写，结果也一个字节不变。
     pub fn handle(&self, request: &Request) -> Response {
         let routes = routes::<F>();
@@ -358,20 +355,6 @@ fn handle_open(request: &Request, service: &SinkService<impl DestinationFactory>
     match service.open(request) {
         // 两种 outcome 都是 200，区别写在报文里——那份暗号由 `OpenOutcome` 一处编码。
         Ok(outcome) => json_response(200, &outcome.into_response()),
-        Err(error) => error_response(error),
-    }
-}
-
-fn handle_cleanup(request: &Request, service: &SinkService<impl DestinationFactory>) -> Response {
-    if !has_json_content_type(request) {
-        return error_response(unsupported_media_type(None));
-    }
-    let request: CleanupRunRequest = match read_json(request) {
-        Ok(request) => request,
-        Err(error) => return error_response(error),
-    };
-    match service.cleanup(request) {
-        Ok(response) => json_response(200, &response),
         Err(error) => error_response(error),
     }
 }

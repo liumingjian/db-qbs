@@ -17,11 +17,11 @@ use serde_json::Value;
 // 报文形状的唯一定义在 `db-qbs-shared`（#124）。这里只保留门面，
 // crate 内部与既有测试的引用路径一个字不变。
 pub use db_qbs_shared::{
-    AbortResponse, BatchPayload, BatchResponse, CleanupRunRequest, CleanupRunResponse,
-    ColumnSupport, CommitRequest, CommitResponse, ErrorBody, ErrorEnvelope, MysqlServerInfo,
-    OpenOutcome, OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn,
-    RangeCheckResult, RunResponse, SourceColumn, TargetCheckFinding, TargetCheckKind,
-    TargetCheckRequest, TargetCheckResult, TargetConnection, Terminal,
+    AbortResponse, BatchPayload, BatchResponse, ColumnSupport, CommitRequest, CommitResponse,
+    ErrorBody, ErrorEnvelope, MysqlServerInfo, OpenOutcome, OpenRunRequest, OpenRunResponse,
+    PrecheckIssue, RangeCheckColumn, RangeCheckResult, RunResponse, SourceColumn,
+    TargetCheckFinding, TargetCheckKind, TargetCheckRequest, TargetCheckResult, TargetConnection,
+    Terminal,
 };
 // 九行形态的推导也只有一份定义（#125）——判定式仍两端各一份。
 pub use agent::load_or_create as load_agent_identity;
@@ -164,11 +164,6 @@ pub enum DropStagingError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CleanupRunError {
-    Environment(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteBatchError {
     DataValue {
         mysql_code: u16,
@@ -207,12 +202,6 @@ pub trait Destination: Send + Sync {
     fn atomic_swap(&self, request: &AtomicSwapRequest)
         -> Result<AtomicSwapResult, AtomicSwapError>;
     fn drop_staging(&self, staging_table: &str) -> Result<(), DropStagingError>;
-    fn cleanup_run(
-        &self,
-        run_id: &str,
-        target_table: &str,
-        primary_key: &[String],
-    ) -> Result<u64, CleanupRunError>;
 }
 
 /// 一条按 run 建起来的目标端连接：库名 + 目的地。

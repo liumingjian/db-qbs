@@ -27,8 +27,8 @@ use std::sync::Mutex;
 use db_qbs_shared::{MysqlServerInfo, RowCounts};
 
 use crate::{
-    AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, CleanupRunError, CreateStagingError,
-    Destination, DropStagingError, TargetColumn, TargetKey, WriteBatchError,
+    AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, CreateStagingError, Destination,
+    DropStagingError, TargetColumn, TargetKey, WriteBatchError,
 };
 
 /// One `write_batch` call, recorded whole so batching tests can assert on the
@@ -71,7 +71,6 @@ pub struct InMemoryDestination {
     pub purged_rows: Mutex<u64>,
     pub count_ms: Mutex<u64>,
     pub target_rows: Mutex<HashMap<(String, String), Vec<Option<String>>>>,
-    pub write_ledger: Mutex<Vec<(String, String, String, bool)>>,
     /// What this destination claims its MySQL is (#257). `None` is the resting
     /// state — the fake is not connected to anything, so "never observed" is the
     /// honest default, and it is also the state the info endpoint must report as
@@ -101,7 +100,6 @@ impl Default for InMemoryDestination {
             purged_rows: Mutex::new(0),
             count_ms: Mutex::new(0),
             target_rows: Mutex::new(HashMap::new()),
-            write_ledger: Mutex::new(Vec::new()),
             server: Mutex::new(None),
         }
     }
@@ -276,7 +274,6 @@ impl Destination for InMemoryDestination {
             .collect::<Vec<_>>();
         let rows = self.staging.lock().unwrap()[&request.staging_table].clone();
         let mut target_rows = self.target_rows.lock().unwrap();
-        let mut ledger = self.write_ledger.lock().unwrap();
         for row in rows {
             let key = serde_json::to_string(
                 &key_indices
@@ -285,13 +282,7 @@ impl Destination for InMemoryDestination {
                     .collect::<Vec<_>>(),
             )
             .unwrap();
-            target_rows.insert((request.target_table.clone(), key.clone()), row);
-            ledger.push((
-                request.run_id.clone(),
-                request.target_table.clone(),
-                key,
-                false,
-            ));
+            target_rows.insert((request.target_table.clone(), key), row);
         }
 
         Ok(AtomicSwapResult {
@@ -312,44 +303,6 @@ impl Destination for InMemoryDestination {
         self.staging.lock().unwrap().remove(staging_table);
         self.dropped.lock().unwrap().push(staging_table.to_owned());
         Ok(())
-    }
-
-    fn cleanup_run(
-        &self,
-        run_id: &str,
-        target_table: &str,
-        _primary_key: &[String],
-    ) -> Result<u64, CleanupRunError> {
-        let mut ledger = self.write_ledger.lock().unwrap();
-        let removable = ledger
-            .iter()
-            .enumerate()
-            .filter(|(_, (writer, table, _, cleaned))| {
-                writer == run_id && table == target_table && !cleaned
-            })
-            .filter(|(index, (_, table, key, _))| {
-                !ledger
-                    .iter()
-                    .skip(index + 1)
-                    .any(|(_, later_table, later_key, _)| later_table == table && later_key == key)
-            })
-            .map(|(_, (_, _, key, _))| key.clone())
-            .collect::<Vec<_>>();
-        let mut target_rows = self.target_rows.lock().unwrap();
-        let deleted = removable
-            .iter()
-            .filter(|key| {
-                target_rows
-                    .remove(&(target_table.to_owned(), (*key).clone()))
-                    .is_some()
-            })
-            .count() as u64;
-        for (writer, table, _, cleaned) in ledger.iter_mut() {
-            if writer == run_id && table == target_table {
-                *cleaned = true;
-            }
-        }
-        Ok(deleted)
     }
 }
 
