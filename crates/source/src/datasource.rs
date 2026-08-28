@@ -10,6 +10,8 @@
 use std::fs::{self, OpenOptions, Permissions};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use db_qbs_shared::TargetConnection;
 use rand::RngCore;
@@ -198,8 +200,11 @@ impl Datasource {
     }
 }
 
+/// 数据源表的门。连接进 `Mutex` 的理由与 [`crate::TaskStore`] 同一条（#255）：
+/// 裸 `Connection` 不是 `Sync`，多线程 accept 循环下 `Api` 编译不过。
+/// `SecretBox` 只读一把内存里的密钥，本来就是 `Sync`，不用包。
 pub struct DatasourceStore {
-    connection: Connection,
+    connection: Mutex<Connection>,
     secrets: SecretBox,
 }
 
@@ -232,10 +237,20 @@ impl DatasourceStore {
             )
             .map_err(|error| format!("初始化 SQLite 数据源表失败：{error}"))?;
 
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(|error| format!("配置 SQLite 忙等待失败：{error}"))?;
+
         Ok(Self {
-            connection,
+            connection: Mutex::new(connection),
             secrets: SecretBox::open(data_dir)?,
         })
+    }
+
+    fn connection(&self) -> Result<MutexGuard<'_, Connection>, String> {
+        self.connection
+            .lock()
+            .map_err(|_| "SQLite 数据源库的锁已损坏".to_owned())
     }
 
     pub fn create(&self, input: DatasourceInput) -> Result<Datasource, String> {
@@ -245,8 +260,8 @@ impl DatasourceStore {
     }
 
     pub fn list(&self) -> Result<Vec<Datasource>, String> {
-        let mut statement = self
-            .connection
+        let connection = self.connection()?;
+        let mut statement = connection
             .prepare("SELECT datasource_id, name, settings FROM datasources ORDER BY rowid")
             .map_err(|error| format!("准备 SQLite 数据源列表查询失败：{error}"))?;
         let datasources = statement
@@ -258,7 +273,7 @@ impl DatasourceStore {
     }
 
     pub fn get(&self, datasource_id: &str) -> Result<Option<Datasource>, String> {
-        self.connection
+        self.connection()?
             .query_row(
                 "SELECT datasource_id, name, settings FROM datasources WHERE datasource_id = ?1",
                 [datasource_id],
@@ -285,7 +300,7 @@ impl DatasourceStore {
                 .settings
                 .set_password(existing.settings.password().to_owned());
         }
-        self.connection
+        self.connection()?
             .execute(
                 "UPDATE datasources SET name = ?2, kind = ?3, settings = ?4 WHERE datasource_id = ?1",
                 params![
@@ -303,7 +318,7 @@ impl DatasourceStore {
         let Some(datasource) = self.get(datasource_id)? else {
             return Ok(None);
         };
-        self.connection
+        self.connection()?
             .execute(
                 "DELETE FROM datasources WHERE datasource_id = ?1",
                 [datasource_id],
@@ -406,7 +421,7 @@ impl DatasourceStore {
             {
                 *slot = agent_id.to_owned();
             }
-            self.connection
+            self.connection()?
                 .execute(
                     "UPDATE datasources SET settings = ?2 WHERE datasource_id = ?1",
                     params![datasource.datasource_id, settings_json(&settings)?],
@@ -552,7 +567,7 @@ impl DatasourceStore {
     }
 
     fn insert(&self, datasource: &Datasource) -> Result<(), String> {
-        self.connection
+        self.connection()?
             .execute(
                 "INSERT INTO datasources (datasource_id, name, kind, settings) VALUES (?1, ?2, ?3, ?4)",
                 params![
@@ -632,7 +647,8 @@ mod tests {
         let created = store.create(mysql_input()).unwrap();
 
         let stored: String = store
-            .connection
+            .connection()
+            .unwrap()
             .query_row(
                 "SELECT settings FROM datasources WHERE datasource_id = ?1",
                 [&created.datasource_id],
@@ -765,7 +781,8 @@ mod tests {
         let directory = temp_directory();
         let store = DatasourceStore::open(&directory).unwrap();
         store
-            .connection
+            .connection()
+            .unwrap()
             .execute(
                 "INSERT INTO datasources (datasource_id, name, kind, settings) VALUES (?1, ?2, ?3, ?4)",
                 params![

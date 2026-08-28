@@ -97,13 +97,36 @@ pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
         describe_source: crate::OracleRowSource::describe,
     };
 
-    while !terminated.load(Ordering::Relaxed) {
-        if let Some(request) = server
-            .recv_timeout(Duration::from_millis(100))
-            .map_err(|error| format!("接收 HTTP 请求失败：{error}"))?
-        {
-            handle_request(request, &state);
-        }
+    // 多线程 accept：HTTP_WORKER_THREADS 条工作线程**共用同一个监听器**（#255）。
+    //
+    // 在这之前只有一条线程，一个请求全程处理完才回头 poll 下一个。而建任务那条路上
+    // 全是同步阻塞：取列信息 / 十行预览最长 15 秒（`PREVIEW_CALL_TIMEOUT`）、
+    // agent 探测 5 秒、发往 sink 的 `ureq` 读超时 30 秒。一次慢查询期间整个界面
+    // 连任务列表都刷不出来。
+    //
+    // 用 `thread::scope` 而不是 `thread::spawn`：`Api` 借着栈上那几个 store，
+    // 作用域线程让借用照旧成立，不必把每一份状态都塞进 `Arc`。
+    //
+    // 线程数取固定值，不按核数算：这里等的是**阻塞 IO**，不是 CPU，核数与它无关。
+    // 也不选「每请求一线程」——那对一个能被反复戳的端口等于没有上限。
+    // 8 条的含义是「同时能有 7 个慢取数在飞，第 8 个人照样刷得出任务列表」。
+    let workers: Vec<_> = thread::scope(|scope| {
+        let handles: Vec<_> = (0..HTTP_WORKER_THREADS)
+            .map(|_| scope.spawn(|| accept_loop(&server, &state, &terminated)))
+            .collect();
+        handles
+            .into_iter()
+            // 一条工作线程 panic 了，剩下几条照常服务——但退出时得说出来，
+            // 否则「服务半死不活」会以退出码 0 收场。
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err("HTTP 工作线程 panic 退出".to_owned()))
+            })
+            .collect()
+    });
+    for outcome in workers {
+        outcome?;
     }
     history_store.seal_incomplete(
         UnknownReason::ServiceRestarted,
@@ -234,6 +257,26 @@ fn is_loopback(listen: &str) -> bool {
         return false;
     };
     first.ip().is_loopback() && addresses.all(|address| address.ip().is_loopback())
+}
+
+/// 共用监听器的工作线程数。见 `serve` 里那段说明。
+const HTTP_WORKER_THREADS: usize = 8;
+
+/// 一条工作线程的一辈子：取一个请求、处理完、回头再取。
+///
+/// `recv_timeout` 在多条线程上同时调是 tiny_http 支持的（`Server: Send + Sync`，
+/// 内部自带队列）。仍然保留 100 毫秒的超时轮询而不是无限阻塞的 `recv()`：
+/// SIGTERM 之后每条线程最多再等 100 毫秒就自己走人，优雅退出的时限没有变。
+fn accept_loop(server: &Server, state: &Api<'_>, terminated: &AtomicBool) -> Result<(), String> {
+    while !terminated.load(Ordering::Relaxed) {
+        if let Some(request) = server
+            .recv_timeout(Duration::from_millis(100))
+            .map_err(|error| format!("接收 HTTP 请求失败：{error}"))?
+        {
+            handle_request(request, state);
+        }
+    }
+    Ok(())
 }
 
 /// 一个 tiny_http 请求的全程：翻译进来、交给 `Api::handle`、翻译回去。

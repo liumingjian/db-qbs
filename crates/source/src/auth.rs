@@ -16,6 +16,8 @@
 use std::fs::{self, OpenOptions, Permissions};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -47,8 +49,11 @@ pub struct IssuedSession {
     pub max_age_seconds: i64,
 }
 
+/// 口令与会话两张表的门。连接进 `Mutex` 的理由与 [`crate::TaskStore`] 同一条（#255）。
+/// 这里尤其要紧：`authenticate()` 在**每一个** `/api/*` 请求上都跑一次，
+/// 是多线程之后最热的一处竞争点，所以锁只包住那一读一写，Argon2 的哈希计算在锁外。
 pub struct AuthStore {
-    connection: Connection,
+    connection: Mutex<Connection>,
 }
 
 impl AuthStore {
@@ -88,11 +93,23 @@ impl AuthStore {
             )
             .map_err(|error| format!("初始化 SQLite 登录表失败：{error}"))?;
 
-        let store = Self { connection };
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(|error| format!("配置 SQLite 忙等待失败：{error}"))?;
+
+        let store = Self {
+            connection: Mutex::new(connection),
+        };
         if store.password_hash()?.is_none() {
             store.write_password_hash(&hash_password(DEFAULT_PASSWORD)?)?;
         }
         Ok(store)
+    }
+
+    fn connection(&self) -> Result<MutexGuard<'_, Connection>, String> {
+        self.connection
+            .lock()
+            .map_err(|_| "SQLite 登录库的锁已损坏".to_owned())
     }
 
     /// 口令对不对。用户名不对也一样是 `false`——**两种失败不分开报**，
@@ -112,7 +129,7 @@ impl AuthStore {
     pub fn issue_session(&self, now: DateTime<Utc>) -> Result<IssuedSession, String> {
         let token = generate_token();
         let stamp = now.timestamp();
-        self.connection
+        self.connection()?
             .execute(
                 "INSERT INTO sessions (token, created_at, last_seen_at) VALUES (?1, ?2, ?2)",
                 params![token, stamp],
@@ -131,7 +148,7 @@ impl AuthStore {
     pub fn authenticate(&self, token: &str, now: DateTime<Utc>) -> Result<bool, String> {
         let stamp = now.timestamp();
         let last_seen: Option<i64> = self
-            .connection
+            .connection()?
             .query_row(
                 "SELECT last_seen_at FROM sessions WHERE token = ?1",
                 params![token],
@@ -146,7 +163,7 @@ impl AuthStore {
             self.forget(token)?;
             return Ok(false);
         }
-        self.connection
+        self.connection()?
             .execute(
                 "UPDATE sessions SET last_seen_at = ?2 WHERE token = ?1",
                 params![token, stamp],
@@ -157,7 +174,7 @@ impl AuthStore {
 
     /// 退出登录：只销这一张票，别处登着的不受影响（见 [`AuthStore::issue_session`]）。
     pub fn forget(&self, token: &str) -> Result<(), String> {
-        self.connection
+        self.connection()?
             .execute("DELETE FROM sessions WHERE token = ?1", params![token])
             .map_err(|error| format!("删除会话失败：{error}"))?;
         Ok(())
@@ -174,7 +191,7 @@ impl AuthStore {
         }
         validate_new_password(next)?;
         self.write_password_hash(&hash_password(next)?)?;
-        self.connection
+        self.connection()?
             .execute("DELETE FROM sessions WHERE token <> ?1", params![keep])
             .map_err(|error| format!("清理其它会话失败：{error}"))?;
         Ok(())
@@ -186,7 +203,7 @@ impl AuthStore {
     /// 此刻还有谁的浏览器攥着一张有效票据。
     pub fn reset_password(&self) -> Result<(), String> {
         self.write_password_hash(&hash_password(DEFAULT_PASSWORD)?)?;
-        self.connection
+        self.connection()?
             .execute("DELETE FROM sessions", [])
             .map_err(|error| format!("清理会话失败：{error}"))?;
         Ok(())
@@ -198,7 +215,7 @@ impl AuthStore {
     }
 
     fn password_hash(&self) -> Result<Option<String>, String> {
-        self.connection
+        self.connection()?
             .query_row(
                 "SELECT password_hash FROM credentials WHERE id = 1",
                 [],
@@ -209,7 +226,7 @@ impl AuthStore {
     }
 
     fn write_password_hash(&self, hash: &str) -> Result<(), String> {
-        self.connection
+        self.connection()?
             .execute(
                 "INSERT INTO credentials (id, password_hash) VALUES (1, ?1)
                  ON CONFLICT (id) DO UPDATE SET password_hash = excluded.password_hash",
