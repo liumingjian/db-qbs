@@ -11,6 +11,7 @@ import {
   leaving,
   leavingConfirmation,
   openExisting,
+  saveGate,
   openNew,
   previewIsFresh,
   selectionBlocker,
@@ -595,6 +596,42 @@ describe("the advance gate", () => {
       column: null,
       message: "目标表检查未通过（1 项）",
     }]);
+  });
+
+  it("keeps 保存 reachable on every step while editing, even behind a failing check", () => {
+    // story 29：改名并进了编辑向导，#263 又把列表上那颗改名按钮撤了。于是「往下走」
+    // 的门一旦当成「保存」的门，就有一种任务谁都改不了名——目标表在库里漂了一列，
+    // 第 3 步过不去，而名字字段原来就在第 4 步。名字字段搬到第 1 步，保存每一步都在。
+    let editing: Draft = { ...withTargetColumns(openExisting(savedTask(), SOURCE, TARGET)), step: 3 };
+    editing = done(apply(editing, {
+      type: "check-arrived",
+      check: {
+        ok: false,
+        findings: [{
+          column: "C_NAME",
+          kind: "missing_column",
+          expected: "VARCHAR(30)",
+          actual: "不存在",
+          message: "目标表缺少这一列",
+        }],
+        suggested_ddl: null,
+      },
+    }));
+    expect(canAdvance(editing, 3)).not.toEqual([]);
+    expect(saveGate(editing)).toEqual({ offered: true, refusal: null });
+
+    const renamed = done(apply(editing, { type: "task-name", name: "客户主档（改）" }));
+    expect(taskName(renamed)).toBe("客户主档（改）");
+    expect(saveGate(renamed).refusal).toBeNull();
+  });
+
+  it("still refuses to save an empty task name, and still finishes creating on step 4", () => {
+    const blank = done(apply(openExisting(savedTask(), SOURCE, TARGET), { type: "task-name", name: "  " }));
+    expect(saveGate(blank)).toEqual({ offered: true, refusal: "任务名不能为空" });
+    // 新建那条路的终点是「开始导入」，走完四步是它应有的代价：中途不给保存。
+    const creating = withTargetColumns(workedDraft());
+    expect(saveGate(creating).offered).toBe(false);
+    expect(saveGate({ ...creating, step: 4 as const }).offered).toBe(true);
   });
 
   it("excuses the check when editing against an offline agent", () => {
