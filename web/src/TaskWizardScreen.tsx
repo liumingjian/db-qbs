@@ -1287,7 +1287,10 @@ function StepBody({
           因而还看不见主键的时候先选写法。 */}
       <WriteModeCard write={model.write} change={change} />
       {model.rows.length === 0 ? <p className="wizard-empty">{draft.fetchMode === "sql" ? "尚未识别结果列" : "未选择源表"}</p> : (
-        <div className="table-wrap"><table className="data-grid wizard-mapping"><thead><tr><th>同步</th><th>源列</th><th>目标列</th><th>主键</th><th><span className="visually-hidden">操作</span></th></tr></thead><tbody>
+        /* 清空模式下整根「主键」列灰掉，理由就写在表头那一格里（#264）：
+           灰掉本身不解释任何事，一个没有理由的禁用控件读起来就是「这里坏了」。
+           每颗勾选框的 `Refusable` 也带着同一句话，两处说的是同一份常量。 */
+        <div className="table-wrap"><table className={`data-grid wizard-mapping${model.write.primaryKeyLock === null ? "" : " is-pk-locked"}`}><thead><tr><th>同步</th><th>源列</th><th>目标列</th><th className="pk-head">主键{model.write.primaryKeyLock !== null && <small>{model.write.primaryKeyLock}</small>}</th><th><span className="visually-hidden">操作</span></th></tr></thead><tbody>
           {model.rows.map((row) => <tr className={row.problem ? "is-problem" : ""} key={row.source}>
             <td><input type="checkbox" aria-label={`同步 ${row.source}`} checked={row.selected} onChange={() => change({ type: "toggle-column", source: row.source })} /></td>
             <td><span className="mono">{row.source}</span></td>

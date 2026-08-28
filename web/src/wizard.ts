@@ -31,6 +31,8 @@ import type {
 } from "./api";
 import { matchSameNameTargets, sourceSummary, whereSummary } from "./spec";
 import {
+  clearsTarget,
+  CLEAR_MODE_PRIMARY_KEY_NOTE,
   writeSemanticsNote,
   writeStatementLabel,
   writeStatementOf,
@@ -563,13 +565,30 @@ function reduce(draft: Draft, change: Change): Reduced {
       };
     }
 
-    case "write-mode":
-      // 写入模式是纯粹的记录：它不清空任何东西，也不改任何一列。
-      // 语句形状由目标表有没有主键决定，模式只说「这一次是追加还是清空后导入」。
+    case "write-mode": {
+      // 写入模式不改任何一列，语句形状仍只由目标表有没有主键决定。
+      //
+      // 它唯一动到的是主键那一格（#264）：清空模式下主键不再是人做的决定，界面把
+      // 那一列灰掉。**灰掉的同时必须把手勾的那一份收回来**——留着一个点不动、
+      // 又还在生效的手勾主键，是这两者里更坏的一种：屏幕上写着「按目标表实际主键
+      // 记录」，实际记的却是上一分钟某个人勾的另一组列。收回之后按目标表的主键重新
+      // 推导；推不出来（目标列还没读到、或目标表就是没有主键）就是空的，那也是一个
+      // 有含义的值——纯 INSERT。
+      const next = { ...draft, spec: { ...draft.spec, write_mode: change.mode } };
+      if (!clearsTarget(change.mode)) {
+        return { draft: next, cleared: [] };
+      }
+      const cleared: Cleared[] = draft.hand.primaryKey ? ["primary-key"] : [];
+      const inferred = inferPrimaryKey(draft.targetKeys, draft.spec.columns) ?? [];
       return {
-        draft: { ...draft, spec: { ...draft.spec, write_mode: change.mode } },
-        cleared: [],
+        draft: {
+          ...next,
+          spec: { ...next.spec, primary_key: inferred },
+          hand: { ...next.hand, primaryKey: false },
+        },
+        cleared,
       };
+    }
 
     // 调度（#265）：和写入模式一样是纯粹的记录，不清空任何东西，也不牵动任何一列。
     // 表达式与开关是两个 change，因为它们是两件事——把表达式清空来「暂停」，
@@ -1250,8 +1269,10 @@ export interface WriteView {
   /** 推导出来的语句形状。 */
   statement: WriteStatement;
   statementLabel: string;
-  /** 跟着语句走的那句交底，永远不缺席。 */
+  /** 跟着语句与模式一起走的那句交底，永远不缺席。 */
   note: string;
+  /** 清空模式下主键区域被灰掉的理由；追加写时是 `null`（#264）。 */
+  primaryKeyLock: string | null;
 }
 
 function writeView(draft: Draft): WriteView {
@@ -1261,7 +1282,12 @@ function writeView(draft: Draft): WriteView {
     mode: draft.spec.write_mode,
     statement,
     statementLabel: writeStatementLabel(statement),
-    note: writeSemanticsNote(statement),
+    note: writeSemanticsNote(statement, draft.spec.write_mode),
+    // 清空模式下主键那一列点不动，而**灰掉必须自带理由**——一个没有解释的禁用
+    // 控件读起来就是「这里坏了」（#264）。
+    primaryKeyLock: clearsTarget(draft.spec.write_mode)
+      ? CLEAR_MODE_PRIMARY_KEY_NOTE
+      : null,
   };
 }
 
@@ -1466,7 +1492,21 @@ function confirmTargetCheck(draft: Draft): ConfirmTargetCheck {
  *
  * A disabled control without a reason beside it reads as broken.
  */
+/**
+ * 主键那一列为什么点不动，以及**为什么这不是坏了**。
+ *
+ * 两个理由，各自都足以锁上，而话不一样，所以不能合并成一个布尔：
+ *
+ * 1. 先清空再导入（#264）——主键不再是人做的决定。清空不靠主键去重，而任务定义里
+ *    那份主键仍要记，因为它决定写入语句是 upsert 还是纯 INSERT，值取自目标表实际
+ *    定义的主键。这一条排在前面：模式是人刚选的，它带来的解释优先于「目标表已定义
+ *    主键」那句更弱的话。
+ * 2. 目标表已经定义了主键，而人还没有自己动过手——那就按目标表的来。
+ */
 function lockedPrimaryKey(draft: Draft): string | null {
+  if (clearsTarget(draft.spec.write_mode)) {
+    return CLEAR_MODE_PRIMARY_KEY_NOTE;
+  }
   if (draft.hand.primaryKey) {
     return null;
   }

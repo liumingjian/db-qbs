@@ -106,6 +106,131 @@ fn commit_atomically_swaps_then_exposes_a_sealed_swapped_tombstone() {
     assert_eq!(error.code, "RUN_SEALED");
 }
 
+/// #264：清空后导入这一档在编排上是什么样。
+///
+/// 三件事一起钉，因为它们必须同时为真才算这个模式成立：
+///
+/// 1. 写入模式**原样传到了切换请求上**——切换那一端才是真正执行 DELETE 的地方，
+///    半路把它丢掉，整个模式就只剩界面上一个选项；
+/// 2. 目标表里原来那些行没了，只剩本次运行推上去的那一份；
+/// 3. 终态是 `REPLACED` 而不是 `SWAPPED`。这两个词不能共用：`SWAPPED` 的意思是
+///    「按主键合并进目标表」，拿它描述一次整表替换，运行历史读起来就是假的。
+///
+/// `purged_rows` 报的是**真删掉的行数**（这里是 2），不是 fake 上那个 7——
+/// 清空模式下那个旋钮被忽略，因为这个数在这条路上是有意义的事实。
+#[test]
+fn a_clear_then_import_run_replaces_the_target_and_says_replaced() {
+    let destination = Arc::new(destination());
+    // 目标表里先躺着两行旧数据，它们正是这次运行要清掉的东西。
+    destination.target_rows.lock().unwrap().insert(
+        (
+            "T_POSITION".to_owned(),
+            "[\"2026-01-01 00:00:00\"]".to_owned(),
+        ),
+        vec![Some("2026-01-01 00:00:00".to_owned())],
+    );
+    destination.target_rows.lock().unwrap().insert(
+        (
+            "T_POSITION".to_owned(),
+            "[\"2026-01-02 00:00:00\"]".to_owned(),
+        ),
+        vec![Some("2026-01-02 00:00:00".to_owned())],
+    );
+    let service = SinkService::new("qbs", destination.clone());
+    service
+        .open(OpenRunRequest {
+            write_mode: WriteMode::ClearThenImport,
+            ..open_request()
+        })
+        .unwrap();
+    service.write_batch(RUN_ID, one_row()).unwrap();
+
+    let committed = service.commit(RUN_ID, 1, 1).unwrap();
+
+    assert_eq!(
+        committed.purged_rows, 2,
+        "清空模式下 purged_rows 是真删掉的行数，不再是恒 0"
+    );
+    assert_eq!(committed.swapped_rows, 1);
+    let requests = destination.swap_requests.lock().unwrap();
+    assert_eq!(requests[0].write_mode, WriteMode::ClearThenImport);
+    drop(requests);
+    assert_eq!(
+        destination.target_row_values("T_POSITION"),
+        vec![vec![Some("2026-08-14 12:34:56".to_owned())]],
+        "跑完之后目标表精确等于本次运行推上去的那一份"
+    );
+
+    let value = serde_json::to_value(service.get(RUN_ID).unwrap()).unwrap();
+    assert_eq!(value["terminal"], "REPLACED");
+    assert_eq!(value["purged_rows"], 2);
+}
+
+/// #264：追加写那一档一个字都没变——写入模式过线，但它不清空任何东西。
+///
+/// 这条是上面那条的对照。同一段编排、同一张目标表，只有模式不同：旧行还在，
+/// 终态仍是 `SWAPPED`。
+#[test]
+fn an_append_run_still_leaves_what_was_there_and_says_swapped() {
+    let destination = Arc::new(destination());
+    destination.target_rows.lock().unwrap().insert(
+        (
+            "T_POSITION".to_owned(),
+            "[\"2026-01-01 00:00:00\"]".to_owned(),
+        ),
+        vec![Some("2026-01-01 00:00:00".to_owned())],
+    );
+    let service = SinkService::new("qbs", destination.clone());
+    service.open(open_request()).unwrap();
+    service.write_batch(RUN_ID, one_row()).unwrap();
+
+    service.commit(RUN_ID, 1, 1).unwrap();
+
+    let requests = destination.swap_requests.lock().unwrap();
+    assert_eq!(requests[0].write_mode, WriteMode::Append);
+    drop(requests);
+    assert_eq!(destination.target_row_values("T_POSITION").len(), 2);
+    let value = serde_json::to_value(service.get(RUN_ID).unwrap()).unwrap();
+    assert_eq!(value["terminal"], "SWAPPED");
+}
+
+/// #264：清空是**导入的一部分**，不是它前面的一步。
+///
+/// 行数门禁没过，切换整个不发生——包括清空。替身把这件事做成了顺序上的事实
+/// （先判、再删、再插，一起返回），真目的地把它做成事务：两边说的是同一句话，
+/// 而这条用例是替身那一半的守卫。目标表还剩那两行旧数据。
+#[test]
+fn a_clear_then_import_that_fails_its_gate_does_not_clear_anything() {
+    let destination = Arc::new(destination());
+    destination.target_rows.lock().unwrap().insert(
+        (
+            "T_POSITION".to_owned(),
+            "[\"2026-01-01 00:00:00\"]".to_owned(),
+        ),
+        vec![Some("2026-01-01 00:00:00".to_owned())],
+    );
+    let service = SinkService::new("qbs", destination.clone());
+    service
+        .open(OpenRunRequest {
+            write_mode: WriteMode::ClearThenImport,
+            ..open_request()
+        })
+        .unwrap();
+    service.write_batch(RUN_ID, one_row()).unwrap();
+    destination.lose_staged_rows(1);
+
+    let error = service.commit(RUN_ID, 1, 1).unwrap_err();
+
+    assert_eq!(error.code, "VERIFY_FAILED");
+    assert_eq!(
+        destination.target_row_values("T_POSITION").len(),
+        1,
+        "导入没发生，清空也就没发生：目标表原样不动"
+    );
+    let value = serde_json::to_value(service.get(RUN_ID).unwrap()).unwrap();
+    assert_eq!(value["terminal"], "DISCARDED");
+}
+
 #[test]
 fn verification_failure_reports_database_loss_and_discards_staging() {
     let destination = Arc::new(destination());

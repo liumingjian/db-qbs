@@ -35,6 +35,7 @@ import { progressOf } from "./progress";
 import { runHash } from "./routes";
 import {
   APPEND_ONLY_CONCLUSION,
+  clearsTarget,
   writeStatementLabel,
   writeStatementOf,
 } from "./writeMode";
@@ -761,6 +762,17 @@ function JobResults({
                   {writeStatementOf(task.spec.primary_key) === "insert" && (
                     <span className="write-mark is-append" title={APPEND_ONLY_CONCLUSION}>
                       {writeStatementLabel("insert")}
+                    </span>
+                  )}
+                  {/* 先清空再导入同样要在清单上看得见（#264）：这一档每跑一次都会
+                      把目标表原有的数据删光，而且没有撤销。它和上面那个标记是两件
+                      不同的事，可以同时挂——写入模式与写入语句本来就互不决定。 */}
+                  {clearsTarget(task.spec.write_mode) && (
+                    <span
+                      className="write-mark is-clear"
+                      title="每次运行都会先清空目标表，原有数据不可恢复"
+                    >
+                      先清空再导入
                     </span>
                   )}
                 </td>

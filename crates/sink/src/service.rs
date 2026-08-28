@@ -308,6 +308,7 @@ impl<F: DestinationFactory> SinkService<F> {
             .collect();
         let active_run = ActiveRun {
             run_id: request.run_id.clone(),
+            write_mode: request.write_mode,
             database: connected.database,
             staging_table: staging_table.clone(),
             max_rows_per_insert: MAX_PREPARED_STATEMENT_PLACEHOLDERS / source_columns.len(),
@@ -488,6 +489,7 @@ impl<F: DestinationFactory> SinkService<F> {
             run_id: run.run_id.clone(),
             staging_table: run.staging_table.clone(),
             target_table: run.target_table.clone(),
+            write_mode: run.write_mode,
             primary_key: run.primary_key.clone(),
             columns: run.swap_columns.clone(),
             source_rows: total_rows,
@@ -497,10 +499,18 @@ impl<F: DestinationFactory> SinkService<F> {
 
         match run.destination.atomic_swap(&swap_request) {
             Ok(result) => {
+                // 终态分两个词，因为目标表遭遇的是两件事（#264）：`SWAPPED` 是
+                // 「按主键合并进目标表」，`REPLACED` 是「整表被替换」。合并成一个词，
+                // 运行历史就会对着一次清空后导入说「已按主键合并」——那是假话。
+                let terminal = if run.write_mode.clears_target() {
+                    Terminal::Replaced
+                } else {
+                    Terminal::Swapped
+                };
                 self.finish_run(
                     run_id,
                     &run,
-                    Terminal::Swapped,
+                    terminal,
                     result.purged_rows,
                     result.swapped_rows,
                 );

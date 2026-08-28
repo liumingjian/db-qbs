@@ -335,12 +335,18 @@ function FinishedRun({
           )}
         </div>
         <RunConclusion detail={detail} presentation={presentation} />
-        {/* 说法跟着写法走（#261）：无主键那条路上「按主键 upsert」是句假话。 */}
-        {presentation.terminalEffect === "SWAPPED" && (
-          <UpsertNote
-            text={writeSemanticsDone(writeStatementOf(task.spec.primary_key))}
-          />
-        )}
+        {/* 说法跟着写法与模式一起走（#261/#264）：无主键那条路上「按主键 upsert」是
+            句假话，先清空再导入那条路上「源端删掉的行仍保留」也是。`DISCARDED`
+            不挂这一行——目标表没被碰过，写入语义无从谈起。 */}
+        {presentation.terminalEffect !== null &&
+          presentation.terminalEffect !== "DISCARDED" && (
+            <UpsertNote
+              text={writeSemanticsDone(
+                writeStatementOf(task.spec.primary_key),
+                task.spec.write_mode,
+              )}
+            />
+          )}
       </section>
 
       {(presentation.kind === "failed" ||

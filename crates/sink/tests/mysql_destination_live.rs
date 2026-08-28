@@ -52,7 +52,7 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use db_qbs_shared::{swap_rows_consistent, WriteStatement};
+use db_qbs_shared::{swap_rows_consistent, WriteMode, WriteStatement};
 use db_qbs_sink::{
     build_staging_ddl, check_connection_settings, precheck_with_primary_key, AtomicSwapRequest,
     AtomicSwapResult, Destination, MysqlDestination, SourceColumn, TargetConnection, MIN_PACKET,
@@ -189,6 +189,117 @@ fn a_keyless_target_appends_and_a_second_run_doubles_it() {
     // 对照：upsert 那一档的区间判据会放行 6，等值判据不会——这正是收紧的意义。
     assert!(swap_rows_consistent(WriteStatement::Upsert, 3, 6));
     assert!(!swap_rows_consistent(WriteStatement::Insert, 3, 6));
+}
+
+/// #264：清空后导入的一次真实往返——**跑完之后目标表精确等于本次查询的结果**。
+///
+/// 这是本票的核心承诺，而它只有真 MySQL 能回答：替身证得了编排顺序，证不了
+/// 一条事务内整表 `DELETE` 加一条 `INSERT ... SELECT` 在 InnoDB 上到底留下什么。
+///
+/// 先用追加写铺一份底（1、2、3），再用清空后导入跑一份**不含 1、却多出 4** 的查询结果。
+/// 追加写模型下 1 会永远留在目标表里，那正是这个模式来解决的债。断言比的是逐行值，
+/// 不只是行数：行数相等而内容不同，恰恰是最难发现的那种错。
+#[test]
+#[ignore = "needs a real MySQL; run docs/spikes/fixtures/local-rig/scripts/run-mysql-destination-live.sh"]
+fn a_clear_then_import_run_leaves_the_target_exactly_equal_to_this_run() {
+    let mut rig = Rig::open("replace");
+
+    rig.stage_and_swap("r1", &[("1", "a"), ("2", "b"), ("3", "c")])
+        .expect("the append that lays down the old contents");
+    assert_eq!(rig.target_row_count(), 3);
+
+    // 源端删掉了 1，改了 2，新增了 4。
+    let replaced = rig
+        .clear_and_import("r2", &[("2", "b2"), ("3", "c"), ("4", "d")])
+        .expect("the clear-then-import run");
+    assert_eq!(
+        replaced.purged_rows, 3,
+        "事务内那条整表 DELETE 报告删掉了原有的三行"
+    );
+    assert_eq!(
+        rig.target_rows(),
+        vec![
+            ("2".to_owned(), "b2".to_owned()),
+            ("3".to_owned(), "c".to_owned()),
+            ("4".to_owned(), "d".to_owned()),
+        ],
+        "目标表精确等于本次查询的结果：源端删掉的 1 不再残留（#264）"
+    );
+
+    // 语句的选择**没有被清空改变**：目标表有主键，走的仍是 upsert，判据仍是区间。
+    assert!(swap_rows_consistent(
+        WriteStatement::Upsert,
+        replaced.staged_rows,
+        replaced.swapped_rows
+    ));
+}
+
+/// #264：导入中途失败时，目标表**原样不动**——包括那条已经执行过的整表 DELETE。
+///
+/// 这一条是不用 `TRUNCATE` 的全部理由。`TRUNCATE` 是 DDL、隐式提交，同样的失败会
+/// 留下一张空表；`DELETE` 在同一个事务里，回滚之后一行都没少。
+///
+/// 失败是造出来的，而且是**真的失败**：暂存表每一列都可空，目标表的 `V` 是
+/// `NOT NULL`，于是导入那条 `INSERT ... SELECT` 在事务中途撞 `ERROR 1048`。
+#[test]
+#[ignore = "needs a real MySQL; run docs/spikes/fixtures/local-rig/scripts/run-mysql-destination-live.sh"]
+fn a_clear_whose_import_fails_leaves_the_target_untouched() {
+    let mut rig = Rig::open("replace_fail");
+
+    rig.stage_and_swap("r1", &[("1", "a"), ("2", "b"), ("3", "c")])
+        .expect("the append that lays down the contents that must survive");
+    let before = rig.target_rows();
+    assert_eq!(before.len(), 3);
+
+    let failure = rig
+        .stage_and_swap_nullable(
+            "r2",
+            &[("7", Some("g")), ("8", None)],
+            WriteMode::ClearThenImport,
+        )
+        .expect_err("a NULL into a NOT NULL column must fail the import");
+    assert!(
+        failure.contains("1048") || failure.to_ascii_uppercase().contains("NULL"),
+        "失败得是导入那条语句被拒，不是别的：{failure}"
+    );
+
+    assert_eq!(
+        rig.target_rows(),
+        before,
+        "导入中途失败，事务回滚，那条整表 DELETE 跟着一起没了：目标表原样不动（#264）"
+    );
+}
+
+/// #264：清空模式下，同一次运行内出现重复主键**不导致失败**。
+///
+/// 这是「清空不改变写入语句选择」那条规则的用处所在。对着刚清空的表打纯 `INSERT`，
+/// 两行同键会撞 `ERROR 1062`、整次运行半途而废；保留 upsert 之后，后一行赢，
+/// 运行照常跑完。行数判据也照旧按 upsert 那一档的区间走。
+#[test]
+#[ignore = "needs a real MySQL; run docs/spikes/fixtures/local-rig/scripts/run-mysql-destination-live.sh"]
+fn a_clear_mode_run_tolerates_a_duplicate_key_within_itself() {
+    let mut rig = Rig::open("replace_dup");
+
+    let result = rig
+        .clear_and_import("r1", &[("1", "a"), ("1", "b"), ("2", "c")])
+        .expect("重复主键不该让清空模式的这次运行失败");
+    assert_eq!(result.staged_rows, 3);
+    assert!(
+        swap_rows_consistent(
+            WriteStatement::Upsert,
+            result.staged_rows,
+            result.swapped_rows
+        ),
+        "{result:?} 仍按 upsert 那一档的区间判"
+    );
+    assert_eq!(
+        rig.target_rows(),
+        vec![
+            ("1".to_owned(), "b".to_owned()),
+            ("2".to_owned(), "c".to_owned())
+        ],
+        "同键的后一行赢，运行不失败"
+    );
 }
 
 /// The Connection Ritual is the pool's, not the first connection's.
@@ -568,6 +679,40 @@ impl Rig {
         run: &str,
         rows: &[(&str, &str)],
     ) -> Result<AtomicSwapResult, String> {
+        self.stage_and_swap_as(run, rows, WriteMode::Append)
+    }
+
+    /// 同一条链路，清空后导入那一档（#264）：切换段在同一个事务里先整表 DELETE。
+    fn clear_and_import(
+        &mut self,
+        run: &str,
+        rows: &[(&str, &str)],
+    ) -> Result<AtomicSwapResult, String> {
+        self.stage_and_swap_as(run, rows, WriteMode::ClearThenImport)
+    }
+
+    fn stage_and_swap_as(
+        &mut self,
+        run: &str,
+        rows: &[(&str, &str)],
+        write_mode: WriteMode,
+    ) -> Result<AtomicSwapResult, String> {
+        let rows: Vec<(&str, Option<&str>)> = rows
+            .iter()
+            .map(|(key, value)| (*key, Some(*value)))
+            .collect();
+        self.stage_and_swap_nullable(run, &rows, write_mode)
+    }
+
+    /// 同一条链路，但暂存的值可以是 NULL——暂存表每一列都可空（`build_staging_ddl`），
+    /// 而目标表的 `V` 是 `NOT NULL`，于是导入那条语句会在事务中途撞 `ERROR 1048`。
+    /// 这是本文件唯一能造出「清空已经执行、导入失败」的办法。
+    fn stage_and_swap_nullable(
+        &mut self,
+        run: &str,
+        rows: &[(&str, Option<&str>)],
+        write_mode: WriteMode,
+    ) -> Result<AtomicSwapResult, String> {
         let staging_table = format!("{}_stg_{run}", self.prefix);
         let columns = self
             .destination
@@ -581,7 +726,7 @@ impl Rig {
         let names: Vec<String> = columns.iter().map(|column| column.name.clone()).collect();
         let values: Vec<Vec<Option<String>>> = rows
             .iter()
-            .map(|(key, value)| vec![Some((*key).to_owned()), Some((*value).to_owned())])
+            .map(|(key, value)| vec![Some((*key).to_owned()), value.map(str::to_owned)])
             .collect();
         self.destination
             .write_batch(&staging_table, &names, &values, 100)
@@ -593,6 +738,7 @@ impl Rig {
                 run_id: format!("{}_{run}", self.prefix),
                 staging_table: staging_table.clone(),
                 target_table: self.target_table.clone(),
+                write_mode,
                 primary_key: self.primary_key.clone(),
                 columns: names,
                 source_rows: rows.len() as u64,
@@ -650,6 +796,20 @@ impl Rig {
     /// How many rows the target table holds right now, over the test's own
     /// connection. On the keyless path this is the whole point: the row count is
     /// the only thing that tells "appended again" apart from "merged".
+    /// 目标表现在到底有哪些行，按主键排好——「跑完之后目标表精确等于本次查询结果」
+    /// 这句话只有逐行比才算证明，光比行数不算（#264）。
+    fn target_rows(&mut self) -> Vec<(String, String)> {
+        self.plain
+            .query_map(
+                format!(
+                    "SELECT `K`, `V` FROM `{}`.`{}` ORDER BY `K`, `V`",
+                    self.database, self.target_table
+                ),
+                |(key, value): (String, String)| (key, value),
+            )
+            .expect("reading the target rows")
+    }
+
     fn target_row_count(&mut self) -> u64 {
         self.plain
             .query_first(format!(

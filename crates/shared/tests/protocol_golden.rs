@@ -270,6 +270,34 @@ fn open_run_request_shape_carries_an_empty_primary_key_as_an_empty_array() {
     );
 }
 
+/// 清空后导入的线上形状（#264）：写入模式随任务定义过线，`primary_key` 照旧。
+///
+/// **模式与语句是两件事**，这份报文里看得最清楚：`write_mode` 是清空后导入，
+/// `primary_key` 仍然非空，于是收方派生出的仍是 upsert。清空只是在导入前多一步
+/// 同事务的整表 DELETE。
+#[test]
+fn open_run_request_shape_carries_the_clear_then_import_mode() {
+    round_trip(
+        OpenRunRequest {
+            run_id: "20260818120000_a1b2c3".to_owned(),
+            target_table: "ORDERS".to_owned(),
+            target: target(),
+            write_mode: WriteMode::ClearThenImport,
+            primary_key: vec!["ID".to_owned()],
+            source_columns: vec![],
+            range_check_results: None,
+        },
+        json!({
+            "run_id": "20260818120000_a1b2c3",
+            "target_table": "ORDERS",
+            "target": target_json(),
+            "write_mode": "CLEAR_THEN_IMPORT",
+            "primary_key": ["ID"],
+            "source_columns": []
+        }),
+    );
+}
+
 /// 预检结论那一栏（#261）：空的时候整个字段不出现，非空时原样过线。
 #[test]
 fn target_check_result_carries_its_conclusions_only_when_it_has_any() {
@@ -458,9 +486,14 @@ fn abort_response_shape() {
 fn terminal_shape() {
     // 大写字面量与 `Terminal::as_str()` 必须一致——两处漂了，运行历史就对不上。
     round_trip(Terminal::Swapped, json!("SWAPPED"));
+    round_trip(Terminal::Replaced, json!("REPLACED"));
     round_trip(Terminal::Discarded, json!("DISCARDED"));
     assert_eq!(Terminal::Swapped.as_str(), "SWAPPED");
+    assert_eq!(Terminal::Replaced.as_str(), "REPLACED");
     assert_eq!(Terminal::Discarded.as_str(), "DISCARDED");
+    // 三个值，各说各的事（#264）。`SWAPPED` 是「按主键合并」，`REPLACED` 是
+    // 「整表被替换」——合并成一个词，运行历史就会对着一次清空后导入说假话。
+    assert_ne!(Terminal::Swapped.as_str(), Terminal::Replaced.as_str());
 }
 
 #[test]

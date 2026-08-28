@@ -3,8 +3,9 @@
 //! Two things live here and they are deliberately **not** the same thing:
 //!
 //! - [`WriteMode`] is what the author chose and what the task definition stores.
-//!   Today there is exactly one value, `Append`; the clear-then-import mode
-//!   arrives later and slots in as a second variant.
+//!   Two values: `Append` adds rows and deletes nothing; `ClearThenImport`
+//!   empties the target table first so that after the run it holds exactly this
+//!   run's query result.
 //! - [`WriteStatement`] is the SQL the target end actually runs. It is **not**
 //!   chosen by anybody: it is decided by one fact only — whether the target
 //!   table has a unique constraint to merge on. A table that has one gets
@@ -27,6 +28,28 @@
 //! has to be *visible* everywhere it is decided: the precheck conclusion, the
 //! task definition, the task list, and the run detail all say it out loud.
 //!
+//! ## Clearing is not a third statement (#264)
+//!
+//! `ClearThenImport` does **not** touch the derivation above. With a primary key
+//! the insert is still an upsert; without one it is still a plain insert. All
+//! the mode adds is a whole-table `DELETE` in front of that insert, inside the
+//! same transaction.
+//!
+//! That is deliberate, and the reason is duplicate keys *within one run*: a
+//! query can legitimately produce two rows with the same key, and against an
+//! emptied table a plain `INSERT` would die on `ERROR 1062` half way. Keeping
+//! the upsert makes the second row win instead of killing the run.
+//!
+//! The `DELETE` is a `DELETE`, never a `TRUNCATE`. `TRUNCATE` is DDL and commits
+//! implicitly, so inside the swap transaction it would manufacture exactly the
+//! outcome the transaction exists to prevent: cleared successfully, import
+//! failed, target table now empty. The cost of a full `DELETE` on a large table
+//! is accepted and recorded in `CONTEXT.md` under the deliberate debts.
+//!
+//! A clear-mode run is **not undoable**, and nothing pretends otherwise: undo
+//! was removed from the product entirely (#256). The old rows are gone the
+//! moment the transaction commits.
+//!
 //! Both ends read this module. The derivation ([`WriteStatement::for_primary_key`])
 //! has one implementation for the same reason [`crate::verification`] has one:
 //! the row-count adjudication forks on it, and two copies would drift.
@@ -46,16 +69,34 @@ pub enum WriteMode {
     /// for anything that does not say.
     #[default]
     Append,
+    /// The target table is emptied and then this run's rows are imported, both
+    /// inside one transaction. Afterwards the target table holds exactly what
+    /// this run's query returned — rows deleted at the source stop lingering.
+    ///
+    /// The price is that the previous contents are **gone**: an import that
+    /// fails leaves the table untouched (the transaction rolls back), but an
+    /// import that succeeds is not reversible.
+    ClearThenImport,
 }
 
 impl WriteMode {
-    pub const ALL: [Self; 1] = [Self::Append];
+    pub const ALL: [Self; 2] = [Self::Append, Self::ClearThenImport];
 
     /// The wire spelling. Never change one of these.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Append => "APPEND",
+            Self::ClearThenImport => "CLEAR_THEN_IMPORT",
         }
+    }
+
+    /// Whether this mode empties the target table before importing.
+    ///
+    /// The one predicate. Both the target end (which emits the `DELETE`) and the
+    /// run history (which marks the target table `REPLACED` rather than
+    /// `SWAPPED`) ask it here rather than matching on the variant themselves.
+    pub const fn clears_target(self) -> bool {
+        matches!(self, Self::ClearThenImport)
     }
 
     pub fn parse(text: &str) -> Option<Self> {
