@@ -202,8 +202,11 @@ branches on the version.
    concurrency equals the task count, most of which would come back `RUN_QUOTA_EXCEEDED`. The cap is
    the number the **agent reports about itself** (`max_concurrent_runs`, below) — a second copy
    configured on the source side would be a second source of truth for one limit, wrong in both
-   directions. An agent old enough not to report it is dispatched **one at a time**: that is the only
-   value that cannot collide with the quota, and the sink's default of 4 would be a guess. The queue
+   directions. An agent old enough not to report it is dispatched **one at a time**, and that
+   one is a fact about such an agent rather than a cautious guess: an agent that predates the
+   quota field also predates concurrency on the target side, and served requests strictly one
+   after another. The sink's default of 4 is the number *a person configuring a current agent*
+   chose; borrowing it for an agent that never had it would be the guess. The queue
    is **visible in the interface** (`GET /api/schedule`), with the instant it was due and what it is
    waiting on; a queue living only in a background thread's memory would leave the screen saying
    nothing happened. An occurrence that cannot be dispatched for a reason waiting will not fix —

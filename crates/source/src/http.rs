@@ -1044,6 +1044,12 @@ pub(crate) fn dispatch_scheduled_run(state: &Api<'_>, task: &Task) -> DispatchOu
         Ok(agent) => agent,
         Err(error) => return DispatchOutcome::Refused(error),
     };
+    // 没自报额度的 agent 按**一次一个**算，而这 1 不是保守的猜测，是那台 agent 的实情：
+    // #260 之前的 sink 是 `for request in server.incoming_requests()`，一个请求一个请求地
+    // 处理，同一时刻只跑得动一个 run。不带 `max_concurrent_runs` 字段的 agent 恰恰就是那批。
+    // 所以这里既不该改成 4（sink.toml 的默认值——那是**配了新版本的人**选的数，不是这台老
+    // agent 的能力），也不该改成任何别的数：1 是唯一一个既不撞 `RUN_QUOTA_EXCEEDED`、
+    // 又没有白白空着额度的取值。
     let quota = agent.max_concurrent_runs.unwrap_or(1) as usize;
     let in_flight = match state.runs.lock() {
         Ok(runs) => runs.in_flight_for_agent(&agent.agent_id),

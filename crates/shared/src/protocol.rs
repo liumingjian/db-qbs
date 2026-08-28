@@ -356,8 +356,11 @@ pub struct AgentInfo {
     ///
     /// **旧版本 agent 不带这个字段**，所以是 `default` + `skip_serializing_if`；读到 `None`
     /// 的一方按「这台 agent 没说」处理，不许拿 4 顶上——见 `source` 侧调度器的取值规则。
+    ///
+    /// `u32` 而不是 `usize`：同一个概念在线上、在 source 的注册表里只有一种类型，
+    /// 而 `usize` 的宽度按机器变，不该出现在两端之间的报文里。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_concurrent_runs: Option<usize>,
+    pub max_concurrent_runs: Option<u32>,
 }
 
 /// 目标端 MySQL 的自述：版本，以及生成建表语句要用的那一项字符序。

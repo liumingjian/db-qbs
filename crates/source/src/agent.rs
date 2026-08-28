@@ -438,10 +438,9 @@ fn ensure_nullable_integer_column(connection: &Connection, name: &str) -> Result
     Ok(())
 }
 
-/// agent 自报的并发额度，收成入库的类型。没报就是 `None`，**不补默认值**。
+/// agent 自报的并发额度。没报就是 `None`，**不补默认值**。
 fn reported_quota(info: &AgentInfo) -> Option<u32> {
     info.max_concurrent_runs
-        .map(|quota| u32::try_from(quota).unwrap_or(u32::MAX))
 }
 
 /// 名字留空就用 agent 自报的那一个。**名字不作判据**，所以随便退化都不伤正确性。
