@@ -118,7 +118,8 @@ branches on the version.
    definition records it, and the task list and run detail both carry a visible marker.
 
 **Task Definition**
-   A **structured spec** (table, columns, filter clause, primary key, **write mode**). **It is the
+   A **structured spec** (table, columns, filter clause, primary key, **write mode**, **schedule**).
+   **It is the
    single source of
    truth, and the source SQL is generated from it.** **The SQL is not stored in the task definition**
    — it is recomputed on demand, and only pinned as a snapshot of what actually ran on each
@@ -129,6 +130,30 @@ branches on the version.
    the definition's record of "the target table had nothing to merge on". If the target table's key
    situation has moved since, the two derivations disagree and **the run fails**; the statement kind
    is never switched silently under an unchanged definition.
+
+**Schedule**
+   Two fields on the task definition: a **five-field cron expression** and an **enable switch**.
+   They are two fields because they are two things — clearing the expression to pause a task would
+   make someone throw away the line they wrote. An enabled task with no expression is a
+   contradiction and is **refused when the task is saved**, as is any expression the parser cannot
+   read; the reason it gives is the sentence the person sees, never an error code.
+
+   The expression is stored **as written**. The parser is **hand-written and depends on nothing**:
+   the packaging chain is an offline cross-compile, and the only forms in play are `*`, `a`, `a-b`,
+   `*/n`, `a-b/n` and comma lists, so `L`, `W`, `#` and seconds fields would all be dead weight. It
+   is a **pure function** — an expression plus an instant in, the next fire time out — which is what
+   lets the whole semantics be pinned by a table of cases. There is exactly one surprising rule and
+   it is Vixie cron's: when **both** the day-of-month and the day-of-week field are restricted, they
+   are **or**-ed, not and-ed.
+
+   **The timezone is the server's local timezone**, and the interface states it. The machine running
+   `source` is the one that will fire the run, so its wall clock is the only meaningful answer; the
+   browser's would be a different two o'clock. The interface therefore shows the timezone and the
+   **next fire times** beside the expression, computed by the server through the same parser that
+   refuses a bad expression at save time — that read-out is what makes the parser's semantics
+   visible instead of assumed.
+
+   **Nothing fires yet.** This is the configuration half; the loop that acts on it is a later ticket.
 
 **Task Draft**
    A Task Definition **while it is being built**, plus everything the interface needs to judge it:
