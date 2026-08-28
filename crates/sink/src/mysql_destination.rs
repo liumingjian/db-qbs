@@ -16,7 +16,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use db_qbs_shared::{swap_rows_in_range, RowCounts};
+use db_qbs_shared::{swap_rows_in_range, MysqlServerInfo, RowCounts};
 use mysql::prelude::Queryable;
 use mysql::{
     consts::CapabilityFlags, params, Conn, Error as MysqlError, Opts, OptsBuilder, Params, TxOpts,
@@ -50,6 +50,9 @@ type MetadataRow = (
 pub struct MysqlDestination {
     database: String,
     pool: RitualPool,
+    /// 建连接那一刻读到的服务端自述（#257）。**读一次就够**：一条连接活着的时候
+    /// 服务端不会换版本，而 `GET /v1/agent/info` 那边一秒可能来好几次。
+    server: Option<MysqlServerInfo>,
 }
 
 impl MysqlDestination {
@@ -76,9 +79,11 @@ impl MysqlDestination {
             // `SWAP_FAILED`（#138）。带上之后这一档记 1，`[n, 2n]` 重新精确。
             .additional_capabilities(CapabilityFlags::CLIENT_FOUND_ROWS);
         let pool = RitualPool::new(Opts::from(opts))?;
+        let server = read_server_info(&pool);
         Ok(Self {
             database: target.database.clone(),
             pool,
+            server,
         })
     }
 
@@ -133,6 +138,10 @@ impl DestinationFactory for MysqlFactory {
 }
 
 impl Destination for MysqlDestination {
+    fn server_info(&self) -> Option<MysqlServerInfo> {
+        self.server.clone()
+    }
+
     fn target_columns(&self, target_table: &str) -> Result<Vec<TargetColumn>, String> {
         self.pool
             .with_conn(|connection| {
@@ -663,6 +672,32 @@ impl RitualPool {
             .push(connection);
         result
     }
+}
+
+/// 读一次服务端自述：`@@version` 与 utf8mb4 的默认字符序（#257）。
+///
+/// **字符序是查出来的，不是按版本号推出来的**：8.0 给 `utf8mb4_0900_ai_ci`、
+/// 5.7 给 `utf8mb4_general_ci`，但部署方完全可以把 `collation-server` 改成别的，
+/// 而这份值最终会写进 source 生成的建表语句里。推一份出来只会在建完表之后才暴露错误。
+///
+/// **读失败不是错误**：回 `None`，调用方当「没观察到」处理。这两项只喂建表语句的
+/// 字符序与界面上的版本一列，够不着搬运链的正确性；为它让 `POST /v1/runs` 失败，
+/// 换来的是一次本来能跑完的同步跑不起来。
+fn read_server_info(pool: &RitualPool) -> Option<MysqlServerInfo> {
+    let row: Option<(String, Option<String>)> = pool
+        .with_conn(|connection| {
+            connection.query_first(
+                "SELECT @@version, \
+                        (SELECT DEFAULT_COLLATE_NAME FROM information_schema.CHARACTER_SETS \
+                          WHERE CHARACTER_SET_NAME = 'utf8mb4')",
+            )
+        })
+        .ok()?;
+    let (version, utf8mb4_collation) = row?;
+    Some(MysqlServerInfo {
+        version,
+        utf8mb4_collation: utf8mb4_collation?,
+    })
 }
 
 fn run_connection_ritual(connection: &mut Conn) -> Result<(), String> {

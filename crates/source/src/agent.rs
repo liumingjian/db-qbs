@@ -43,6 +43,16 @@ pub struct Agent {
     pub status: AgentStatus,
     /// 最近一次探测失败的人话原因；在线时为 `None`。
     pub last_error: Option<String>,
+    /// agent 上报的、它所连 MySQL 的版本（`@@version` 原样）。**`None` 是「还没报过」**——
+    /// 旧版本 agent 不带这个字段，新 agent 也要等它手上有过一次目标端凭据之后才报得出来
+    /// （#257）。界面上那一列读的就是它。
+    pub mysql_version: Option<String>,
+    /// agent 上报的 utf8mb4 默认字符序，生成建表语句时用（#257）。
+    ///
+    /// **`None` 时不许拿 8.0 的默认值顶上**：生成的建表语句会照旧只写
+    /// `DEFAULT CHARSET=utf8mb4`，字符序交给目标库自己的默认值——那正是本票之前的行为，
+    /// 也是唯一一个不掺猜测的退化。
+    pub mysql_collation: Option<String>,
 }
 
 /// agent 的在线状态。**三档，不是两档**：`Mismatch` 与 `Offline` 分开报，
@@ -109,6 +119,10 @@ impl AgentStore {
                 );",
             )
             .map_err(|error| format!("初始化 SQLite agent 表失败：{error}"))?;
+        // #257 之前建的库没有这两列，老记录补出来就是 `NULL`：那是「这台 agent 还没报过
+        // 版本」，与新 agent 从没被探到过是同一档，处置也一样。
+        ensure_nullable_text_column(&connection, "mysql_version")?;
+        ensure_nullable_text_column(&connection, "mysql_collation")?;
         Ok(Self { connection })
     }
 
@@ -129,11 +143,17 @@ impl AgentStore {
             last_seen_at: Some(now.to_owned()),
             status: AgentStatus::Online,
             last_error: None,
+            mysql_version: info.mysql.as_ref().map(|mysql| mysql.version.clone()),
+            mysql_collation: info
+                .mysql
+                .as_ref()
+                .map(|mysql| mysql.utf8mb4_collation.clone()),
         };
         self.connection
             .execute(
-                "INSERT INTO agents (agent_id, name, base_url, instance_id, version, last_seen_at, status, last_error)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+                "INSERT INTO agents (agent_id, name, base_url, instance_id, version, last_seen_at, status, last_error,
+                                     mysql_version, mysql_collation)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)",
                 params![
                     agent.agent_id,
                     agent.name,
@@ -142,6 +162,8 @@ impl AgentStore {
                     agent.version,
                     agent.last_seen_at,
                     agent.status.as_str(),
+                    agent.mysql_version,
+                    agent.mysql_collation,
                 ],
             )
             .map_err(|error| format!("写入 SQLite agent 失败：{error}"))?;
@@ -169,11 +191,17 @@ impl AgentStore {
             last_seen_at: Some(now.to_owned()),
             status: AgentStatus::Online,
             last_error: None,
+            mysql_version: info.mysql.as_ref().map(|mysql| mysql.version.clone()),
+            mysql_collation: info
+                .mysql
+                .as_ref()
+                .map(|mysql| mysql.utf8mb4_collation.clone()),
         };
         self.connection
             .execute(
                 "UPDATE agents SET name = ?2, base_url = ?3, instance_id = ?4, version = ?5,
-                                   last_seen_at = ?6, status = ?7, last_error = NULL
+                                   last_seen_at = ?6, status = ?7, last_error = NULL,
+                                   mysql_version = ?8, mysql_collation = ?9
                  WHERE agent_id = ?1",
                 params![
                     agent.agent_id,
@@ -183,6 +211,8 @@ impl AgentStore {
                     agent.version,
                     agent.last_seen_at,
                     agent.status.as_str(),
+                    agent.mysql_version,
+                    agent.mysql_collation,
                 ],
             )
             .map_err(|error| format!("更新 SQLite agent 失败：{error}"))?;
@@ -193,7 +223,8 @@ impl AgentStore {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT agent_id, name, base_url, instance_id, version, last_seen_at, status, last_error
+                "SELECT agent_id, name, base_url, instance_id, version, last_seen_at, status, last_error,
+                        mysql_version, mysql_collation
                  FROM agents ORDER BY rowid",
             )
             .map_err(|error| format!("准备 SQLite agent 列表查询失败：{error}"))?;
@@ -208,7 +239,8 @@ impl AgentStore {
     pub fn get(&self, agent_id: &str) -> Result<Option<Agent>, String> {
         self.connection
             .query_row(
-                "SELECT agent_id, name, base_url, instance_id, version, last_seen_at, status, last_error
+                "SELECT agent_id, name, base_url, instance_id, version, last_seen_at, status, last_error,
+                        mysql_version, mysql_collation
                  FROM agents WHERE agent_id = ?1",
                 [agent_id],
                 agent_from_row,
@@ -243,6 +275,26 @@ impl AgentStore {
     ) -> Result<Option<Agent>, String> {
         let Some(existing) = self.get(agent_id)? else {
             return Ok(None);
+        };
+        // agent 上报的 MySQL 只在**探通且身份对得上**那一档才更新（#257）。
+        // 身份对不上那台报的是它自己那边的库，抄过来等于让顶替者改写被顶替者的档案；
+        // 探不通就更没有新值可言，留住上一次的真值——把它抹成「未知」只会让建表语句
+        // 在 agent 短暂离线期间悄悄换一份字符序。
+        let (mysql_version, mysql_collation) = match result {
+            Ok(info)
+                if (info.agent_id == existing.instance_id || existing.instance_id.is_empty())
+                    && info.mysql.is_some() =>
+            {
+                let mysql = info.mysql.as_ref().expect("just checked");
+                (
+                    Some(mysql.version.clone()),
+                    Some(mysql.utf8mb4_collation.clone()),
+                )
+            }
+            _ => (
+                existing.mysql_version.clone(),
+                existing.mysql_collation.clone(),
+            ),
         };
         let (status, last_error, version, last_seen_at) = match result {
             Ok(info)
@@ -280,7 +332,8 @@ impl AgentStore {
         self.connection
             .execute(
                 "UPDATE agents SET instance_id = ?2, version = ?3, last_seen_at = ?4,
-                                   status = ?5, last_error = ?6
+                                   status = ?5, last_error = ?6,
+                                   mysql_version = ?7, mysql_collation = ?8
                  WHERE agent_id = ?1",
                 params![
                     agent_id,
@@ -289,6 +342,8 @@ impl AgentStore {
                     last_seen_at,
                     status.as_str(),
                     last_error,
+                    mysql_version,
+                    mysql_collation,
                 ],
             )
             .map_err(|error| format!("更新 SQLite agent 探测结果失败：{error}"))?;
@@ -313,13 +368,32 @@ impl AgentStore {
         let agent_id = generate_agent_id();
         self.connection
             .execute(
-                "INSERT INTO agents (agent_id, name, base_url, instance_id, version, last_seen_at, status, last_error)
-                 VALUES (?1, '默认', ?2, '', '', NULL, 'offline', '尚未探测')",
+                "INSERT INTO agents (agent_id, name, base_url, instance_id, version, last_seen_at, status, last_error,
+                                     mysql_version, mysql_collation)
+                 VALUES (?1, '默认', ?2, '', '', NULL, 'offline', '尚未探测', NULL, NULL)",
                 params![agent_id, normalize_base_url(base_url)?],
             )
             .map_err(|error| format!("迁移 sink_base_url 失败：{error}"))?;
         Ok(Some(agent_id))
     }
+}
+
+/// 补一列可空 TEXT（#257）。判据是 `pragma_table_info`，与 `run_history` 那两处同一条路子。
+fn ensure_nullable_text_column(connection: &Connection, name: &str) -> Result<(), String> {
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agents') WHERE name = ?1)",
+            [name],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("检查 SQLite agent 列 {name} 失败：{error}"))?;
+    if exists {
+        return Ok(());
+    }
+    connection
+        .execute(&format!("ALTER TABLE agents ADD COLUMN {name} TEXT"), [])
+        .map_err(|error| format!("迁移 SQLite agent 列 {name} 失败：{error}"))?;
+    Ok(())
 }
 
 /// 名字留空就用 agent 自报的那一个。**名字不作判据**，所以随便退化都不伤正确性。
@@ -395,6 +469,8 @@ fn agent_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
             _ => AgentStatus::Offline,
         },
         last_error: row.get("last_error")?,
+        mysql_version: row.get("mysql_version")?,
+        mysql_collation: row.get("mysql_collation")?,
     })
 }
 
@@ -416,6 +492,8 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use db_qbs_shared::MysqlServerInfo;
+
     use super::*;
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -435,6 +513,17 @@ mod tests {
             agent_id: agent_id.to_owned(),
             name: "target-a".to_owned(),
             version: "0.1.0".to_owned(),
+            mysql: None,
+        }
+    }
+
+    fn info_with_mysql(agent_id: &str, version: &str, collation: &str) -> AgentInfo {
+        AgentInfo {
+            mysql: Some(MysqlServerInfo {
+                version: version.to_owned(),
+                utf8mb4_collation: collation.to_owned(),
+            }),
+            ..info(agent_id)
         }
     }
 
@@ -539,6 +628,94 @@ mod tests {
                 .unwrap(),
             None,
             "表非空就不再迁，迁移只发生一次"
+        );
+    }
+
+    /// #257：agent 报回来的 MySQL 版本与字符序要落库，界面与建表语句都读这一份。
+    #[test]
+    fn a_reported_mysql_version_is_recorded_on_register_and_refreshed_on_probe() {
+        let store = AgentStore::open(&temp_dir()).unwrap();
+
+        let agent = store
+            .register(
+                &input("http://127.0.0.1:8080"),
+                &info_with_mysql("aaa", "8.0.36", "utf8mb4_0900_ai_ci"),
+                "2026-08-24T00:00:00Z",
+            )
+            .unwrap();
+        assert_eq!(agent.mysql_version.as_deref(), Some("8.0.36"));
+        assert_eq!(agent.mysql_collation.as_deref(), Some("utf8mb4_0900_ai_ci"));
+
+        // 同一台 agent 被指到另一台 MySQL 上（5.7），探一次就该换成新报的那一份。
+        let probed = store
+            .record_probe(
+                &agent.agent_id,
+                &Ok(info_with_mysql("aaa", "5.7.44-log", "utf8mb4_general_ci")),
+                "2026-08-24T00:01:00Z",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(probed.mysql_version.as_deref(), Some("5.7.44-log"));
+        assert_eq!(
+            probed.mysql_collation.as_deref(),
+            Some("utf8mb4_general_ci")
+        );
+    }
+
+    /// #257 的「不静默猜测」那一半：agent 没报版本，库里就是空的，
+    /// 生成建表语句的那一端据此走既有的 8.0 行为（不写 `COLLATE`）。
+    #[test]
+    fn an_agent_that_reports_no_mysql_version_leaves_the_column_empty() {
+        let store = AgentStore::open(&temp_dir()).unwrap();
+
+        let agent = store
+            .register(
+                &input("http://127.0.0.1:8080"),
+                &info("aaa"),
+                "2026-08-24T00:00:00Z",
+            )
+            .unwrap();
+
+        assert_eq!(agent.mysql_version, None);
+        assert_eq!(agent.mysql_collation, None);
+    }
+
+    /// 探不通、或者应答的是另一台 agent，都不许改写已经记下的那一份——
+    /// 一次离线不该让建表语句悄悄换一份字符序。
+    #[test]
+    fn a_failed_probe_keeps_the_last_known_mysql_version() {
+        let store = AgentStore::open(&temp_dir()).unwrap();
+        let agent = store
+            .register(
+                &input("http://127.0.0.1:8080"),
+                &info_with_mysql("aaa", "5.7.44", "utf8mb4_general_ci"),
+                "2026-08-24T00:00:00Z",
+            )
+            .unwrap();
+
+        let offline = store
+            .record_probe(
+                &agent.agent_id,
+                &Err("连不上 agent：connection refused".to_owned()),
+                "2026-08-24T00:01:00Z",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(offline.mysql_version.as_deref(), Some("5.7.44"));
+
+        let mismatched = store
+            .record_probe(
+                &agent.agent_id,
+                &Ok(info_with_mysql("bbb", "8.0.36", "utf8mb4_0900_ai_ci")),
+                "2026-08-24T00:02:00Z",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(mismatched.status, AgentStatus::Mismatch);
+        assert_eq!(
+            mismatched.mysql_collation.as_deref(),
+            Some("utf8mb4_general_ci"),
+            "顶替者报的版本不许覆盖被顶替者的档案"
         );
     }
 

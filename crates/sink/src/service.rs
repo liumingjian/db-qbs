@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use db_qbs_shared::{OpenOutcome, RowCounts, Verdict};
+use db_qbs_shared::{MysqlServerInfo, OpenOutcome, RowCounts, Verdict};
 use regex::Regex;
 use serde_json::json;
 
@@ -34,7 +34,31 @@ impl<F: DestinationFactory> SinkService<F> {
             factory,
             active_runs: Mutex::new(HashMap::new()),
             tombstones: Mutex::new(VecDeque::new()),
+            observed_mysql: Mutex::new(None),
         }
+    }
+
+    /// 最近一次连上目标端时读到的 MySQL 自述，从没连上过就是 `None`（#257）。
+    /// `GET /v1/agent/info` 读的就是这里。
+    pub fn observed_mysql(&self) -> Option<MysqlServerInfo> {
+        self.observed_mysql
+            .lock()
+            .expect("observed mysql mutex poisoned")
+            .clone()
+    }
+
+    /// 记下这条连接背后那台 MySQL 的自述。
+    ///
+    /// **读不到就不动缓存**：一次读失败不该把上一次读到的真值抹成「未知」，
+    /// 那会让界面上的版本一列莫名其妙地闪回横杠。
+    fn remember_mysql<D: Destination>(&self, destination: &D) {
+        let Some(observed) = destination.server_info() else {
+            return;
+        };
+        *self
+            .observed_mysql
+            .lock()
+            .expect("observed mysql mutex poisoned") = Some(observed);
     }
 
     pub fn check_target(&self, request: TargetCheckRequest) -> Result<TargetCheckResult, ApiError> {
@@ -51,6 +75,8 @@ impl<F: DestinationFactory> SinkService<F> {
             .factory
             .connect(&request.target)
             .map_err(target_check_environment)?;
+        // 手上有凭据的路径顺手把版本记一笔（#257）——信息接口本身连不了 MySQL。
+        self.remember_mysql(connected.destination.as_ref());
         let columns = connected
             .destination
             .target_columns(&request.target_table)
@@ -86,6 +112,7 @@ impl<F: DestinationFactory> SinkService<F> {
             .connect(&request.target)
             .map_err(|message| target_connect_error(&request.run_id, message))?;
         let destination = connected.destination;
+        self.remember_mysql(destination.as_ref());
 
         let target_columns =
             destination

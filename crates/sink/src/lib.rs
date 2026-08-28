@@ -18,10 +18,10 @@ use serde_json::Value;
 // crate 内部与既有测试的引用路径一个字不变。
 pub use db_qbs_shared::{
     AbortResponse, BatchPayload, BatchResponse, CleanupRunRequest, CleanupRunResponse,
-    ColumnSupport, CommitRequest, CommitResponse, ErrorBody, ErrorEnvelope, OpenOutcome,
-    OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn, RangeCheckResult,
-    RunResponse, SourceColumn, TargetCheckFinding,
-    TargetCheckKind, TargetCheckRequest, TargetCheckResult, TargetConnection, Terminal,
+    ColumnSupport, CommitRequest, CommitResponse, ErrorBody, ErrorEnvelope, MysqlServerInfo,
+    OpenOutcome, OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn,
+    RangeCheckResult, RunResponse, SourceColumn, TargetCheckFinding, TargetCheckKind,
+    TargetCheckRequest, TargetCheckResult, TargetConnection, Terminal,
 };
 // 九行形态的推导也只有一份定义（#125）——判定式仍两端各一份。
 pub use agent::load_or_create as load_agent_identity;
@@ -187,6 +187,13 @@ pub enum WriteBatchError {
 }
 
 pub trait Destination: Send + Sync {
+    /// 这条连接背后那台 MySQL 的自述（版本 + utf8mb4 默认字符序，见 [`MysqlServerInfo`]）。
+    ///
+    /// **建连接的时候就读掉**，之后只是把读到的那一份交出来：`GET /v1/agent/info` 手上
+    /// 没有任何凭据（ADR-0037 §2），临时去连是连不上的。读不到就是 `None`——
+    /// 一台连得上、但连自己的字符集表都查不了的 MySQL 不该因此让整条搬运链停摆。
+    fn server_info(&self) -> Option<MysqlServerInfo>;
+
     fn target_columns(&self, target_table: &str) -> Result<Vec<TargetColumn>, String>;
     fn target_keys(&self, target_table: &str) -> Result<Vec<TargetKey>, String>;
     fn create_staging(&self, staging_table: &str, ddl: &str) -> Result<(), CreateStagingError>;
@@ -300,6 +307,13 @@ pub struct SinkService<F: DestinationFactory> {
     factory: F,
     active_runs: Mutex<HashMap<String, ActiveRun<F::Dest>>>,
     tombstones: Mutex<VecDeque<RunResponse>>,
+    /// 最近一次连上目标端时读到的 MySQL 自述（#257）。
+    ///
+    /// **这是缓存，不是配置。** sink 启动时不连 MySQL，`GET /v1/agent/info` 也拿不到凭据，
+    /// 所以「这台 agent 连的是哪个版本」只能在**手上有凭据的那些路径**上顺手记一笔：
+    /// 目标端检查（`POST /v1/target/check`）与开跑（`POST /v1/runs`）。在那之前是
+    /// `None`，信息接口照实报「未知」——猜一个 8.0 出来，正是本票要避免的那种静默。
+    observed_mysql: Mutex<Option<MysqlServerInfo>>,
 }
 
 /// sink 内部的错误模型。**它不是线上形状**——过线的是 [`ErrorEnvelope`]，

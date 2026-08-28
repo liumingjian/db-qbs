@@ -9,9 +9,9 @@
 
 use db_qbs_shared::{
     AbortResponse, AgentInfo, BatchPayload, BatchResponse, CleanupRunRequest, CleanupRunResponse,
-    ColumnSupport, CommitRequest, CommitResponse, ErrorBody, ErrorEnvelope, OpenOutcome,
-    OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn, RangeCheckResult, RunResponse,
-    SourceColumn, TargetConnection, Terminal,
+    ColumnSupport, CommitRequest, CommitResponse, ErrorBody, ErrorEnvelope, MysqlServerInfo,
+    OpenOutcome, OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn,
+    RangeCheckResult, RunResponse, SourceColumn, TargetConnection, Terminal,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -549,11 +549,39 @@ fn agent_info_shape() {
             agent_id: "6f1a9c2d4e8b47f0a1b2c3d4e5f60718".to_owned(),
             name: "target-a".to_owned(),
             version: "0.1.0".to_owned(),
+            mysql: None,
         },
         json!({
             "agent_id": "6f1a9c2d4e8b47f0a1b2c3d4e5f60718",
             "name": "target-a",
             "version": "0.1.0",
+        }),
+    );
+}
+
+/// 报过版本的那一份（#257）。`None` 那一份在上面——两种取值各钉一份，
+/// 否则 `skip_serializing_if` 合并错了测不出来：那正好是「旧版本 agent 不带这个字段」
+/// 与「新 agent 还没观察过」必须序列化成同一份字节的地方。
+#[test]
+fn agent_info_carries_the_observed_mysql_when_there_is_one() {
+    round_trip(
+        AgentInfo {
+            agent_id: "6f1a9c2d4e8b47f0a1b2c3d4e5f60718".to_owned(),
+            name: "target-a".to_owned(),
+            version: "0.1.0".to_owned(),
+            mysql: Some(MysqlServerInfo {
+                version: "5.7.44-log".to_owned(),
+                utf8mb4_collation: "utf8mb4_general_ci".to_owned(),
+            }),
+        },
+        json!({
+            "agent_id": "6f1a9c2d4e8b47f0a1b2c3d4e5f60718",
+            "name": "target-a",
+            "version": "0.1.0",
+            "mysql": {
+                "version": "5.7.44-log",
+                "utf8mb4_collation": "utf8mb4_general_ci",
+            },
         }),
     );
 }

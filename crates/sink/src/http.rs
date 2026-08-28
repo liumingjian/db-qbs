@@ -167,7 +167,7 @@ pub fn routes<F: DestinationFactory>() -> Vec<Route<F>> {
     use Method::{Get, Post};
     vec![
         Route::new(Get, "/v1/agent/info", |api, _request, _run_id| {
-            json_response(200, api.agent)
+            json_response(200, &api.agent_info())
         }),
         Route::new(Post, "/v1/runs", |api, request, _run_id| {
             handle_open(request, api.service)
@@ -205,6 +205,19 @@ pub fn routes<F: DestinationFactory>() -> Vec<Route<F>> {
 }
 
 impl<F: DestinationFactory> Api<'_, F> {
+    /// 这台 agent 的身份自述 + 它最近一次观察到的 MySQL（#257）。
+    ///
+    /// 身份那三个字段在进程起来之前就定了（`load_agent_identity` 先于监听），
+    /// 而 MySQL 那一份**要等到手上有凭据的请求来过一次才有**——sink 自己不持有目标端
+    /// 凭据（ADR-0037 §2）。所以这一份是每次现拼的：静态身份 + 服务里的那份缓存。
+    /// 没观察过就不带 `mysql` 字段，读的一方按「未知」处理，不许当成 8.0。
+    pub fn agent_info(&self) -> AgentInfo {
+        AgentInfo {
+            mysql: self.service.observed_mysql(),
+            ..self.agent.clone()
+        }
+    }
+
     /// 这个 crate 的 HTTP 面**唯一**的入口。
     ///
     /// 两趟匹配：先字面量样式，再带占位的样式。这就是「顺序不承重」的全部机制——

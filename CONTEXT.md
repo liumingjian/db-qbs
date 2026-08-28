@@ -80,6 +80,15 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    before each use. **An identity mismatch does not count as online** — "a different agent is
    answering at this address" and "nothing is running" are two distinct incidents, reported separately.
 
+   The agent also reports **which MySQL it is connected to**: `@@version`, and the default collation
+   of `utf8mb4` on that server. `source` opens no MySQL connection of its own, so the agent is the
+   **only** source of this information, and the generated **target DDL** depends on it.
+   The report is a **cache, not configuration**: the agent holds no target credentials of its own
+   (they arrive with each run), so it learns the answer only on a path that carries them — a target
+   check or the opening of a run — and repeats the last thing it observed afterwards. Before it has
+   ever observed one, and for agents built before this was reported at all, the answer is **unknown**,
+   and unknown is reported as unknown. **Nothing downstream may substitute a guess for it.**
+
 **Import Task**
    One complete job: query a batch of data from Oracle, move it into one MySQL table. A task is
    re-runnable — running **the same task definition** twice must leave the target table in an
@@ -311,6 +320,13 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    determines it uniquely, and **no input from the target side is needed** (the table does not exist
    yet). **Primary key columns are `NOT NULL` with a `PRIMARY KEY (...)`, every other column
    nullable**, and `utf8mb4` is explicit.
+   The **collation** is the one exception to "no input from the target side is needed": MySQL's
+   default collation for `utf8mb4` differs between server versions, so it is taken from what the
+   **target agent** reported (see *Target Agent*) and written out as an explicit `COLLATE`.
+   When the agent reported nothing, the statement carries `DEFAULT CHARSET=utf8mb4` and **no
+   `COLLATE` at all**, leaving the choice to the target server's own default — the behaviour that
+   predates the report. Picking a collation on the agent's behalf is forbidden: a wrong one surfaces
+   only much later, as comparisons and sorts quietly giving the wrong answer.
    **It grants no clearance of any kind**: after a person creates the table from it, the mapping
    precheck still runs from scratch and may still reject. There is exactly one interception point, and
    it is the mapping precheck. The **staging table**'s DDL is a different thing: that one is *copied*

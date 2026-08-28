@@ -27,6 +27,8 @@ const agent: Agent = {
   last_seen_at: "2026-08-24T00:00:00Z",
   status: "online",
   last_error: null,
+  mysql_version: "8.0.36",
+  mysql_collation: "utf8mb4_0900_ai_ci",
 };
 
 const oracle: Datasource = {

@@ -55,6 +55,9 @@ interface AgentRow {
   last_seen_at: string | null;
   status: "online" | "offline" | "mismatch";
   last_error: string | null;
+  /** agent 上报的所连 MySQL 版本（#257）。`null` 是「还没报过」，不是 8.0。 */
+  mysql_version: string | null;
+  mysql_collation: string | null;
 }
 
 let agents: AgentRow[] = [
@@ -67,6 +70,8 @@ let agents: AgentRow[] = [
     last_seen_at: new Date().toISOString(),
     status: "online",
     last_error: null,
+    mysql_version: "8.0.36",
+    mysql_collation: "utf8mb4_0900_ai_ci",
   },
   {
     agent_id: "agent-02",
@@ -77,6 +82,9 @@ let agents: AgentRow[] = [
     last_seen_at: new Date(Date.now() - 3_600_000).toISOString(),
     status: "offline",
     last_error: "连接被拒绝（Connection refused）",
+    // 从没经手过一次目标端检查的 agent：版本一列就该是「未知」。
+    mysql_version: null,
+    mysql_collation: null,
   },
 ];
 
@@ -634,6 +642,8 @@ const ROUTES: Route[] = [
         last_seen_at: new Date().toISOString(),
         status: "online",
         last_error: null,
+        mysql_version: "8.0.36",
+        mysql_collation: "utf8mb4_0900_ai_ci",
       };
       agents.push(row);
       return ok(row);

@@ -176,6 +176,11 @@ struct ColumnFetchInput {
     spec: TaskSpec,
     #[serde(default)]
     column_precision: Option<ColumnPrecision>,
+    /// 目标端数据源。**可选**：这个端点只描述源端的列，取列本身不需要目标端。
+    /// 给了就顺带把建表语句的字符序按那台 agent 上报的值生成（#257）；
+    /// 不给就不写 `COLLATE`，与本票之前一个字不差。
+    #[serde(default)]
+    target_datasource_id: Option<String>,
 }
 
 /// 一次请求能碰到的**全部**进程状态。`Api::handle` 是这个 crate 对外的唯一 HTTP 入口。
@@ -1849,11 +1854,14 @@ fn handle_target_check(request: &Request, state: &Api<'_>) -> HttpResponse {
     result.suggested_ddl = if result.ok {
         None
     } else {
+        // 字符序取这台 agent 上报的那一份（#257）：source 不连 MySQL，这是唯一的信息源。
+        // 旧版本 agent 报不出来就是 `None`，生成的语句照旧不写 `COLLATE`。
         generate_target_ddl(
             &source_columns,
             &input.target_table,
             &input.spec.primary_key,
             None,
+            agent.mysql_collation.as_deref(),
         )
         .ok()
     };
@@ -2225,11 +2233,19 @@ fn handle_column_fetch(request: &Request, state: &Api<'_>) -> HttpResponse {
         Ok(columns) => columns,
         Err(error) => return oracle_failure(error),
     };
+    // 目标端可给可不给（见 `ColumnFetchInput`）。给了但那台 agent 不在线，也不该让取列
+    // 失败——取列问的是源端，目标端只影响建表语句里那一段字符序。
+    let target_collation = input
+        .target_datasource_id
+        .as_deref()
+        .and_then(|datasource_id| resolve_target_agent(state, datasource_id).ok())
+        .and_then(|agent| agent.mysql_collation);
     match generate_target_ddl(
         &columns,
         &input.spec.target_table,
         &input.spec.primary_key,
         input.column_precision.as_ref(),
+        target_collation.as_deref(),
     ) {
         Ok(target_ddl) => json_response(
             200,

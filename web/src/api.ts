@@ -121,6 +121,15 @@ export interface Agent {
   last_seen_at: string | null;
   status: AgentStatus;
   last_error: string | null;
+  /**
+   * agent 上报的、它所连 MySQL 的版本（#257）。
+   *
+   * **`null` 是「还没报过」，不是「8.0」**：agent 自己不持有目标库凭据，要等它经手过
+   * 一次目标端检查或一次开跑才知道；#257 之前的 agent 则永远报不出来。
+   */
+  mysql_version: string | null;
+  /** 同上，utf8mb4 的默认字符序——生成建表语句时那一段 `COLLATE` 取的就是它。 */
+  mysql_collation: string | null;
 }
 
 export interface AgentInput {

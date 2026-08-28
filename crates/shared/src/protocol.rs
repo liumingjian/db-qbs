@@ -315,11 +315,40 @@ pub struct ErrorBody {
 /// - `name`：给人看的名字，agent 自报（默认取主机名）。**不作判据**，只进界面。
 /// - `version`：agent 的构建版本，排障时用来判「两端是不是同一批二进制」。
 ///
+/// - `mysql`：这台 agent **实际连到的那台 MySQL** 的自述，见 [`MysqlServerInfo`]。
+///   与上面三个不同，它**是 `Option`**：agent 启动时并不连 MySQL（ADR-0037 §2，凭据随
+///   每个 run 过线），所以进程刚起来时它就是 `None`——那是「还没观察到」，不是「8.0」。
+///   一次目标端检查或一次开跑之后它才有值，之后一直报最近一次观察到的那一份。
+///
 /// **没有凭据字段，也永远不许加**：这个端点是未鉴权面（ADR-0024），任何进得来的人都读得到。
+/// `mysql` 里的两项都是服务端自述的公开信息（`@@version` 与字符序），不是凭据。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentInfo {
     pub agent_id: String,
     pub name: String,
     pub version: String,
+    /// 见上。**旧版本 agent 不带这个字段**，所以是 `default` + `skip_serializing_if`：
+    /// 新 source 读旧 agent 得到 `None`，与「新 agent 还没观察过」同一档处理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mysql: Option<MysqlServerInfo>,
+}
+
+/// 目标端 MySQL 的自述：版本，以及生成建表语句要用的那一项字符序。
+///
+/// **两项都是从服务器上读回来的，不是推出来的。** 支持矩阵里 MySQL 8.0 与 5.7 的
+/// utf8mb4 默认字符序不同（`utf8mb4_0900_ai_ci` / `utf8mb4_general_ci`），而生成建表语句的
+/// 那一端（source）**一条 MySQL 连接都不建**，除 agent 上报之外没有第二个信息源。
+///
+/// 既然要上报，就顺手把字符序本身读回来，而不是在 source 侧按版本号做一次
+/// 「5.7 就用 general_ci」的映射：那等于把 MySQL 的默认值抄一份进我们的代码，
+/// 抄错、或者部署方把 `collation-server` 改过，都只会在建完表之后才暴露。
+/// 版本号照样上报——它是给人看的排障信息，界面上那一列读的就是它。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MysqlServerInfo {
+    /// `@@version` 原样，例如 `8.0.36` / `5.7.44-log`。
+    pub version: String,
+    /// `information_schema.CHARACTER_SETS` 里 utf8mb4 的 `DEFAULT_COLLATE_NAME`。
+    pub utf8mb4_collation: String,
 }

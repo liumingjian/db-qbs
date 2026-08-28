@@ -34,6 +34,8 @@ const UNROUTED: &str = "请求的 sink v1 资源不存在";
 struct Rig {
     service: SinkService<Fixture>,
     agent: AgentInfo,
+    /// 同一份目的地，测试这一侧也留一把手：#257 要在它身上装「这台 MySQL 报什么版本」。
+    destination: Arc<InMemoryDestination>,
 }
 
 impl Rig {
@@ -42,13 +44,16 @@ impl Rig {
     }
 
     fn with_destination(destination: InMemoryDestination) -> Self {
+        let destination = Arc::new(destination);
         Self {
-            service: SinkService::new("qbs", Arc::new(destination)),
+            service: SinkService::new("qbs", Arc::clone(&destination)),
             agent: AgentInfo {
                 agent_id: "fixture-agent".to_owned(),
                 name: "fixture".to_owned(),
                 version: "0.0.0-test".to_owned(),
+                mysql: None,
             },
+            destination,
         }
     }
 
@@ -501,4 +506,58 @@ fn agent_info_is_served() {
     assert_eq!(body["agent_id"], "fixture-agent");
     assert_eq!(body["name"], "fixture");
     assert!(body.get("version").is_some(), "{body}");
+}
+
+/// #257 的核心：这台 agent 连的是哪个 MySQL，只有**手上有凭据的那些请求**才知道
+/// （sink 自己不持有目标端凭据，ADR-0037 §2）。所以信息接口在第一次目标端检查之前
+/// **必须报「未知」**——不带 `mysql` 字段，而不是端出一个 8.0 来。
+#[test]
+fn agent_info_reports_no_mysql_until_a_credentialed_request_has_observed_one() {
+    let rig = Rig::new();
+    rig.destination
+        .report_mysql("5.7.44-log", "utf8mb4_general_ci");
+
+    let before = rig.json(&rig.get("/v1/agent/info"));
+    assert_eq!(
+        before.get("mysql"),
+        None,
+        "还没连过目标端就报版本，等于凭空猜一个出来：{before}"
+    );
+
+    let checked = rig.post(
+        "/v1/target/check",
+        &format!(
+            r#"{{{TARGET_JSON}"target_table":"T_POSITION","primary_key":["D_BIZ"],"source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
+        ),
+    );
+    assert_eq!(checked.status, 200, "{}", checked.body_text());
+
+    let after = rig.json(&rig.get("/v1/agent/info"));
+    assert_eq!(after["mysql"]["version"], "5.7.44-log");
+    assert_eq!(after["mysql"]["utf8mb4_collation"], "utf8mb4_general_ci");
+}
+
+/// 开跑那条路径也算一次观察——两条路径都带着凭据，谁先来谁把版本记上。
+#[test]
+fn opening_a_run_also_records_the_observed_mysql() {
+    let rig = Rig::new();
+    rig.destination.report_mysql("8.0.36", "utf8mb4_0900_ai_ci");
+
+    rig.open_run("20260814091530_a3f19c");
+
+    let info = rig.json(&rig.get("/v1/agent/info"));
+    assert_eq!(info["mysql"]["version"], "8.0.36");
+    assert_eq!(info["mysql"]["utf8mb4_collation"], "utf8mb4_0900_ai_ci");
+}
+
+/// 目的地报不出版本（连得上、但字符集表查不了）时，信息接口照旧报「未知」——
+/// 一台连得上的 MySQL 不会因为这一项读不到就让整条链停摆，但也不许因此被猜成 8.0。
+#[test]
+fn a_destination_that_reports_nothing_leaves_the_info_endpoint_at_unknown() {
+    let rig = Rig::new();
+
+    rig.open_run("20260814091530_a3f19c");
+
+    let info = rig.json(&rig.get("/v1/agent/info"));
+    assert_eq!(info.get("mysql"), None, "{info}");
 }
