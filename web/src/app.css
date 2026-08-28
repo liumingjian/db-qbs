@@ -287,7 +287,7 @@ pre.drawer-sql,
 .job-grid tbody tr:hover td.action-column { background: var(--mute-bg); }
 .job-grid th.action-column { z-index: 2; }
 .row-actions { display: flex; align-items: center; }
-/* 两道分隔线把「跑」｜「看 / 改 / 改名」｜「删」分成三组——位置因此是有结构的，不是硬记。 */
+/* 两道分隔线把「跑」｜「看 / 改 / 看日志」｜「删」分成三组——位置因此是有结构的，不是硬记。 */
 .row-actions .divider { width: 1px; height: 14px; margin: 0 4px; background: var(--line-mid); }
 
 /* ---------------------------------------------------------------- 迁移进度
@@ -1140,3 +1140,24 @@ select, .page-size {
 .confirm-none { color: var(--dim); font-size: var(--size-meta); }
 /* 没勾的列：与 `.mapping-chip` 同形，但删除线 + 灰底，一眼看出「这些不会过线」。 */
 .mapping-chip.is-dropped { border-style: dashed; color: var(--mute); text-decoration: line-through; }
+
+
+/* ---------------------------------------------------------------- 运行日志（#263）
+   一条条人话，跟着运行往下滚。等宽只给时间与正文里的原文行——中文说明用正文字体，
+   等宽的中文只会更难读。 */
+.run-logs { margin-top: var(--gap); }
+.run-logs-actions { display: flex; align-items: center; gap: 8px; }
+.run-logs-live { color: var(--ok); font-size: var(--size-meta); font-weight: var(--weight-em); }
+/* 固定高度而不是随内容长：日志会长到几千行，让它推着整屏往下长，等于没有「回到最新」
+   可言——整页的滚动条不是这个面板的滚动条。 */
+.log-lines { margin: 0; padding: 8px var(--pad); max-height: 420px; overflow-y: auto; list-style: none; }
+.log-line { display: grid; grid-template-columns: 72px 56px minmax(0, 1fr); gap: 8px; padding: 2px 0; align-items: baseline; font-size: var(--size-meta); }
+.log-time { color: var(--mute); font-family: var(--font-num); }
+.log-event { color: var(--dim); font-weight: var(--weight-em); }
+.log-text { color: var(--text); word-break: break-word; }
+.log-line.is-warn .log-event, .log-line.is-warn .log-text { color: var(--warn); }
+.log-line.is-error .log-event, .log-line.is-error .log-text { color: var(--crit); }
+/* 认不出来的行照原样显示，并且**看得出来它是原样**：等宽 + 一道左边框，
+   免得一行 JSON 被当成一句写坏了的人话。 */
+.log-line.is-unknown .log-text { font-family: var(--font-num); }
+.log-line.is-unknown { border-left: 2px solid var(--line-mid); padding-left: 6px; }
