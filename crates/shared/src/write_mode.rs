@@ -80,6 +80,13 @@ pub enum WriteMode {
 }
 
 impl WriteMode {
+    /// Every variant, in wire order.
+    ///
+    /// It exists so that the test which freezes the wire spellings can walk the
+    /// enum instead of listing it: a third mode is then covered the day it is
+    /// added rather than the day someone remembers. Nothing at run time chooses
+    /// a mode from a list — the web side renders its own `WRITE_MODES`, and the
+    /// value itself arrives through serde.
     pub const ALL: [Self; 2] = [Self::Append, Self::ClearThenImport];
 
     /// The wire spelling. Never change one of these.
@@ -97,10 +104,6 @@ impl WriteMode {
     /// `SWAPPED`) ask it here rather than matching on the variant themselves.
     pub const fn clears_target(self) -> bool {
         matches!(self, Self::ClearThenImport)
-    }
-
-    pub fn parse(text: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|mode| mode.as_str() == text)
     }
 }
 

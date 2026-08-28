@@ -1,6 +1,5 @@
 import type { RunDetail } from "./api";
 import { historyPresentation } from "./history";
-import type { TerminalEffect } from "./history";
 import type { RunPhase } from "./runStage";
 import { runPhase, stageLabel } from "./runStage";
 
@@ -16,7 +15,8 @@ export interface RunPresentation {
   kind: RunPresentationKind;
   phase: RunPhase | null;
   conclusion: string;
-  terminalEffect: TerminalEffect | null;
+  /** 服务端给的原字符串（见 `history.ts` 的 `TerminalEffect`），不是筛过的枚举。 */
+  terminalEffect: string | null;
   error: { code: string; httpStatus: number | null } | null;
   metrics: {
     rows: number;

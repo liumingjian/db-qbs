@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
 
+// Rust 那份的原文，`?raw` 读进来（见 `globals.d.ts`）。
+import precheckSource from "../../crates/sink/src/precheck.rs?raw";
+
+import type { RunEvidence, TaskSpec } from "./api";
 import {
   APPEND_ONLY_CONCLUSION,
   clearsTarget,
   CLEAR_MODE_PRIMARY_KEY_NOTE,
+  runWriteSemantics,
+  runWriteView,
   targetHasUniqueKey,
   writeSemanticsDone,
   writeSemanticsNote,
@@ -98,5 +104,62 @@ describe("targetHasUniqueKey", () => {
     expect(targetHasUniqueKey([])).toBe(false);
     expect(targetHasUniqueKey([{ name: "PRIMARY", columns: ["ID"] }])).toBe(true);
     expect(targetHasUniqueKey([{ name: "uk_code", columns: ["CODE"] }])).toBe(true);
+  });
+});
+
+describe("运行详情说的是当时那一次", () => {
+  const spec: TaskSpec = {
+    owner: "APP",
+    table: "T_CUSTOMER",
+    target_table: "t_customer",
+    write_mode: "CLEAR_THEN_IMPORT",
+    schedule_enabled: false,
+    primary_key: [],
+    columns: [{ source: "ID", target: "ID" }],
+  };
+  const evidence: RunEvidence = {
+    parameters: {
+      target_table: "t_customer",
+      columns: [{ source: "ID", target: "ID" }],
+      primary_key: ["ID"],
+      write_mode: "APPEND",
+      source_sql: "SELECT 1 FROM DUAL",
+    },
+  };
+
+  it("读的是那一行上的快照，任务后来改成什么样都不改写过去", () => {
+    // 这一次跑的时候有主键、是追加写；今天任务的主键被清空、改成了先清空再导入。
+    expect(runWriteView(evidence, spec)).toEqual({ statement: "upsert", mode: "APPEND" });
+    expect(runWriteSemantics(evidence, spec)).toBe(
+      writeSemanticsDone("upsert", "APPEND"),
+    );
+  });
+
+  it("早于 #264 的历史行没有 write_mode，按当时唯一的那一档读", () => {
+    const older: RunEvidence = {
+      parameters: { ...evidence.parameters!, write_mode: undefined },
+    };
+    expect(runWriteView(older, spec).mode).toBe("APPEND");
+  });
+
+  it("整份运行证据都缺席的老记录才回退到当前定义——没有快照可读时它是唯一比空白好的答案", () => {
+    expect(runWriteView(undefined, spec)).toEqual({
+      statement: "insert",
+      mode: "CLEAR_THEN_IMPORT",
+    });
+    expect(runWriteView({}, spec).statement).toBe("insert");
+  });
+});
+
+describe("与目标端预检的那句结论逐字一致", () => {
+  it("Rust 那份改了一个字，这条用例就红", () => {
+    // 同一句话必须在两端各有一份（见 `APPEND_ONLY_CONCLUSION` 的注释：说这句话的
+    // 地方大多没有服务端的回答可读）。两份一致过去只由一行注释守着，而注释拦不住
+    // 任何人改一个字——这里把 Rust 那份读出来直接比。
+    const matched = precheckSource.match(
+      /pub const APPEND_ONLY_CONCLUSION: &str =\s*"([^"]*)";/,
+    );
+    expect(matched, "precheck.rs 里应当有 APPEND_ONLY_CONCLUSION").not.toBeNull();
+    expect(matched![1]).toBe(APPEND_ONLY_CONCLUSION);
   });
 });

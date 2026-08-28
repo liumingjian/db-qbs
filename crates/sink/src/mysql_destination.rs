@@ -33,8 +33,16 @@ use crate::{
 /// 曾经的写入台账表，随「撤销运行」一起废弃（#256）。
 ///
 /// 名字留着只为**删**：老版本会在客户的目标库里建这张表、逐行记下每次运行写过的主键，
-/// 已经装出去的实例里它还在。产品不该在客户库里留下自建的附属表，所以每次切换前
-/// 顺手 `DROP TABLE IF EXISTS` 一次——不再建、只删。
+/// 已经装出去的实例里它还在。#256 要的不只是「不再建」，还有「跑完一次导入之后，
+/// 目标库里除目标表外没有任何产品自建的表」——升级上来的实例得有人替它把这张表收掉，
+/// 而产品只在跑运行的时候碰得到客户的库，没有别的时机。
+///
+/// 收在**建暂存表那一步**：那一步本来就是这次运行对客户库下的第一条 DDL，删这张表
+/// 与建那张表是同一类动作，一起做完，切换那条路上从此一条 DDL 都没有。
+/// 摆在切换里是有代价的：`DROP TABLE` 隐式提交，紧挨着「原子清空+导入」那个事务的
+/// 开头写一条会隐式提交的语句，全靠下一个人记得两行的先后顺序。
+///
+/// `IF EXISTS`，所以在从来没建过它的库上是一条空操作。
 const LEGACY_WRITE_LEDGER_TABLE: &str = "__db_qbs_write_ledger";
 
 type MetadataRow = (
@@ -230,7 +238,12 @@ SELECT INDEX_NAME, COLUMN_NAME
 
     fn create_staging(&self, _staging_table: &str, ddl: &str) -> Result<(), CreateStagingError> {
         self.pool
-            .with_conn(|connection| connection.query_drop(ddl))
+            .with_conn(|connection| {
+                // 这次运行对客户库下的第一条 DDL，顺手把老版本留下的写入台账表收掉
+                // （#256，见 `LEGACY_WRITE_LEDGER_TABLE`）。只删不建，`IF EXISTS`。
+                connection.query_drop(drop_legacy_write_ledger(&self.database))?;
+                connection.query_drop(ddl)
+            })
             .map_err(classify_create_error)
     }
 
@@ -296,9 +309,6 @@ SELECT INDEX_NAME, COLUMN_NAME
         let outcome = self
             .pool
             .with_conn(|connection| {
-                // 台账已废（#256）：这里只把老版本留下的那张表删掉，不再建。
-                // `DROP TABLE` 会隐式提交，所以必须在切换事务开始之前做。
-                connection.query_drop(drop_legacy_write_ledger(&self.database))?;
                 let mut transaction = connection.start_transaction(TxOpts::default())?;
                 let count_statement = format!(
                     "SELECT COUNT(*) FROM {}.{}",

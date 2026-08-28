@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use url::Url;
 
+use crate::scheduler::SCHEDULE_TIME_FORMAT;
 use crate::{
     cleared_cookie_header, embedded_web_asset, fetch_agent_info, generate_target_ddl,
     CronSchedule,
@@ -46,8 +47,6 @@ const MAX_REQUEST_BODY_BYTES: u64 = 1024 * 1024;
 const DEFAULT_PREVIEW_LIMIT: usize = 10;
 /// 「下次触发」一次给几个。给一个说不清 `*/n` 的取整，给一串就一目了然。
 const SCHEDULE_PREVIEW_COUNT: usize = 5;
-/// 触发时刻的呈现格式。秒永远是 0，写出来只会让人以为它有意义。
-const SCHEDULE_TIME_FORMAT: &str = "%Y-%m-%d %H:%M";
 const MAX_PREVIEW_LIMIT: usize = 100;
 const PREVIEW_CALL_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const RUN_TASKS_DIRECTORY: &str = "run-tasks";
@@ -904,8 +903,15 @@ fn handle_run_logs(state: &Api<'_>, run_record_id: &str, query: Option<&str>) ->
     // 认不认得这条运行由**运行历史**说了算，不由日志表说了算：日志的保留期（7 天）
     // 比历史（默认 90 天）短得多，一条老运行的原文早已清掉，但它本身还在——
     // 那种情况的正确答案是「200，一行都没有」，不是 404。
-    let known = match state.runs.lock() {
-        Ok(registry) => registry.live_histories.contains_key(run_record_id),
+    //
+    // 两个问题（认不认得、还在不在跑）**一把锁读完**：分两次拿锁的话，中间隔着一次
+    // 状态变化，答出来的会是两个时刻的组合——「不认得，但正在跑」这种自相矛盾的回答
+    // 就是这么来的。
+    let (known, live) = match state.runs.lock() {
+        Ok(registry) => (
+            registry.live_histories.contains_key(run_record_id),
+            registry.active_runs.contains_key(run_record_id),
+        ),
         Err(_) => return internal_error("run 投影锁已损坏".to_owned()),
     };
     if !known {
@@ -915,10 +921,6 @@ fn handle_run_logs(state: &Api<'_>, run_record_id: &str, query: Option<&str>) ->
             Err(error) => return internal_error(error),
         }
     }
-    let live = match state.runs.lock() {
-        Ok(registry) => registry.active_runs.contains_key(run_record_id),
-        Err(_) => return internal_error("run 控制锁已损坏".to_owned()),
-    };
     let lines = match state.run_logs.lines_after(run_record_id, after) {
         Ok(lines) => lines,
         Err(error) => return internal_error(error),
@@ -1044,6 +1046,12 @@ pub(crate) fn dispatch_scheduled_run(state: &Api<'_>, task: &Task) -> DispatchOu
         Ok(agent) => agent,
         Err(error) => return DispatchOutcome::Refused(error),
     };
+    // 没自报额度的 agent 按**一次一个**算，而这 1 不是保守的猜测，是那台 agent 的实情：
+    // #260 之前的 sink 是 `for request in server.incoming_requests()`，一个请求一个请求地
+    // 处理，同一时刻只跑得动一个 run。不带 `max_concurrent_runs` 字段的 agent 恰恰就是那批。
+    // 所以这里既不该改成 4（sink.toml 的默认值——那是**配了新版本的人**选的数，不是这台老
+    // agent 的能力），也不该改成任何别的数：1 是唯一一个既不撞 `RUN_QUOTA_EXCEEDED`、
+    // 又没有白白空着额度的取值。
     let quota = agent.max_concurrent_runs.unwrap_or(1) as usize;
     let in_flight = match state.runs.lock() {
         Ok(runs) => runs.in_flight_for_agent(&agent.agent_id),
@@ -1126,6 +1134,7 @@ fn start_run(
             target_table: task.spec.target_table.clone(),
             columns: task.spec.columns.clone(),
             primary_key: task.spec.primary_key.clone(),
+            write_mode: task.spec.write_mode,
             source_sql: task.spec.source_sql(),
         }),
     };

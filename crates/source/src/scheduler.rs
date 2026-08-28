@@ -48,8 +48,11 @@ const EVALUATE_INTERVAL: Duration = Duration::from_secs(5);
 /// 所以它对 SIGTERM 的反应速度就是优雅退出的下限。
 const TERMINATION_POLL: Duration = Duration::from_millis(100);
 
-/// 界面上那个时刻的格式，与 `http::SCHEDULE_TIME_FORMAT` 同一份写法。
-const SCHEDULE_TIME_FORMAT: &str = "%Y-%m-%d %H:%M";
+/// 界面上那个触发时刻长什么样。**秒永远是 0**，写出来只会让人以为它有意义。
+///
+/// 调度这件事上「时刻」只有一种写法，所以这份常量也只有一份：HTTP 那一层的
+/// `/api/schedule` 与 cron 预览读的就是这里（`crate::scheduler::SCHEDULE_TIME_FORMAT`）。
+pub(crate) const SCHEDULE_TIME_FORMAT: &str = "%Y-%m-%d %H:%M";
 
 /// 一个任务的调度状态：表达式原文 + 下一个触发时刻。
 ///

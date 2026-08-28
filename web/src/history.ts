@@ -2,12 +2,16 @@ import type { RunHistory } from "./api";
 import { stageLabel } from "./runStage";
 
 /**
- * 目标表最后被怎么了，**只有界面认得的那几个**（#264）。
+ * 目标表最后被怎么了，**界面认得的那几个**（#264）。
  *
  * 三件事，三个词，一个都不能合并：`SWAPPED` 是「按主键合并进目标表」，`REPLACED`
  * 是「整表被替换」（先清空再导入），`DISCARDED` 是「一根手指头都没碰」。
- * 服务端那一列是字符串、会原样搬运没见过的拼写；这里认不出来的落到 `null`，
- * 由调用方把原值直接显示出来，而不是拿一个认得的词去糊它。
+ *
+ * 认得的只有这三个，但**展示层搬运的是服务端给的原字符串**：那一列在服务端就是
+ * 「日志的尽力投影」，不认识的拼写原样落库（`run_history.rs`）。前端再把它筛一遍、
+ * 认不出就渲染成空白，等于把「跑数的子进程比界面新」这件事从屏幕上抹掉——而那正是
+ * 最该被看见的时候。所以 `HistoryPresentation.terminalEffect` 是 `string`：原样透出，
+ * 但**不据此做任何判断**，要判断的地方问 `knownTerminalEffect`。
  */
 export type TerminalEffect = "SWAPPED" | "REPLACED" | "DISCARDED";
 
@@ -17,10 +21,20 @@ const TERMINAL_EFFECTS: readonly TerminalEffect[] = [
   "DISCARDED",
 ];
 
+/**
+ * 认得就给那个词，认不得就给 `null`——**判断走这一份，显示不走**。
+ *
+ * 与 `RunStage::parse` 同一条分工：原样搬运负责说实话，解析负责做决定。
+ */
+export function knownTerminalEffect(effect: string | null): TerminalEffect | null {
+  return TERMINAL_EFFECTS.find((known) => known === effect) ?? null;
+}
+
 export interface HistoryPresentation {
   kind: "live" | "succeeded" | "failed" | "unknown";
   conclusion: string;
-  terminalEffect: TerminalEffect | null;
+  /** 服务端给的原字符串（见 `TerminalEffect` 的注释），不是筛过的枚举。 */
+  terminalEffect: string | null;
   error: { code: string; httpStatus: number | null } | null;
 }
 
@@ -232,9 +246,14 @@ function succeededConclusion(
   return `目标端：运行成功：已推送 ${countFormatter.format(rows)} 行${merged}。`;
 }
 
-function sinkTerminalEffect(
-  history: RunHistory,
-): HistoryPresentation["terminalEffect"] {
+/**
+ * 这一行该不该谈论目标表效果，以及服务端为它写下的那个词。
+ *
+ * `null` 只有一种含义：**这次运行根本没走到目标端**（没有 run_id、没有暂存表、
+ * 或者预检就被挡下了），谈论目标表效果本身就不成立。它不再兼职表示「有一个词但
+ * 我不认识」——那个词照样返回，由展示层原样摆出来。
+ */
+function sinkTerminalEffect(history: RunHistory): string | null {
   if (
     history.run_id === null ||
     history.staging_table === null ||
@@ -243,8 +262,7 @@ function sinkTerminalEffect(
     return null;
   }
 
-  const effect = history.target_table_effect;
-  return TERMINAL_EFFECTS.find((known) => known === effect) ?? null;
+  return history.target_table_effect;
 }
 
 /**

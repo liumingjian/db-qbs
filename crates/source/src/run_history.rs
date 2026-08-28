@@ -8,7 +8,7 @@ use rusqlite::{named_params, params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{ColumnMapping, FailureKind, RunStage};
+use crate::{ColumnMapping, FailureKind, RunStage, WriteMode};
 
 const DATABASE_FILE: &str = "db-qbs.sqlite3";
 
@@ -101,6 +101,16 @@ pub struct RunParametersEvidence {
     pub target_table: String,
     pub columns: Vec<ColumnMapping>,
     pub primary_key: Vec<String>,
+    /// 开跑那一刻的写入模式快照（#264）。
+    ///
+    /// 和 `primary_key` 一样是**当时的事实**，不是任务此刻的定义。这两份合起来才
+    /// 说得出「这一次到底做了什么」：主键决定语句是 upsert 还是纯 INSERT，模式决定
+    /// 之前有没有先清空整张表。回头去任务定义现取，改一次任务就会把**过去所有**
+    /// 运行记录声称做过的事一起改写——与 `task_name` 同一条道理（#259）。
+    ///
+    /// 缺席的老历史行落到 `Append`：本字段之前，产品只有追加写这一档。
+    #[serde(default)]
+    pub write_mode: WriteMode,
     pub source_sql: String,
 }
 

@@ -10,15 +10,25 @@ use db_qbs_shared::{WriteMode, WriteStatement};
 
 #[test]
 fn the_write_mode_spellings_are_frozen() {
-    assert_eq!(WriteMode::ALL.len(), 2);
+    assert_eq!(
+        WriteMode::ALL,
+        [WriteMode::Append, WriteMode::ClearThenImport]
+    );
     assert_eq!(WriteMode::Append.as_str(), "APPEND");
     assert_eq!(WriteMode::ClearThenImport.as_str(), "CLEAR_THEN_IMPORT");
+    // 每一档的拼写都要能原样回来。**解析只有 serde 一家**：产品里没有第二个
+    // 写入模式解析器，也不该有——两份解析迟早在某个拼写上说出两个答案。
     for mode in WriteMode::ALL {
-        assert_eq!(WriteMode::parse(mode.as_str()), Some(mode));
+        let decoded: WriteMode = serde_json::from_value(serde_json::json!(mode.as_str()))
+            .expect("wire spelling must parse");
+        assert_eq!(decoded, mode);
     }
-    assert_eq!(WriteMode::parse("REPLACE"), None);
-    assert_eq!(WriteMode::parse("REPLACED"), None);
-    assert_eq!(WriteMode::parse("append"), None);
+    for wrong in ["REPLACE", "REPLACED", "append"] {
+        assert!(
+            serde_json::from_value::<WriteMode>(serde_json::json!(wrong)).is_err(),
+            "{wrong} is not a write mode"
+        );
+    }
 }
 
 /// 清空**不改变写入语句的选择**（#264）——这是清空模式最容易被写错的一条。
@@ -27,14 +37,13 @@ fn the_write_mode_spellings_are_frozen() {
 /// 同一次运行内出现重复主键；无主键仍纯 INSERT。
 #[test]
 fn clearing_the_target_does_not_change_which_statement_runs() {
-    for mode in WriteMode::ALL {
-        let _ = mode;
-        assert_eq!(
-            WriteStatement::for_primary_key(&["ID".to_owned()]),
-            WriteStatement::Upsert
-        );
-        assert_eq!(WriteStatement::for_primary_key(&[]), WriteStatement::Insert);
-    }
+    // 派生根本不接受模式做参数——这一行就是那件事本身：两档模式下同一份主键给出
+    // 同一条语句，因为语句压根问不到模式。
+    assert_eq!(
+        WriteStatement::for_primary_key(&["ID".to_owned()]),
+        WriteStatement::Upsert
+    );
+    assert_eq!(WriteStatement::for_primary_key(&[]), WriteStatement::Insert);
     assert!(!WriteMode::Append.clears_target());
     assert!(WriteMode::ClearThenImport.clears_target());
 }

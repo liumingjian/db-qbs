@@ -13,7 +13,7 @@
  * 抄的是同一个常量，抄成三份第一次改口径就会漏掉一处。
  */
 
-import type { TargetKey } from "./api";
+import type { RunEvidence, TargetKey, TaskSpec } from "./api";
 
 export type WriteMode = "APPEND" | "CLEAR_THEN_IMPORT";
 
@@ -53,7 +53,18 @@ export function writeStatementLabel(statement: WriteStatement): string {
   return statement === "upsert" ? "按主键 upsert" : "纯追加写";
 }
 
-/** 无主键那条路上必须被读到的那句话。与目标端预检的结论逐字一致。 */
+/**
+ * 无主键那条路上必须被读到的那句话，**与目标端预检的结论逐字一致**
+ * （`crates/sink/src/precheck.rs` 的 `APPEND_ONLY_CONCLUSION`）。
+ *
+ * 为什么这里要有一份而不是一律渲染服务端给的那句：需要说这句话的地方大多**没有**
+ * 服务端的回答可读——任务清单上每一行的那个标记（`JobCenterScreen`）背后没有一次
+ * 目标表检查，向导里那句常驻交底在第一次检查跑起来之前就得在。真有服务端结论的地方
+ * （第 3 步那一屏）渲染的仍是 `TargetCheckResult.notes` 原文，不是这份常量。
+ *
+ * 两份逐字一致这件事不靠注释守，靠 `writeMode.test.ts` 里那条把 Rust 那份读出来比对
+ * 的用例守——注释拦不住任何人改一个字。
+ */
 export const APPEND_ONLY_CONCLUSION =
   "目标表无主键 → 本任务为纯追加写，重跑会产生重复数据";
 
@@ -111,4 +122,38 @@ export function writeSemanticsDone(
  */
 export function targetHasUniqueKey(keys: readonly TargetKey[]): boolean {
   return keys.length > 0;
+}
+
+/**
+ * 一次运行**当时**是怎么写的：主键与写入模式都取自那一行历史上的运行证据快照，
+ * 不是任务此刻的定义。
+ *
+ * 任务定义随时会改：主键加一列、写法从追加改成先清空再导入。回头拿现在的定义去讲
+ * 过去那一次，等于让今天的一次编辑追溯性地改写历史记录里「已经做过的事」——和改名
+ * 会改写过去每一行上的名字是同一个错，#259 因此把名称快照到历史行上，这里照办。
+ *
+ * 只有一种情况回退到当前定义：这条历史早于运行证据（`parameters` 缺席），那时没有
+ * 任何快照可读，回退是唯一比空白好的答案。`write_mode` 单独缺席（早于 #264 的历史行）
+ * 则按 `APPEND` 读——那时产品只有这一档。
+ */
+export function runWriteView(
+  evidence: RunEvidence | undefined,
+  spec: TaskSpec,
+): { statement: WriteStatement; mode: WriteMode } {
+  const parameters = evidence?.parameters ?? null;
+  return parameters === null
+    ? { statement: writeStatementOf(spec.primary_key), mode: spec.write_mode }
+    : {
+        statement: writeStatementOf(parameters.primary_key),
+        mode: parameters.write_mode ?? "APPEND",
+      };
+}
+
+/** 跑完之后那句「这一次做了什么」，说的是当时那一次。 */
+export function runWriteSemantics(
+  evidence: RunEvidence | undefined,
+  spec: TaskSpec,
+): string {
+  const write = runWriteView(evidence, spec);
+  return writeSemanticsDone(write.statement, write.mode);
 }

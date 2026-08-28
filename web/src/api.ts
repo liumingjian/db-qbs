@@ -20,7 +20,7 @@ export interface TaskSpec {
   table: string;
   target_table: string;
   /**
-   * 写入模式（#261）。今天只有「追加写」一档，`WRITE_MODES` 是它的清单。
+   * 写入模式（#261/#264）：「追加写」与「先清空再导入」两档，`WRITE_MODES` 是它的清单。
    */
   write_mode: WriteMode;
   /**
@@ -357,6 +357,12 @@ export interface RunEvidence {
     target_table: string;
     columns: ColumnMapping[];
     primary_key: string[];
+    /**
+     * 开跑那一刻的写入模式快照（#264）。缺席的老历史行按 `APPEND` 读——本字段之前
+     * 产品只有追加写这一档。运行详情说「这一次做了什么」时读的是这一份和上面那份
+     * `primary_key`，不是任务此刻的定义。
+     */
+    write_mode?: WriteMode;
     source_sql: string;
   } | null;
 }

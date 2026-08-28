@@ -13,13 +13,14 @@ import {
   UpsertNote,
 } from "./components/DesignSystem";
 import {
-  writeSemanticsDone,
+  runWriteSemantics,
   writeStatementLabel,
   writeStatementOf,
 } from "./writeMode";
 import {
   formatTimestamp,
   historyPresentation,
+  knownTerminalEffect,
   runIdPresentation,
   runTriggerLabel,
 } from "./history";
@@ -66,6 +67,8 @@ export function RunDrawer({
   useDialogFocus(dialog, { onEscape: onClose });
 
   const presentation = historyPresentation(run);
+  /** 判断走认得的那一份，显示走原样那一份（见 `history.ts`）。 */
+  const knownEffect = knownTerminalEffect(presentation.terminalEffect);
   const rerun = rerunAction(run, tasks);
 
   return (
@@ -107,19 +110,12 @@ export function RunDrawer({
                   <span className="outcome-label">
                     运行结果 <strong>{run.outcome ?? "进行中"}</strong>
                   </span>
+                  {/* 认得的、不认得的，都由 `TerminalBlock` 一个人摆出来（#264）：
+                      原来这里是三条分支，认得的走轴二、`UNKNOWN` 走一句、别的走另一句，
+                      而整屏详情那边一条都没有，于是同一个词两屏长得不一样。 */}
                   {presentation.terminalEffect !== null && (
                     <TerminalBlock effect={presentation.terminalEffect} />
                   )}
-                  {run.target_table_effect === "UNKNOWN" && (
-                    <span className="unknown-effect">UNKNOWN　目标表效果未知</span>
-                  )}
-                  {presentation.terminalEffect === null &&
-                    run.target_table_effect !== null &&
-                    run.target_table_effect !== "UNKNOWN" && (
-                      <span className="effect-text">
-                        目标表 <strong>{run.target_table_effect}</strong>
-                      </span>
-                    )}
                   {run.source_code !== null && (
                     <span className="source-code">
                       源端 <strong>{run.source_code}</strong>
@@ -139,16 +135,13 @@ export function RunDrawer({
                 {presentation.kind === "succeeded" && (
                   <div className="success-conclusion">{presentation.conclusion}</div>
                 )}
-                {/* 说法跟着写法与模式一起走（#261/#264）。`DISCARDED` 不挂这一行。 */}
-                {presentation.terminalEffect !== null &&
-                  presentation.terminalEffect !== "DISCARDED" && (
-                    <UpsertNote
-                      text={writeSemanticsDone(
-                        writeStatementOf(task.spec.primary_key),
-                        task.spec.write_mode,
-                      )}
-                    />
-                  )}
+                {/* 说法跟着写法与模式一起走（#261/#264），读的是当次快照。挂不挂问
+                    `knownTerminalEffect`：`DISCARDED` 不挂（目标表没被碰过），产品
+                    不认识的那个词也不挂——原样透出是一回事，据它断言写入做了什么
+                    是另一回事，后者这里没有资格做。 */}
+                {(knownEffect === "SWAPPED" || knownEffect === "REPLACED") && (
+                  <UpsertNote text={runWriteSemantics(run.evidence, task.spec)} />
+                )}
                 {presentation.kind === "live" && (
                   <div className="drawer-note">{presentation.conclusion}</div>
                 )}

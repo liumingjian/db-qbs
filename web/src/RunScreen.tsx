@@ -13,13 +13,18 @@ import {
   UpsertNote,
 } from "./components/DesignSystem";
 import {
-  writeSemanticsDone,
+  runWriteSemantics,
+  runWriteView,
   writeStatementLabel,
-  writeStatementOf,
 } from "./writeMode";
 import { messageFrom } from "./errors";
 import { FailureEvidence } from "./FailureEvidence";
-import { runIdPresentation, runTaskName, runTriggerLabel } from "./history";
+import {
+  knownTerminalEffect,
+  runIdPresentation,
+  runTaskName,
+  runTriggerLabel,
+} from "./history";
 import { PrecheckReports } from "./PrecheckReports";
 import { RunLogPanel } from "./RunLogPanel";
 import { progressOfLiveRun } from "./progress";
@@ -246,10 +251,10 @@ function RunIdentity({ task, detail }: { task: Task; detail: RunDetail }) {
         <DetailValue label="发起方式" value={runTriggerLabel(detail.trigger)!} />
       )}
       {/* 写入方式在运行详情上必须看得见（#261）：一条跑完的记录，光看行数看不出
-          这次是「合并」还是「又追加了一份」。 */}
+          这次是「合并」还是「又追加了一份」。读的是当次快照，不是任务此刻的主键。 */}
       <DetailValue
         label="写入方式"
-        value={writeStatementLabel(writeStatementOf(task.spec.primary_key))}
+        value={writeStatementLabel(runWriteView(detail.evidence, task.spec).statement)}
       />
       <DetailValue label="暂存表" value={detail.staging_table ?? "—"} />
     </dl>
@@ -328,6 +333,8 @@ function FinishedRun({
   onEditTask: (step: Step) => void;
 }) {
   const mappingFailed = presentation.kind === "mapping-failed";
+  /** 判断走认得的那一份，显示走原样那一份（见 `history.ts`）。 */
+  const knownEffect = knownTerminalEffect(presentation.terminalEffect);
   return (
     <>
       <section className={`run-result is-${presentation.kind}`}>
@@ -340,18 +347,17 @@ function FinishedRun({
           )}
         </div>
         <RunConclusion detail={detail} presentation={presentation} />
-        {/* 说法跟着写法与模式一起走（#261/#264）：无主键那条路上「按主键 upsert」是
-            句假话，先清空再导入那条路上「源端删掉的行仍保留」也是。`DISCARDED`
-            不挂这一行——目标表没被碰过，写入语义无从谈起。 */}
-        {presentation.terminalEffect !== null &&
-          presentation.terminalEffect !== "DISCARDED" && (
-            <UpsertNote
-              text={writeSemanticsDone(
-                writeStatementOf(task.spec.primary_key),
-                task.spec.write_mode,
-              )}
-            />
-          )}
+        {/* 说法跟着写法与模式一起走（#261/#264），而且跟着的是**当时那一次**的写法：
+            主键与模式都读运行证据里的快照，不读任务此刻的定义，否则今天改一次任务
+            就把过去每一条记录声称做过的事一起改写了（同 #259 的名称快照）。
+            无主键那条路上「按主键 upsert」是句假话，先清空再导入那条路上「源端删掉的
+            行仍保留」也是。
+            挂不挂问 `knownTerminalEffect`：`DISCARDED` 不挂（目标表没被碰过），产品
+            不认识的那个词也不挂——原样透出是一回事，据它断言写入做了什么是另一回事，
+            后者这里没有资格做（#263 的同一条原则）。 */}
+        {knownEffect !== null && knownEffect !== "DISCARDED" && (
+          <UpsertNote text={runWriteSemantics(detail.evidence, task.spec)} />
+        )}
       </section>
 
       {(presentation.kind === "failed" ||

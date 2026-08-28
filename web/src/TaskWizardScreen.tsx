@@ -45,6 +45,7 @@ import {
   foldedSteps,
   leaving,
   leavingConfirmation,
+  saveGate,
   selectionBlocker,
   taskName,
   toSpec,
@@ -179,8 +180,8 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
     ? "下一步：选列"
     : `回到第 ${displayStep(draft.step)} 步：${model.rail.find((entry) => entry.step === draft.step)?.label ?? ""}`;
   /** 最后一步为什么提交不了，或者 `null`。 */
-  const submitRefusal =
-    busy === "submit" ? "正在提交" : canAdvance(draft, 4)[0]?.message ?? null;
+  const save = saveGate(draft);
+  const submitRefusal = busy === "submit" ? "正在提交" : save.refusal;
   const sqlIdentity = JSON.stringify(toSpec(draft));
 
   function commit(next: Draft) {
@@ -1022,11 +1023,22 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
                 </button>
               )}</Refusable>
             ) : draft.step < 4 ? (
-              <Refusable reason={advanceBlocked ? "请先处理当前步骤中的问题" : null}>{(describedBy) => (
-                <button className="button is-primary" type="submit" disabled={advanceBlocked} aria-describedby={describedBy}>
-                  {draft.step === 3 ? "查看确认页" : "下一步"}
-                </button>
-              )}</Refusable>
+              <>
+                {/* 编辑模式下「保存」每一步都在（`saveGate`）：往下走的门不该顺手
+                    当成保存的门，不然目标表一漂，连改个名字都做不到（story 29）。 */}
+                {save.offered && (
+                  <Refusable reason={submitRefusal}>{(describedBy) => (
+                    <button className="button" type="button" disabled={submitRefusal !== null} aria-describedby={describedBy} onClick={() => void submit("save-only")}>
+                      {busy === "submit" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : null}保存
+                    </button>
+                  )}</Refusable>
+                )}
+                <Refusable reason={advanceBlocked ? "请先处理当前步骤中的问题" : null}>{(describedBy) => (
+                  <button className="button is-primary" type="submit" disabled={advanceBlocked} aria-describedby={describedBy}>
+                    {draft.step === 3 ? "查看确认页" : "下一步"}
+                  </button>
+                )}</Refusable>
+              </>
             ) : draft.mode === "edit" ? (
               <Refusable reason={submitRefusal}>{(describedBy) => (
                 <button className="button is-primary" type="submit" disabled={submitRefusal !== null} aria-describedby={describedBy}>
@@ -1268,6 +1280,10 @@ function StepBody({
   if (model.step === 1) {
     return <section className="wizard-step">
       <header>{/* tabIndex={-1}：能用脚本聚焦，但不进 Tab 序（#239）。 */}<h1 ref={headingRef} tabIndex={-1}>选列与字段映射</h1></header>
+      {/* 任务名摆在第一步，不在最后一屏（story 29 / 见 `wizard.ts` 的 `saveGate`）：
+          它不依赖这份草稿里的任何东西，排在最后只会被前面每一道门连坐——目标表一漂，
+          第 3 步就过不去，改个名字都成了做不到的事。 */}
+      <label className="wizard-name">任务名<input value={taskName(draft)} onChange={(event) => change({ type: "task-name", name: event.target.value })} /></label>
       {draft.fetchMode === "sql" && (
         /* SQL 正文归第 1 步（#245）。这里只留一小块只读回显——同一份 SQL 两处都能改，
            人会搞不清哪个算数。要改就回第 1 步改，草稿一个字都不丢。 */
@@ -1376,13 +1392,15 @@ function StepBody({
   const dropped = draft.sourceColumns.filter((column) => !carried.has(column.name));
   return <section className="wizard-step">
     <header><h1 ref={headingRef} tabIndex={-1}>确认并运行</h1></header>
-    <label className="wizard-name">任务名<input value={taskName(draft)} onChange={(event) => change({ type: "task-name", name: event.target.value })} /></label>
     <ScheduleCard
       cron={draft.spec.schedule_cron ?? ""}
       enabled={draft.spec.schedule_enabled}
       change={change}
     />
     <dl className="wizard-confirm-grid">
+      {/* 任务名在第 1 步改（见 `saveGate`）。这里只回显——同一个值两处都能改，人会
+          搞不清哪个算数，第 1 步那块 SQL 回显是同一条道理。 */}
+      <div><dt>任务名</dt><dd>{confirmView.name}</dd></div>
       <div><dt>源端</dt><dd>{confirmView.sourceLabel}</dd></div>
       <div><dt>目标表</dt><dd>{confirmView.targetTable}</dd></div>
       <div><dt>WHERE</dt><dd>{confirmView.where}</dd></div>
@@ -1404,7 +1422,7 @@ function StepBody({
 }
 
 /**
- * 周期调度那一格（#265），摆在最后一屏「任务名」的下面。
+ * 周期调度那一格（#265），摆在最后一屏确认信息的上面。
  *
  * 三样东西必须同时在屏幕上，少一样这一格就骗人：
  *
@@ -1537,9 +1555,9 @@ function ScheduleCard({
  *
  * 两行，**上面一行可选、下面一行推导**：
  *
- * - 「写入模式」是任务定义里的一个字段。今天只有一档，那也照样渲染成一组单选按钮而
- *   不是一行只读文字——清空后导入那一档接进来时，`WRITE_MODES` 多一项，这里什么都
- *   不用改；而一行只读文字要变成控件，改的是人对这一格的理解。
+ * - 「写入模式」是任务定义里的一个字段，照 `WRITE_MODES` 渲染成一组单选按钮：加一档
+ *   就多一项，这里一个字都不用改。（#261 落地时只有一档，也是这么渲染的——只读文字
+ *   要变成控件，改的是人对这一格的理解；#264 把第二档接进来时果然什么都没动。）
  * - 「写入语句」**不是选出来的**，人也改不了它：目标表有主键就 upsert，没有就纯
  *   追加。做成禁用的下拉框会让人以为它本来能选、只是此刻不让选。
  *

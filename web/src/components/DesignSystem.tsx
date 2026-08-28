@@ -1,7 +1,6 @@
 import { Eye, EyeOff } from "lucide-react";
 import { useState } from "react";
 
-import type { TerminalEffect } from "../history";
 import type { RunPhase } from "../runStage";
 import { RUN_PHASES, stageLabel } from "../runStage";
 
@@ -66,17 +65,26 @@ export function PhaseLine({ current }: { current: RunPhase | null }) {
  *
  * 标签本身照旧是一个词，长话在 `UpsertNote` 里。
  */
-const TERMINAL_COPY: Readonly<Record<TerminalEffect, string>> = {
+const TERMINAL_COPY: Readonly<Record<string, string>> = {
   SWAPPED: "已按主键合并写入",
   REPLACED: "目标表已整表替换",
   DISCARDED: "目标表未被触碰",
+  UNKNOWN: "目标表效果未知",
 };
 
-export function TerminalBlock({ effect }: { effect: TerminalEffect }) {
+/**
+ * 轴二。`effect` 是**服务端给的原字符串**，不是筛过的枚举（见 `history.ts`）。
+ *
+ * 认得的词配一句人话；不认得的词照样摆出来，只是没有那句人话可配——产品不认识它，
+ * 也就没有资格替它说是什么意思。吞掉它才是最坏的一种：那意味着跑数的那一端比这块
+ * 屏幕新，而这件事只会在这一格里露头。
+ */
+export function TerminalBlock({ effect }: { effect: string }) {
+  const copy = TERMINAL_COPY[effect] ?? null;
   return (
-    <span className={`terminal-block is-${effect.toLowerCase()}`}>
+    <span className={`terminal-block is-${copy === null ? "unrecognised" : effect.toLowerCase()}`}>
       <span>{effect}</span>
-      <span className="terminal-copy">{TERMINAL_COPY[effect]}</span>
+      {copy !== null && <span className="terminal-copy">{copy}</span>}
     </span>
   );
 }

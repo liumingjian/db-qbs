@@ -217,7 +217,9 @@ impl<F: DestinationFactory> Api<'_, F> {
             // 并发额度也在这里补：它是 `sink.toml` 的值，而 source 侧的调度器要靠它
             // 在派发之前就守住这条线（#266）。身份那三个字段之外，这是第二样
             // 「进程起来之后才知道」的东西。
-            max_concurrent_runs: Some(self.service.max_concurrent_runs()),
+            // 报文里那一项是 `u32`（同一个概念只有一种类型，见 `AgentInfo`）；
+            // 本地那一份是 `usize`，因为它要和在飞的条数直接比。
+            max_concurrent_runs: u32::try_from(self.service.max_concurrent_runs()).ok(),
             ..self.agent.clone()
         }
     }
