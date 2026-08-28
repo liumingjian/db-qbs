@@ -20,8 +20,8 @@ use tiny_http::Server;
 
 use crate::http::{emit, Api, AgentRegistry, Request, RunState, RUN_TASKS_DIRECTORY};
 use crate::{
-    fetch_agent_info, AgentStore, AuthStore, DatasourceStore, HistoryStore, SourceConfig, TaskStore,
-    UnknownReason,
+    fetch_agent_info, AgentStore, AuthStore, DatasourceStore, HistoryStore, RunLogStore,
+    SourceConfig, TaskStore, UnknownReason,
 };
 
 pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
@@ -35,6 +35,9 @@ pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
     let agent_store: AgentRegistry = Arc::new(Mutex::new(AgentStore::open(&config.data_dir)?));
     migrate_legacy_sink_base_url(&config, &agent_store, &datasource_store)?;
     let history_store = HistoryStore::open(&config.data_dir)?;
+    // 原始日志行与运行历史同库同表空间、同一份 0600。它自己管自己的保留期
+    // （7 天与每任务 10 次运行两者取严），比历史那 90 天严得多。
+    let run_log_store = RunLogStore::open(&config.data_dir)?;
     // 会话与口令跟任务、数据源同一个库、同一份 0600。**开在监听之前**：
     // 端口一开就得有一道门，不能有一个「表还没建好、于是先放行」的窗口。
     let auth_store = AuthStore::open(&config.data_dir)?;
@@ -92,6 +95,7 @@ pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
         datasources: &datasource_store,
         agents: &agent_store,
         history: &history_store,
+        run_logs: &run_log_store,
         runs: &runs,
         auth: &auth_store,
         describe_source: crate::OracleRowSource::describe,
