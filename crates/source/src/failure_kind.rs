@@ -52,6 +52,11 @@ pub enum FailureKind {
     Defect,
     /// 结局未知：进程消失、服务重启、commit 断连后仍判不出。
     Unknown,
+    /// 到点了但没发起：上一次还没结束，本次跳过（#266）。
+    ///
+    /// 它是本闭集里唯一一个**什么都没做**的值：没连过库、没到过代理、目标表未被改动。
+    /// 落成一行历史是为了让那个触发时刻有答案，不是为了报告一次故障。
+    Skipped,
 }
 
 impl FailureKind {
@@ -73,6 +78,7 @@ impl FailureKind {
             Self::VerifyFailed => "VERIFY_FAILED",
             Self::Defect => "DEFECT",
             Self::Unknown => "UNKNOWN",
+            Self::Skipped => "SKIPPED",
         }
     }
 

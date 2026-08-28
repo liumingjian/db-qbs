@@ -17,6 +17,7 @@ macro_rules! history_params {
         named_params! {
             ":run_record_id": $history.run_record_id,
             ":run_id": $history.run_id,
+            ":run_trigger": $history.trigger,
             ":task_id": $history.task_id,
             ":task_name": $history.task_name,
             ":staging_table": $history.staging_table,
@@ -114,6 +115,25 @@ pub enum HistoryChange {
     Terminal,
 }
 
+/// 一次运行是**谁发起的**：人按的，还是到点了调度器发的（#266）。
+///
+/// 两者在运行历史里必须分得开：夜里两点那次是不是自动跑的、还是有人手动补的一次，
+/// 事后只有这一列答得出来。它**不是**结局的一部分，也不参与任何判定——纯粹是出处。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunTrigger {
+    Manual,
+    Scheduled,
+}
+
+impl RunTrigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "MANUAL",
+            Self::Scheduled => "SCHEDULED",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnknownReason {
     ProcessDisappeared,
@@ -140,6 +160,10 @@ impl UnknownReason {
 pub struct RunHistory {
     pub run_record_id: String,
     pub run_id: Option<String>,
+    /// 这一次是谁发起的（[`RunTrigger`]，#266）。落库的列名是 `run_trigger`，
+    /// `trigger` 在 SQLite 里是保留字。老历史行迁移出来是 `MANUAL`——本字段之前
+    /// 一次运行只可能是人按出来的。
+    pub trigger: String,
     pub task_id: String,
     /// 开跑那一刻的任务名称快照。
     ///
@@ -218,6 +242,7 @@ impl RunHistory {
         Self {
             run_record_id: run_record_id.to_owned(),
             run_id: None,
+            trigger: RunTrigger::Manual.as_str().to_owned(),
             task_id: task_id.to_owned(),
             task_name: String::new(),
             source_sql: source_sql.to_owned(),
@@ -369,6 +394,19 @@ impl RunHistory {
         self.failure_kind = Some(FailureKind::Orchestrator.as_str().to_owned());
     }
 
+    /// 到点了但**没发起**的那一次（#266）。
+    ///
+    /// 它与「预检拒绝、从未到达代理」同构：**没有运行标识**（`run_id` 一直是 `None`），
+    /// 目标表一个字节都没动过。写它的理由只有一条——绝不静默丢弃一个触发时刻，
+    /// 否则「月末那次到底跑没跑」没人答得上来。
+    pub fn mark_skipped(&mut self, message: String, at: DateTime<Utc>) {
+        self.outcome = Some("FAILED".to_owned());
+        self.target_table_effect = Some("DISCARDED".to_owned());
+        self.finished_at = Some(at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        self.message = Some(message);
+        self.failure_kind = Some(FailureKind::Skipped.as_str().to_owned());
+    }
+
     pub fn started_at_ms(&self) -> i64 {
         self.started_at_ms
     }
@@ -437,6 +475,7 @@ impl HistoryStore {
                 "CREATE TABLE IF NOT EXISTS run_history (
                     run_record_id       TEXT PRIMARY KEY NOT NULL,
                     run_id              TEXT,
+                    run_trigger         TEXT NOT NULL DEFAULT 'MANUAL',
                     task_id             TEXT NOT NULL,
                     task_name           TEXT NOT NULL DEFAULT '',
                     source_sql          TEXT NOT NULL DEFAULT '',
@@ -484,6 +523,8 @@ impl HistoryStore {
             .map_err(|error| format!("初始化 SQLite 运行历史表失败：{error}"))?;
         // 老库里没有这一列：迁移出来的行拿空串，展示层据此回退到当前名称。
         ensure_text_column(&connection, "task_name")?;
+        // 老库里没有这一列：迁移出来的行拿 `MANUAL`——本列之前一次运行只可能是人按的（#266）。
+        ensure_column_with_default(&connection, "run_trigger", "MANUAL")?;
         ensure_json_column(&connection, "mapping_issues", "[]")?;
         ensure_json_column(&connection, "evidence", "{}")?;
         ensure_nullable_text_column(&connection, "failure_kind")?;
@@ -507,7 +548,7 @@ impl HistoryStore {
         transaction
             .execute(
                 "INSERT INTO run_history (
-                    run_record_id, run_id, task_id, task_name, source_sql, staging_table,
+                    run_record_id, run_id, run_trigger, task_id, task_name, source_sql, staging_table,
                     started_at, started_at_ms, finished_at, outcome, target_table_effect, stage,
                     source_rows, staged_rows, sink_reported_rows, purged_rows, source_batches,
                     received_batches, total_rows, precount_ms,
@@ -515,7 +556,7 @@ impl HistoryStore {
                     source_code, sink_code, [column], [value], message, unknown_reason,
                     failure_kind, seq, rows_pushed, bytes, ms, last_ts, mapping_issues, evidence
                  ) VALUES (
-                    :run_record_id, :run_id, :task_id, :task_name, :source_sql, :staging_table,
+                    :run_record_id, :run_id, :run_trigger, :task_id, :task_name, :source_sql, :staging_table,
                     :started_at, :started_at_ms, :finished_at, :outcome, :target_table_effect,
                     :stage, :source_rows, :staged_rows, :sink_reported_rows, :purged_rows,
                     :source_batches, :received_batches, :total_rows, :precount_ms,
@@ -548,7 +589,7 @@ impl HistoryStore {
         transaction
             .execute(
                 "UPDATE run_history SET
-                    run_id=:run_id, task_id=:task_id, task_name=:task_name,
+                    run_id=:run_id, run_trigger=:run_trigger, task_id=:task_id, task_name=:task_name,
                     source_sql=:source_sql,
                     staging_table=:staging_table, started_at=:started_at,
                     started_at_ms=:started_at_ms, finished_at=:finished_at, outcome=:outcome,
@@ -827,7 +868,7 @@ fn number(value: &Value, key: &str) -> Option<u64> {
 }
 
 const HISTORY_SELECT: &str = "SELECT
-    run_record_id, run_id, task_id, task_name, source_sql, staging_table, started_at,
+    run_record_id, run_id, run_trigger, task_id, task_name, source_sql, staging_table, started_at,
     started_at_ms, finished_at, outcome, target_table_effect, stage, source_rows, staged_rows,
     sink_reported_rows, purged_rows, source_batches, received_batches, fetch_ms, push_ms,
     total_rows, precount_ms,
@@ -840,6 +881,7 @@ fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunHistory> {
     Ok(RunHistory {
         run_record_id: row.get("run_record_id")?,
         run_id: row.get("run_id")?,
+        trigger: row.get("run_trigger")?,
         task_id: row.get("task_id")?,
         task_name: row.get("task_name")?,
         source_sql: row.get("source_sql")?,
