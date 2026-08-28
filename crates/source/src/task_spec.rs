@@ -51,7 +51,8 @@ pub struct TaskSpec {
     /// 落盘，值排在表之后会直接序列化失败。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub where_clause: Option<String>,
-    /// 写入模式（#261）。今天只有「追加写」一档，清空后导入那一档接进来时加在这里。
+    /// 写入模式（#261/#264）：「追加写」与「先清空再导入」两档，定义在
+    /// [`db_qbs_shared::WriteMode`]。**不给默认值**——任务定义里必须写明白这一次要怎么写。
     ///
     /// 它是标量，和 [`Self::where_clause`] 一样**必须排在 `columns` 之前**。
     pub write_mode: WriteMode,
