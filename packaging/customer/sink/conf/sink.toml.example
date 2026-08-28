@@ -3,3 +3,6 @@
 # Sink has no login layer. Restrict this port by firewall so only the source
 # server can access it.
 listen = "0.0.0.0:18080"
+
+# 同时允许在飞的运行数，不写就是 4。超限时开跑的请求当场被拒，不排队。
+# max_concurrent_runs = 4

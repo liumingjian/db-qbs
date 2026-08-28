@@ -13,7 +13,7 @@
 //! 拿测试替身换掉本文件时，换掉的正是这三件事——见 `test_support` 的模块说明。
 
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 use db_qbs_shared::{swap_rows_in_range, MysqlServerInfo, RowCounts};
@@ -537,26 +537,58 @@ fn build_swap_upsert_statement(
     statement
 }
 
-// Connections enter this pool only after the creation hook has completed.
+/// 一个 run 的目标端连接池：有上限、会复用，**每条新连接照旧跑完整套开连接仪式**（#260）。
+///
+/// 从前这里是一个没有上限的 `Vec<Conn>`：`new` 急开一条，`with_conn` 拿不到空闲的就
+/// 现开一条，用完一律塞回去。低并发下它实际只有一条连接（于是同一个 run 的所有操作
+/// 互相排队），高并发下它又没有任何刹车（于是能把目标库的 `max_connections` 顶穿）。
+///
+/// 现在：空闲的优先复用；没有空闲但活着的连接还没到 [`MAX_POOL_CONNECTIONS`] 就新建；
+/// 已经到顶就在条件变量上等，等别人还回来一条。**排队发生在这里，不发生在目标库上**。
+///
+/// 仪式那一环一个字没动：[`Self::connect`] 是**唯一**造连接的地方，它无条件调用
+/// [`run_connection_ritual`]。第一条如此，第 N 条也如此、重连出来的那条同样如此——
+/// 那四条断言就是「这台 agent 可用」的定义，池化不是省掉它们的理由。
 struct RitualPool {
     opts: Opts,
-    idle: Mutex<Vec<Conn>>,
+    state: Mutex<PoolState>,
+    returned: Condvar,
 }
+
+struct PoolState {
+    idle: Vec<Conn>,
+    /// 已经造出来、还没销毁的连接数（含此刻正被人用着的那些）。上限就管着它。
+    live: usize,
+}
+
+/// 一个 run 的池子最多同时持有几条 MySQL 连接。
+///
+/// 一个 run 内部本来就是**顺序**推批次的，所以 1 条也够用；留到 4 是因为切换那一步
+/// 与元数据读取可能与批次写入交错，而多备几条的代价只是几个空闲会话。真正管住
+/// 「这台 agent 一共开多少连接」的是 `max_concurrent_runs`——池子是**每个 run 一个**。
+const MAX_POOL_CONNECTIONS: usize = 4;
 
 impl RitualPool {
     fn new(opts: Opts) -> Result<Self, String> {
         let pool = Self {
             opts,
-            idle: Mutex::new(Vec::new()),
+            state: Mutex::new(PoolState {
+                idle: Vec::new(),
+                live: 0,
+            }),
+            returned: Condvar::new(),
         };
+        // 急开第一条：`test_connection` 与 `POST /v1/runs` 都指望「池子建得起来」
+        // 等价于「这台 MySQL 过得了开连接仪式」。这条断言不能改成惰性的。
         let connection = pool.connect()?;
-        pool.idle
-            .lock()
-            .expect("MySQL pool mutex poisoned")
-            .push(connection);
+        let mut state = pool.state.lock().expect("MySQL pool mutex poisoned");
+        state.live += 1;
+        state.idle.push(connection);
+        drop(state);
         Ok(pool)
     }
 
+    /// **唯一**造连接的地方：开一条，然后无条件跑完开连接仪式。
     fn connect(&self) -> Result<Conn, String> {
         let mut connection =
             Conn::new(self.opts.clone()).map_err(|error| format!("连接 MySQL 失败：{error}"))?;
@@ -564,28 +596,77 @@ impl RitualPool {
         Ok(connection)
     }
 
+    /// 借一条连接出来用，用完还回去。
+    ///
+    /// 借与还都只在锁里改计数，**操作本身在锁外跑**——否则这把锁会变成第二个串行点。
     fn with_conn<T>(
         &self,
         operation: impl FnOnce(&mut Conn) -> Result<T, MysqlError>,
     ) -> Result<T, PoolError> {
-        let pooled = self.idle.lock().expect("MySQL pool mutex poisoned").pop();
-        let mut connection = match pooled {
-            Some(mut connection) => {
-                if connection.ping().is_ok() {
-                    connection
-                } else {
-                    self.connect().map_err(PoolError::ConnectionRitual)?
-                }
-            }
-            None => self.connect().map_err(PoolError::ConnectionRitual)?,
-        };
-
+        let mut connection = self.acquire()?;
         let result = operation(&mut connection).map_err(PoolError::Mysql);
-        self.idle
-            .lock()
-            .expect("MySQL pool mutex poisoned")
-            .push(connection);
+        self.release(connection);
         result
+    }
+
+    fn acquire(&self) -> Result<Conn, PoolError> {
+        let mut state = self.state.lock().expect("MySQL pool mutex poisoned");
+        loop {
+            if let Some(mut connection) = state.idle.pop() {
+                drop(state);
+                if connection.ping().is_ok() {
+                    return Ok(connection);
+                }
+                // 这条已经死了：连它占的那个名额一起交出去，再按新建走一遍仪式。
+                // 直接复用一个 ping 不通的会话，等于把仪式设过的会话变量赌在
+                // 服务端的自动重连上——那正是仪式要排除的不确定。
+                drop(connection);
+                let mut state = self.state.lock().expect("MySQL pool mutex poisoned");
+                state.live -= 1;
+                drop(state);
+                return self.open_counted();
+            }
+            if state.live < MAX_POOL_CONNECTIONS {
+                state.live += 1;
+                drop(state);
+                return self.open_counted_reserved();
+            }
+            // 到顶了：等别人还一条回来。等在这里比多开一条连接强——
+            // 目标库的 `max_connections` 是个硬上限，撞上它是整台 agent 一起失败。
+            state = self
+                .returned
+                .wait(state)
+                .expect("MySQL pool mutex poisoned");
+        }
+    }
+
+    /// 名额还没占：占一个再开。
+    fn open_counted(&self) -> Result<Conn, PoolError> {
+        let mut state = self.state.lock().expect("MySQL pool mutex poisoned");
+        state.live += 1;
+        drop(state);
+        self.open_counted_reserved()
+    }
+
+    /// 名额已经占好了：开不出来就把名额退回去，并叫醒一个等的人。
+    fn open_counted_reserved(&self) -> Result<Conn, PoolError> {
+        match self.connect() {
+            Ok(connection) => Ok(connection),
+            Err(message) => {
+                let mut state = self.state.lock().expect("MySQL pool mutex poisoned");
+                state.live -= 1;
+                drop(state);
+                self.returned.notify_one();
+                Err(PoolError::ConnectionRitual(message))
+            }
+        }
+    }
+
+    fn release(&self, connection: Conn) {
+        let mut state = self.state.lock().expect("MySQL pool mutex poisoned");
+        state.idle.push(connection);
+        drop(state);
+        self.returned.notify_one();
     }
 }
 

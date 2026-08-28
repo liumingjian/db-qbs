@@ -88,3 +88,20 @@ fn a_code_outside_the_closed_set_is_a_defect_not_a_silent_pass() {
         FailureKind::Defect
     );
 }
+
+#[test]
+fn an_agent_that_is_busy_is_not_a_defect() {
+    // 目标表被别的运行占着、或 agent 的并发额度满了（#260），处置都是「等一等重跑」。
+    // 落 `Defect` 的话，界面会把一次完全正常的排队冲突说成程序缺陷。
+    for code in [
+        "SWAP_TARGET_BUSY",
+        "TARGET_TABLE_BUSY",
+        "RUN_QUOTA_EXCEEDED",
+    ] {
+        assert_eq!(
+            FailureKind::from_sink_code(code),
+            FailureKind::TargetBusy,
+            "{code}"
+        );
+    }
+}

@@ -1165,3 +1165,174 @@ fn staging_permission_errors_name_create_or_drop() {
     assert!(error.message.contains("DROP"), "{}", error.message);
     assert_eq!(error.details["operation"], "DROP");
 }
+
+// —— 并发额度与目标表互斥（#260）——————————————————————————————
+//
+// 这几条都跑在**服务对象 + 内存目标端替身**上：判的是编排——谁受理、谁被拒、
+// 拒的那句话说没说清是哪张表被哪次运行占着——一行真实的 MySQL 都不需要。
+// 多线程本身的正确性由既有那批集成用例在多线程服务器下继续通过来担保，
+// 本票**不为并发另开一道集成接缝**。
+
+const RUN_A: &str = "20260814091530_a3f19c";
+const RUN_B: &str = "20260814091531_b4e20d";
+const RUN_C: &str = "20260814091532_c5f31e";
+
+fn open_request_on(
+    run_id: &str,
+    target_table: &str,
+    source_columns: Vec<SourceColumn>,
+) -> OpenRunRequest {
+    OpenRunRequest {
+        run_id: run_id.to_owned(),
+        target_table: target_table.to_owned(),
+        ..open_request(source_columns)
+    }
+}
+
+#[test]
+fn the_concurrency_cap_admits_up_to_the_configured_number_of_runs_and_refuses_the_next() {
+    let (sources, targets) = valid_columns();
+    let destination = Arc::new(InMemoryDestination {
+        columns: targets,
+        ..InMemoryDestination::default()
+    });
+    let service = SinkService::new("qbs", destination).with_max_concurrent_runs(2);
+
+    // 每个 run 各指一张自己的表，所以挡住第三个的只可能是额度，不是目标表互斥。
+    service
+        .open(open_request_on(RUN_A, "T_ONE", sources.clone()))
+        .unwrap();
+    service
+        .open(open_request_on(RUN_B, "T_TWO", sources.clone()))
+        .unwrap();
+
+    let error = service
+        .open(open_request_on(RUN_C, "T_THREE", sources))
+        .unwrap_err();
+
+    assert_eq!(error.code, "RUN_QUOTA_EXCEEDED");
+    assert_eq!(error.status, 429);
+    assert!(error.message.contains("并发额度已满"), "{}", error.message);
+    // 额度是多少、正占着的是谁，两样都得说出来——只说「满了」，现场那个人无从下手。
+    assert!(error.message.contains('2'), "{}", error.message);
+    assert!(
+        error.message.contains(RUN_A) && error.message.contains(RUN_B),
+        "{}",
+        error.message
+    );
+    assert_eq!(error.details["max_concurrent_runs"], 2);
+}
+
+#[test]
+fn a_run_that_finished_hands_its_slot_back_to_the_quota() {
+    let (sources, targets) = valid_columns();
+    let destination = Arc::new(InMemoryDestination {
+        columns: targets,
+        ..InMemoryDestination::default()
+    });
+    let service = SinkService::new("qbs", destination).with_max_concurrent_runs(1);
+
+    service
+        .open(open_request_on(RUN_A, "T_ONE", sources.clone()))
+        .unwrap();
+    let refused = service
+        .open(open_request_on(RUN_B, "T_TWO", sources.clone()))
+        .unwrap_err();
+    assert_eq!(refused.code, "RUN_QUOTA_EXCEEDED");
+
+    service.abort(RUN_A).unwrap();
+
+    // 被拒的那一次没在额度上留下任何痕迹，走掉的那一次把位子还了回来。
+    service
+        .open(open_request_on(RUN_B, "T_TWO", sources))
+        .unwrap();
+}
+
+#[test]
+fn two_runs_on_the_same_target_table_cannot_be_in_flight_at_once() {
+    // 并发之后最危险的那个缺口：目标表只是个字符串，两个不同任务完全可以指向同一张。
+    // 一个任务正在整表改写、另一个刚把行 upsert 进去，那些行会被静默盖掉，
+    // **两次运行都报成功**。所以这道判定必须在写库的这一端。
+    let (sources, targets) = valid_columns();
+    let destination = Arc::new(InMemoryDestination {
+        columns: targets,
+        ..InMemoryDestination::default()
+    });
+    let service = SinkService::new("qbs", destination).with_max_concurrent_runs(8);
+
+    service
+        .open(open_request_on(RUN_A, "T_POSITION", sources.clone()))
+        .unwrap();
+    let error = service
+        .open(open_request_on(RUN_B, "T_POSITION", sources.clone()))
+        .unwrap_err();
+
+    assert_eq!(error.code, "TARGET_TABLE_BUSY");
+    assert_eq!(error.status, 409);
+    // 措辞点名到表、点名到占着它的那次运行。
+    assert!(
+        error.message.contains("qbs.T_POSITION"),
+        "{}",
+        error.message
+    );
+    assert!(error.message.contains(RUN_A), "{}", error.message);
+    assert_eq!(error.details["target_table"], "T_POSITION");
+    assert_eq!(error.details["holder_run_id"], RUN_A);
+    assert_eq!(error.run_id.as_deref(), Some(RUN_B));
+
+    // 额度还剩七个位子，另一张表照开不误——挡的是同一张表，不是「有别人在跑」。
+    service
+        .open(open_request_on(RUN_C, "T_OTHER", sources.clone()))
+        .unwrap();
+
+    // 占着的那次结束，表就还了回来。
+    service.abort(RUN_A).unwrap();
+    service
+        .open(open_request_on(RUN_B, "T_POSITION", sources))
+        .unwrap();
+}
+
+#[test]
+fn the_target_table_mutex_ignores_letter_case() {
+    // MySQL 的表名大小写敏感与否随 `lower_case_table_names` 与文件系统变。
+    // 判互斥宁可多拦一次，也不能因为大小写差一位就放两个 run 同时进同一张表。
+    let (sources, targets) = valid_columns();
+    let destination = Arc::new(InMemoryDestination {
+        columns: targets,
+        ..InMemoryDestination::default()
+    });
+    let service = SinkService::new("qbs", destination).with_max_concurrent_runs(8);
+
+    service
+        .open(open_request_on(RUN_A, "T_POSITION", sources.clone()))
+        .unwrap();
+    let error = service
+        .open(open_request_on(RUN_B, "t_position", sources))
+        .unwrap_err();
+
+    assert_eq!(error.code, "TARGET_TABLE_BUSY");
+}
+
+#[test]
+fn max_concurrent_runs_defaults_to_four_and_zero_is_read_as_one() {
+    let config = SinkConfig::parse("listen = \"127.0.0.1:8080\"\n").unwrap();
+    assert_eq!(config.max_concurrent_runs, 4);
+
+    let raw = "listen = \"127.0.0.1:8080\"\nmax_concurrent_runs = 16\n";
+    assert_eq!(SinkConfig::parse(raw).unwrap().max_concurrent_runs, 16);
+
+    let (sources, targets) = valid_columns();
+    let destination = Arc::new(InMemoryDestination {
+        columns: targets,
+        ..InMemoryDestination::default()
+    });
+    // 配置里写 0 的意思几乎肯定是「不限」，而「不限」正是本票要撤掉的那件事。
+    let service = SinkService::new("qbs", destination).with_max_concurrent_runs(0);
+    service
+        .open(open_request_on(RUN_A, "T_ONE", sources.clone()))
+        .unwrap();
+    let refused = service
+        .open(open_request_on(RUN_B, "T_TWO", sources))
+        .unwrap_err();
+    assert_eq!(refused.code, "RUN_QUOTA_EXCEEDED");
+}

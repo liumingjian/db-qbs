@@ -295,6 +295,13 @@ branches on the version.
    **It hangs off the pool's connection-creation hook, not the top of the business code** — otherwise
    the second connection in the pool comes up bare. It concerns no particular column and happens
    before the mapping precheck, so it never appears in the precheck's per-column report.
+   The pool behind it is a real one — **bounded, and reusing** — but that changed nothing about the
+   ritual: the pool has exactly one place that creates a connection, and it runs the ritual
+   unconditionally. First connection, Nth connection, and the replacement for one that stopped
+   answering are all the same case. A pooled connection that fails its ping is **thrown away rather
+   than reused**: keeping it would bet the ritual's session variables on the server's reconnect
+   behaviour, which is precisely the uncertainty the ritual exists to remove. The four assertions are
+   the definition of an agent being usable; **pooling is not a licence to skip them**.
 
    **The 64 MiB is a hard gate on both supported versions**; it is what stops a large batch being
    truncated at the protocol layer, which surfaces as a syntax error and sends whoever is on call
@@ -465,6 +472,29 @@ branches on the version.
    ever held across blocking IO** — Oracle calls, agent probes and sink requests all happen with
    every lock released. The one mutual exclusion that is a product rule, not an implementation
    detail, is **one task runs at most once at a time** (a second start returns 409).
+
+   The **agent** side is built the same way and for the same reason. Its HTTP face is served by a
+   fixed pool of worker threads over one listener; the run registry lock is taken only long enough to
+   hand out a run's destination handle and reserve its batch sequence number, with **every MySQL
+   write happening outside it**; and the target-side connection pool is bounded and reusing. Those
+   three were one thing, not three: while any of them serialised the process, the other two bought
+   nothing — a single commit's table-wide rewrite would still hold up every other task's batches.
+   How many runs may be in flight on one agent is a **configured number** (`max_concurrent_runs` in
+   `sink.toml`, 4 by default), not an accident of process structure; over it, opening a run is
+   **refused on the spot rather than queued** (`RUN_QUOTA_EXCEEDED`), because a caller hanging on a
+   connection that will not move is worse than being told the quota is full. Worker threads are a
+   separate, larger number: the refusal itself, and the read-only endpoints, must still answer while
+   several slow writes are in flight.
+
+   Concurrency also **widens the mutual exclusion key from a task to a task ∪ its target table**:
+   at most one run at a time per (agent, database, target table). A target table is just a string
+   with no uniqueness constraint, so two unrelated tasks may legitimately point at the same one. In
+   the serial era that was harmless; concurrently it is silent data loss — one run rewriting the
+   whole table while another upserts rows into it deletes those rows, and **both runs report
+   success**. This one is **adjudicated on the agent side, never on the source's honour**: there may
+   be several sources, and none of them holds the truth about the target database. The refusal
+   (`TARGET_TABLE_BUSY`) names **which target table is held by which run**, and the comparison
+   ignores letter case, because whether MySQL table names are case-sensitive depends on the host.
 
    **Multiple users are explicitly out of scope**: there is exactly one account, tasks have no
    owner, and there is no per-user visibility, sharing or audit trail. Everyone who logs in sees and

@@ -10,3 +10,8 @@ listen = "127.0.0.1:8080"
 # 处置是在「目标端 Agent」屏对这台重新保存一次。
 # agent_name = "目标端 A"
 # agent_id_file = "/etc/db-qbs/agent-id"
+# 这台 agent 同时允许在飞多少次运行（#260），不写就是 4。超限时 POST /v1/runs 当场拒
+# （RUN_QUOTA_EXCEEDED），不排队。另有一道不可配置的互斥：同一个库上的同一张目标表，
+# 同时只允许一次运行（TARGET_TABLE_BUSY）——两个不同任务指向同一张表时，
+# 并发写会互相把对方的行盖掉，而两次运行都会报成功。
+# max_concurrent_runs = 4

@@ -41,6 +41,18 @@ pub use service::build_staging_ddl;
 const MAX_PREPARED_STATEMENT_PLACEHOLDERS: usize = 65_535;
 const TOMBSTONE_LIMIT: usize = 32;
 
+/// 一台 agent 上同时允许在飞的 run 数上限，`max_concurrent_runs` 不写时取它（#260）。
+///
+/// 4 不是算出来的，是**保守的默认**：每个 run 各持一份自己的目标端连接池
+/// （[`MysqlDestination`]），4 个 run 在最坏情况下也就是十几条 MySQL 连接。
+/// 现场要更高就在 `sink.toml` 里写明——但那是一次**明示**的决定，
+/// 不该由「谁先把请求发过来谁就占住」来隐式决定。
+pub const DEFAULT_MAX_CONCURRENT_RUNS: usize = 4;
+
+fn default_max_concurrent_runs() -> usize {
+    DEFAULT_MAX_CONCURRENT_RUNS
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SinkConfig {
@@ -60,6 +72,12 @@ pub struct SinkConfig {
     /// 不需要人来准备，没有就现生成（见 [`crate::load_agent_identity`]）。
     #[serde(default)]
     pub agent_id_file: Option<PathBuf>,
+    /// 这台 agent 同时允许在飞多少个 run（#260），不写取 [`DEFAULT_MAX_CONCURRENT_RUNS`]。
+    ///
+    /// 超限时 `POST /v1/runs` 当场拒，**不排队**：排队等于让 source 那边挂着一条
+    /// 看不出为什么不动的连接，而「额度满了，等在跑的那几个结束再来」是句能读懂的话。
+    #[serde(default = "default_max_concurrent_runs")]
+    pub max_concurrent_runs: usize,
     /// `sink.toml` 所在目录，**不来自配置文件本身**：`agent_id_file` 留空时的默认位置按它算。
     /// [`SinkConfig::parse`] 出来的配置里它是空的，那条路径只有测试在走。
     #[serde(skip)]
@@ -261,6 +279,9 @@ impl<D: Destination> DestinationFactory for FixedDestination<D> {
 
 struct ActiveRun<D> {
     run_id: String,
+    /// 本次 run 写的是哪个库——互斥键的前半截（#260）。
+    /// 取自工厂给的 [`ConnectedDestination::database`]，不从请求里另取一份。
+    database: String,
     staging_table: String,
     source_columns: Vec<String>,
     swap_columns: Vec<String>,
@@ -280,6 +301,7 @@ impl<D> Clone for ActiveRun<D> {
     fn clone(&self) -> Self {
         Self {
             run_id: self.run_id.clone(),
+            database: self.database.clone(),
             staging_table: self.staging_table.clone(),
             source_columns: self.source_columns.clone(),
             swap_columns: self.swap_columns.clone(),
@@ -294,9 +316,24 @@ impl<D> Clone for ActiveRun<D> {
     }
 }
 
+/// 一个已受理但尚未进 `active_runs` 的 run 占的位子（#260）。
+pub(crate) struct RunAdmission {
+    pub(crate) database: String,
+    pub(crate) target_table: String,
+}
+
 pub struct SinkService<F: DestinationFactory> {
     factory: F,
+    /// 同时在飞的 run 数上限（#260），来自 `sink.toml` 的 `max_concurrent_runs`。
+    max_concurrent_runs: usize,
     active_runs: Mutex<HashMap<String, ActiveRun<F::Dest>>>,
+    /// 已经受理、但还没走完「连库 → 读元数据 → 预检 → 建暂存表」的 run（#260）。
+    ///
+    /// 为什么不能只看 `active_runs`：那张表要到 `open` 的**最后一行**才有条目，
+    /// 而在它之前是好几秒的 MySQL 往返。只看它的话，两个指向同一张目标表的 run
+    /// 会双双通过判定、双双开跑，互斥键等于没设。受理的那一刻先在这里占个位，
+    /// 无论 `open` 成功还是中途出错，位子都由 `AdmissionGuard` 的 `Drop` 归还。
+    admitting: Mutex<HashMap<String, RunAdmission>>,
     tombstones: Mutex<VecDeque<RunResponse>>,
     /// 最近一次连上目标端时读到的 MySQL 自述（#257）。
     ///
