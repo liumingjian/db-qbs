@@ -196,8 +196,12 @@ export function SqlEditorPanel({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const formatted = useMemo(() => formatSql(value), [value]);
   const [wrapped, setWrapped] = useState(false);
-  // **跟着语句长**，上下都有界：十行以下的语句不该配一个半屏高的空框，
-  // 而两百行的语句也不该把下面的映射表推到三屏之外——超过上界的用全屏读。
+  // **这是初始值 / 回退值，不再是面板里的实际高度**：第 1 步那两栏里，编辑器的高度
+  // 由 `.wizard-pane-card` 分给它——两栏等高、卡片吃满剩余高度，下沿才在同一条线上，
+  // 跟着行数长会把左栏拉得比右栏长（见 app.css「两栏取数区的框线」那一节）。
+  // 删不得：`rows` 这个属性还在（全屏那一档给的是写死的 32），而 SSR 首帧压根没有布局，
+  // 那一屏的高度就是 `rows` 说了算。上下界的理由照旧——十行以下的语句不该配一个
+  // 半屏高的空框，两百行的语句也不该把下面的映射表推到三屏之外，超过上界的用全屏读。
   const visibleRows = useMemo(
     () => Math.min(26, Math.max(10, value.split("\n").length + 2)),
     [value],

@@ -38,6 +38,7 @@ import {
   foldedSteps,
   leaving,
   leavingConfirmation,
+  selectionBlocker,
   taskName,
   toSpec,
   view,
@@ -80,10 +81,26 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
   ref,
 ) {
   const [draft, setDraft] = useState(initial);
+  /*
+   * 五步里的第 1 步「选择数据」（#245）。`wizard.ts` 的 `Step` 只有 1-4 且一个字不能改，
+   * 所以它不是一个 Step，而是本地状态——`draft.step` 全程照旧。
+   *
+   * 初值**不看 `draft.step`**：落在第 1 步的草稿多半已经把数据选完了（从存盘恢复回来的、
+   * 进来编辑一个已有任务的），那种草稿该直接开在映射步上。开在选择屏的是「还没挑源表、
+   * 也没写 SQL」的草稿——问的正是 `selectionBlocker` 那句话。
+   */
+  const [isSelectingData, setIsSelectingData] = useState(() => selectionBlocker(initial) !== null);
   const draftRef = useRef(initial);
   const [pending, setPending] = useState<PendingConfirmation | null>(null);
   const [tables, setTables] = useState<BuilderTable[]>([]);
-  const [dblinks, setDblinks] = useState<string[]>([]);
+  /*
+   * 清单要等一次请求才回来，但草稿里已经连着的那条现在就得摆出来：不然打开一份走
+   * DBLINK 的任务时，数据源行先渲染成「没有 DBLINK」的样子，清单到了再凭空多出一个
+   * 控件——条件出现的控件正是这套两栏布局的天敌（#249）。
+   */
+  const [dblinks, setDblinks] = useState<string[]>(
+    () => (initial.spec.dblink === undefined ? [] : [initial.spec.dblink]),
+  );
   const [targetTables, setTargetTables] = useState<string[]>([]);
   const [targetMetadataKey, setTargetMetadataKey] = useState<string | null>(null);
   const [sourceFilter, setSourceFilter] = useState("");
@@ -105,8 +122,43 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
   const headingRef = useRef<HTMLHeadingElement | null>(null);
   const lastStep = useRef(initial.step);
   const [announcement, setAnnouncement] = useState("");
+  /*
+   * 缺表提示搬到了两栏容器之外的通栏一行（#249），目标表输入框靠 aria-describedby
+   * 指过去——那段话因此需要一个稳定的 id，不能再是输入框旁边匿名的一句。
+   * 标签也随之从「包着输入框」变成 htmlFor，所以输入框自己也要一个 id。
+   */
+  const targetMissingNoteId = useId();
+  const targetTableInputId = useId();
   const model = view(draft);
   const advanceBlocked = model.step.blockers.length > 0;
+  /** 第 1 步走不下去的理由，或者 `null`。 */
+  const selectionRefusal = selectionBlocker(draft);
+  /*
+   * 五格轨道：第 1 格是「选择数据」那个本地状态，后四格是 `wizard.ts` 给的那四步。
+   * 还在选择屏上时后四格一律 todo——那时 `draft.step` 虽然是 1，人却还没走到映射。
+   *
+   * `number` 就是人眼里的序号（见 `displayStep`），存进条目里而不是渲染时数下标：
+   * 轨道要渲染两遍（左栏竖着、选择屏横着），下标算两次就是两个会各自漂的算法。
+   */
+  const railEntries: RailSlot[] = [
+    { key: "selection", number: 1, label: "选择数据", state: isSelectingData ? "current" : "done" },
+    ...model.rail.map((entry) => ({
+      key: `step-${entry.step}`,
+      number: displayStep(entry.step),
+      label: entry.label,
+      state: isSelectingData ? ("todo" as const) : entry.state,
+    })),
+  ];
+  const stepCount = displayStepCount(model.rail);
+  /*
+   * 选择屏主按钮上写的必须是它**真正去的地方**。它做的只有一件事：离开选择屏——回到
+   * `draft.step` 那一步。从第 3 步按「改 SQL」进来、又什么都没改的人，按下去回的是第 3 步，
+   * 写死「下一步：选列」在那时候是句假话。真改了选择的话，`wizard.ts` 的清空规则会把
+   * `draft.step` 拨回 1，这一句也就跟着变回「下一步：选列」——标签跟着草稿走，不猜。
+   */
+  const selectionNextLabel = draft.step === 1
+    ? "下一步：选列"
+    : `回到第 ${displayStep(draft.step)} 步：${model.rail.find((entry) => entry.step === draft.step)?.label ?? ""}`;
   /** 最后一步为什么提交不了，或者 `null`。 */
   const submitRefusal =
     busy === "submit" ? "正在提交" : canAdvance(draft, 4)[0]?.message ?? null;
@@ -235,6 +287,25 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
     );
     // model.rail 只随 draft.step 变，不必进依赖表。
   }, [draft.step]);
+
+  /*
+   * 进出选择屏也是一次换步：焦点跟过去，顺带说一句到了第几步（#239 的规矩，第 1 步照办）。
+   * 头一次运行不算——那是刚打开向导，容器自己的初始焦点已经安排过了。
+   */
+  const firstRun = useRef(true);
+  useEffect(() => {
+    if (firstRun.current) {
+      firstRun.current = false;
+      return;
+    }
+    headingRef.current?.focus();
+    setAnnouncement(
+      isSelectingData
+        ? `第 1 步，共 ${stepCount} 步：选择数据`
+        : stepAnnouncement(model.rail, draft.step, []),
+    );
+    // model 只随 draft 变，进出选择屏时读的都是当下这一份。
+  }, [isSelectingData]);
 
   async function loadTables() {
     const request = ++tableRequest.current;
@@ -563,9 +634,22 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
     return targetTables.filter((table) => table.toLocaleLowerCase().includes(query));
   }, [targetFilter, targetTables]);
 
+  const sourceSqlEmpty = (draft.spec.source_sql ?? "").trim() === "";
   /** 已经查过、确认目标库里没有这张表。查之前不显示——那只是「还没查」。 */
   const targetTableMissing =
     draft.spec.target_table.trim() !== "" && !draft.targetTableExists;
+
+  /*
+   * 数据源行两侧同进同退（#249）。条件出现的行是这套两栏布局唯一的天敌：一侧多渲染
+   * 一行，两栏当场差出一个 --ctl-h 加一个 gap。
+   *
+   * 所以「有没有这一行」由两侧合起来定（就是下面这一个判断），「这一行里放什么」才
+   * 各自定——那一半归 `DatasourceRow`，两侧共用同一份。
+   *
+   * 两侧都空是另一回事：那说明压根没有部署信息（没登录、清单还没到），不是「只有一个
+   * 数据源」，此时两侧一起不渲染，仍旧是齐的。
+   */
+  const showDatasourceRow = sourceOptions.length > 0 || targetOptions.length > 0;
 
   function selectTargetTable(table: string) {
     const alreadySelected = draftRef.current.spec.target_table === table;
@@ -579,11 +663,15 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
 
   /**
    * 步骤主体就是一张表单（#240）：在输入框里敲回车，等于按了这一步的主操作——
-   * 前三步是「下一步」，最后一步是「保存」或「开始导入」。这一步不让走时主按钮
+   * 选择数据与前三步是「下一步」，最后一步是「保存」或「开始导入」。这一步不让走时主按钮
    * 是禁用的，浏览器不会替禁用的默认按钮提交；这里再挡一道，回车便越不过拒绝理由。
    */
   function submitStep(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (isSelectingData) {
+      if (selectionRefusal === null) setIsSelectingData(false);
+      return;
+    }
     if (draft.step < 4) {
       if (!advanceBlocked) advance();
       return;
@@ -602,110 +690,194 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
     }
   }
 
-  return (
-    <section
-      className="task-wizard"
-      ref={containerRef}
-      /* 只为了让 Escape 一进来就有地方落（见上面那个监听），不进 Tab 序。 */
-      tabIndex={-1}
-      aria-label={draft.mode === "edit" ? "编辑任务" : "新建导入"}
-    >
-      <aside className="wizard-context">
-        <header>
-          <strong>导入上下文</strong>
-          <button className="icon-button" type="button" title="退出向导" aria-label="退出向导" onClick={() => requestLeave(onCancel)}><X size={ICON.md} /></button>
-        </header>
+  /*
+   * 第 1 步「选择数据」的源端卡片：一张卡画唯一那一层框，里面是编辑器或源表树。
+   * 自定义 SQL 那一路把结果列收进同一张卡的下半段——它是这条 SQL 的产物，另起一块
+   * 只会把左栏拉得比右栏长。
+   */
+  const sourceCard = draft.fetchMode === "sql" ? (
+    <div className="wizard-pane-card">
+      <SqlEditor
+        value={draft.spec.source_sql ?? ""}
+        placeholder="SELECT ID, NAME FROM APP.T_CUSTOMER"
+        onChange={(value) => requestChange({ type: "source-sql", sql: value })}
+        onFormat={(value) => requestChange({ type: "format-sql", sql: value })}
+      />
+      <div className="wizard-pane-result">
+        <ResultColumns columns={draft.sourceColumns} busy={busy === "columns"} />
+      </div>
+    </div>
+  ) : (
+    <div className="wizard-pane-card">
+      <label className="tree-search wizard-pane-card-head">
+        <Search size={ICON.sm} aria-hidden="true" />
+        <input value={sourceFilter} placeholder="筛选 owner / 表" onChange={(event) => setSourceFilter(event.target.value)} />
+      </label>
+      {/* **不声称是 tree**（UX 评审 P2）：`role="tree"` 承诺的是 treeitem 的整套键盘
+          契约——上下左右移动、Home/End、展开折叠。这里是一组 `<button>`，一条都没实现，
+          读屏软件照着 tree 的规则去用只会更糟。它实际上是一个「披露式分组列表」：
+          owner 行自己带 aria-expanded。 */}
+      <div className="schema-tree" role="group" aria-label="源表">
+        {sourceGroups.map(([owner, ownerTables]) => {
+          const open = expandedOwners.has(owner);
+          return <div className="schema-node" key={owner}>
+            <button className="schema-row" type="button" aria-expanded={open} onClick={() => setExpandedOwners((current) => {
+              const next = new Set(current);
+              if (open) next.delete(owner); else next.add(owner);
+              return next;
+            })}>
+              {open ? <ChevronDown size={ICON.sm} /> : <ChevronRight size={ICON.sm} />}
+              <span className="schema-name">{owner}</span><span className="schema-count">{ownerTables.length}</span>
+            </button>
+            {open && <div className="table-node-list">{ownerTables.map((table) => (
+              <button
+                className={`table-node ${draft.spec.owner === owner && draft.spec.table === table.name ? "is-selected" : ""}`}
+                key={`${owner}.${table.name}`}
+                type="button"
+                onClick={() => requestChange({ type: "source-table", owner, table: table.name })}
+              >{table.name}</button>
+            ))}</div>}
+          </div>;
+        })}
+      </div>
+    </div>
+  );
 
-        <div className="wizard-mode" role="group" aria-label="取数方式">
-          <button
-            type="button"
-            className={draft.fetchMode === "table" ? "is-active" : ""}
-            onClick={() => requestChange({ type: "fetch-mode", fetchMode: "table" })}
-          >按表选择</button>
-          <button
-            type="button"
-            className={draft.fetchMode === "sql" ? "is-active" : ""}
-            onClick={() => requestChange({ type: "fetch-mode", fetchMode: "sql" })}
-          >自定义 SQL</button>
-        </div>
+  /* 源端的控件行：报「现在选中的是什么」，刷新按钮就摆在它报的那个状态旁边——
+     原来这颗刷新挂在面板表头里，离它刷新的东西隔着一整段。 */
+  const sourceColbar = draft.fetchMode === "sql" ? (
+    <div className="wizard-pane-colbar">
+      <span className="wizard-pane-colbar-label">结果列</span>
+      <div className="wizard-pane-colbar-row">
+        <span className="wizard-pane-colbar-state">
+          {draft.sourceColumns.length > 0
+            ? `${draft.sourceColumns.length} 列`
+            : busy === "columns" ? "正在识别…" : "尚未识别"}
+        </span>
+        {/* 理由不挂在这颗**自己就是 `disabled`** 的按钮的 `title` 上：一个字都显示不出来（#238）。 */}
+        <Refusable reason={sourceSqlEmpty ? "先写好 SQL" : busy === "columns" ? "正在刷新结果列" : null}>{(describedBy) => (
+          <button className="button" type="button" disabled={sourceSqlEmpty || busy === "columns"} aria-describedby={describedBy} onClick={() => void loadSourceColumns()}>
+            {busy === "columns" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : <RefreshCw size={ICON.sm} />}刷新结果列
+          </button>
+        )}</Refusable>
+      </div>
+    </div>
+  ) : (
+    <div className="wizard-pane-colbar">
+      <span className="wizard-pane-colbar-label">源表</span>
+      <div className="wizard-pane-colbar-row">
+        <span className="wizard-pane-colbar-state">
+          {draft.spec.owner !== "" && draft.spec.table !== "" ? `${draft.spec.owner}.${draft.spec.table}` : "尚未选择"}
+        </span>
+        {/* 这一颗从不禁用，不必走 `Refusable`。 */}
+        <button className="button" type="button" onClick={() => void loadTables()}>
+          <RefreshCw className={busy === "tables" ? "is-spinning" : ""} size={ICON.sm} />刷新源表
+        </button>
+      </div>
+    </div>
+  );
 
-        <div className="wizard-context-scroll">
-          <section className="wizard-context-section">
-            <div className="wizard-context-title">
-              <strong>源端 · {model.context.sourceName}</strong>
-              {draft.fetchMode === "table" && (
-                <button className="icon-button" type="button" title="刷新源表" aria-label="刷新源表" onClick={() => void loadTables()}>
-                  <RefreshCw className={busy === "tables" ? "is-spinning" : ""} size={ICON.sm} />
-                </button>
-              )}
-            </div>
-            {/* 新建时也给（UX 评审 P1-10）：这两个下拉原来只在编辑态出现，于是新建路上
-                选错了源库只能退回去从头再来一遍。改动本身有清空规则守着（Rule 1 / Rule 3），
-                真会丢东西时向导自己会拦一道。 */}
-            {sourceOptions.length > 0 && (
-              <label className="wizard-select-label">源端数据源
-                <select value={draft.source.datasource_id} onChange={(event) => {
-                  const option = sourceOptions.find((candidate) => candidate.datasource_id === event.target.value);
-                  if (option !== undefined) requestChange({ type: "source-datasource", datasource: option });
-                }}>
-                  {sourceOptions.map((option) => <option key={option.datasource_id} value={option.datasource_id}>{option.name} · {option.connection}</option>)}
-                </select>
-              </label>
-            )}
-            {draft.fetchMode === "sql" ? (
-              /* SQL 编辑器**搬到了主区**（UX 评审 P1-3）：300px 宽、145px 高的框放不下
-                 一条粘过来的语句。左栏这一格改成放**结果列**——原来这里在自定义 SQL 下
-                 是一整片空白（P1-9），而结果列正是「这条 SQL 到底取出了什么」的答案，
-                 右边勾列时要反复回头看的就是它。 */
-              <ResultColumns columns={draft.sourceColumns} busy={busy === "columns"} />
-            ) : (
-              <>
-                {dblinks.length > 0 && (
-                  <label className="wizard-select-label">DBLINK
-                    <select value={draft.spec.dblink ?? ""} onChange={(event) => requestChange({ type: "dblink", dblink: event.target.value })}>
-                      <option value="">本地库</option>
-                      {dblinks.map((dblink) => <option key={dblink}>{dblink}</option>)}
-                    </select>
-                  </label>
-                )}
-                <label className="tree-search">
-                  <Search size={ICON.sm} aria-hidden="true" />
-                  <input value={sourceFilter} placeholder="筛选 owner / 表" onChange={(event) => setSourceFilter(event.target.value)} />
+  /* 第 1 步：占满主区全宽，源端 / 目标端左右对称两栏（#245）。 */
+  const selectionBody = (
+    <section className="wizard-step wizard-selection">
+      <header className="wizard-selection-head">
+        {/* tabIndex={-1}：能用脚本聚焦，但不进 Tab 序（#239）。全向导只此一个 `<h1>`。 */}
+        <h1 ref={headingRef} tabIndex={-1}>选择数据</h1>
+        <button className="icon-button" type="button" title="退出向导" aria-label="退出向导" onClick={() => requestLeave(onCancel)}><X size={ICON.md} /></button>
+      </header>
+
+      <div className="wizard-mode" role="group" aria-label="取数方式">
+        <button
+          type="button"
+          className={draft.fetchMode === "table" ? "is-active" : ""}
+          onClick={() => requestChange({ type: "fetch-mode", fetchMode: "table" })}
+        >按表选择</button>
+        <button
+          type="button"
+          className={draft.fetchMode === "sql" ? "is-active" : ""}
+          onClick={() => requestChange({ type: "fetch-mode", fetchMode: "sql" })}
+        >自定义 SQL</button>
+      </div>
+
+      <div className="wizard-panes">
+        <section className="wizard-pane" aria-label="源端">
+          {/* 表头只留「源端」：名字由下面的数据源行统一负责，不再重复一遍（#249）。 */}
+          <header className="wizard-pane-head">
+            <strong>源端</strong>
+          </header>
+          {/* 新建时也给（UX 评审 P1-10）：这两个下拉原来只在编辑态出现，于是新建路上
+              选错了源库只能退回去从头再来一遍。改动本身有清空规则守着（Rule 1 / Rule 3），
+              真会丢东西时向导自己会拦一道。 */}
+          {showDatasourceRow && (
+            <DatasourceRow
+              label="源端数据源"
+              options={sourceOptions}
+              datasourceId={draft.source.datasource_id}
+              boundName={model.context.sourceName}
+              onPick={(option) => requestChange({ type: "source-datasource", datasource: option })}
+            >
+              {/* DBLINK 住在数据源这一行里（#249）：数据源吃满剩余宽度，DBLINK 定宽跟在
+                  右边，没有 DBLINK 时数据源自然吃满，行高恒为 --ctl-h。
+                  反例（不要写）：把 DBLINK 做成源端栏的又一个直接子元素——那是凭数据多出
+                  一整行，源端卡片的上沿会比目标端低一截，正是这次要修的病。
+                  仍旧走 `requestChange({ type: "dblink" })`：换 DBLINK 会清掉源表与映射
+                  （`wizard.ts` 的清空规则 2），确认框由那条规则推出来，屏幕不自己判断。 */}
+              {draft.fetchMode === "table" && dblinks.length > 0 && (
+                <label className="wizard-select-label wizard-pane-ds-dblink">DBLINK
+                  <select value={draft.spec.dblink ?? ""} onChange={(event) => requestChange({ type: "dblink", dblink: event.target.value })}>
+                    <option value="">本地库</option>
+                    {dblinks.map((dblink) => <option key={dblink}>{dblink}</option>)}
+                  </select>
                 </label>
-                {/* **不声称是 tree**（UX 评审 P2）：`role="tree"` 承诺的是 treeitem
-                    的整套键盘契约——上下左右移动、Home/End、展开折叠。这里是一组
-                    `<button>`，一条都没实现，读屏软件照着 tree 的规则去用只会更糟。
-                    它实际上是一个「披露式分组列表」：owner 行自己带 aria-expanded。 */}
-                <div className="schema-tree" role="group" aria-label="源表">
-                  {sourceGroups.map(([owner, ownerTables]) => {
-                    const open = expandedOwners.has(owner);
-                    return <div className="schema-node" key={owner}>
-                      <button className="schema-row" type="button" aria-expanded={open} onClick={() => setExpandedOwners((current) => {
-                        const next = new Set(current);
-                        if (open) next.delete(owner); else next.add(owner);
-                        return next;
-                      })}>
-                        {open ? <ChevronDown size={ICON.sm} /> : <ChevronRight size={ICON.sm} />}
-                        <span className="schema-name">{owner}</span><span className="schema-count">{ownerTables.length}</span>
-                      </button>
-                      {open && <div className="table-node-list">{ownerTables.map((table) => (
-                        <button
-                          className={`table-node ${draft.spec.owner === owner && draft.spec.table === table.name ? "is-selected" : ""}`}
-                          key={`${owner}.${table.name}`}
-                          type="button"
-                          onClick={() => requestChange({ type: "source-table", owner, table: table.name })}
-                        >{table.name}</button>
-                      ))}</div>}
-                    </div>;
-                  })}
-                </div>
-              </>
-            )}
-          </section>
+              )}
+            </DatasourceRow>
+          )}
+          {sourceColbar}
+          {sourceCard}
+        </section>
 
-          <section className="wizard-context-section">
-            <div className="wizard-context-title">
-              <strong>目标端 · {model.context.targetName}</strong>
+        <section className="wizard-pane" aria-label="目标端">
+          <header className="wizard-pane-head">
+            <strong>目标端</strong>
+          </header>
+          {/* 数据源行同进同退：两栏是**同一个组件**渲染的，不是抄成两份的两段长得像的
+              JSX——两栏这一段严格同高，靠的正是这一点（CONTEXT.md 常设限制 #10）。 */}
+          {showDatasourceRow && (
+            <DatasourceRow
+              label="目标端数据源"
+              options={targetOptions}
+              datasourceId={draft.target.datasource_id}
+              boundName={model.context.targetName}
+              onPick={(option) => requestChange({
+                type: "target-datasource",
+                datasource: option,
+                online: option.agentStatus === "online",
+              })}
+            />
+          )}
+          {/* 目标端的控件行：与源端的控件行同结构同高（说明 + 一行 --ctl-h 的控件），
+              刷新目标表这颗按钮从面板表头搬到了这里（#249）——刷新动作要和它刷新的那个
+              状态在同一行，原来它挂在表头里，离目标表清单隔着一整段。
+              目标表可以**直接打字**，不只能从清单里挑（UX 评审 P1-4）：打进一个还不存在
+              的名字是正当用法，第 4 步会给出完整的 CREATE TABLE，自己执行完再回来刷新。
+              产品不替人建表这条边界没动（CONTEXT.md）。 */}
+          <div className="wizard-pane-colbar">
+            <label className="wizard-pane-colbar-label" htmlFor={targetTableInputId}>目标表</label>
+            <div className="wizard-pane-colbar-row">
+              {/* 「尚不存在」徽标贴在输入框右端当锚点，绝对定位、不占独立行；解释那一段
+                  在两栏容器之外，由 aria-describedby 连过去。留出的 78px 只在徽标真的
+                  渲染时才让——表存在时长表名不该白丢一截字段宽度。 */}
+              <span className={targetTableMissing ? "wizard-pane-target-input has-badge" : "wizard-pane-target-input"}>
+                <input
+                  id={targetTableInputId}
+                  value={draft.spec.target_table}
+                  placeholder="从下面挑一张，或直接输入表名"
+                  spellCheck={false}
+                  aria-describedby={targetTableMissing ? targetMissingNoteId : undefined}
+                  onChange={(event) => requestChange({ type: "target-table", table: event.target.value })}
+                />
+                {targetTableMissing && <span className="field-badge is-inline wizard-pane-target-badge">尚不存在</span>}
+              </span>
               {/* 刷新**不再绑在「已经选了表」上**（UX 评审 P1-4）：在别处刚建完表回来刷一下
                   清单，正是没选表的时候最需要的动作。选了表就顺带把它的列也重读一遍。 */}
               {/* 「正在刷新」是**按不动的理由**，挂在 title 上等于永远不显示（#238）：
@@ -716,38 +888,9 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
                 </button>
               )}</Refusable>
             </div>
-            {targetOptions.length > 0 && (
-              <label className="wizard-select-label">目标端数据源
-                <select value={draft.target.datasource_id} onChange={(event) => {
-                  const option = targetOptions.find((candidate) => candidate.datasource_id === event.target.value);
-                  if (option !== undefined) requestChange({
-                    type: "target-datasource",
-                    datasource: option,
-                    online: option.agentStatus === "online",
-                  });
-                }}>
-                  {targetOptions.map((option) => <option key={option.datasource_id} value={option.datasource_id}>{option.name} · {option.connection}</option>)}
-                </select>
-              </label>
-            )}
-            {/* 目标表可以**直接打字**，不只能从清单里挑（UX 评审 P1-4）。
-                打进一个还不存在的名字是正当用法：第 3 步会给出完整的 CREATE TABLE，
-                自己执行完再回来刷新。产品不替人建表这条边界没动（CONTEXT.md）。 */}
-            <label className="wizard-select-label">目标表
-              <input
-                value={draft.spec.target_table}
-                placeholder="从下面挑一张，或直接输入表名"
-                spellCheck={false}
-                onChange={(event) => requestChange({ type: "target-table", table: event.target.value })}
-              />
-            </label>
-            {targetTableMissing && (
-              <p className="target-missing-note">
-                <span className="field-badge is-inline">尚不存在</span>
-                这张表目标库里还没有。第 3 步会给出建表语句，运行前需要你自己执行。
-              </p>
-            )}
-            <label className="tree-search">
+          </div>
+          <div className="wizard-pane-card">
+            <label className="tree-search wizard-pane-card-head">
               <Search size={ICON.sm} aria-hidden="true" />
               <input value={targetFilter} placeholder="筛选目标表" onChange={(event) => setTargetFilter(event.target.value)} />
               <span className="tree-count">{filteredTargets.length} / {targetTables.length}</span>
@@ -766,49 +909,100 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
                 >{table}</button>
               ))}
             </div>
-          </section>
+          </div>
+        </section>
+      </div>
 
-        </div>
-      </aside>
+      {/* 通栏一行，落在 `.wizard-panes` **之外**（#249）：它出现或消失都不再动两栏的
+          几何——原来它挤在目标端控件行与卡片之间，一命中就把目标端的卡片往下推两行
+          中文的高度，两栏当场不齐。
+          也不收进 title：#238 立的规矩是理由要是看得见的一行字。 */}
+      {targetTableMissing && (
+        <p className="wizard-missing-note" id={targetMissingNoteId}>
+          <strong>{draft.spec.target_table}</strong> 这张表目标库里还没有。第 4 步会给出建表语句，运行前需要你自己执行。
+        </p>
+      )}
+    </section>
+  );
+
+  return (
+    <section
+      className={`task-wizard ${isSelectingData ? "is-selection" : "is-steps"}`}
+      ref={containerRef}
+      /* 只为了让 Escape 一进来就有地方落（见上面那个监听），不进 Tab 序。 */
+      tabIndex={-1}
+      aria-label={draft.mode === "edit" ? "编辑任务" : "新建导入"}
+    >
+      {/* 选完数据之后左栏就收成这条：一条竖轨道 + 一小块只读摘要，再没有表单控件，
+          也没有树——宽度因此让得出去，剩下的全给映射表。 */}
+      {!isSelectingData && (
+        <aside className="wizard-context">
+          <header>
+            <strong>{draft.mode === "edit" ? "编辑任务" : "新建导入"}</strong>
+            <button className="icon-button" type="button" title="退出向导" aria-label="退出向导" onClick={() => requestLeave(onCancel)}><X size={ICON.md} /></button>
+          </header>
+          <div className="wizard-context-scroll">
+            {/* 第 1 格可点，回去改源表 / 目标表 / SQL。 */}
+            <WizardRail entries={railEntries} className="wizard-vrail" onEditSelection={() => setIsSelectingData(true)} />
+            <div className="wizard-summary">
+              <div className="wizard-summary-head">
+                <strong>当前选择</strong>
+                {/* 回第 1 步不必倒着走一遍向导（#245）：同一份草稿，换一屏改。 */}
+                <button className="button wizard-summary-edit" type="button" onClick={() => setIsSelectingData(true)}>
+                  {draft.fetchMode === "sql" ? "改 SQL" : "改选择"}
+                </button>
+              </div>
+              <span>源端 · {model.context.sourceName}</span>
+              <span className="mono">{model.context.sourceLabel}</span>
+              <span>目标端 · {model.context.targetName}</span>
+              <span className="mono">{model.context.targetTable}</span>
+            </div>
+          </div>
+        </aside>
+      )}
 
       <form className="wizard-main" noValidate onSubmit={submitStep}>
-        <ol className="wizard-rail" aria-label="导入步骤">
-          {model.rail.map((entry) => (
-            <li className={`is-${entry.state}`} aria-current={entry.state === "current" ? "step" : undefined} key={entry.step}>
-              {/* 走过的步子打勾、当前那一步填实心（UX 评审 P1-7）：两者原来长得一模一样，
-                  于是这条轨道说不出「我在哪儿」——而那正是它唯一的职责。 */}
-              <span>{entry.state === "done" ? <Check size={ICON.sm} aria-label="已完成" /> : entry.step}</span>
-              <strong>{entry.label}</strong>
-            </li>
-          ))}
-        </ol>
+        {/* 第 1 步是全宽的，轨道横在顶上；之后轨道搬进左栏，这里不再重复一遍。 */}
+        {isSelectingData && (
+          <WizardRail entries={railEntries} className="wizard-rail" />
+        )}
 
         {/* 全向导只此一处播报口（#239）：换到第几步、叫什么名字，以及向导替你折掉了哪一步——
             不然轨道上那一格自己打了勾，人是不知道为什么的。不是错误，所以用 role="status"。 */}
         <div className="wizard-live visually-hidden" role="status" aria-live="polite">{announcement}</div>
 
         <div className="wizard-step-scroll">
-          <StepBody
-            headingRef={headingRef}
-            draft={draft}
-            sql={sql}
-            sqlError={sqlError}
-            checkError={checkError}
-            busy={busy}
-            change={requestChange}
-            loadSourceColumns={() => void loadSourceColumns()}
-            loadPreview={() => void loadPreview()}
-            loadCheck={() => void loadCheck()}
-          />
+          {isSelectingData ? selectionBody : (
+            <StepBody
+              headingRef={headingRef}
+              editSelection={() => setIsSelectingData(true)}
+              draft={draft}
+              sql={sql}
+              sqlError={sqlError}
+              checkError={checkError}
+              busy={busy}
+              change={requestChange}
+              loadPreview={() => void loadPreview()}
+              loadCheck={() => void loadCheck()}
+            />
+          )}
           {error !== null && <div className="form-error" role="alert">{error}</div>}
         </div>
 
         <footer className="wizard-footer">
-          <button className="button" type="button" onClick={draft.step === 1 ? () => requestLeave(onCancel) : () => requestChange({ type: "back" })}>
-            {draft.step === 1 ? "取消" : "上一步"}
+          {/* 映射步的左键仍旧是「取消」（#240 的回车走查在这一步上量）：回第 1 步的路
+              在左栏那颗「改 SQL」上，不占页脚这一格。 */}
+          <button className="button" type="button" onClick={isSelectingData || draft.step === 1 ? () => requestLeave(onCancel) : () => requestChange({ type: "back" })}>
+            {isSelectingData || draft.step === 1 ? "取消" : "上一步"}
           </button>
           <span className="wizard-footer-actions">
-            {draft.step < 4 ? (
+            {isSelectingData ? (
+              <Refusable reason={selectionRefusal}>{(describedBy) => (
+                <button className="button is-primary" type="submit" disabled={selectionRefusal !== null} aria-describedby={describedBy}>
+                  {selectionNextLabel}
+                </button>
+              )}</Refusable>
+            ) : draft.step < 4 ? (
               <Refusable reason={advanceBlocked ? "请先处理当前步骤中的问题" : null}>{(describedBy) => (
                 <button className="button is-primary" type="submit" disabled={advanceBlocked} aria-describedby={describedBy}>
                   {draft.step === 3 ? "查看确认页" : "下一步"}
@@ -903,6 +1097,115 @@ export function WizardConfirmDialog({ loss, leaving = false, onCancel, onConfirm
 }
 
 /**
+ * 「名字 · 连接串」，两侧都这么写。
+ *
+ * 清单里找不到这一侧时（另一侧有清单、这一侧没有——正是这一行存在的理由），`Draft` 里
+ * 只存着名字，连接串这个进程压根没拿到。那就**说出来**：退回只报名字，两栏看着都是
+ * 一行字，人却读不出这两行说的详略根本不同。
+ */
+function boundLabel(
+  options: readonly DatasourceOption[],
+  datasourceId: string,
+  boundName: string,
+): string {
+  const bound = options.find((candidate) => candidate.datasource_id === datasourceId);
+  return bound === undefined ? `${boundName} · 连接串未知` : `${bound.name} · ${bound.connection}`;
+}
+
+/**
+ * 数据源那一行，源端目标端**同一个组件**（#249）。
+ *
+ * 抄成两份也能跑，但两栏严格同高就成了「两处记得一起改」——而这套两栏布局唯一的天敌
+ * 正是某一栏比另一栏多出或少掉一行（CONTEXT.md 常设限制 #10）。行高、渲染成下拉还是
+ * 只读文本、什么时候整行不出现，都只有一份实现。
+ *
+ * 可选项多于一个给下拉；只有一个、或这一侧压根没拿到清单，给标签 + 一行只读文本，
+ * 两者同高。不用 disabled 下拉——那看着像坏了；也不留空占位块——那是给读屏软件的一段空洞。
+ */
+function DatasourceRow({ label, options, datasourceId, boundName, onPick, children }: {
+  label: string;
+  options: readonly DatasourceOption[];
+  datasourceId: string;
+  /** `Draft` 里存着的那个名字，清单里没有这一侧时的兜底。 */
+  boundName: string;
+  onPick: (option: DatasourceOption) => void;
+  /** 跟在数据源右边的定宽控件（今天只有源端的 DBLINK）。 */
+  children?: ReactNode;
+}) {
+  return <div className="wizard-pane-dsrow">
+    {options.length > 1 ? (
+      <label className="wizard-select-label wizard-pane-ds-main">{label}
+        <select value={datasourceId} onChange={(event) => {
+          const option = options.find((candidate) => candidate.datasource_id === event.target.value);
+          if (option !== undefined) onPick(option);
+        }}>
+          {options.map((option) => <option key={option.datasource_id} value={option.datasource_id}>{option.name} · {option.connection}</option>)}
+        </select>
+      </label>
+    ) : (
+      <div className="wizard-select-label wizard-pane-ds-main">{label}
+        <p className="wizard-pane-ds-fixed">{boundLabel(options, datasourceId, boundName)}</p>
+      </div>
+    )}
+    {children}
+  </div>;
+}
+
+/*
+ * 五步里的第 1 格「选择数据」不是 `wizard.ts` 的 `Step`（`Step` 仍旧只有 1-4，#245 一个字
+ * 没改），可人眼里它就是第 1 步。于是**显示的步号 = wizard 的步号 + 1**，**一共几步 =
+ * 轨道长度 + 1**。这个 +1 原来散在七处（两处轨道下标、播报词里三处、CSS 的 repeat）——
+ * 一样的意思写七遍，下次多一步就得七处都想起来。给它一个名字，改一处就够。
+ * 唯一改不到的是 `app.css` 里 `.wizard-rail` 的 `repeat(5, …)`，那条自己带着注释指回来。
+ */
+const SELECTION_SLOT = 1;
+
+/** 轨道上的一格：`number` 是人眼里的序号，不是 `Step`。 */
+interface RailSlot {
+  key: string;
+  number: number;
+  label: string;
+  state: RailEntry["state"];
+}
+
+/** `wizard.ts` 的第 n 步在人眼里是第几步。 */
+function displayStep(step: Step): number {
+  return step + SELECTION_SLOT;
+}
+
+/** 人眼里这个向导一共几步。 */
+function displayStepCount(rail: readonly RailEntry[]): number {
+  return rail.length + SELECTION_SLOT;
+}
+
+/**
+ * 步骤条，两处共用（左栏竖着一条、选择屏顶上横着一条）。
+ *
+ * 手抄两份的代价不是重复本身，是两份会各自漂：序号怎么算、走过的那一格画什么、
+ * `aria-current` 落在谁头上——这些是**同一条轨道**的规矩，只能有一份。
+ * 两处的差别只有壳的类名，和第 1 格是不是一颗能点回去的按钮。
+ */
+function WizardRail({ entries, className, onEditSelection }: {
+  entries: readonly RailSlot[];
+  className: string;
+  /** 给了就把第 1 格渲染成「回去改选择」的按钮；选择屏自己在第 1 格上，不需要。 */
+  onEditSelection?: () => void;
+}) {
+  return <ol className={className} aria-label="导入步骤">
+    {entries.map((entry) => (
+      <li className={`is-${entry.state}`} aria-current={entry.state === "current" ? "step" : undefined} key={entry.key}>
+        {/* 走过的步子打勾、当前那一步填实心（UX 评审 P1-7）：两者原来长得一模一样，
+            于是这条轨道说不出「我在哪儿」——而那正是它唯一的职责。 */}
+        <span>{entry.state === "done" ? <Check size={ICON.sm} aria-label="已完成" /> : entry.number}</span>
+        {onEditSelection !== undefined && entry.number === 1
+          ? <button className="wizard-rail-back" type="button" onClick={onEditSelection}>{entry.label}</button>
+          : <strong>{entry.label}</strong>}
+      </li>
+    ))}
+  </ol>;
+}
+
+/**
  * 播报词（#239）：到了第几步、这一步叫什么，以及路上被折掉的那些步。
  *
  * 折掉哪几步不在这里数：中间隔着一步不等于向导跳过了它——往回走更不是。
@@ -914,30 +1217,31 @@ function stepAnnouncement(
   folded: readonly Step[],
 ): string {
   const label = (step: Step) => rail.find((entry) => entry.step === step)?.label ?? "";
-  const skipped = folded.map((step) => `第 ${step} 步「${label(step)}」无需处理，已跳过。`);
-  return `${skipped.join("")}第 ${to} 步，共 ${rail.length} 步：${label(to)}`;
+  const skipped = folded.map((step) => `第 ${displayStep(step)} 步「${label(step)}」无需处理，已跳过。`);
+  return `${skipped.join("")}第 ${displayStep(to)} 步，共 ${displayStepCount(rail)} 步：${label(to)}`;
 }
 
 function StepBody({
   headingRef,
+  editSelection,
   draft,
   sql,
   sqlError,
   checkError,
   busy,
   change,
-  loadSourceColumns,
   loadPreview,
   loadCheck,
 }: {
   headingRef: RefObject<HTMLHeadingElement | null>;
+  /** 回第 1 步接着改源端。 */
+  editSelection: () => void;
   draft: Draft;
   sql: BuilderSql | null;
   sqlError: string | null;
   checkError: string | null;
   busy: string | null;
   change: (intent: Change) => void;
-  loadSourceColumns: () => void;
   loadPreview: () => void;
   loadCheck: () => void;
 }) {
@@ -946,26 +1250,14 @@ function StepBody({
     return <section className="wizard-step">
       <header>{/* tabIndex={-1}：能用脚本聚焦，但不进 Tab 序（#239）。 */}<h1 ref={headingRef} tabIndex={-1}>选列与字段映射</h1></header>
       {draft.fetchMode === "sql" && (
-        /* 编辑器住在这里，不在左栏（UX 评审 P1-3）。宽度是主区的宽度，高度 420px 起，
-           带行号、软换行开关、格式化、全屏——这里的 SQL 基本都是粘过来的，粘进来第一件事
-           是通读一遍确认粘对了。 */
-        <section className="generated-sql wizard-sql-card">
+        /* SQL 正文归第 1 步（#245）。这里只留一小块只读回显——同一份 SQL 两处都能改，
+           人会搞不清哪个算数。要改就回第 1 步改，草稿一个字都不丢。 */
+        <section className="generated-sql wizard-sql-echo">
           <header>
             <div><strong>自定义 SQL</strong></div>
-            {/* 理由原来挂在这颗**自己就是 `disabled`** 的按钮的 `title` 上，一个字都显示不出来
-                （#238）。跟底下那几颗一样，交给 `Refusable` 写成旁边的一行字。 */}
-            <Refusable reason={(draft.spec.source_sql ?? "").trim() === "" ? "先写好 SQL" : busy === "columns" ? "正在刷新结果列" : null}>{(describedBy) => (
-              <button className="button" type="button" disabled={(draft.spec.source_sql ?? "").trim() === "" || busy === "columns"} aria-describedby={describedBy} onClick={loadSourceColumns}>
-                {busy === "columns" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : <RefreshCw size={ICON.sm} />}刷新结果列
-              </button>
-            )}</Refusable>
+            <button className="button" type="button" onClick={editSelection}>改 SQL</button>
           </header>
-          <SqlEditor
-            value={draft.spec.source_sql ?? ""}
-            placeholder="SELECT ID, NAME FROM APP.T_CUSTOMER"
-            onChange={(value) => change({ type: "source-sql", sql: value })}
-            onFormat={(value) => change({ type: "format-sql", sql: value })}
-          />
+          <pre className="ddl-output"><HighlightedSql sql={sqlEcho(draft.spec.source_sql ?? "")} /></pre>
         </section>
       )}
       {model.rows.length === 0 ? <p className="wizard-empty">{draft.fetchMode === "sql" ? "尚未识别结果列" : "未选择源表"}</p> : (
@@ -1134,6 +1426,19 @@ function PreviewData({ preview }: { preview: PreviewResult }) {
     <div className="table-wrap"><table className="data-grid preview-table"><thead><tr>{preview.columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{preview.rows.map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, columnIndex) => <td key={`${rowIndex}-${columnIndex}`}><span className="mono">{cell ?? "NULL"}</span></td>)}</tr>)}</tbody></table></div>
     <footer><span>{preview.rows.length} 条 · {preview.elapsed_ms} ms</span>{preview.truncated && <span>结果已截断，仅显示前 10 条</span>}</footer>
   </>;
+}
+
+/**
+ * 映射步那块只读回显：SQL 前几行，长的截断——这里只是「认一眼」，不是读全文。
+ *
+ * 导出只为单测直接量它（`WizardConfirmDialog` 同一个路子）：这个项目没有 DOM harness，
+ * 而截断这件事上唯一会错的地方——多截一行、少截一行、行数报错——只有拿真串子量才看得见。
+ */
+export function sqlEcho(sql: string): string {
+  const trimmed = sql.trim();
+  if (trimmed === "") return "（还没写）";
+  const lines = trimmed.split("\n");
+  return lines.length <= 6 ? trimmed : `${lines.slice(0, 6).join("\n")}\n…（共 ${lines.length} 行）`;
 }
 
 function previewIdentity(draft: Draft): string {
