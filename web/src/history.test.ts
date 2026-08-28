@@ -4,6 +4,7 @@ import type { RunHistory } from "./api";
 import {
   failureKindLabel,
   historyPresentation,
+  knownTerminalEffect,
   runIdPresentation,
   runTaskName,
   runTriggerLabel,
@@ -168,17 +169,28 @@ describe("run history presentation", () => {
     });
   });
 
-  // 服务端那一列会原样搬运它不认识的拼写（#264）。界面认不出来就落 null，
-  // 由展示层把原值直接摆出来——**不能拿一个认得的词去糊它**。
-  it("认不出来的终态不被当成 SWAPPED，也不被当成 DISCARDED", () => {
+  // 服务端那一列会原样搬运它不认识的拼写（#264）。展示层照样原样摆出来——吞掉它
+  // 等于把「跑数的那一端比这块屏幕新」从屏幕上抹掉；但**不能拿一个认得的词去糊它**，
+  // 也不能据它下任何判断，判断走 `knownTerminalEffect`。
+  it("认不出来的终态原样透出，但不被当成 SWAPPED，也不被当成 DISCARDED", () => {
+    const presented = historyPresentation(
+      history({
+        outcome: "SUCCEEDED",
+        target_table_effect: "SOMETHING_NEW",
+        sink_code: null,
+      }),
+    );
+    expect(presented.terminalEffect).toBe("SOMETHING_NEW");
+    expect(knownTerminalEffect(presented.terminalEffect)).toBeNull();
+    // 结论条一个字都不替它编：只说推了多少行。
+    expect(presented.conclusion).not.toContain("合并");
+    expect(presented.conclusion).not.toContain("整表替换");
+  });
+
+  it("没走到目标端的那些行，`terminalEffect` 才是 null——那是「无从谈起」，不是「不认识」", () => {
     expect(
-      historyPresentation(
-        history({
-          outcome: "SUCCEEDED",
-          target_table_effect: "SOMETHING_NEW",
-          sink_code: null,
-        }),
-      ).terminalEffect,
+      historyPresentation(history({ run_id: null, target_table_effect: "SWAPPED" }))
+        .terminalEffect,
     ).toBeNull();
   });
 

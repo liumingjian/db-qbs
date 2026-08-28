@@ -253,8 +253,7 @@ pre.drawer-sql,
 .ddl-output,
 .run-identity dd, .run-metrics dd,
 .outcome-label,
-.unknown-effect,
-.effect-text, .source-code,
+.source-code,
 .precheck-reports code,
 .precheck-exit code,
 .diagnostic-table td,
@@ -1010,9 +1009,8 @@ select, .page-size {
 .detail-status { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
 .outcome-label { color: var(--mute); font-family: var(--font-num); font-size: var(--size-meta); }
 .outcome-label strong { margin-left: 5px; color: var(--text); font-weight: var(--weight-em); }
-.unknown-effect { color: var(--dim); font-family: var(--font-num); font-size: var(--size-meta); }
-.effect-text, .source-code { color: var(--mute); font-family: var(--font-num); font-size: var(--size-meta); }
-.effect-text strong, .source-code strong { margin-left: 5px; color: var(--dim); font-weight: var(--weight-em); }
+.source-code { color: var(--mute); font-family: var(--font-num); font-size: var(--size-meta); }
+.source-code strong { margin-left: 5px; color: var(--dim); font-weight: var(--weight-em); }
 
 /* 形状预检整段随 ADR-0036 §5 取消，这里只剩映射预检一段：容器不再分栏、不留占位空栏（#132）。 */
 .precheck-reports { border: 1px solid var(--line); background: var(--panel); }
@@ -1051,6 +1049,9 @@ select, .page-size {
    #89：反过来那半边也要成立——SWAPPED 的填充用 --ok-fill 而不是 --ok-bg，
    后者灰度下只比白底深 3.1%，「实心」这半边等于没画。 */
 .terminal-block.is-discarded { background: transparent; border-color: var(--line-strong); color: var(--dim); }
+/* 产品不认识的那个词（#263/#264）。虚线边是它自己的一档：既不是成功的实心块，也不是
+   DISCARDED 那种确定的描边块——它是「这个词我没见过，原样给你看」。 */
+.terminal-block.is-unrecognised { background: transparent; border-style: dashed; border-color: var(--line-strong); color: var(--dim); }
 .terminal-copy { color: var(--dim); font-family: var(--font-cn); }
 /* 轴二后面那句写入语义（P0-1）。语义常驻，不是错误也不是告警：只用中性色 + 一道左边线，
    不着 --crit / --warn，否则每一次成功的运行都会看着像出了事。 */

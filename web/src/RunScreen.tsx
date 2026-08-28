@@ -19,7 +19,12 @@ import {
 } from "./writeMode";
 import { messageFrom } from "./errors";
 import { FailureEvidence } from "./FailureEvidence";
-import { runIdPresentation, runTaskName, runTriggerLabel } from "./history";
+import {
+  knownTerminalEffect,
+  runIdPresentation,
+  runTaskName,
+  runTriggerLabel,
+} from "./history";
 import { PrecheckReports } from "./PrecheckReports";
 import { RunLogPanel } from "./RunLogPanel";
 import { progressOfLiveRun } from "./progress";
@@ -328,6 +333,8 @@ function FinishedRun({
   onEditTask: (step: Step) => void;
 }) {
   const mappingFailed = presentation.kind === "mapping-failed";
+  /** 判断走认得的那一份，显示走原样那一份（见 `history.ts`）。 */
+  const knownEffect = knownTerminalEffect(presentation.terminalEffect);
   return (
     <>
       <section className={`run-result is-${presentation.kind}`}>
@@ -344,11 +351,13 @@ function FinishedRun({
             主键与模式都读运行证据里的快照，不读任务此刻的定义，否则今天改一次任务
             就把过去每一条记录声称做过的事一起改写了（同 #259 的名称快照）。
             无主键那条路上「按主键 upsert」是句假话，先清空再导入那条路上「源端删掉的
-            行仍保留」也是。`DISCARDED` 不挂这一行——目标表没被碰过，写入语义无从谈起。 */}
-        {presentation.terminalEffect !== null &&
-          presentation.terminalEffect !== "DISCARDED" && (
-            <UpsertNote text={runWriteSemantics(detail.evidence, task.spec)} />
-          )}
+            行仍保留」也是。
+            挂不挂问 `knownTerminalEffect`：`DISCARDED` 不挂（目标表没被碰过），产品
+            不认识的那个词也不挂——原样透出是一回事，据它断言写入做了什么是另一回事，
+            后者这里没有资格做（#263 的同一条原则）。 */}
+        {knownEffect !== null && knownEffect !== "DISCARDED" && (
+          <UpsertNote text={runWriteSemantics(detail.evidence, task.spec)} />
+        )}
       </section>
 
       {(presentation.kind === "failed" ||
