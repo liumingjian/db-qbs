@@ -182,9 +182,9 @@ pub struct OpenRunRequest {
     /// 本次运行的目标端连接（ADR-0037 §1/§2）。`sink.toml` 的 `mysql_dsn` / `database` 已退役，
     /// 库名也随本字段过来——暂存表 DDL 的库名限定按它取。
     pub target: TargetConnection,
-    /// 任务定义里的写入模式（#261）。今天只有一个值，它随任务定义过线是为了让
-    /// 「写入模式属于任务定义」这件事在协议上也成立——清空后导入那一档接进来时，
-    /// 两端不需要再谈一次。
+    /// 任务定义里的写入模式（#261/#264）。追加写只写不删；清空后导入会在切换事务里
+    /// 先对目标表整表 `DELETE` 再导入。**它不改变写入语句的选择**——那一件事只由
+    /// [`crate::WriteStatement::for_primary_key`] 决定。
     #[serde(default)]
     pub write_mode: WriteMode,
     /// upsert 的去重键（ADR-0035 §2），**可以为空**（#261）。
@@ -240,7 +240,8 @@ pub struct CommitRequest {
 pub struct CommitResponse {
     pub source_rows: u64,
     pub staged_rows: u64,
-    /// 新写入模型下**恒为 0**，字段保留（ADR-0035 §4）。这句话是真的：确实没删任何行。
+    /// 追加写下**恒为 0**（ADR-0035 §4）：那句话是真的，确实没删任何行。
+    /// 清空后导入（#264）下它是切换事务里那条整表 `DELETE` 真的删掉的行数。
     pub purged_rows: u64,
     pub swapped_rows: u64,
     pub count_ms: u64,
@@ -254,11 +255,21 @@ pub struct AbortResponse {
     pub staging_dropped: bool,
 }
 
-/// run 的终态（ADR-0012）。
+/// run 的终态（ADR-0012）。**它同时是「目标表最后被怎么了」的词表**，
+/// 所以三个值必须各说各的事，不能合并同类项（#264）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Terminal {
+    /// **按主键合并进目标表**——`INSERT ... ON DUPLICATE KEY UPDATE`（无主键时是纯
+    /// `INSERT`）。目标表原有的行一行没删，源端删掉的行仍留在目标表里。
+    ///
+    /// #264 之前这个词兼职表示「目标端认下了这次写入」，清空后导入接进来之后它
+    /// **收窄**成上面这一句：整表被替换是另一件事，共用一个词会让历史记录读起来是假的。
     Swapped,
+    /// **整表被替换**——清空后导入（`WriteMode::ClearThenImport`）：同一个事务里
+    /// 先整表 `DELETE` 再导入，跑完之后目标表精确等于本次查询的结果。
+    /// 原有数据已经没了，且**不可撤销**。
+    Replaced,
     Discarded,
 }
 
@@ -266,6 +277,7 @@ impl Terminal {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Swapped => "SWAPPED",
+            Self::Replaced => "REPLACED",
             Self::Discarded => "DISCARDED",
         }
     }

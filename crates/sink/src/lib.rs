@@ -148,6 +148,9 @@ pub struct AtomicSwapRequest {
     pub run_id: String,
     pub staging_table: String,
     pub target_table: String,
+    /// 任务定义里的写入模式（#264）。清空后导入时，切换事务里先对目标表整表
+    /// `DELETE` 再导入；追加写时这一步根本不存在。**它不参与选语句**。
+    pub write_mode: WriteMode,
     /// upsert 的去重键（ADR-0035 §1）。`ON DUPLICATE KEY UPDATE` 的更新列
     /// = `columns` 减去这里的列。
     pub primary_key: Vec<String>,
@@ -160,7 +163,8 @@ pub struct AtomicSwapRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AtomicSwapResult {
     pub staged_rows: u64,
-    /// 恒为 0（ADR-0035 §4）——新写入模型不删任何行，字段保留。
+    /// 追加写下恒为 0（ADR-0035 §4）——那条路不删任何行。
+    /// 清空后导入下是切换事务里那条整表 `DELETE` 报告的行数（#264）。
     pub purged_rows: u64,
     pub swapped_rows: u64,
     pub count_ms: u64,
@@ -282,6 +286,9 @@ impl<D: Destination> DestinationFactory for FixedDestination<D> {
 
 struct ActiveRun<D> {
     run_id: String,
+    /// 本次 run 的写入模式（#264），从 `POST /v1/runs` 原样收下。
+    /// 它决定切换时要不要先整表 `DELETE`，以及终态是 `SWAPPED` 还是 `REPLACED`。
+    write_mode: WriteMode,
     /// 本次 run 写的是哪个库——互斥键的前半截（#260）。
     /// 取自工厂给的 [`ConnectedDestination::database`]，不从请求里另取一份。
     database: String,
@@ -304,6 +311,7 @@ impl<D> Clone for ActiveRun<D> {
     fn clone(&self) -> Self {
         Self {
             run_id: self.run_id.clone(),
+            write_mode: self.write_mode,
             database: self.database.clone(),
             staging_table: self.staging_table.clone(),
             source_columns: self.source_columns.clone(),

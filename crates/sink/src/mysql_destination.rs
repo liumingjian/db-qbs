@@ -336,6 +336,25 @@ SELECT INDEX_NAME, COLUMN_NAME
                 // `information_schema`：重读等于给「预检说无主键、切换时又发现有」留一条
                 // 静默改写法的路，而那正是预检拒跑要挡的东西。
                 let statement = WriteStatement::for_primary_key(&request.primary_key);
+                // 清空后导入（#264）：整表 `DELETE` **就在这个事务里**，紧挨着下面那条
+                // 导入语句。两件事一起成、一起败——导入中途失败时事务回滚，目标表原样不动。
+                //
+                // **绝不用 `TRUNCATE`**：它是 DDL、会隐式提交，放进这里等于制造
+                // 「清空成功、导入失败、目标表变空」这个最坏结果。大表上整表 DELETE 的
+                // 代价是明知故犯，记在 CONTEXT.md 的「刻意欠的债」里。
+                //
+                // 它也**不改写下面选哪条语句**：有主键仍 upsert，无主键仍纯 INSERT。
+                // 保留 upsert 是为了容忍同一次运行内出现重复主键——对着刚清空的表打纯
+                // INSERT，两行同键就会撞 `ERROR 1062` 半途而废。
+                let purged_rows = if request.write_mode.clears_target() {
+                    transaction.query_drop(build_clear_statement(
+                        &self.database,
+                        &request.target_table,
+                    ))?;
+                    transaction.affected_rows()
+                } else {
+                    0
+                };
                 let insert_statement = match statement {
                     WriteStatement::Upsert => build_swap_upsert_statement(
                         &self.database,
@@ -381,8 +400,9 @@ SELECT INDEX_NAME, COLUMN_NAME
                 transaction.commit()?;
                 Ok(AtomicSwapOutcome::Swapped(AtomicSwapResult {
                     staged_rows,
-                    // 新模型不删任何行；这个 0 是事实，不是拿 0 糊弄（ADR-0035 §4）。
-                    purged_rows: 0,
+                    // 追加写下这个 0 是事实，不是拿 0 糊弄（ADR-0035 §4）；
+                    // 清空后导入下它是上面那条整表 DELETE 真的删掉的行数（#264）。
+                    purged_rows,
                     swapped_rows,
                     count_ms,
                 }))
@@ -405,6 +425,19 @@ SELECT INDEX_NAME, COLUMN_NAME
             .with_conn(|connection| connection.query_drop(statement))
             .map_err(classify_drop_error)
     }
+}
+
+/// 清空后导入那一步的整表删除（#264）。
+///
+/// 是 `DELETE` 不是 `TRUNCATE`，而且这件事写在函数名和这段注释里，不指望调用方记得：
+/// `TRUNCATE` 是 DDL，隐式提交，放进切换事务里会把「原子清空+导入」变成
+/// 「先不可逆地清空，再赌导入成功」。
+fn build_clear_statement(database: &str, target_table: &str) -> String {
+    format!(
+        "DELETE FROM {}.{}",
+        quote_identifier(database),
+        quote_identifier(target_table)
+    )
 }
 
 fn drop_legacy_write_ledger(database: &str) -> String {
@@ -883,8 +916,9 @@ pub fn check_connection_settings(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_insert_statement, build_swap_insert_statement, build_swap_upsert_statement,
-        classify_atomic_swap_error, classify_mysql_diagnostic, PoolError,
+        build_clear_statement, build_insert_statement, build_swap_insert_statement,
+        build_swap_upsert_statement, classify_atomic_swap_error, classify_mysql_diagnostic,
+        PoolError,
     };
     use crate::{AtomicSwapError, WriteBatchError};
     use db_qbs_shared::WriteStatement;
@@ -1007,5 +1041,19 @@ mod tests {
             WriteStatement::Upsert
         );
         assert_eq!(WriteStatement::for_primary_key(&[]), WriteStatement::Insert);
+    }
+
+    /// 清空那一步是 `DELETE`，**不是 `TRUNCATE`**，而且这条测试就是那个理由的守卫。
+    ///
+    /// `TRUNCATE` 是 DDL、隐式提交：放进切换事务里，一次失败的导入会留下一张空表——
+    /// 也就是「清空成功、导入失败、数据没了」这个最坏结果。把它钉成一条断言，
+    /// 是因为改成 `TRUNCATE` 在读代码时看起来只是「换个更快的写法」。
+    #[test]
+    fn clearing_the_target_is_a_delete_and_never_a_truncate() {
+        let statement = build_clear_statement("app", "HOLDINGS");
+        assert_eq!(statement, "DELETE FROM `app`.`HOLDINGS`");
+        assert!(!statement.to_ascii_uppercase().contains("TRUNCATE"));
+        // 没有 WHERE：整表。有 WHERE 就不是「跑完之后目标表精确等于本次查询结果」了。
+        assert!(!statement.to_ascii_uppercase().contains("WHERE"));
     }
 }

@@ -295,3 +295,70 @@ fn opening_an_old_history_schema_adds_empty_evidence_without_inventing_facts() {
     );
     fs::remove_dir_all(directory).unwrap();
 }
+
+
+/// #264：跑成功的一次清空后导入，历史上记的是 `REPLACED`，不是 `SWAPPED`。
+///
+/// 这一格从前是父进程折出来的：`SUCCEEDED` 一律折成 `SWAPPED`。可「目标表遭遇了什么」
+/// 取决于本次运行的写入模式，而只有跑数的子进程知道那件事——所以终态日志现在直说，
+/// 父进程照抄。两个词不能合并：`SWAPPED` 的意思是「按主键合并进目标表」。
+#[test]
+fn a_successful_clear_then_import_is_recorded_as_replaced() {
+    let accepted_at = Utc.with_ymd_and_hms(2026, 8, 15, 9, 59, 59).unwrap();
+    let lines = [
+        r#"{"ts":"2026-08-15T10:00:01.000Z","event":"stage_changed","run_id":"run-9","stage":"PREPARING"}"#,
+        r#"{"ts":"2026-08-15T10:00:02.000Z","event":"run_opened","run_id":"run-9","staging_table":"STG_9"}"#,
+        r#"{"ts":"2026-08-15T10:00:07.000Z","event":"run_finished","run_id":"run-9","terminal":"SUCCEEDED","stage":"SUCCEEDED","target_table_effect":"REPLACED","message":"run completed successfully","source_rows":3,"staged_rows":3,"purged_rows":11}"#,
+    ];
+
+    let history =
+        fold_history_lines("record-9", "task-1", SOURCE_SQL, accepted_at, &lines).unwrap();
+
+    assert_eq!(history.outcome.as_deref(), Some("SUCCEEDED"));
+    assert_eq!(history.target_table_effect.as_deref(), Some("REPLACED"));
+    assert_eq!(history.purged_rows, Some(11));
+}
+
+/// 同一条路上的对照：追加写照旧是 `SWAPPED`，而**老日志里没有这个字段**时，
+/// 父进程仍按原来那套折算（`SUCCEEDED` ⇒ `SWAPPED`）。加一个值不能让旧记录改口径。
+#[test]
+fn a_run_finished_line_without_the_new_field_still_folds_the_old_way() {
+    let accepted_at = Utc.with_ymd_and_hms(2026, 8, 15, 9, 59, 59).unwrap();
+    let lines = [
+        r#"{"ts":"2026-08-15T10:00:02.000Z","event":"run_opened","run_id":"run-8","staging_table":"STG_8"}"#,
+        r#"{"ts":"2026-08-15T10:00:07.000Z","event":"run_finished","run_id":"run-8","terminal":"SUCCEEDED","stage":"SUCCEEDED","message":"run completed successfully"}"#,
+    ];
+
+    let history =
+        fold_history_lines("record-8", "task-1", SOURCE_SQL, accepted_at, &lines).unwrap();
+
+    assert_eq!(history.target_table_effect.as_deref(), Some("SWAPPED"));
+}
+
+/// #264：不认识的终态**原样搬运**，不折成 `UNKNOWN`。
+///
+/// 和 `stage` 那一列同一个规矩。子进程比父进程新、多报了一个词，正是最该被看见的时候；
+/// 从前这里的 `match` 会把它吞掉，屏幕上就只剩「说不清」。真正的说不清只有一种：
+/// 子进程自己就没能判定，`terminal` 是 `null`。
+#[test]
+fn an_unrecognised_terminal_is_carried_through_rather_than_collapsed() {
+    let accepted_at = Utc.with_ymd_and_hms(2026, 8, 15, 9, 59, 59).unwrap();
+    let carried = [
+        r#"{"ts":"2026-08-15T10:00:02.000Z","event":"run_opened","run_id":"run-x","staging_table":"STG_X"}"#,
+        r#"{"ts":"2026-08-15T10:00:06.000Z","event":"commit_diagnosed","run_id":"run-x","terminal":"SOMETHING_NEW","message":"a newer child said so"}"#,
+        r#"{"ts":"2026-08-15T10:00:07.000Z","event":"run_finished","run_id":"run-x","terminal":"FAILED","stage":"COMMITTING","message":"commit failed"}"#,
+    ];
+    let history =
+        fold_history_lines("record-x", "task-1", SOURCE_SQL, accepted_at, &carried).unwrap();
+    assert_eq!(history.target_table_effect.as_deref(), Some("SOMETHING_NEW"));
+
+    // 子进程说不出来的时候（`terminal` 是 null），那才是 UNKNOWN。
+    let undetermined = [
+        r#"{"ts":"2026-08-15T10:00:02.000Z","event":"run_opened","run_id":"run-y","staging_table":"STG_Y"}"#,
+        r#"{"ts":"2026-08-15T10:00:06.000Z","event":"commit_diagnosed","run_id":"run-y","terminal":null,"message":"无法确定目标表是否已被切换"}"#,
+        r#"{"ts":"2026-08-15T10:00:07.000Z","event":"run_finished","run_id":"run-y","terminal":"FAILED","stage":"COMMITTING","message":"commit failed"}"#,
+    ];
+    let history =
+        fold_history_lines("record-y", "task-1", SOURCE_SQL, accepted_at, &undetermined).unwrap();
+    assert_eq!(history.target_table_effect.as_deref(), Some("UNKNOWN"));
+}

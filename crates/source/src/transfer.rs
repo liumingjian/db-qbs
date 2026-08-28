@@ -630,6 +630,22 @@ fn diagnose_commit(
                 swapped_rows
             ),
         ),
+        // 整表被替换是另一件事，不能并进上面那一支（#264）：那一句说的是「已按主键合并」，
+        // 而这一次目标表原有的数据已经全没了，且撤不回来。重跑前要确认的东西也不同。
+        Ok(RunResponse {
+            run_id: response_run_id,
+            terminal: Some(Terminal::Replaced),
+            swapped_rows: Some(swapped_rows),
+            purged_rows,
+            ..
+        }) if response_run_id == run_id => (
+            Some(Terminal::Replaced),
+            format!(
+                "目标端报告该 run 已整表替换成功（清空 {} 行、导入 {swapped_rows} 行），目标表已是本次查询的结果，原有数据不可恢复，重跑前请先确认",
+                purged_rows
+                    .map_or_else(|| "?".to_owned(), |rows| rows.to_string()),
+            ),
+        ),
         Ok(RunResponse {
             run_id: response_run_id,
             terminal: Some(Terminal::Discarded),
