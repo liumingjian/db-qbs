@@ -62,8 +62,24 @@ published to the internet.
 
 Both sides are written in **Rust** with synchronous blocking IO. `source` reaches Oracle **11g**
 through the `oracle` crate (ODPI-C), so the source machine must carry a full **Oracle Instant
-Client 19c Basic** bundle (brought in offline, no root required). The target is **MySQL 8.0**,
-`utf8mb4` throughout.
+Client 19c Basic** bundle (brought in offline, no root required). The target is **MySQL 5.7 or
+8.0**, `utf8mb4` throughout.
+
+**5.7 is an addition to the support matrix, not a replacement for 8.0** — a great many sites have
+not upgraded, and "cannot connect" is not an answer to give them. Nothing in the SQL had to move:
+no CTE, no window function, and the upsert was already in the form 5.7 accepts. Two things did:
+
+- **`max_allowed_packet` must be raised on 5.7.** Its stock value is 4 MiB against the Connection
+  Ritual's hard 64 MiB, so *every untuned 5.7 instance* is judged unusable on its first run. The
+  gate is not relaxed — see **Connection Ritual** — so the target's DBA raises it, and the refusal
+  message carries the `SET GLOBAL` command and the `my.cnf` stanza to make it stick.
+- **Auto-increment is read from `EXTRA` by containment, never by equality.** 8.0 also writes
+  `DEFAULT_GENERATED` into that column and 5.7 never does; comparing the whole value against an
+  8.0-only spelling made every 5.7 auto-increment column read as ordinary.
+
+The same live round-trip suite is pointed at both versions in turn
+(`docs/spikes/fixtures/local-rig/scripts/run-mysql-destination-live.sh both`); nothing in it
+branches on the version.
 
 ## Glossary
 
@@ -258,6 +274,13 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    **It hangs off the pool's connection-creation hook, not the top of the business code** — otherwise
    the second connection in the pool comes up bare. It concerns no particular column and happens
    before the mapping precheck, so it never appears in the precheck's per-column report.
+
+   **The 64 MiB is a hard gate on both supported versions**; it is what stops a large batch being
+   truncated at the protocol layer, which surfaces as a syntax error and sends whoever is on call
+   digging through business data that is fine. MySQL 5.7's stock value is 4 MiB, so on 5.7 the
+   refusal is the *normal* first outcome rather than a rare misconfiguration — which is why the
+   message is written to be obeyed rather than investigated: it names the `SET GLOBAL` command and
+   the `my.cnf` line, one to take effect now and one to survive the restart.
 
 **Verification**
    A mandatory gate before the swap, not an optional step. **It compares the row count the source
@@ -460,7 +483,14 @@ gets paid off and when lives in the issue tracker, not here.
    a hard gate.
 9. **An upsert never deletes.** Rows removed at the source stay in the target table forever; see
    **Swap**.
-10. **The wizard's first-step two-pane geometry is a CSS-only invariant** — one row that renders only
+10. **On MySQL 5.7 the metadata reads are slower, and that is left alone.** 5.7's
+   `information_schema` is not backed by a data dictionary — the `COLUMNS` / `STATISTICS` /
+   `TABLES` queries the target agent runs are answered by opening table definitions, so on a
+   database with many tables listing tables and reading a table's columns take visibly longer than
+   on 8.0. It costs seconds on the wizard's metadata steps and nothing on the transfer itself,
+   so **no optimisation is planned**: caching it would introduce a staleness question that the
+   product does not otherwise have.
+11. **The wizard's first-step two-pane geometry is a CSS-only invariant** — one row that renders only
    for certain data breaks the alignment; the rules and the worked counter-example live in the
    「两栏取数区的框线」 section of `web/src/app.css`. The row both panes share is rendered by one
    component (`DatasourceRow`), not copied per pane: a hand-written copy makes the invariant depend
