@@ -126,6 +126,7 @@ fn write_task(directory: &Path) -> PathBuf {
          { source = \"ID\", target = \"ID\" },\n\
          { source = \"BIZ_DAY\", target = \"BIZ_DAY\" },\n\
          ]\n\
+         write_mode = \"APPEND\"\n\
          primary_key = [\"ID\"]\n\
          where_clause = \"BIZ_DAY = DATE '2026-08-14'\"\n\
          \n\

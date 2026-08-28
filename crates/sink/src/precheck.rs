@@ -203,7 +203,12 @@ fn precheck_inner(
         });
     }
 
-    if !primary_key.is_empty() {
+    // 主键那道硬门只在 **upsert 那条路** 上（#261）：勾了主键就是要 upsert，
+    // 目标表得真有对应约束；一列都没勾就是「目标表无主键，纯追加写」，
+    // 该核对的是**反过来那一条**——目标表现在是不是真的没有唯一约束。
+    if primary_key.is_empty() {
+        validate_no_primary_key(target_keys, &mut issues);
+    } else {
         validate_primary_key(
             primary_key,
             &source_names,
@@ -216,16 +221,72 @@ fn precheck_inner(
     issues
 }
 
+/// 预检的**结论**——通过之后还要说的那句话（#261）。不阻塞，但必须被读到。
+///
+/// 「目标表无主键」是这个产品第一次接受「同一任务定义跑两次，目标表状态不同」。
+/// 需求方明确不要为它加勾选框，那这句话就是它唯一的出口：不写出来，
+/// 第一个发现数据翻倍的人会是在生产上第二次点了运行之后。
+pub fn precheck_conclusions(primary_key: &[String], target_keys: &[TargetKey]) -> Vec<String> {
+    if primary_key.is_empty() && target_keys.is_empty() {
+        return vec![APPEND_ONLY_CONCLUSION.to_owned()];
+    }
+    Vec::new()
+}
+
+/// 无主键结论那句话的唯一定义。界面上照抄它，两端不各写一份。
+pub const APPEND_ONLY_CONCLUSION: &str =
+    "目标表无主键 → 本任务为纯追加写，重跑会产生重复数据";
+
+/// 纯追加写这条路上的唯一硬门：目标表**现在**必须真的没有唯一约束。
+///
+/// 这不是对称的礼节，它挡的是「写法静默切换」。任务定义记下的是「无主键」，于是两端
+/// 都按纯 `INSERT ... SELECT` 走、行数按严格相等判。若目标表在此期间被加上了主键或
+/// 唯一索引，同一条 INSERT 会撞 `ERROR 1062` 半途而废——或者更糟，若这里改成
+/// 「发现有约束就自动改走 upsert」，那就是同一份任务定义在没人改过它的情况下换了语义。
+/// 宁可拒跑：让人回去重做一次目标表检查，把主键勾上。
+fn validate_no_primary_key(target_keys: &[TargetKey], issues: &mut Vec<PrecheckIssue>) {
+    if target_keys.is_empty() {
+        return;
+    }
+    let existing = target_keys
+        .iter()
+        .map(|key| format!("{}({})", key.name, key.columns.join(",")))
+        .collect::<Vec<_>>()
+        .join("；");
+    let rule = format!(
+        "任务定义记的是「目标表无主键，纯追加写」，但目标表上现在有唯一约束（{existing}）；\
+         写法不会静默切换，请回到目标表检查那一步重新勾主键"
+    );
+    issues.push(PrecheckIssue {
+        column: "<primary_key>".to_owned(),
+        source: "<无主键>".to_owned(),
+        target: existing.clone(),
+        rule: rule.clone(),
+        suggestion: Some("重新做一次目标表检查，把主键勾上".to_owned()),
+        check: Some(TargetCheckFinding {
+            column: None,
+            kind: TargetCheckKind::PrimaryKeyMismatch,
+            expected: "目标表没有 PRIMARY KEY 或 UNIQUE 约束".to_owned(),
+            actual: existing,
+            message: rule,
+        }),
+    });
+}
+
 /// `information_schema.COLUMNS.EXTRA` 里带 `auto_increment` —— 这一列由数据库自己填，
 /// 未映射也写得进去（ADR-0038 §5 第 3 分支）。MySQL 给的是小写，这里仍按大小写无关判。
 fn is_auto_increment(target: &TargetColumn) -> bool {
     target.extra.to_ascii_lowercase().contains("auto_increment")
 }
 
-/// ADR-0035 §2 的三条，任一不满足即拒跑。
+/// ADR-0035 §2 的三条，任一不满足即拒跑。**只在 upsert 那条路上生效**（#261）。
 ///
 /// 撤掉 DELETE 之后这是**唯一**挡住静默重复的东西：目标表没有对应唯一约束时，
 /// `ON DUPLICATE KEY UPDATE` 不报错、写得进去、重跑就多一份行。
+///
+/// #261 把它从「所有任务都要过」降级为「勾了主键的任务才要过」——但降的是**适用范围**，
+/// 不是力度：勾了主键就是声明要 upsert，这三条一条都没松，仍然是这里唯一的拦截点。
+/// 一列都没勾走的是 [`validate_no_primary_key`]，那边有它自己的硬门。
 fn validate_primary_key(
     primary_key: &[String],
     source_names: &HashSet<String>,

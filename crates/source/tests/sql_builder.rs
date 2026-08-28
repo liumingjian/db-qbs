@@ -8,7 +8,7 @@
 
 use db_qbs_source::{
     builder_column_query, builder_dblink_query, builder_table_query, validate_builder_dblink,
-    validate_source_sql, ColumnMapping, TaskSpec,
+    validate_source_sql, ColumnMapping, TaskSpec, WriteMode, WriteStatement,
 };
 
 /// 恒等映射：目标字段预填成源列名（ADR-0038 §2）。改形状之前的规格就是这一份。
@@ -26,6 +26,7 @@ fn spec() -> TaskSpec {
         owner: "HTBR45".to_owned(),
         table: "T_R_FR_ASTSTAT".to_owned(),
         target_table: "T_POSITION".to_owned(),
+        write_mode: WriteMode::Append,
         columns: vec![identity("N_VA_PRICE"), identity("D_BIZ")],
         primary_key: vec!["D_BIZ".to_owned()],
         where_clause: None,
@@ -285,13 +286,6 @@ fn a_renamed_column_shows_up_as_the_alias_and_nothing_else_moves() {
 
 #[test]
 fn validation_refuses_the_ways_a_spec_can_be_unusable() {
-    let mut no_key = spec();
-    no_key.primary_key.clear();
-    assert_eq!(
-        no_key.validate().unwrap_err(),
-        "主键必选：至少要勾一列作为 upsert 的去重键"
-    );
-
     let mut key_outside = spec();
     key_outside.primary_key = vec!["ID".to_owned()];
     assert_eq!(
@@ -402,4 +396,41 @@ fn metadata_queries_use_only_a_validated_dblink_suffix() {
     );
     assert!(validate_builder_dblink(Some("FA WHERE 1=1")).is_err());
     assert!(builder_table_query(Some("FA WHERE 1=1")).is_err());
+}
+
+/// #261：空主键不是「还没填」，它是一个有含义的值——目标表没有可合并的唯一约束，
+/// 本任务写纯 `INSERT ... SELECT`。源端因此没有可判的东西：目标表到底有没有主键，
+/// 不是源端能回答的问题，它归 sink 侧的映射预检。
+#[test]
+fn an_empty_primary_key_is_a_value_and_the_source_end_has_nothing_to_say_about_it() {
+    let mut no_key = spec();
+    no_key.primary_key.clear();
+
+    no_key.validate().unwrap();
+    assert_eq!(no_key.write_statement(), WriteStatement::Insert);
+    // 其余每一条校验都还在——放开的只有「必须勾一列」这一条。
+    assert_eq!(spec().write_statement(), WriteStatement::Upsert);
+}
+
+/// 临时任务文件走 TOML 落盘，而**标量排在 array-of-tables 之后会直接序列化失败**。
+/// `write_mode` 是新加的标量，这条测试就是它必须排在 `columns` 之前的那个理由。
+#[test]
+fn the_spec_serialises_to_toml_which_is_what_pins_the_field_order() {
+    let encoded = toml::to_string(&spec()).expect("任务定义必须能落成 TOML");
+
+    let write_mode_at = encoded.find("write_mode").expect("write_mode 必须落盘");
+    let columns_at = encoded.find("[[columns]]").expect("columns 是 array-of-tables");
+    assert!(
+        write_mode_at < columns_at,
+        "write_mode 必须排在 columns 之前，否则整个任务定义序列化不出来：\n{encoded}"
+    );
+    assert!(encoded.contains("write_mode = \"APPEND\""), "{encoded}");
+
+    // 无主键那一份同样要落得下来。
+    let keyless = TaskSpec {
+        primary_key: Vec::new(),
+        ..spec()
+    };
+    let encoded = toml::to_string(&keyless).expect("无主键的任务定义同样要能落盘");
+    assert!(encoded.contains("primary_key = []"), "{encoded}");
 }

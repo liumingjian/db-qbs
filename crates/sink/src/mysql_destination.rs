@@ -4,7 +4,7 @@
 //! 的验收台架**（需要一台起得了 docker MySQL 的机器）：
 //!
 //! - `CLIENT_FOUND_ROWS` 把「值未变的既有行记 0」抹平（#138），也就是
-//!   `swap_rows_in_range` 的下界之所以能是 `staged_rows` 的前提；
+//!   `swap_rows_consistent` 在 upsert 那一支的下界之所以能是 `staged_rows` 的前提；
 //! - upsert 的 `affected_rows` 落在 `[staged, 2×staged]`（`run-v1-acceptance.sh` 的 C4②）；
 //! - Connection Ritual 挂在连接池的建连钩子上，池里第**二**条连接也照做。
 //!
@@ -16,7 +16,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use db_qbs_shared::{swap_rows_in_range, MysqlServerInfo, RowCounts};
+use db_qbs_shared::{swap_rows_consistent, MysqlServerInfo, RowCounts, WriteStatement};
 use mysql::prelude::Queryable;
 use mysql::{
     consts::CapabilityFlags, params, Conn, Error as MysqlError, Opts, OptsBuilder, Params, TxOpts,
@@ -331,26 +331,50 @@ SELECT INDEX_NAME, COLUMN_NAME
                     return Ok(AtomicSwapOutcome::Failed(error));
                 }
 
-                let insert_statement = build_swap_upsert_statement(
-                    &self.database,
-                    &request.target_table,
-                    &request.staging_table,
-                    &request.columns,
-                    &request.primary_key,
-                );
+                // 写哪一种语句**只由目标表有没有主键决定**，而那件事已经在 `POST /v1/runs`
+                // 的映射预检里与任务定义记的那一份核对过了（#261）。这里不再重读一次
+                // `information_schema`：重读等于给「预检说无主键、切换时又发现有」留一条
+                // 静默改写法的路，而那正是预检拒跑要挡的东西。
+                let statement = WriteStatement::for_primary_key(&request.primary_key);
+                let insert_statement = match statement {
+                    WriteStatement::Upsert => build_swap_upsert_statement(
+                        &self.database,
+                        &request.target_table,
+                        &request.staging_table,
+                        &request.columns,
+                        &request.primary_key,
+                    ),
+                    WriteStatement::Insert => build_swap_insert_statement(
+                        &self.database,
+                        &request.target_table,
+                        &request.staging_table,
+                        &request.columns,
+                    ),
+                };
                 transaction.query_drop(insert_statement)?;
                 let swapped_rows = transaction.affected_rows();
-                // 区间判据（而非等值）连同它的三条理由都在 `swap_rows_in_range` 的文档里，
+                // 判据按语句分叉、以及 upsert 那一支为什么是区间而非等值，都在
+                // `swap_rows_consistent` 的文档里（#261），
                 // source 侧那面镜子读的也是它——上一次两端各写一份时，
                 // sink 改了区间、source 的等值断言没跟上，「重跑改值」整条主路径必失败（#135 C4④）。
                 // 这一档最后落到 `SWAP_FAILED` / `SinkWrite`，而 source 那面镜子同样这件事
                 // 落 `Defect`（#196）——**不是同一个故障两个标签**：这里是第一手判断，
                 // 数字确实不对；那里只有在本端已经放行之后才可能响，那时问题在两端判据不同。
-                if !swap_rows_in_range(staged_rows, swapped_rows) {
+                if !swap_rows_consistent(statement, staged_rows, swapped_rows) {
                     transaction.rollback()?;
+                    let expected = match statement {
+                        WriteStatement::Upsert => {
+                            format!("落在 [{staged_rows}, {}] 区间内", staged_rows.saturating_mul(2))
+                        }
+                        // 纯 INSERT 没有更新那条腿，判据因此收紧成等值（#261）。
+                        WriteStatement::Insert => format!("严格等于 {staged_rows}"),
+                    };
+                    let kind = match statement {
+                        WriteStatement::Upsert => "upsert",
+                        WriteStatement::Insert => "纯追加 INSERT",
+                    };
                     let message = format!(
-                        "暂存表有 {staged_rows} 行，切换 upsert 报告影响 {swapped_rows} 行，不落在 [{staged_rows}, {}] 区间内",
-                        staged_rows.saturating_mul(2)
+                        "暂存表有 {staged_rows} 行，切换 {kind} 报告影响 {swapped_rows} 行，不{expected}"
                     );
                     return Ok(AtomicSwapOutcome::Failed(AtomicSwapError::Other(message)));
                 }
@@ -490,7 +514,8 @@ fn build_insert_statement(
     )
 }
 
-/// 切换段：`INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`，**不再 DELETE**（ADR-0035 §1）。
+/// 切换段的一种形状：`INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`，**不再 DELETE**
+/// （ADR-0035 §1）。**目标表有主键时走这一支**，另一支见 [`build_swap_insert_statement`]。
 ///
 /// 更新列 = 全部选中列**排除主键列本身**，语义是「同一主键的行，以本次源端数据为准」。
 /// 不做部分更新：没有对应需求，且会引入「这列这次没更新是有意还是漏了」的排查成本。
@@ -535,6 +560,32 @@ fn build_swap_upsert_statement(
     };
     statement.push_str(&format!(" ON DUPLICATE KEY UPDATE {assignments}"));
     statement
+}
+
+/// 切换段的另一种形状：目标表**没有主键**时的纯 `INSERT ... SELECT`（#261）。
+///
+/// 没有 `ON DUPLICATE KEY UPDATE`，因为没有可撞的唯一约束——带上那一段，MySQL 不报错、
+/// 语句照跑，只是那个子句永远不会触发。留着它的唯一效果是让读语句的人以为这次写入
+/// 会去重。**重跑会把数据再追加一份**，这不是缺陷，是这条路的定义；它在任务定义、
+/// 预检结论、任务列表和运行详情四处都被写出来过。
+fn build_swap_insert_statement(
+    database: &str,
+    target_table: &str,
+    staging_table: &str,
+    columns: &[String],
+) -> String {
+    let quoted_columns = columns
+        .iter()
+        .map(|column| quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "INSERT INTO {}.{} ({quoted_columns}) SELECT {quoted_columns} FROM {}.{}",
+        quote_identifier(database),
+        quote_identifier(target_table),
+        quote_identifier(database),
+        quote_identifier(staging_table)
+    )
 }
 
 // Connections enter this pool only after the creation hook has completed.
@@ -735,10 +786,11 @@ pub fn check_connection_settings(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_insert_statement, build_swap_upsert_statement, classify_atomic_swap_error,
-        classify_mysql_diagnostic, PoolError,
+        build_insert_statement, build_swap_insert_statement, build_swap_upsert_statement,
+        classify_atomic_swap_error, classify_mysql_diagnostic, PoolError,
     };
     use crate::{AtomicSwapError, WriteBatchError};
+    use db_qbs_shared::WriteStatement;
     use mysql::{Error as MysqlError, MySqlError};
 
     #[test]
@@ -830,5 +882,33 @@ mod tests {
                 "ON DUPLICATE KEY UPDATE `C_ONLY` = `C_ONLY`"
             )
         );
+    }
+
+    #[test]
+    fn a_target_table_without_a_primary_key_gets_a_plain_insert_select() {
+        // 没有 `ON DUPLICATE KEY UPDATE`，一个字都没有：这条语句就是纯追加（#261）。
+        let statement = build_swap_insert_statement(
+            "qbs",
+            "T_FLOW",
+            "T_FLOW__stg_run",
+            &["C_FIRST".to_owned(), "C_SECOND".to_owned()],
+        );
+        assert_eq!(
+            statement,
+            concat!(
+                "INSERT INTO `qbs`.`T_FLOW` (`C_FIRST`, `C_SECOND`) ",
+                "SELECT `C_FIRST`, `C_SECOND` FROM `qbs`.`T_FLOW__stg_run`"
+            )
+        );
+        assert!(!statement.contains("ON DUPLICATE KEY"));
+    }
+
+    #[test]
+    fn the_statement_shape_follows_the_recorded_primary_key_and_nothing_else() {
+        assert_eq!(
+            WriteStatement::for_primary_key(&["C_ONLY".to_owned()]),
+            WriteStatement::Upsert
+        );
+        assert_eq!(WriteStatement::for_primary_key(&[]), WriteStatement::Insert);
     }
 }

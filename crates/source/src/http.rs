@@ -2315,7 +2315,7 @@ mod bridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ColumnMapping, FailureKind, SourceColumn};
+    use crate::{ColumnMapping, FailureKind, SourceColumn, WriteMode};
 
     struct FakeSource {
         columns: Vec<SourceColumn>,
@@ -2358,6 +2358,7 @@ mod tests {
             table: if source_sql.is_some() { "" } else { "ORDERS" }.to_owned(),
             target_table: "orders".to_owned(),
             where_clause: Some(where_clause.to_owned()),
+            write_mode: WriteMode::Append,
             primary_key: vec!["BIZ_ID".to_owned()],
             columns: vec![ColumnMapping {
                 source: "ID".to_owned(),

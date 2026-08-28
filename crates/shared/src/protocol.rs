@@ -14,6 +14,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::WriteMode;
+
 /// 一批行数据。`rows` 的每一行按 `source_columns` 的顺序给值，`None` 表示 NULL。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -131,6 +133,14 @@ pub struct TargetCheckResult {
     pub ok: bool,
     pub findings: Vec<TargetCheckFinding>,
     pub suggested_ddl: Option<String>,
+    /// 预检的**结论**，与 `findings` 分开：不阻塞，但必须被读到（#261）。
+    ///
+    /// `findings` 是「这里不对，去改」的清单，`ok` 就是它空不空。结论说的是另一件事：
+    /// 检查通过了，而这次通过意味着什么。目前唯一一条是「目标表无主键 → 本任务为纯追加写，
+    /// 重跑会产生重复数据」——把它塞进 `findings` 会让一次合法的配置显示成未通过，
+    /// 而不说等于让人第二次跑完才发现数据翻倍。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// 目标端 MySQL 的连接信息。**由 source 侧的数据源库读出、随请求过线**（ADR-0037 §1）——
@@ -172,10 +182,20 @@ pub struct OpenRunRequest {
     /// 本次运行的目标端连接（ADR-0037 §1/§2）。`sink.toml` 的 `mysql_dsn` / `database` 已退役，
     /// 库名也随本字段过来——暂存表 DDL 的库名限定按它取。
     pub target: TargetConnection,
-    /// upsert 的去重键（ADR-0035 §2）。用户在构建器里勾，sink 侧预检去目标表核对
-    /// 「约束确有、列在选中列里、列 NOT NULL」三条——缺约束时
-    /// `ON DUPLICATE KEY UPDATE` 会**静默退化成纯 INSERT**，重跑就出重复行。
-    /// 撤掉 DELETE 之后，那条预检是唯一挡住静默重复的东西。
+    /// 任务定义里的写入模式（#261）。今天只有一个值，它随任务定义过线是为了让
+    /// 「写入模式属于任务定义」这件事在协议上也成立——清空后导入那一档接进来时，
+    /// 两端不需要再谈一次。
+    #[serde(default)]
+    pub write_mode: WriteMode,
+    /// upsert 的去重键（ADR-0035 §2），**可以为空**（#261）。
+    ///
+    /// 非空：用户在构建器里勾了主键，sink 侧预检去目标表核对「约束确有、列在选中列里、
+    /// 列 NOT NULL」三条——缺约束时 `ON DUPLICATE KEY UPDATE` 会**静默退化成纯 INSERT**，
+    /// 重跑就出重复行。
+    ///
+    /// 为空：任务定义记下的是「目标表没有可合并的唯一约束」，本次运行写纯
+    /// `INSERT ... SELECT`（[`crate::WriteStatement::for_primary_key`]）。sink 侧仍要核对
+    /// 目标表**现在**确实没有唯一约束——不符就拒跑，写法绝不静默切换。
     pub primary_key: Vec<String>,
     pub source_columns: Vec<SourceColumn>,
     /// 3.5 步：source 回发的值域校核结果。永久可选（#106 裁定 Q14/Q15）。

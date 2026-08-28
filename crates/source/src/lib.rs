@@ -49,7 +49,7 @@ pub use db_qbs_shared::{
     is_supported_decimal_shape, ColumnShape, ShapeRejection, TargetShape,
 };
 // 校验门禁的判据同样只有一份定义，与 sink 共用（`shared::verification`）。
-pub use db_qbs_shared::{swap_rows_in_range, RowCounts, Verdict};
+pub use db_qbs_shared::{swap_rows_consistent, RowCounts, Verdict, WriteMode, WriteStatement};
 pub use failure_kind::{oracle_kind, FailureKind};
 pub use oracle_source::OracleRowSource;
 pub use protocol::{

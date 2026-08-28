@@ -77,6 +77,8 @@ fn the_task_file_carries_a_spec_and_this_run_parameters_and_nothing_else() {
     let loaded = load_task_config(&path).unwrap();
     assert_eq!(loaded.spec.owner, "APP");
     assert_eq!(loaded.spec.primary_key, vec!["ID".to_owned()]);
+    // 写入模式随任务定义落进临时任务文件（#261）——子进程按它走。
+    assert_eq!(loaded.spec.write_mode, db_qbs_source::WriteMode::Append);
     // 映射逐条读进来：目标字段是规格里的一等字段，不是从源列名推出来的。
     assert_eq!(
         loaded
@@ -161,6 +163,7 @@ fn valid_task() -> &'static str {
      { source = \"ID\", target = \"ID\" },\n\
      { source = \"D_BIZ\", target = \"D_BIZ\" },\n\
      ]\n\
+     write_mode = \"APPEND\"\n\
      primary_key = [\"ID\"]\n\
      where_clause = \"D_BIZ = DATE '2026-08-14'\"\n\
      \n\

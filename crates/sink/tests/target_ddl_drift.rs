@@ -232,6 +232,57 @@ fn sink_rejects_source_shapes_marked_unsupported() {
     }
 }
 
+/// #261：一列主键都没勾时，生成的建表语句里**不许出现主键约束**。
+///
+/// 按本文件的做法走 AST：解析出来的 `CREATE TABLE` 上一条约束都没有，且每一列都可空。
+/// 字符串比对在这里尤其不行——`"PRIMARY KEY"` 这几个字也会出现在表头注释里。
+///
+/// 另一半同样要钉：这张无主键的表喂回 sink 的映射预检，必须**一条问题都不报**。
+/// 生成器给的语句自己过不了自家预检，是这条链上最尴尬的一种漂移。
+#[test]
+fn a_task_with_no_primary_key_generates_a_table_with_no_primary_key() {
+    let source_columns = vec![
+        source_column("C_NAME", "VARCHAR2", None, None, Some(50)),
+        source_column("D_BIZ", "DATE", None, None, None),
+    ];
+
+    let ddl = generate_target_ddl(&source_columns, "T_FLOW", &[], None, None).unwrap();
+
+    assert_eq!(parse_target_keys(&ddl), [], "{ddl}");
+    for column in parse_target_columns(&ddl) {
+        assert!(
+            column.nullable,
+            "没有 upsert 要去重，就没有哪一列非 NOT NULL 不可：{} in {ddl}",
+            column.name
+        );
+    }
+    assert_eq!(
+        precheck_with_primary_key("T_FLOW", &[], &source_columns, &parse_target_columns(&ddl), &[]),
+        [],
+        "{ddl}"
+    );
+}
+
+/// 同一条判定的对照组：勾了主键，那条约束一个字都不能少。
+#[test]
+fn a_task_with_a_primary_key_still_gets_its_constraint() {
+    let source_columns = vec![
+        source_column("C_NAME", "VARCHAR2", None, None, Some(50)),
+        source_column("D_BIZ", "DATE", None, None, None),
+    ];
+
+    let ddl = generate_target_ddl(&source_columns, "T_GENERATED", &key(), None, None).unwrap();
+
+    assert_eq!(
+        parse_target_keys(&ddl),
+        vec![TargetKey {
+            name: "PRIMARY".to_owned(),
+            columns: key(),
+        }],
+        "{ddl}"
+    );
+}
+
 /// #257：生成的建表语句里那一段字符序，随目标端 agent 上报的值分叉。
 ///
 /// 8.0 与 5.7 的 utf8mb4 默认字符序不是同一个（`utf8mb4_0900_ai_ci` /

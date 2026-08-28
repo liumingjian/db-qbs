@@ -6,7 +6,8 @@ use regex::Regex;
 use serde_json::json;
 
 use crate::precheck::{
-    precheck_with_primary_key, range_check_columns, range_check_issue, target_check_findings,
+    precheck_conclusions, precheck_with_primary_key, range_check_columns, range_check_issue,
+    target_check_findings,
 };
 use crate::{
     AbortResponse, ActiveRun, ApiError, AtomicSwapError, AtomicSwapRequest, BatchPayload,
@@ -96,6 +97,8 @@ impl<F: DestinationFactory> SinkService<F> {
             ok: findings.is_empty(),
             findings,
             suggested_ddl: None,
+            // 结论与 findings 分开：这一句在检查**通过**时才有意义（#261）。
+            notes: precheck_conclusions(&request.primary_key, &keys),
         })
     }
 
@@ -838,9 +841,8 @@ fn validate_open_request(request: &OpenRunRequest) -> Result<(), ApiError> {
     if request.target_table.is_empty() {
         problems.push("target_table 不能为空");
     }
-    if request.primary_key.is_empty() {
-        problems.push("primary_key 不能为空：upsert 的去重键必选");
-    }
+    // `primary_key` 空是合法的（#261）：那是「目标表无主键，纯追加写」。
+    // 它到底成不成立由映射预检去目标表核对——拦截点只有那一个。
     if request.source_columns.is_empty() {
         problems.push("source_columns 不能为空");
     }

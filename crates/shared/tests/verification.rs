@@ -1,4 +1,4 @@
-use db_qbs_shared::{swap_rows_in_range, RowCounts, Verdict};
+use db_qbs_shared::{swap_rows_consistent, RowCounts, Verdict, WriteStatement};
 
 fn counts(
     source_rows: u64,
@@ -75,19 +75,48 @@ fn only_a_passing_verdict_passes() {
 fn the_swap_count_is_judged_as_an_interval_because_an_update_counts_twice() {
     // ADR-0035 §4: `ON DUPLICATE KEY UPDATE` counts an insert as 1 and an update
     // as 2, so a re-run that changed every value reports double what it staged.
-    assert!(swap_rows_in_range(5, 5));
-    assert!(swap_rows_in_range(5, 7));
-    assert!(swap_rows_in_range(5, 10));
+    let upsert = WriteStatement::Upsert;
+    assert!(swap_rows_consistent(upsert, 5, 5));
+    assert!(swap_rows_consistent(upsert, 5, 7));
+    assert!(swap_rows_consistent(upsert, 5, 10));
     // Below the lower bound means the swap wrote fewer rows than it staged —
     // the real failure this assertion exists to catch. The bound holds only
     // because `CLIENT_FOUND_ROWS` is set on the connection (#138); without it a
     // row whose values did not change would count 0 and this would fire.
-    assert!(!swap_rows_in_range(5, 4));
-    assert!(!swap_rows_in_range(5, 11));
+    assert!(!swap_rows_consistent(upsert, 5, 4));
+    assert!(!swap_rows_consistent(upsert, 5, 11));
+}
+
+#[test]
+fn a_plain_insert_is_judged_by_equality_because_it_has_no_update_leg() {
+    // #261: a primary-key-less target gets `INSERT ... SELECT` and nothing else,
+    // so every row staged is one row inserted — no matched rows, no doubled
+    // counts, nothing for an interval to absorb.
+    let insert = WriteStatement::Insert;
+    assert!(swap_rows_consistent(insert, 5, 5));
+    assert!(!swap_rows_consistent(insert, 5, 4));
+    // The upper half of the upsert interval is exactly what must NOT pass here:
+    // twice the staged rows on a plain insert means the statement ran twice.
+    assert!(!swap_rows_consistent(insert, 5, 10));
+    assert!(!swap_rows_consistent(insert, 5, 6));
+}
+
+#[test]
+fn the_statement_is_derived_from_the_recorded_primary_key_in_exactly_one_place() {
+    assert_eq!(
+        WriteStatement::for_primary_key(&["ID".to_owned()]),
+        WriteStatement::Upsert
+    );
+    assert_eq!(WriteStatement::for_primary_key(&[]), WriteStatement::Insert);
+    // The whole point of the fork: only one of the two promises idempotence.
+    assert!(WriteStatement::Upsert.idempotent());
+    assert!(!WriteStatement::Insert.idempotent());
 }
 
 #[test]
 fn an_empty_run_swaps_nothing_and_that_is_in_range() {
-    assert!(swap_rows_in_range(0, 0));
-    assert!(!swap_rows_in_range(0, 1));
+    for statement in [WriteStatement::Upsert, WriteStatement::Insert] {
+        assert!(swap_rows_consistent(statement, 0, 0));
+        assert!(!swap_rows_consistent(statement, 0, 1));
+    }
 }
