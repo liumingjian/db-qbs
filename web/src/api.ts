@@ -728,6 +728,37 @@ export async function fetchRun(runRecordId: string): Promise<RunDetail> {
   return readJson<RunDetail>(response, "读取运行详情失败");
 }
 
+/**
+ * 一页原始日志行（#258 的 `GET /api/runs/{}/logs?after=<seq>`）。
+ *
+ * `line` 是子进程写出来的**原文**，服务端不解析也不美化——翻成人话是
+ * `runLogLine.ts` 的活。`next_after` 是下一次该带的游标；`has_more` 说的是
+ * 「这一页取满了，立刻再来一次，别等下一个轮询周期」；`live` 说的是还该不该接着轮询。
+ */
+export interface RunLogPage {
+  run_record_id: string;
+  after: number;
+  next_after: number;
+  has_more: boolean;
+  live: boolean;
+  lines: { seq: number; line: string }[];
+}
+
+/**
+ * 取一页日志。**带游标的增量轮询，不是 SSE、不是长连接**：source 是同步阻塞栈、
+ * 没有异步运行时，一条挂着不放的连接会整根占死一个工作线程。
+ */
+export async function fetchRunLogs(
+  runRecordId: string,
+  after = 0,
+): Promise<RunLogPage> {
+  const response = await fetch(
+    `/api/runs/${encodeURIComponent(runRecordId)}/logs?after=${after}`,
+    { headers: { Accept: "application/json" } },
+  );
+  return readJson<RunLogPage>(response, "读取运行日志失败");
+}
+
 export async function cancelRun(
   runRecordId: string,
 ): Promise<{ message: string }> {

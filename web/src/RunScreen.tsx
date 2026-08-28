@@ -21,6 +21,7 @@ import { messageFrom } from "./errors";
 import { FailureEvidence } from "./FailureEvidence";
 import { runIdPresentation, runTaskName } from "./history";
 import { PrecheckReports } from "./PrecheckReports";
+import { RunLogPanel } from "./RunLogPanel";
 import { progressOfLiveRun } from "./progress";
 import { runPresentation } from "./run";
 import type { RunPresentation } from "./run";
@@ -33,12 +34,15 @@ const countFormatter = new Intl.NumberFormat("zh-CN");
 export function RunScreen({
   task,
   runRecordId,
+  focusLogs = false,
   onBack,
   onRelaunch,
   onEditTask,
 }: {
   task: Task;
   runRecordId: string;
+  /** 地址点名的是日志那一段（`#runs/<id>/logs`，任务列表的「查看日志」）。 */
+  focusLogs?: boolean;
   onBack: () => void;
   onRelaunch: () => void;
   onEditTask: (step: Step) => void;
@@ -136,6 +140,7 @@ export function RunScreen({
   }
 
   return (
+    <>
     <section className="card run-card" aria-labelledby="run-title">
       <header className="card-header run-header">
         <div>
@@ -203,6 +208,10 @@ export function RunScreen({
         </div>
       )}
     </section>
+    {/* 日志摆在详情下面，进行中与已结束走同一段（#263）：折叠出来的那几个数字答不出
+        「它卡在哪一步、上一句说了什么」，而那正是出事时唯一想看的东西。 */}
+    <RunLogPanel runRecordId={runRecordId} focus={focusLogs} />
+    </>
   );
 }
 
