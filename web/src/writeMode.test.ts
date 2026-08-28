@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import type { RunEvidence, TaskSpec } from "./api";
@@ -145,5 +148,22 @@ describe("运行详情说的是当时那一次", () => {
       mode: "CLEAR_THEN_IMPORT",
     });
     expect(runWriteView({}, spec).statement).toBe("insert");
+  });
+});
+
+describe("与目标端预检的那句结论逐字一致", () => {
+  it("Rust 那份改了一个字，这条用例就红", () => {
+    // 同一句话必须在两端各有一份（见 `APPEND_ONLY_CONCLUSION` 的注释：说这句话的
+    // 地方大多没有服务端的回答可读）。两份一致过去只由一行注释守着，而注释拦不住
+    // 任何人改一个字——这里把 Rust 那份读出来直接比。
+    const precheck = readFileSync(
+      fileURLToPath(new URL("../../crates/sink/src/precheck.rs", import.meta.url)),
+      "utf8",
+    );
+    const matched = precheck.match(
+      /pub const APPEND_ONLY_CONCLUSION: &str =\s*"([^"]*)";/,
+    );
+    expect(matched, "precheck.rs 里应当有 APPEND_ONLY_CONCLUSION").not.toBeNull();
+    expect(matched![1]).toBe(APPEND_ONLY_CONCLUSION);
   });
 });

@@ -53,7 +53,18 @@ export function writeStatementLabel(statement: WriteStatement): string {
   return statement === "upsert" ? "按主键 upsert" : "纯追加写";
 }
 
-/** 无主键那条路上必须被读到的那句话。与目标端预检的结论逐字一致。 */
+/**
+ * 无主键那条路上必须被读到的那句话，**与目标端预检的结论逐字一致**
+ * （`crates/sink/src/precheck.rs` 的 `APPEND_ONLY_CONCLUSION`）。
+ *
+ * 为什么这里要有一份而不是一律渲染服务端给的那句：需要说这句话的地方大多**没有**
+ * 服务端的回答可读——任务清单上每一行的那个标记（`JobCenterScreen`）背后没有一次
+ * 目标表检查，向导里那句常驻交底在第一次检查跑起来之前就得在。真有服务端结论的地方
+ * （第 3 步那一屏）渲染的仍是 `TargetCheckResult.notes` 原文，不是这份常量。
+ *
+ * 两份逐字一致这件事不靠注释守，靠 `writeMode.test.ts` 里那条把 Rust 那份读出来比对
+ * 的用例守——注释拦不住任何人改一个字。
+ */
 export const APPEND_ONLY_CONCLUSION =
   "目标表无主键 → 本任务为纯追加写，重跑会产生重复数据";
 

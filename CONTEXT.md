@@ -107,7 +107,7 @@ branches on the version.
 
 **Import Task**
    One complete job: query a batch of data from Oracle, move it into one MySQL table.
-   **The idempotence promise is no longer unconditional.** A task whose target table has a unique
+   **The idempotence promise is conditional.** A task whose target table has a unique
    constraint is re-runnable in the old sense — running **the same task definition** twice leaves the
    target table in an identical state, because consistency comes from **upserting on the primary
    key** and idempotence rests on that constraint. A task whose target table has **no** unique
@@ -582,8 +582,8 @@ branches on the version.
    a literal such as `/v1/runs/probe` could not be swallowed by `/v1/runs/{}` however the table is
    written — the table holds no such pair today, and the guard in `api.rs` is written against
    `routes()` rather than against one named route, so it covers the next one added. A placeholder is
-   exactly one path segment: non-empty, no `/` — one `match_pattern`, where there used to be a
-   `run_resource` and a `run_action` saying the same thing twice.
+   exactly one path segment: non-empty, no `/`, decided by **one** `match_pattern` rather than one
+   predicate per route shape.
    `every_route_reaches_its_handler` reconciles its own table against `routes()`, so a new route
    without a test fails the suite. The failure log reads the same table, so a run-scoped route added
    later names its `run_id` without anyone remembering to go and say so.
