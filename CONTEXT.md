@@ -205,6 +205,12 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    table holds either all old data or all new data, never an intermediate state.
    **Rows deleted at the source do not disappear at the target** — an upsert only writes, never
    deletes. That is a deliberate debt.
+   **The swap leaves nothing behind but the target table.** It writes no per-row record of what it
+   wrote: the write ledger `sink` used to keep in the customer's own database
+   (`__db_qbs_write_ledger`, one row per written primary key) is gone, and with it the "undo a run"
+   action that was its only consumer (#256). The reasoning is in **Standing limits** item 11; the
+   swap now drops that table when it finds one, so a deployment that has it sheds it on the next
+   run.
 
 **Tombstone**
    An in-memory record `sink` keeps for a finished run so that "what happened?" still has an answer
@@ -396,11 +402,13 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    three places in that file — `serve`'s listener loop, the `handle_request` that feeds it, and the
    translation pair at the bottom — and no route or handler knows it exists. Unlike `source`, `sink`
    keeps that process-level half in the same file rather than a `server.rs`; the file is 700 lines,
-   not 2400. Tests drive all eleven routes in-process (`crates/sink/tests/api.rs`), against
+   not 2400. Tests drive all ten routes in-process (`crates/sink/tests/api.rs`), against
    `test_support::InMemoryDestination` behind the `SinkService` seam.
 
    Routes are **data** (`routes()`) and matched in the same two passes, literal before placeholder, so
-   `/v1/runs/cleanup` cannot be swallowed by a run id however the table is written. A placeholder is
+   a literal such as `/v1/runs/probe` could not be swallowed by `/v1/runs/{}` however the table is
+   written — the table holds no such pair today, and the guard in `api.rs` is written against
+   `routes()` rather than against one named route, so it covers the next one added. A placeholder is
    exactly one path segment: non-empty, no `/` — one `match_pattern`, where there used to be a
    `run_resource` and a `run_action` saying the same thing twice.
    `every_route_reaches_its_handler` reconciles its own table against `routes()`, so a new route
@@ -460,7 +468,16 @@ gets paid off and when lives in the issue tracker, not here.
    a hard gate.
 9. **An upsert never deletes.** Rows removed at the source stay in the target table forever; see
    **Swap**.
-10. **The wizard's first-step two-pane geometry is a CSS-only invariant** — one row that renders only
+10. **A finished run cannot be undone.** There is no "undo" action and no record of which rows a
+   run wrote. Undo used to exist, backed by a write ledger table `sink` created inside the
+   customer's target database; it was removed whole, and the removal is irreversible (#256). Two
+   reasons. First, the promise could not be kept: once clear-then-import is a write mode, the rows
+   it deletes were never in the ledger, so "undo" could not put them back — and even for upsert,
+   undo deleted the rows the run had overwritten rather than restoring them. Second, the price was
+   a product-owned table growing row-for-row with the customer's business data, inside the
+   customer's own database, written on every commit and read by nothing else. The recovery path
+   for a bad run is a corrected re-run, not an undo.
+11. **The wizard's first-step two-pane geometry is a CSS-only invariant** — one row that renders only
    for certain data breaks the alignment; the rules and the worked counter-example live in the
    「两栏取数区的框线」 section of `web/src/app.css`. The row both panes share is rendered by one
    component (`DatasourceRow`), not copied per pane: a hand-written copy makes the invariant depend
