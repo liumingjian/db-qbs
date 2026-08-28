@@ -4,6 +4,7 @@ use db_qbs_shared::BatchPayload;
 use db_qbs_sink::test_support::InMemoryDestination;
 use db_qbs_sink::{
     OpenRunRequest, SinkService, SourceColumn, TargetColumn, TargetConnection, WriteBatchError,
+    WriteMode,
 };
 
 const RUN_ID: &str = "20260814091530_a3f19c";
@@ -276,6 +277,7 @@ fn open_request(source_columns: Vec<SourceColumn>) -> OpenRunRequest {
             password: "change-me".to_owned(),
             database: "qbs".to_owned(),
         },
+        write_mode: WriteMode::Append,
         primary_key: vec!["D_BIZ".to_owned()],
         source_columns,
         range_check_results: None,

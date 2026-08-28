@@ -421,6 +421,7 @@ c2_spec() {
   # 源列名与目标列名成心取得不一样（ADR-0038 §2）：投影是 `a.SRC_NAME AS DEST_NAME`。
   jq -nc --arg load_date "$(load_date_clause)" '{
     owner:"SPIKE", table:"T_V1_C2", target_table:"V1_C2",
+    write_mode:"APPEND",
     primary_key:["ROW_ID"],
     columns:[
       {source:"ROW_ID", target:"ROW_ID"},
@@ -553,6 +554,7 @@ c3_spec() {
   local group=$1
   jq -nc --arg group "$group" --arg load_date "$(load_date_clause)" '{
     owner:"SPIKE", table:"T_V1_C3", target_table:"V1_C3",
+    write_mode:"APPEND",
     primary_key:["ROW_ID"],
     columns:[
       {source:"ROW_ID", target:"ROW_ID"},
@@ -604,6 +606,7 @@ c4_spec() {
   local target_table=$1
   jq -nc --arg target_table "$target_table" --arg load_date "$(load_date_clause)" '{
     owner:"SPIKE", table:"T_V1_C4", target_table:$target_table,
+    write_mode:"APPEND",
     primary_key:["ROW_ID"],
     columns:[
       {source:"ROW_ID", target:"ROW_ID"},
@@ -669,6 +672,7 @@ c5_spec() {
   local target_table=$1
   jq -nc --arg target_table "$target_table" --arg load_date "$(load_date_clause)" '{
     owner:"SPIKE", table:"T_V1_C5", target_table:$target_table,
+    write_mode:"APPEND",
     primary_key:["ROW_ID"],
     columns:[
       {source:"ROW_ID", target:"ROW_ID"},
@@ -729,6 +733,7 @@ wide_spec() {
   local row_limit=$1
   jq -nc --arg row_limit "$row_limit" --arg biz_date "$BIZ_DATE" '{
     owner:"SPIKE", table:"T_M1_WIDE", target_table:"V1_WIDE",
+    write_mode:"APPEND",
     primary_key:["ROW_ID"],
     columns:(
       [{source:"ROW_ID", target:"ROW_ID"}, {source:"D_BIZ", target:"D_BIZ"}]

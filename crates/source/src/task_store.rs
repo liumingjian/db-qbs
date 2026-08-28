@@ -326,6 +326,7 @@ mod tests {
 
     use super::*;
     use crate::task_spec::ColumnMapping;
+    use db_qbs_shared::WriteMode;
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -342,6 +343,7 @@ mod tests {
             dblink: Some("FA".to_owned()),
             owner: "HTBR45".to_owned(),
             table: "T_R_FR_ASTSTAT".to_owned(),
+            write_mode: WriteMode::Append,
             columns: vec![mapping("ID"), mapping("D_BIZ")],
             primary_key: vec!["ID".to_owned()],
             where_clause: Some("D_BIZ = DATE '2026-08-14'".to_owned()),
@@ -450,6 +452,68 @@ mod tests {
         // 报错就说明没丢干净：那既不是「丢弃」，也没有从界面上恢复的办法。
         assert!(store.list().unwrap().is_empty());
         assert_eq!(store.get("stale").unwrap(), None);
+
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// #261 给任务定义加了 `write_mode`，而它是**必填**——老规格上没有这个键，
+    /// 反序列化不出来，于是走同一条路：整表丢弃。
+    ///
+    /// 这一票明知会把现有测试任务全部清掉，POC 阶段已确认可接受、不做迁移。把它钉在
+    /// 这里是为了让「代价是什么」有一处白纸黑字，而不是靠改这个字段的人自己记得。
+    /// 想不丢，唯一的办法是给字段一个 `#[serde(default)]`——那等于让「这条老任务
+    /// 到底是不是追加写」由默认值替用户回答，而这一票的全部内容就是不许静默替人回答。
+    #[test]
+    fn a_task_row_that_predates_the_write_mode_field_is_dropped_whole() {
+        let directory = temp_directory();
+        let database = directory.join(DATABASE_FILE);
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE tasks (
+                    task_id              TEXT PRIMARY KEY NOT NULL,
+                    name                 TEXT NOT NULL,
+                    source_datasource_id TEXT NOT NULL,
+                    target_datasource_id TEXT NOT NULL,
+                    spec                 TEXT NOT NULL
+                );
+                INSERT INTO tasks VALUES (
+                    'pre-write-mode', 'pre write mode task', 'src1', 'tgt1',
+                    '{\"owner\":\"HTBR45\",\"table\":\"T\",\"target_table\":\"M\",\"columns\":[{\"source\":\"ID\",\"target\":\"ID\"}],\"primary_key\":[\"ID\"]}'
+                );",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = TaskStore::open(&directory).unwrap();
+        assert!(store.list().unwrap().is_empty());
+        assert_eq!(store.get("pre-write-mode").unwrap(), None);
+
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// 无主键的任务定义能存能读：`primary_key` 是空数组，不是「还没填」。
+    #[test]
+    fn a_spec_with_no_primary_key_round_trips_because_empty_is_a_value() {
+        let directory = temp_directory();
+        let store = TaskStore::open(&directory).unwrap();
+        let created = store
+            .create(TaskInput {
+                name: "append only".to_owned(),
+                source_datasource_id: "src1".to_owned(),
+                target_datasource_id: "tgt1".to_owned(),
+                spec: TaskSpec {
+                    primary_key: Vec::new(),
+                    ..sample_spec()
+                },
+            })
+            .unwrap();
+
+        let read_back = store.get(&created.task_id).unwrap().unwrap();
+        assert!(read_back.spec.primary_key.is_empty());
+        assert_eq!(read_back.spec.write_mode, WriteMode::Append);
 
         drop(store);
         std::fs::remove_dir_all(directory).unwrap();

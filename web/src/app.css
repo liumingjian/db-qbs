@@ -520,6 +520,27 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .sql-editor-toolbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .sql-editor-toolbar .spec-note { margin: 0; }
 .sql-editor-toolbar .button { flex: none; }
+
+/* 写入模式那一格（#261）。规格与 `.where-clause-card` 同一档：同样的边线、同样的
+   48px 表头，因为它就摆在第 1 步映射表的正上方，两块卡差 1px 都看得出来。 */
+.write-mode-card { overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); }
+.write-mode-card > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.write-mode-card > header > div { display: flex; flex-direction: column; gap: 2px; }
+.write-mode-card strong { font-size: var(--size-body); font-weight: var(--weight-em); }
+.write-mode-card header span { color: var(--mute); font-size: var(--size-meta); }
+.write-mode-body { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 24px; padding: 12px; }
+.write-mode-choices { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; border: 0; }
+.write-mode-choices label { display: grid; grid-template-columns: auto 1fr; align-items: baseline; gap: 2px 8px; }
+.write-mode-choices label small { grid-column: 2; color: var(--mute); font-size: var(--size-meta); }
+.write-mode-statement { display: flex; flex-direction: column; gap: 2px; margin: 0; }
+.write-mode-statement dt { color: var(--mute); font-size: var(--size-meta); }
+.write-mode-statement dd { display: flex; flex-direction: column; gap: 2px; margin: 0; font-weight: var(--weight-em); }
+.write-mode-statement dd small { color: var(--mute); font-size: var(--size-meta); font-weight: normal; }
+.write-mode-card .upsert-note { margin: 0 12px 12px; }
+
+/* 任务列表上的纯追加写标记。它不是告警，所以不着 --crit / --warn——
+   这是一种合法的写法，只是它的代价必须在清单上就看得见。 */
+.write-mark { display: inline-block; margin-top: 2px; padding: 0 6px; border: 1px solid var(--line-strong); border-radius: var(--radius); color: var(--dim); font-size: var(--size-meta); line-height: 18px; }
 .sql-editor-tools { flex: none; display: flex; align-items: center; gap: 6px; }
 .sql-editor-tools .button { height: 28px; padding: 0 10px; font-size: var(--size-meta); }
 /* 开着的开关要看得出是开着的：`aria-pressed` 只说给辅助技术听。 */

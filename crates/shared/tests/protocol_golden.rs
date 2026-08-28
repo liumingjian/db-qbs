@@ -11,7 +11,7 @@ use db_qbs_shared::{
     AbortResponse, AgentInfo, BatchPayload, BatchResponse, ColumnSupport, CommitRequest,
     CommitResponse, ErrorBody, ErrorEnvelope, MysqlServerInfo, OpenOutcome, OpenRunRequest,
     OpenRunResponse, PrecheckIssue, RangeCheckColumn, RangeCheckResult, RunResponse, SourceColumn,
-    TargetConnection, Terminal,
+    TargetCheckResult, TargetConnection, Terminal, WriteMode,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -193,6 +193,7 @@ fn open_run_request_shape_with_range_check_results() {
             run_id: "20260818120000_a1b2c3".to_owned(),
             target_table: "ORDERS".to_owned(),
             target: target(),
+            write_mode: WriteMode::Append,
             primary_key: vec!["ID".to_owned()],
             source_columns: vec![column_minimal()],
             range_check_results: Some(vec![RangeCheckResult {
@@ -204,6 +205,7 @@ fn open_run_request_shape_with_range_check_results() {
             "run_id": "20260818120000_a1b2c3",
             "target_table": "ORDERS",
             "target": target_json(),
+            "write_mode": "APPEND",
             "primary_key": ["ID"],
             "source_columns": [{
                 "name": "ID",
@@ -224,6 +226,7 @@ fn open_run_request_shape_omits_absent_range_check_results() {
             run_id: "20260818120000_a1b2c3".to_owned(),
             target_table: "ORDERS".to_owned(),
             target: target(),
+            write_mode: WriteMode::Append,
             primary_key: vec!["ID".to_owned()],
             source_columns: vec![],
             range_check_results: None,
@@ -232,8 +235,65 @@ fn open_run_request_shape_omits_absent_range_check_results() {
             "run_id": "20260818120000_a1b2c3",
             "target_table": "ORDERS",
             "target": target_json(),
+            "write_mode": "APPEND",
             "primary_key": ["ID"],
             "source_columns": []
+        }),
+    );
+}
+
+/// 无主键那一支的线上形状（#261）：`primary_key` 是**空数组，不是缺席**。
+///
+/// 这件事值得单钉一份：空数组在这个报文里是一个有含义的值——「目标表没有可合并的
+/// 唯一约束，本次写纯 INSERT」。哪天有人顺手给它加上 `skip_serializing_if`，
+/// 收方就再也分不清「无主键」和「老版本没送这个字段」，而这两者的写法不一样。
+#[test]
+fn open_run_request_shape_carries_an_empty_primary_key_as_an_empty_array() {
+    round_trip(
+        OpenRunRequest {
+            run_id: "20260818120000_a1b2c3".to_owned(),
+            target_table: "T_FLOW".to_owned(),
+            target: target(),
+            write_mode: WriteMode::Append,
+            primary_key: vec![],
+            source_columns: vec![],
+            range_check_results: None,
+        },
+        json!({
+            "run_id": "20260818120000_a1b2c3",
+            "target_table": "T_FLOW",
+            "target": target_json(),
+            "write_mode": "APPEND",
+            "primary_key": [],
+            "source_columns": []
+        }),
+    );
+}
+
+/// 预检结论那一栏（#261）：空的时候整个字段不出现，非空时原样过线。
+#[test]
+fn target_check_result_carries_its_conclusions_only_when_it_has_any() {
+    round_trip(
+        TargetCheckResult {
+            ok: true,
+            findings: vec![],
+            suggested_ddl: None,
+            notes: vec![],
+        },
+        json!({ "ok": true, "findings": [], "suggested_ddl": null }),
+    );
+    round_trip(
+        TargetCheckResult {
+            ok: true,
+            findings: vec![],
+            suggested_ddl: None,
+            notes: vec!["目标表无主键 → 本任务为纯追加写，重跑会产生重复数据".to_owned()],
+        },
+        json!({
+            "ok": true,
+            "findings": [],
+            "suggested_ddl": null,
+            "notes": ["目标表无主键 → 本任务为纯追加写，重跑会产生重复数据"]
         }),
     );
 }

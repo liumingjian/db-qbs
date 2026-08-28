@@ -8,7 +8,7 @@ use db_qbs_sink::{
     build_staging_ddl, check_connection_settings, precheck, precheck_with_primary_key,
     CreateStagingError, DropStagingError, OpenOutcome, OpenRunRequest, RangeCheckColumn,
     RangeCheckResult, SinkConfig, SinkService, SourceColumn, TargetCheckKind, TargetCheckRequest,
-    TargetColumn, TargetConnection, TargetKey,
+    TargetColumn, TargetConnection, TargetKey, WriteMode,
 };
 
 const RUN_ID: &str = "20260814091530_a3f19c";
@@ -704,6 +704,7 @@ fn open_request(source_columns: Vec<SourceColumn>) -> OpenRunRequest {
             password: "change-me".to_owned(),
             database: "qbs".to_owned(),
         },
+        write_mode: WriteMode::Append,
         primary_key: vec!["D_BIZ".to_owned()],
         source_columns,
         range_check_results: None,

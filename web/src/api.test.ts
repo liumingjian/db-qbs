@@ -48,6 +48,7 @@ function spec(overrides: Partial<TaskSpec> = {}): TaskSpec {
       { source: "ID", target: "ID" },
       { source: "D_BIZ", target: "D_BIZ" },
     ],
+    write_mode: "APPEND",
     primary_key: ["ID"],
     ...overrides,
   };

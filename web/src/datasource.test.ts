@@ -62,6 +62,7 @@ function taskWith(sourceId: string, targetId: string, name = "t"): Task {
       owner: "SPIKE",
       table: "T",
       target_table: "T",
+      write_mode: "APPEND",
       primary_key: ["ID"],
       columns: [{ source: "ID", target: "ID" }],
       where_clause: "",

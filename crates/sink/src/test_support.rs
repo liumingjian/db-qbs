@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use db_qbs_shared::{MysqlServerInfo, RowCounts};
+use db_qbs_shared::{MysqlServerInfo, RowCounts, WriteStatement};
 
 use crate::{
     AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, CreateStagingError, Destination,
@@ -273,24 +273,41 @@ impl Destination for InMemoryDestination {
             })
             .collect::<Vec<_>>();
         let rows = self.staging.lock().unwrap()[&request.staging_table].clone();
+        let statement = WriteStatement::for_primary_key(&request.primary_key);
         let mut target_rows = self.target_rows.lock().unwrap();
         for row in rows {
-            let key = serde_json::to_string(
-                &key_indices
-                    .iter()
-                    .map(|index| &row[*index])
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap();
+            let key = match statement {
+                // Merge on the recorded key: a second run with the same keys
+                // overwrites, which is what makes the run idempotent.
+                WriteStatement::Upsert => serde_json::to_string(
+                    &key_indices
+                        .iter()
+                        .map(|index| &row[*index])
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap(),
+                // Nothing to merge on, so every row lands as a new row — including
+                // one identical to a row already there. Re-running doubles the
+                // table, and a test that asserts that has to be able to see it,
+                // so the fake's key here is a counter, not the row's values.
+                WriteStatement::Insert => {
+                    let ordinal = target_rows
+                        .keys()
+                        .filter(|(table, _)| table == &request.target_table)
+                        .count();
+                    format!("#{ordinal}")
+                }
+            };
             target_rows.insert((request.target_table.clone(), key), row);
         }
 
         Ok(AtomicSwapResult {
             staged_rows,
             purged_rows: *self.purged_rows.lock().unwrap(),
-            // No upsert here, so nothing can be counted twice: the interval
-            // `swap_rows_in_range` allows for is a MySQL `affected_rows` fact,
-            // not something a test double should invent.
+            // No real upsert here, so nothing can be counted twice: the interval
+            // `swap_rows_consistent` allows on the upsert path is a MySQL
+            // `affected_rows` fact, not something a test double should invent.
+            // Strict equality is also exactly what the plain-INSERT path demands.
             swapped_rows: staged_rows,
             count_ms,
         })

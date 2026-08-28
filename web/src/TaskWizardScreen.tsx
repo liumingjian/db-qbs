@@ -28,7 +28,7 @@ import type { BuilderColumn, BuilderSql, BuilderTable, PreviewResult } from "./a
 import { overlayOwnsKeyboard } from "./dialogFocus";
 import { messageFrom } from "./errors";
 import type { DatasourceOption } from "./entry";
-import { ICON, UpsertNote, UPSERT_NOTE_AHEAD } from "./components/DesignSystem";
+import { ICON, UpsertNote } from "./components/DesignSystem";
 import { HighlightedSql, HighlightedSqlInput, SqlEditor } from "./SqlEditor";
 import { Modal } from "./ui";
 import {
@@ -43,7 +43,16 @@ import {
   toSpec,
   view,
 } from "./wizard";
-import type { Change, ConfirmTargetCheck, Draft, Loss, RailEntry, Step } from "./wizard";
+import type {
+  Change,
+  ConfirmTargetCheck,
+  Draft,
+  Loss,
+  RailEntry,
+  Step,
+  WriteView,
+} from "./wizard";
+import { WRITE_MODES } from "./writeMode";
 
 export interface TaskWizardScreenProps {
   initial: Draft;
@@ -1260,6 +1269,13 @@ function StepBody({
           <pre className="ddl-output"><HighlightedSql sql={sqlEcho(draft.spec.source_sql ?? "")} /></pre>
         </section>
       )}
+      {/* 写入模式就在这里，紧挨着下面那张表的「主键」一列（#261）。
+          规格原话是「放在挑目标表与定主键的那一步」，而**向导里没有这样一步**：
+          目标表在进四步之前的选择屏上挑，主键在第 1 步这张映射表里勾。两个决定
+          里更该并排做的是「写入模式」与「主键」——它们一起决定了写出去的是哪条语句。
+          目标表那一屏离它有一整个步骤的距离，把模式摆到那里，人会在还没有列清单、
+          因而还看不见主键的时候先选写法。 */}
+      <WriteModeCard write={model.write} change={change} />
       {model.rows.length === 0 ? <p className="wizard-empty">{draft.fetchMode === "sql" ? "尚未识别结果列" : "未选择源表"}</p> : (
         <div className="table-wrap"><table className="data-grid wizard-mapping"><thead><tr><th>同步</th><th>源列</th><th>目标列</th><th>主键</th><th><span className="visually-hidden">操作</span></th></tr></thead><tbody>
           {model.rows.map((row) => <tr className={row.problem ? "is-problem" : ""} key={row.source}>
@@ -1322,6 +1338,8 @@ function StepBody({
       {checkError !== null && <div className="form-error" role="alert">{checkError}</div>}
       {model.check.state === "stale" && <div className="form-error" role="alert">映射或主键已变化，请重新检查目标表。</div>}
       {model.check.state === "none" && busy !== "check" && checkError === null && <p className="wizard-empty">等待目标表元数据与字段映射就绪。</p>}
+      {/* 预检结论：不是 finding，检查是**通过**的（#261）。通过之后还有一句话必须被读到。 */}
+      {(result?.notes ?? []).map((note) => <UpsertNote key={note} text={note} />)}
       {missing && <p className="wizard-placeholder"><strong>{draft.spec.target_table} 在目标库里还没有</strong>用下面这条语句建好它，再点「重新检查」。</p>}
       {result !== null && !result.ok && <>
         {!missing && <div className="target-check-findings">
@@ -1352,7 +1370,7 @@ function StepBody({
       <div><dt>WHERE</dt><dd>{confirmView.where}</dd></div>
       <div><dt>主键</dt><dd>{confirmView.primaryKey.join(", ")}</dd></div>
       <div className="is-wide"><dt>字段映射</dt><dd>{confirmView.mappings.map((mapping) => <span className="mapping-chip" key={mapping.source}>{mapping.source} → {mapping.target}</span>)}</dd></div>
-      <div><dt>写入方式</dt><dd>按主键 upsert</dd></div>
+      <div><dt>写入方式</dt><dd>{WRITE_MODES.find((entry) => entry.mode === confirmView.write.mode)?.label ?? confirmView.write.mode}（{confirmView.write.statementLabel}）</dd></div>
       {/* agent 离线原来要等点了「开始导入」才知道——那是最贵的一次发现。 */}
       <div><dt>目标端 Agent</dt><dd><span className={draft.targetAgentOnline ? "confirm-check is-passed" : "confirm-check is-warn"}>{draft.targetAgentOnline ? "在线" : "离线"}</span></dd></div>
       <div className="is-wide"><dt>不搬的列</dt><dd>{dropped.length === 0 ? <span className="confirm-none">源表所有列都会搬</span> : dropped.map((column) => <span className="mapping-chip is-dropped" key={column.name}>{column.name}</span>)}</dd></div>
@@ -1360,9 +1378,10 @@ function StepBody({
     </dl>
     <Blockers blockers={model.blockers} />
     {/* 写入语义的常驻交底（2026-08 UX 评审 P0-1）：这一步是「开始导入」前的最后一屏，
-        而这个产品**只增量合并、不删**。不写清楚的话，第一次用的人会按「全量同步」去理解
-        自己刚配好的这张目标表。它不是告警，所以不着 --crit / --warn。 */}
-    <UpsertNote text={UPSERT_NOTE_AHEAD} />
+        而这个产品**从不删行**。不写清楚的话，第一次用的人会按「全量同步」去理解
+        自己刚配好的这张目标表。它不是告警，所以不着 --crit / --warn。
+        文本按写法分叉（#261）：无主键那条路上「按主键 upsert」是句假话。 */}
+    <UpsertNote text={confirmView.write.note} />
   </section>;
 }
 
@@ -1376,6 +1395,60 @@ function StepBody({
  * 没检查过时把原因摆出来，并给一颗**当场就能检查**的按钮——原因写在这里而补救要退回
  * 第 3 步，等于把人赶去找路。
  */
+/**
+ * 写入那一格（#261），摆在第 1 步映射表的正上方——也就是「主键」那一列旁边。
+ *
+ * 两行，**上面一行可选、下面一行推导**：
+ *
+ * - 「写入模式」是任务定义里的一个字段。今天只有一档，那也照样渲染成一组单选按钮而
+ *   不是一行只读文字——清空后导入那一档接进来时，`WRITE_MODES` 多一项，这里什么都
+ *   不用改；而一行只读文字要变成控件，改的是人对这一格的理解。
+ * - 「写入语句」**不是选出来的**，人也改不了它：目标表有主键就 upsert，没有就纯
+ *   追加。做成禁用的下拉框会让人以为它本来能选、只是此刻不让选。
+ *
+ * 下面那句 `note` 永远在，两种写法各说各的：需求方明确不要为无主键加勾选框，
+ * 那这句话就是「重跑会产生重复数据」唯一的出口。
+ */
+function WriteModeCard({
+  write,
+  change,
+}: {
+  write: WriteView;
+  change: (intent: Change) => void;
+}) {
+  return (
+    <section className="write-mode-card">
+      <header><div><strong>写入模式</strong><span>决定这次运行往目标表写什么</span></div></header>
+      <div className="write-mode-body">
+        <fieldset className="write-mode-choices">
+          <legend className="visually-hidden">写入模式</legend>
+          {write.modes.map((entry) => (
+            <label key={entry.mode}>
+              <input
+                type="radio"
+                name="write-mode"
+                value={entry.mode}
+                checked={write.mode === entry.mode}
+                onChange={() => change({ type: "write-mode", mode: entry.mode })}
+              />
+              <span>{entry.label}</span>
+              <small>{entry.hint}</small>
+            </label>
+          ))}
+        </fieldset>
+        <dl className="write-mode-statement">
+          <dt>写入语句</dt>
+          <dd>
+            {write.statementLabel}
+            <small>由目标表有没有主键决定，不由这里选</small>
+          </dd>
+        </dl>
+      </div>
+      <UpsertNote text={write.note} />
+    </section>
+  );
+}
+
 function ConfirmTargetCheckCell({
   check,
   busy,

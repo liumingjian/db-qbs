@@ -5,7 +5,7 @@
 //! were therefore believed only by reading the implementation:
 //!
 //! 1. `CLIENT_FOUND_ROWS` makes an existing row whose values did not change count
-//!    as 1 rather than 0 (#138) — the whole reason `swap_rows_in_range` may put its
+//!    as 1 rather than 0 (#138) — the whole reason `swap_rows_consistent` may put its
 //!    lower bound at `staged_rows` instead of 0;
 //! 2. the swap's `affected_rows` lands in `[staged, 2×staged]` (ADR-0035 §4), and
 //!    **both ends are reachable**, which is why the judgement is an interval;
@@ -52,7 +52,7 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use db_qbs_shared::swap_rows_in_range;
+use db_qbs_shared::{swap_rows_consistent, WriteStatement};
 use db_qbs_sink::{
     build_staging_ddl, check_connection_settings, precheck_with_primary_key, AtomicSwapRequest,
     AtomicSwapResult, Destination, MysqlDestination, SourceColumn, TargetConnection, MIN_PACKET,
@@ -97,7 +97,7 @@ fn a_rerun_that_changes_nothing_is_still_counted_row_for_row() {
         "the control: without CLIENT_FOUND_ROWS MySQL counts an unchanged matched row as 0"
     );
     assert!(
-        !swap_rows_in_range(3, without_the_flag),
+        !swap_rows_consistent(WriteStatement::Upsert, 3, without_the_flag),
         "and 0 against 3 staged rows is outside the interval, which is the spelling of \
          \"remove the flag and it starts refusing correct runs\""
     );
@@ -139,10 +139,56 @@ fn the_swap_interval_reaches_both_of_its_ends() {
 
     for result in [inserts, updates, mixed] {
         assert!(
-            swap_rows_in_range(result.staged_rows, result.swapped_rows),
+            swap_rows_consistent(WriteStatement::Upsert, result.staged_rows, result.swapped_rows),
             "{result:?} must satisfy the judgement both ends share"
         );
     }
+}
+
+/// #261：无主键目标表的一次真实往返，以及连跑两次数据翻倍这件已知的事。
+///
+/// 这条测试是本票唯一能证明「纯 `INSERT ... SELECT` 真的跑得通」的东西——替身能证明
+/// 编排，证不了 MySQL 在一张没有唯一约束的表上如何计数。三件事一起钉：
+///
+/// 1. 语句确实写进去了，行数**严格相等**（不是区间——纯 INSERT 没有更新那条腿）；
+/// 2. 再跑一次，目标表变成两份。这不是缺陷，是这条路的定义，所以它被断言，不是被回避；
+/// 3. 严格判据在两次运行上都成立，也就是说「翻倍」不会被判成一次失败的切换。
+#[test]
+#[ignore = "needs a real MySQL; run docs/spikes/fixtures/local-rig/scripts/run-mysql-destination-live.sh"]
+fn a_keyless_target_appends_and_a_second_run_doubles_it() {
+    let mut rig = Rig::open_without_a_key("keyless");
+    let rows = [("1", "a"), ("2", "b"), ("3", "c")];
+
+    let first = rig.stage_and_swap("r1", &rows).expect("the first append");
+    assert_eq!(
+        (first.staged_rows, first.swapped_rows),
+        (3, 3),
+        "a plain INSERT ... SELECT inserts exactly what was staged"
+    );
+    assert_eq!(rig.target_row_count(), 3);
+    assert!(swap_rows_consistent(
+        WriteStatement::Insert,
+        first.staged_rows,
+        first.swapped_rows
+    ));
+
+    // 一模一样的三行再跑一遍。有主键时这是幂等的一次重跑；没有主键时它是又一次追加。
+    let second = rig.stage_and_swap("r2", &rows).expect("the second append");
+    assert_eq!((second.staged_rows, second.swapped_rows), (3, 3));
+    assert_eq!(
+        rig.target_row_count(),
+        6,
+        "重跑不再幂等：同一份任务定义跑两次，目标表状态不同（#261）"
+    );
+    assert!(swap_rows_consistent(
+        WriteStatement::Insert,
+        second.staged_rows,
+        second.swapped_rows
+    ));
+
+    // 对照：upsert 那一档的区间判据会放行 6，等值判据不会——这正是收紧的意义。
+    assert!(swap_rows_consistent(WriteStatement::Upsert, 3, 6));
+    assert!(!swap_rows_consistent(WriteStatement::Insert, 3, 6));
 }
 
 /// The Connection Ritual is the pool's, not the first connection's.
@@ -213,6 +259,7 @@ fn an_unmapped_auto_increment_column_is_recognised_on_this_server() {
          `V` VARCHAR(32) NULL, \
          `CREATE_TIME` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, \
          PRIMARY KEY (`SEQ_NO`), UNIQUE KEY `uk_k` (`K`)",
+        vec!["K".to_owned()],
     );
 
     let columns = rig
@@ -443,6 +490,9 @@ struct Rig {
     /// [`Rig::drop`] finds them again without keeping a list.
     prefix: String,
     target_table: String,
+    /// 这张目标表的主键，也就是这台台架跑的是哪一种写法（#261）。
+    /// 空 = 目标表上什么唯一约束都没有，切换段走纯 `INSERT ... SELECT`。
+    primary_key: Vec<String>,
     plain_opts: Opts,
     plain: Conn,
     /// The connection holding the occupier's lock, if one is held. A MySQL named
@@ -455,14 +505,22 @@ struct Rig {
 const DEFAULT_TABLE_BODY: &str =
     "`K` VARCHAR(16) NOT NULL, `V` VARCHAR(32) NOT NULL, PRIMARY KEY (`K`)";
 
+/// The same two columns with no unique constraint at all — the pure-append path (#261).
+const KEYLESS_TABLE_BODY: &str = "`K` VARCHAR(16) NULL, `V` VARCHAR(32) NULL";
+
 impl Rig {
     fn open(label: &str) -> Self {
-        Self::open_with_columns(label, DEFAULT_TABLE_BODY)
+        Self::open_with_columns(label, DEFAULT_TABLE_BODY, vec!["K".to_owned()])
+    }
+
+    /// 同一台台架，目标表**没有任何唯一约束**（#261）。
+    fn open_without_a_key(label: &str) -> Self {
+        Self::open_with_columns(label, KEYLESS_TABLE_BODY, Vec::new())
     }
 
     /// The same rig over a target table of the caller's own shape — for the tests
     /// that are about what `information_schema` says, rather than about the swap.
-    fn open_with_columns(label: &str, table_body: &str) -> Self {
+    fn open_with_columns(label: &str, table_body: &str, primary_key: Vec<String>) -> Self {
         let target = target_from_env();
 
         let plain_opts = Opts::from(
@@ -495,6 +553,7 @@ impl Rig {
             database: target.database.clone(),
             prefix,
             target_table,
+            primary_key,
             plain_opts,
             plain,
             locker: Mutex::new(None),
@@ -534,7 +593,7 @@ impl Rig {
                 run_id: format!("{}_{run}", self.prefix),
                 staging_table: staging_table.clone(),
                 target_table: self.target_table.clone(),
-                primary_key: vec!["K".to_owned()],
+                primary_key: self.primary_key.clone(),
                 columns: names,
                 source_rows: rows.len() as u64,
                 source_batches: 1,
@@ -586,6 +645,19 @@ impl Rig {
             ))
             .expect("the control upsert");
         self.plain.affected_rows()
+    }
+
+    /// How many rows the target table holds right now, over the test's own
+    /// connection. On the keyless path this is the whole point: the row count is
+    /// the only thing that tells "appended again" apart from "merged".
+    fn target_row_count(&mut self) -> u64 {
+        self.plain
+            .query_first(format!(
+                "SELECT COUNT(*) FROM `{}`.`{}`",
+                self.database, self.target_table
+            ))
+            .expect("counting the target rows")
+            .expect("COUNT(*) must return one row")
     }
 
     /// Runs one statement of the test's own on a connection out of the pool.

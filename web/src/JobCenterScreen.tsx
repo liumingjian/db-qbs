@@ -33,6 +33,11 @@ import {
 import type { LatestRunStatus, TaskFilters } from "./listing";
 import { progressOf } from "./progress";
 import { runHash } from "./routes";
+import {
+  APPEND_ONLY_CONCLUSION,
+  writeStatementLabel,
+  writeStatementOf,
+} from "./writeMode";
 import { RunDrawer } from "./RunDrawer";
 import { sourceSummary } from "./spec";
 import { rowRunAction } from "./troubleshooting";
@@ -744,6 +749,14 @@ function JobResults({
                   <span className="task-name" title={`任务 ID ${task.task_id}`}>
                     {task.name}
                   </span>
+                  {/* 纯追加写的可见标记（#261）：这一列上「这个任务重跑会翻倍」是
+                      需要在**看清单的时候**就知道的事，不能只在点进去之后才说。
+                      有主键的任务不挂任何标记——那是今天的行为，一个字都不多。 */}
+                  {writeStatementOf(task.spec.primary_key) === "insert" && (
+                    <span className="write-mark is-append" title={APPEND_ONLY_CONCLUSION}>
+                      {writeStatementLabel("insert")}
+                    </span>
+                  )}
                 </td>
                 <td>
                   {/* 状态是**一条链接**（UX 评审 P1-6）：运行详情整屏现在有地址了，

@@ -209,6 +209,7 @@ fn run() -> bool {
         // 子进程不碰数据源库、也不碰密钥文件。
         target: task.target.clone(),
         primary_key: task.spec.primary_key.clone(),
+        write_mode: task.spec.write_mode,
     };
     let result = run_transfer(&mut source, &mut sink, request, |event| {
         emit_transfer_event(event, &run_id, &task_path)

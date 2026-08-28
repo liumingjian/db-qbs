@@ -178,6 +178,24 @@ fn a_composite_primary_key_makes_every_key_column_not_null() {
     assert!(ddl.contains("PRIMARY KEY (`C_FUND`, `D_BIZ`)"));
 }
 
+/// #261：一列主键都没勾时，语句里不出现主键约束，而且每一列都可空。
+///
+/// 表头那句交底也跟着换：说的不再是「别去掉这条主键」，而是「重跑会再追加一份」。
+#[test]
+fn no_primary_key_means_no_constraint_and_a_note_that_says_why() {
+    let columns = vec![
+        source_column("C_FUND", "VARCHAR2", None, None, Some(20)),
+        source_column("N_AMT", "NUMBER", Some(18), Some(2), None),
+    ];
+
+    let ddl = generate_target_ddl(&columns, "T_FLOW", &[], None, None).unwrap();
+
+    assert!(!ddl.contains("PRIMARY KEY"), "{ddl}");
+    assert!(ddl.contains("`C_FUND` VARCHAR(20) NULL"), "{ddl}");
+    assert!(ddl.contains("`N_AMT` DECIMAL(18,2) NULL"), "{ddl}");
+    assert!(ddl.contains("每跑一次都会把这批数据再追加一份"), "{ddl}");
+}
+
 #[test]
 fn a_primary_key_column_missing_from_describe_is_named() {
     let columns = vec![source_column("D_BIZ", "DATE", None, None, None)];

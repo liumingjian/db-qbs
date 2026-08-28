@@ -3,7 +3,7 @@ use std::sync::Arc;
 use db_qbs_sink::test_support::{datetime_target_column, InMemoryDestination};
 use db_qbs_sink::{
     AtomicSwapError, BatchPayload, DropStagingError, OpenRunRequest, SinkService, SourceColumn,
-    TargetConnection,
+    TargetColumn, TargetConnection, TargetKey, WriteMode,
 };
 
 const RUN_ID: &str = "20260814091530_a3f19c";
@@ -38,6 +38,7 @@ fn open_request_for(run_id: &str) -> OpenRunRequest {
             password: "change-me".to_owned(),
             database: "qbs".to_owned(),
         },
+        write_mode: WriteMode::Append,
         primary_key: vec!["D_BIZ".to_owned()],
         source_columns: vec![SourceColumn {
             name: "D_BIZ".to_owned(),
@@ -322,4 +323,153 @@ fn abort_records_discarded_tombstones_and_the_33rd_evicts_the_oldest() {
     let batch_error = service.write_batch(&run_ids[1], one_row()).unwrap_err();
     assert_eq!(batch_error.status, 404);
     assert_eq!(batch_error.code, "RUN_UNKNOWN");
+}
+
+// ---------------------------------------------------------------------------
+// 无主键目标表：纯追加写（#261）
+// ---------------------------------------------------------------------------
+
+/// 一张**没有任何唯一约束**的目标表，单列 `D_BIZ datetime NULL`。
+///
+/// `nullable: true` 不是无所谓的细节：没有主键就没有哪一列能豁免「目标列必须可空」
+/// 那条预检，一张 NOT NULL 的无主键表本来就该被拦下来。
+fn keyless_destination() -> InMemoryDestination {
+    InMemoryDestination {
+        columns: vec![TargetColumn {
+            nullable: true,
+            ..datetime_target_column("D_BIZ")
+        }],
+        keys: Vec::new(),
+        ..InMemoryDestination::default()
+    }
+}
+
+fn keyless_open_request(run_id: &str) -> OpenRunRequest {
+    OpenRunRequest {
+        primary_key: Vec::new(),
+        ..open_request_for(run_id)
+    }
+}
+
+fn row_at(seq: u64, value: &str) -> BatchPayload {
+    BatchPayload {
+        seq,
+        rows: vec![vec![Some(value.to_owned())]],
+    }
+}
+
+#[test]
+fn a_target_table_without_a_primary_key_opens_and_commits_as_a_plain_append() {
+    let destination = Arc::new(keyless_destination());
+    let service = SinkService::new("qbs", destination.clone());
+
+    service.open(keyless_open_request(RUN_ID)).unwrap();
+    service.write_batch(RUN_ID, one_row()).unwrap();
+    let committed = service.commit(RUN_ID, 1, 1).unwrap();
+
+    // 严格相等，不是区间：纯 INSERT 没有更新那条腿（#261）。
+    assert_eq!(committed.staged_rows, committed.swapped_rows);
+    let requests = destination.swap_requests.lock().unwrap();
+    assert!(
+        requests[0].primary_key.is_empty(),
+        "空主键必须原样传到切换请求上——语句形状就是从它派生的"
+    );
+    drop(requests);
+    assert_eq!(
+        serde_json::to_value(service.get(RUN_ID).unwrap()).unwrap()["terminal"],
+        "SWAPPED"
+    );
+}
+
+#[test]
+fn re_running_a_keyless_task_doubles_the_target_table_and_that_is_the_known_cost() {
+    // 这个产品第一次接受「同一任务定义跑两次，目标表状态不同」。它不是缺陷，
+    // 是这条路的定义——所以它被钉在这里，而不是靠人记得。
+    let destination = Arc::new(keyless_destination());
+    let service = SinkService::new("qbs", destination.clone());
+
+    for run_id in ["20260814091530_a3f19c", "20260814091531_b4e28d"] {
+        service.open(keyless_open_request(run_id)).unwrap();
+        service
+            .write_batch(run_id, row_at(1, "2026-08-14 12:34:56"))
+            .unwrap();
+        service.commit(run_id, 1, 1).unwrap();
+    }
+
+    let rows = destination.target_row_values("T_POSITION");
+    assert_eq!(rows.len(), 2, "两次跑同一批数据，目标表里就是两份");
+    assert_eq!(rows[0], rows[1]);
+}
+
+#[test]
+fn a_task_recorded_as_keyless_is_refused_when_the_target_table_has_grown_a_unique_key() {
+    // 写法绝不静默切换：任务定义记的是「无主键」，目标表却有唯一约束——
+    // 这时改走 upsert 等于同一份任务定义在没人改过它的情况下换了语义。
+    let destination = Arc::new(InMemoryDestination {
+        keys: vec![TargetKey {
+            name: "PRIMARY".to_owned(),
+            columns: vec!["D_BIZ".to_owned()],
+        }],
+        ..keyless_destination()
+    });
+    let service = SinkService::new("qbs", destination.clone());
+
+    let error = service.open(keyless_open_request(RUN_ID)).unwrap_err();
+
+    // 拦截点仍然只有映射预检那一个。
+    assert_eq!(error.status, 422);
+    assert_eq!(error.code, "PRECHECK_FAILED");
+    let issues = error.details["issues"].as_array().unwrap();
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue["rule"].as_str().unwrap().contains("写法不会静默切换")),
+        "{issues:?}"
+    );
+    assert!(
+        destination.created.lock().unwrap().is_empty(),
+        "拒跑就是什么都没建"
+    );
+}
+
+#[test]
+fn the_no_primary_key_conclusion_comes_back_from_the_target_check() {
+    use db_qbs_sink::{TargetCheckRequest, APPEND_ONLY_CONCLUSION};
+
+    let destination = Arc::new(keyless_destination());
+    let service = SinkService::new("qbs", destination);
+
+    let result = service
+        .check_target(TargetCheckRequest {
+            target: open_request().target,
+            target_table: "T_POSITION".to_owned(),
+            source_columns: open_request().source_columns,
+            primary_key: Vec::new(),
+        })
+        .unwrap();
+
+    // 结论不是 finding：检查是**通过**的，通过之后还有一句话必须被读到（#261）。
+    assert!(result.ok);
+    assert!(result.findings.is_empty());
+    assert_eq!(result.notes, vec![APPEND_ONLY_CONCLUSION.to_owned()]);
+}
+
+#[test]
+fn a_target_table_with_a_primary_key_says_nothing_extra() {
+    use db_qbs_sink::TargetCheckRequest;
+
+    let destination = Arc::new(destination());
+    let service = SinkService::new("qbs", destination);
+
+    let result = service
+        .check_target(TargetCheckRequest {
+            target: open_request().target,
+            target_table: "T_POSITION".to_owned(),
+            source_columns: open_request().source_columns,
+            primary_key: vec!["D_BIZ".to_owned()],
+        })
+        .unwrap();
+
+    assert!(result.ok);
+    assert!(result.notes.is_empty(), "有主键就是今天的行为，一个字不多");
 }

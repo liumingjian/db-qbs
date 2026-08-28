@@ -277,7 +277,7 @@ fn mysql_datasource_json(name: &str, agent_id: &str) -> String {
 fn task_json(name: &str, target_table: &str, datasources: &(String, String)) -> String {
     let (source_datasource_id, target_datasource_id) = datasources;
     format!(
-        r#"{{"name":"{name}","source_datasource_id":"{source_datasource_id}","target_datasource_id":"{target_datasource_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"{target_table}","columns":[{{"source":"ID","target":"ID"}},{{"source":"D_BIZ","target":"D_BIZ"}}],"primary_key":["ID"],"where_clause":"D_BIZ = DATE '2026-08-14'"}}}}"#
+        r#"{{"name":"{name}","source_datasource_id":"{source_datasource_id}","target_datasource_id":"{target_datasource_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"{target_table}","columns":[{{"source":"ID","target":"ID"}},{{"source":"D_BIZ","target":"D_BIZ"}}],"write_mode":"APPEND","primary_key":["ID"],"where_clause":"D_BIZ = DATE '2026-08-14'"}}}}"#
     )
 }
 
@@ -488,7 +488,7 @@ fn every_route_reaches_its_handler() {
             Method::Post,
             "/api/target/check",
             "/api/target/check".into(),
-            format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"primary_key":["ID"]}}}}"#),
+            format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","primary_key":["ID"]}}}}"#),
             502,
         ),
         (
@@ -842,28 +842,28 @@ fn builder_preview_validates_spec_and_limit_before_reaching_oracle() {
     let rig = Rig::new();
     let incomplete = rig.post(
         "/api/builder/preview",
-        r#"{"source_datasource_id":"missing","spec":{"owner":"","table":"","target_table":"","primary_key":[],"columns":[]},"limit":10}"#,
+        r#"{"source_datasource_id":"missing","spec":{"owner":"","table":"","target_table":"","write_mode":"APPEND","primary_key":[],"columns":[]},"limit":10}"#,
     );
     assert_eq!(incomplete.status, 400);
     assert!(incomplete.body_text().contains("owner"));
 
     let invalid_sql = rig.post(
         "/api/builder/preview",
-        r#"{"source_datasource_id":"missing","spec":{"source_sql":"DELETE FROM APP.T","owner":"","table":"","target_table":"T","primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":10}"#,
+        r#"{"source_datasource_id":"missing","spec":{"source_sql":"DELETE FROM APP.T","owner":"","table":"","target_table":"T","write_mode":"APPEND","primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":10}"#,
     );
     assert_eq!(invalid_sql.status, 400);
     assert!(invalid_sql.body_text().contains("SELECT"));
 
     let zero = rig.post(
         "/api/builder/preview",
-        r#"{"source_datasource_id":"missing","spec":{"source_sql":"SELECT ID FROM APP.T","owner":"","table":"","target_table":"T","primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":0}"#,
+        r#"{"source_datasource_id":"missing","spec":{"source_sql":"SELECT ID FROM APP.T","owner":"","table":"","target_table":"T","write_mode":"APPEND","primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":0}"#,
     );
     assert_eq!(zero.status, 400);
     assert!(zero.body_text().contains("limit 必须大于 0"));
 
     let custom_sql = rig.post(
         "/api/builder/preview",
-        r#"{"source_datasource_id":"missing","spec":{"source_sql":"SELECT ID FROM APP.T","owner":"","table":"","target_table":"T","primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":1000}"#,
+        r#"{"source_datasource_id":"missing","spec":{"source_sql":"SELECT ID FROM APP.T","owner":"","table":"","target_table":"T","write_mode":"APPEND","primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":1000}"#,
     );
     assert_eq!(custom_sql.status, 400);
     assert!(custom_sql.body_text().contains("数据源 missing 不存在"));
@@ -952,7 +952,7 @@ fn task_writes_reject_client_identity_and_incomplete_definitions() {
 
     let missing_name = rig.post(
         "/api/tasks",
-        r#"{"spec":{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{"source":"ID","target":"ID"}],"primary_key":["ID"]}}"#,
+        r#"{"spec":{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{"source":"ID","target":"ID"}],"write_mode":"APPEND","primary_key":["ID"]}}"#,
     );
     assert_eq!(missing_name.status, 400, "{}", missing_name.body_text());
     assert_eq!(rig.json(&rig.get("/api/tasks")), serde_json::json!([]));
@@ -1045,7 +1045,7 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
         0o600
     );
     let task_toml = fs::read_to_string(&task_files[0]).unwrap();
-    for field in ["owner", "table", "columns", "primary_key", "where_clause"] {
+    for field in ["owner", "table", "columns", "write_mode", "primary_key", "where_clause"] {
         assert!(task_toml.contains(field), "{task_toml}");
     }
     // SQL 不落进任务文件：子进程从同一份规格现算。
@@ -1552,7 +1552,7 @@ fn column_fetch_rejects_an_invalid_spec_before_reaching_oracle() {
           "datasource_id":"unused-the-spec-gate-runs-first",
           "spec":{
             "owner":"APP","table":"ORDERS","target_table":"ORDERS",
-            "columns":[{"source":"ID","target":"ID"}],"primary_key":["MISSING"]
+            "columns":[{"source":"ID","target":"ID"}],"write_mode":"APPEND","primary_key":["MISSING"]
           }
         }"#,
     );
@@ -1582,7 +1582,7 @@ fn builder_sql_is_derived_from_the_spec_and_never_travels_back() {
           "table":"T_R_FR_ASTSTAT",
           "target_table":"T_POSITION",
           "columns":[{"source":"N_VA_PRICE","target":"N_VA_PRICE"},{"source":"D_BIZ","target":"D_BIZ"}],
-          "primary_key":["D_BIZ"],
+          "write_mode":"APPEND","primary_key":["D_BIZ"],
           "where_clause":"D_BIZ >= DATE '2026-08-01' AND STATUS IN ('OK','WARN')"
         }"#,
     );
@@ -1655,7 +1655,7 @@ fn column_fetch_oracle_failure_does_not_create_a_run_touch_sink_or_write_storage
           "datasource_id":"{source_datasource_id}",
           "spec":{{
             "owner":"APP","table":"MISSING_ORDERS","target_table":"ORDERS",
-            "columns":[{{"source":"ID","target":"ID"}},{{"source":"BIZ_DAY","target":"BIZ_DAY"}}],"primary_key":["ID"]
+            "columns":[{{"source":"ID","target":"ID"}},{{"source":"BIZ_DAY","target":"BIZ_DAY"}}],"write_mode":"APPEND","primary_key":["ID"]
           }}
         }}"#
         ),
@@ -1764,7 +1764,7 @@ fn target_check_proxies_every_typed_kind_and_attaches_ddl_only_when_failed() {
         .unwrap()
         .to_owned();
     let target_id = rig.create_mysql_datasource("目标库", &agent_id);
-    let request = format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"primary_key":["ID"]}}}}"#);
+    let request = format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","primary_key":["ID"]}}}}"#);
 
     let response = rig.post_with_describer("/api/target/check", &request, described_id);
     assert_eq!(response.status, 200, "{}", response.body_text());
@@ -1811,7 +1811,7 @@ fn target_check_maps_request_datasource_agent_and_sink_failures_at_their_boundar
     assert_eq!(rig.post("/api/target/check", "{}").status, 400);
 
     let source_id = rig.create_oracle_datasource("源库");
-    let check_body = |target_id: &str| format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"primary_key":["ID"]}}}}"#);
+    let check_body = |target_id: &str| format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","primary_key":["ID"]}}}}"#);
     let invalid_target = check_body(&source_id);
     let wrong_kind = rig.post_with_describer("/api/target/check", &invalid_target, described_id);
     assert_eq!(wrong_kind.status, 400, "{}", wrong_kind.body_text());
@@ -2353,7 +2353,7 @@ fn a_slow_oracle_fetch_does_not_block_another_client_listing_tasks() {
     let (_agent_id, source_id, target_id) = rig.seed();
     rig.create_task("holdings", "HOLDINGS", &(source_id.clone(), target_id.clone()));
     let check = format!(
-        r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"primary_key":["ID"]}}}}"#
+        r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","primary_key":["ID"]}}}}"#
     );
 
     thread::scope(|scope| {

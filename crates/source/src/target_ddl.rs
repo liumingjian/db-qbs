@@ -71,6 +71,8 @@ pub fn generate_target_ddl(
 
         // 主键列必须 NOT NULL，其余列必须可空——两条各有出处：前者是 ADR-0035 §2 第 3 条
         // （可空会让 upsert 静默退化），后者是 ADR-0009 的映射预检。
+        // 一列主键都没勾时（#261 的纯追加写）全部列都落到 `NULL` 这一支，这是对的：
+        // 没有 upsert 要去重，也就没有哪一列非 NOT NULL 不可。
         let nullability = if is_key_column(&column.name, primary_key) {
             "NOT NULL"
         } else {
@@ -112,16 +114,23 @@ pub fn generate_target_ddl(
     } else {
         quote_identifier(target_table)
     };
-    // 主键不是可选项：撤掉 DELETE 之后幂等全靠它，目标表没有它时
-    // `ON DUPLICATE KEY UPDATE` 会静默退化成纯 INSERT（ADR-0035 §2），预检会直接拒跑。
-    definitions.push(format!(
-        "  PRIMARY KEY ({})",
-        primary_key
-            .iter()
-            .map(|column| quote_identifier(column))
-            .collect::<Vec<_>>()
-            .join(", ")
-    ));
+    // 主键是**可选**的（#261）。勾了主键就是要 upsert，那时它一个字都不能少：撤掉
+    // DELETE 之后幂等全靠它，目标表没有对应约束时 `ON DUPLICATE KEY UPDATE` 会静默
+    // 退化成纯 INSERT（ADR-0035 §2），sink 侧预检会直接拒跑。
+    //
+    // 一列都没勾时**不写这一段**。写一条空的 `PRIMARY KEY ()` 是语法错，随便挑一列
+    // 凑上去则更糟：那会建出一张有主键的表，而任务定义记的是「无主键、纯追加写」，
+    // 两边一对不上，第一次运行就被预检拦下来——用户手里拿的正是本工具给他的语句。
+    if !primary_key.is_empty() {
+        definitions.push(format!(
+            "  PRIMARY KEY ({})",
+            primary_key
+                .iter()
+                .map(|column| quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
 
     let precision_note = if precision_placeholders.is_empty() {
         String::new()
@@ -139,10 +148,16 @@ pub fn generate_target_ddl(
         .map(|collation| format!(" COLLATE={collation}"))
         .unwrap_or_default();
 
+    // 表头那句话跟着写法走（#261）：有主键时说的是「别去掉它」，无主键时说的是
+    // 「这就是纯追加，重跑会翻倍」。两种情况说同一句话等于其中一句必然是假的。
+    let write_note = if primary_key.is_empty() {
+        "-- 没有主键：本任务写纯 INSERT，每跑一次都会把这批数据再追加一份。\n"
+    } else {
+        "-- 下面那条主键不是可选项：写入走 upsert，目标表没有它时重跑会静默出重复行。\n"
+    };
     Ok(format!(
         "-- db-qbs 生成的目标表建表 SQL，请自行执行；产品不会替你建表。\n\
-         -- 下面那条主键不是可选项：写入走 upsert，目标表没有它时重跑会静默出重复行。\n\
-         {precision_note}CREATE TABLE {table_name} (\n{}\n\
+         {write_note}{precision_note}CREATE TABLE {table_name} (\n{}\n\
          ) DEFAULT CHARSET=utf8mb4{collation_clause};",
         definitions.join(",\n")
     ))

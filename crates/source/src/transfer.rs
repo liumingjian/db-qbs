@@ -5,9 +5,9 @@ use chrono::Utc;
 use rand::RngCore;
 
 use crate::{
-    swap_rows_in_range, BatchPayload, FailureKind, OpenFailure, OpenRunRequest, RangeCheckColumn,
-    RangeCheckResult, RowCounts, RunResponse, RunStage, SinkClient, SinkError, SinkErrorKind,
-    SourceColumn, TargetConnection, Terminal,
+    swap_rows_consistent, BatchPayload, FailureKind, OpenFailure, OpenRunRequest,
+    RangeCheckColumn, RangeCheckResult, RowCounts, RunResponse, RunStage, SinkClient, SinkError,
+    SinkErrorKind, SourceColumn, TargetConnection, Terminal, WriteMode, WriteStatement,
 };
 
 pub const FETCH_ARRAY_SIZE: u32 = 100;
@@ -86,8 +86,11 @@ pub struct TransferRequest {
     pub target_table: String,
     /// 目标端连接（ADR-0037 §1）：由编排进程按任务的目标数据源解出来，原样过线给 sink。
     pub target: TargetConnection,
-    /// upsert 的去重键（ADR-0035 §2），原样过线交给 sink 侧预检核对。
+    /// 去重键（ADR-0035 §2），原样过线交给 sink 侧预检核对。**可以为空**——
+    /// 空就是任务定义记下的「目标表无主键，纯追加写」（#261）。
     pub primary_key: Vec<String>,
+    /// 任务定义里的写入模式（#261），原样过线。
+    pub write_mode: WriteMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,10 +265,14 @@ pub fn run_transfer(
         run_id: request.run_id.clone(),
         target_table: request.target_table,
         target: request.target,
-        primary_key: request.primary_key,
+        write_mode: request.write_mode,
+        primary_key: request.primary_key.clone(),
         source_columns: source.columns().to_vec(),
         range_check_results: None,
     };
+    // 判据按语句分叉，而语句只由任务定义记下的主键决定（#261）。sink 在开 run 时
+    // 已经拿目标表现在的样子核对过这一份记录，对不上就不会有 200——所以这里照它读。
+    let statement = WriteStatement::for_primary_key(&request.primary_key);
     // 开 run 可能是两段的：sink 要值域校核时，由这个闭包去源端把数取回来。往返几次、
     // 暗号长什么样、run_id 校验几遍，都在 `SinkClient::open` 里，这里看不见也不必知道。
     let open_result = sink.open(open_request, |columns| {
@@ -512,7 +519,7 @@ pub fn run_transfer(
     };
     if committed.source_rows != source_rows
         || !counts.verdict().passed()
-        || !swap_rows_in_range(committed.staged_rows, committed.swapped_rows)
+        || !swap_rows_consistent(statement, committed.staged_rows, committed.swapped_rows)
     {
         observe(TransferEvent::StageChanged(RunStage::Failed));
         return Err(Box::new(
