@@ -389,8 +389,26 @@ describe("SQL builder API", () => {
 
   it("asks the target end for tables and columns by datasource id alone", async () => {
     // 界面只报数据源 id——凭据由 source 解一次再过线，前端一次也不碰（ADR-0037 §1/§8）。
+    // `extra` 按 **MySQL 5.7** 的取值写（#262）：5.7 的 `information_schema.COLUMNS.EXTRA`
+    // 对一根 `NOT NULL DEFAULT CURRENT_TIMESTAMP` 的列给空串，`DEFAULT_GENERATED` 是 8.0 才加的。
+    // 夹具里写死 8.0 独有的取值，等于把「只在 8.0 上成立」当成了通例。
+    // 自增列两版都报 `auto_increment`，所以这里一并放一根，两个版本共有的形状各占一行。
     const metadata = {
       columns: [
+        {
+          name: "ID",
+          column_type: "bigint(20)",
+          data_type: "bigint",
+          precision: 20,
+          scale: 0,
+          length: null,
+          datetime_precision: null,
+          nullable: false,
+          character_set: null,
+          ordinal: 1,
+          default_value: null,
+          extra: "auto_increment",
+        },
         {
           name: "CREATE_TIME",
           column_type: "datetime",
@@ -401,9 +419,9 @@ describe("SQL builder API", () => {
           datetime_precision: 0,
           nullable: false,
           character_set: null,
-          ordinal: 1,
+          ordinal: 2,
           default_value: "CURRENT_TIMESTAMP",
-          extra: "DEFAULT_GENERATED",
+          extra: "",
         },
       ],
       keys: [{ name: "PRIMARY", columns: ["ID"] }],
