@@ -12,8 +12,8 @@ use crate::{
     AbortResponse, ActiveRun, ApiError, AtomicSwapError, AtomicSwapRequest, BatchPayload,
     BatchResponse, CommitResponse, CreateStagingError, Destination, DestinationFactory,
     DropStagingError, FixedDestination, OpenRunRequest, PrecheckIssue, RangeCheckColumn,
-    RangeCheckResult, RunResponse, SinkService, SourceColumn, TargetCheckRequest,
-    TargetCheckResult, TargetColumn, Terminal, WriteBatchError,
+    RangeCheckResult, RunAdmission, RunResponse, SinkService, SourceColumn, TargetCheckRequest,
+    TargetCheckResult, TargetColumn, Terminal, WriteBatchError, DEFAULT_MAX_CONCURRENT_RUNS,
     MAX_PREPARED_STATEMENT_PLACEHOLDERS, TOMBSTONE_LIMIT,
 };
 
@@ -29,13 +29,26 @@ impl<D: Destination> SinkService<FixedDestination<D>> {
 
 impl<F: DestinationFactory> SinkService<F> {
     /// 生产路径：每个 run 按请求里的连接信息现建目的地（ADR-0037 §2）。
+    /// 并发额度取 [`DEFAULT_MAX_CONCURRENT_RUNS`]，配置里写了另一个值就再链一次
+    /// [`SinkService::with_max_concurrent_runs`]。
     pub fn with_factory(factory: F) -> Self {
         Self {
             factory,
+            max_concurrent_runs: DEFAULT_MAX_CONCURRENT_RUNS,
             active_runs: Mutex::new(HashMap::new()),
+            admitting: Mutex::new(HashMap::new()),
             tombstones: Mutex::new(VecDeque::new()),
             observed_mysql: Mutex::new(None),
         }
+    }
+
+    /// 把并发额度换成 `sink.toml` 里那一份（#260）。
+    ///
+    /// **0 当 1 用**：配置里写 0 的意思几乎肯定是「不限」而不是「一个都不许跑」，
+    /// 但「不限」正是本票要撤掉的那件事；把它收成 1 既不静默放行、也不让 agent 变砖。
+    pub fn with_max_concurrent_runs(mut self, max_concurrent_runs: usize) -> Self {
+        self.max_concurrent_runs = max_concurrent_runs.max(1);
+        self
     }
 
     /// 最近一次连上目标端时读到的 MySQL 自述，从没连上过就是 `None`（#257）。
@@ -99,6 +112,84 @@ impl<F: DestinationFactory> SinkService<F> {
         })
     }
 
+    /// 受理一个 run：并发额度与目标表互斥两道判定，在同一把锁下一起做（#260）。
+    ///
+    /// **互斥键是「（agent、库、目标表）」，不是「任务」**。任务那一层的互斥在 source 侧，
+    /// 但 source 可能有好几台，而且没有一台掌握目标库的真相——两个不同任务完全可以
+    /// 指向同一张目标表（目标表就是个字符串，没有唯一性约束）。串行时代这不出事；
+    /// 并发之后，一个任务正在整表改写、另一个刚把行 upsert 进去，那些行会被静默盖掉，
+    /// **两次运行都报成功，数据已经没了**。所以这道判定必须落在写库的这一端。
+    ///
+    /// 表名按**忽略大小写**比：MySQL 的表名大小写敏感与否随 `lower_case_table_names`
+    /// 和文件系统变，判互斥宁可多拦一次，也不能因为大小写差一位就放两个 run 同时进去。
+    ///
+    /// 返回的是一张**位子的收据**：它一 drop，位子就还回去，`open` 后半程的每一条
+    /// 出错分支都不必记得手工归还。
+    fn admit(
+        &self,
+        run_id: &str,
+        database: &str,
+        target_table: &str,
+    ) -> Result<AdmissionGuard<'_, F>, ApiError> {
+        // 两把锁的次序在整个 crate 里只有这一处成对出现：先 `active_runs` 再 `admitting`。
+        let active_runs = self.active_runs.lock().expect("active run mutex poisoned");
+        let mut admitting = self.admitting.lock().expect("admission mutex poisoned");
+        // 同一个 run id 重开自己不算冲突，也不占第二份额度。
+        let holder = active_runs
+            .values()
+            .filter(|run| run.run_id != run_id)
+            .find(|run| {
+                run.database == database && run.target_table.eq_ignore_ascii_case(target_table)
+            })
+            .map(|run| run.run_id.clone())
+            .or_else(|| {
+                admitting
+                    .iter()
+                    .filter(|(id, _)| id.as_str() != run_id)
+                    .find(|(_, admission)| {
+                        admission.database == database
+                            && admission.target_table.eq_ignore_ascii_case(target_table)
+                    })
+                    .map(|(id, _)| id.clone())
+            });
+        if let Some(holder) = holder {
+            return Err(target_table_busy_error(
+                run_id,
+                database,
+                target_table,
+                &holder,
+            ));
+        }
+
+        let mut in_flight = active_runs
+            .keys()
+            .chain(admitting.keys())
+            .filter(|id| id.as_str() != run_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        in_flight.sort();
+        in_flight.dedup();
+        if in_flight.len() >= self.max_concurrent_runs {
+            return Err(run_quota_exceeded_error(
+                run_id,
+                self.max_concurrent_runs,
+                &in_flight,
+            ));
+        }
+
+        admitting.insert(
+            run_id.to_owned(),
+            RunAdmission {
+                database: database.to_owned(),
+                target_table: target_table.to_owned(),
+            },
+        );
+        Ok(AdmissionGuard {
+            service: self,
+            run_id: run_id.to_owned(),
+        })
+    }
+
     /// 开一个 run。**回 [`OpenOutcome::RangeCheckNeeded`] 时什么都没建、什么都没存**——
     /// 预检的 1–3 步过了，但 3.5 步值域校核要源端去数真实数据，本次调用到此为止。
     /// 那不是「开成了一半」，`active_runs` 里不会有条目，此时推批次只会拿到 404。
@@ -113,6 +204,9 @@ impl<F: DestinationFactory> SinkService<F> {
             .map_err(|message| target_connect_error(&request.run_id, message))?;
         let destination = connected.destination;
         self.remember_mysql(destination.as_ref());
+        // 受理点在**连上之后**：库名是工厂给的那一份（`ConnectedDestination::database`），
+        // 请求里的那个字段只是它的原料。一次连接的代价换互斥键与运行时用的是同一个库名。
+        let _admission = self.admit(&request.run_id, &connected.database, &request.target_table)?;
 
         let target_columns =
             destination
@@ -203,6 +297,7 @@ impl<F: DestinationFactory> SinkService<F> {
             .collect();
         let active_run = ActiveRun {
             run_id: request.run_id.clone(),
+            database: connected.database,
             staging_table: staging_table.clone(),
             max_rows_per_insert: MAX_PREPARED_STATEMENT_PLACEHOLDERS / source_columns.len(),
             source_columns,
@@ -231,69 +326,85 @@ impl<F: DestinationFactory> SinkService<F> {
         run_id: &str,
         payload: BatchPayload,
     ) -> Result<BatchResponse, ApiError> {
-        let mut active_runs = self.active_runs.lock().expect("active run mutex poisoned");
-        let run = match active_runs.get_mut(run_id) {
-            Some(run) => run,
-            None => {
+        // 锁**只圈住取句柄与占号那几行**，MySQL 写在锁外做（#260）。
+        //
+        // 从前这把锁一路攥到 `write_batch` 返回，于是任意一个 run 的一次批次写入
+        // 会把这台 agent 上所有其他 run 的推送全堵住——一次切换时的整表改写
+        // 能让别的任务停在那里干等。提交那条路早就是这个写法（取出 `run.clone()`、
+        // 放锁、再 `atomic_swap`），本票只是把剩下的一条统一过来。
+        //
+        // 序号是**先占后写**的：占号与「期望第几批」的判定在同一把锁下完成，
+        // 所以两条同 run 的推送不会双双认为自己是第 n 批；写失败再把号退回去，
+        // 对调用方而言 `next_seq` 与从前一个字节不差。
+        let run = {
+            let mut active_runs = self.active_runs.lock().expect("active run mutex poisoned");
+            let Some(run) = active_runs.get_mut(run_id) else {
                 drop(active_runs);
                 return Err(self.inactive_run_error(run_id));
+            };
+
+            if run.sealed {
+                return Err(run_sealed_error(run_id, active_run_response(run_id, run)));
             }
+
+            if payload.seq != run.next_seq {
+                return Err(ApiError {
+                    status: 409,
+                    code: "SEQ_MISMATCH",
+                    message: format!(
+                        "run {run_id} 批次顺序不符：期望第 {} 批，实际第 {} 批",
+                        run.next_seq, payload.seq
+                    ),
+                    run_id: Some(run_id.to_owned()),
+                    details: json!({ "expected": run.next_seq, "got": payload.seq }),
+                });
+            }
+
+            let column_count = run.source_columns.len();
+            if let Some((row_index, row)) = payload
+                .rows
+                .iter()
+                .enumerate()
+                .find(|(_, row)| row.len() != column_count)
+            {
+                return Err(ApiError {
+                    status: 400,
+                    code: "BAD_REQUEST",
+                    message: format!(
+                        "第 {} 批第 {} 行有 {} 个值，source_columns 要求 {column_count} 个",
+                        payload.seq,
+                        row_index + 1,
+                        row.len()
+                    ),
+                    run_id: Some(run_id.to_owned()),
+                    details: json!({
+                        "seq": payload.seq,
+                        "row": row_index + 1,
+                        "expected": column_count,
+                        "got": row.len(),
+                    }),
+                });
+            }
+
+            run.next_seq += 1;
+            run.clone()
         };
 
-        if run.sealed {
-            return Err(run_sealed_error(run_id, active_run_response(run_id, run)));
-        }
-
-        if payload.seq != run.next_seq {
-            return Err(ApiError {
-                status: 409,
-                code: "SEQ_MISMATCH",
-                message: format!(
-                    "run {run_id} 批次顺序不符：期望第 {} 批，实际第 {} 批",
-                    run.next_seq, payload.seq
-                ),
-                run_id: Some(run_id.to_owned()),
-                details: json!({ "expected": run.next_seq, "got": payload.seq }),
-            });
-        }
-
-        let column_count = run.source_columns.len();
-        if let Some((row_index, row)) = payload
-            .rows
-            .iter()
-            .enumerate()
-            .find(|(_, row)| row.len() != column_count)
-        {
-            return Err(ApiError {
-                status: 400,
-                code: "BAD_REQUEST",
-                message: format!(
-                    "第 {} 批第 {} 行有 {} 个值，source_columns 要求 {column_count} 个",
-                    payload.seq,
-                    row_index + 1,
-                    row.len()
-                ),
-                run_id: Some(run_id.to_owned()),
-                details: json!({
-                    "seq": payload.seq,
-                    "row": row_index + 1,
-                    "expected": column_count,
-                    "got": row.len(),
-                }),
-            });
-        }
-
-        let rows_written = run
-            .destination
-            .write_batch(
-                &run.staging_table,
-                &run.source_columns,
-                &payload.rows,
-                run.max_rows_per_insert,
-            )
-            .map_err(|error| write_batch_api_error(run_id, payload.seq, error))?;
+        let rows_written = match run.destination.write_batch(
+            &run.staging_table,
+            &run.source_columns,
+            &payload.rows,
+            run.max_rows_per_insert,
+        ) {
+            Ok(rows_written) => rows_written,
+            Err(error) => {
+                self.release_seq(run_id, payload.seq);
+                return Err(write_batch_api_error(run_id, payload.seq, error));
+            }
+        };
         let row_count = payload.rows.len();
         if rows_written != row_count as u64 {
+            self.release_seq(run_id, payload.seq);
             return Err(ApiError {
                 status: 500,
                 code: "INTERNAL_ASSERTION_FAILED",
@@ -311,13 +422,35 @@ impl<F: DestinationFactory> SinkService<F> {
             });
         }
 
-        run.next_seq += 1;
-        run.rows_written += rows_written;
+        // 落账要回到锁里：这中间这条 run 可能已经被 abort 掉了，那就没有账可落。
+        let next_seq = {
+            let mut active_runs = self.active_runs.lock().expect("active run mutex poisoned");
+            match active_runs.get_mut(run_id) {
+                Some(run) => {
+                    run.rows_written += rows_written;
+                    run.next_seq
+                }
+                None => payload.seq + 1,
+            }
+        };
         Ok(BatchResponse {
             seq: payload.seq,
             rows_written,
-            next_seq: run.next_seq,
+            next_seq,
         })
+    }
+
+    /// 本批次写失败，把先前占下的序号退回去（#260）。
+    ///
+    /// 只在号还是自己占的那一格时才退：run 已经被 abort 掉、或后一批已经占过号，
+    /// 都不该由这条失败路径去改。
+    fn release_seq(&self, run_id: &str, seq: u64) {
+        let mut active_runs = self.active_runs.lock().expect("active run mutex poisoned");
+        if let Some(run) = active_runs.get_mut(run_id) {
+            if run.next_seq == seq + 1 {
+                run.next_seq = seq;
+            }
+        }
     }
 
     pub fn commit(
@@ -659,6 +792,62 @@ fn terminal_response<D>(
 
 /// 连不上目标端。**不增错误码**（ADR-0037 §9）：`SINK_ENVIRONMENT` 的本义就是
 /// 「目标端环境配置错误，不要排查业务数据」，连不上正属这一类。
+/// `open` 受理成功后拿到的位子收据（#260）。drop 即归还，成功或失败都一样。
+struct AdmissionGuard<'a, F: DestinationFactory> {
+    service: &'a SinkService<F>,
+    run_id: String,
+}
+
+impl<F: DestinationFactory> Drop for AdmissionGuard<'_, F> {
+    fn drop(&mut self) {
+        // 锁坏了就不动：那时进程已经在往下崩，硬 panic 只会把真正的第一现场盖掉。
+        if let Ok(mut admitting) = self.service.admitting.lock() {
+            admitting.remove(&self.run_id);
+        }
+    }
+}
+
+/// 并发额度满了（#260）。**当场拒，不排队**：排队等于让 source 那边挂着一条
+/// 看不出为什么不动的连接，而「额度满了」是句能读懂、能处置的话。
+fn run_quota_exceeded_error(run_id: &str, max: usize, in_flight: &[String]) -> ApiError {
+    ApiError {
+        status: 429,
+        code: "RUN_QUOTA_EXCEEDED",
+        message: format!(
+            "目标端 agent 并发额度已满：同时最多允许 {max} 次运行，当前在飞的是 {}；本次未受理，目标表未被改动，等其中一次结束后重跑，或把 sink.toml 的 max_concurrent_runs 调大",
+            in_flight.join("、")
+        ),
+        run_id: Some(run_id.to_owned()),
+        details: json!({
+            "max_concurrent_runs": max,
+            "in_flight": in_flight,
+        }),
+    }
+}
+
+/// 目标表被另一次运行占着（#260）。措辞里**点名是哪张表、被哪次运行占着**——
+/// 只说「冲突了」的话，现场那个人还得自己去猜是哪两个任务撞在了一起。
+fn target_table_busy_error(
+    run_id: &str,
+    database: &str,
+    target_table: &str,
+    holder: &str,
+) -> ApiError {
+    ApiError {
+        status: 409,
+        code: "TARGET_TABLE_BUSY",
+        message: format!(
+            "目标表 {database}.{target_table} 正被运行 {holder} 占用：同一台 agent 上同一张目标表同时只允许一次运行；本次未受理，目标表未被改动，等 {holder} 结束后重跑"
+        ),
+        run_id: Some(run_id.to_owned()),
+        details: json!({
+            "database": database,
+            "target_table": target_table,
+            "holder_run_id": holder,
+        }),
+    }
+}
+
 fn target_connect_error(run_id: &str, message: String) -> ApiError {
     ApiError {
         status: 500,

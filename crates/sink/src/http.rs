@@ -10,6 +10,9 @@
 //! `/v1/runs/{}` 吃掉，**无论表里怎么排**——声明顺序不承重。
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 
 use db_qbs_shared::{write_log_line_with_fields, AgentInfo, LogEvent, LogLevel};
 use serde::de::DeserializeOwned;
@@ -296,7 +299,8 @@ pub fn serve(config: SinkConfig) -> Result<(), String> {
         );
     }
     // sink 启动**不再连 MySQL**：连接按 run 建，连不上的失败点在 POST /v1/runs。
-    let service = SinkService::with_factory(MysqlFactory);
+    let service = SinkService::with_factory(MysqlFactory)
+        .with_max_concurrent_runs(config.max_concurrent_runs);
     let server = Server::http(&config.listen)
         .map_err(|error| format!("监听 {} 失败：{error}", config.listen))?;
 
@@ -304,8 +308,65 @@ pub fn serve(config: SinkConfig) -> Result<(), String> {
         service: &service,
         agent: &agent,
     };
-    for request in server.incoming_requests() {
-        handle_request(request, &api);
+    // 多线程 accept：HTTP_WORKER_THREADS 条工作线程**共用同一个监听器**（#260）。
+    //
+    // 在这之前只有一条线程，一个请求全程处理完才回头取下一个——而这台服务上每个请求
+    // 都是一次同步的 MySQL 往返：建暂存表、写批次、切换。一次切换（整表 upsert，
+    // 分钟级）期间，**所有**其他任务的批次推送都堵在门外，「同一时刻只有一个任务在跑」
+    // 因此是进程结构决定的，跟任务那层的互斥键没关系。
+    //
+    // 用 `thread::scope` 而不是 `thread::spawn`：`Api` 借着栈上的 `service` 与 `agent`，
+    // 作用域线程让借用照旧成立，不必把这两份状态搬进 `Arc`。
+    //
+    // 线程数取固定值，不按核数算：这里等的是**阻塞 IO**，不是 CPU。它也**不是**并发额度——
+    // 同时能有几个 run 在飞由 `max_concurrent_runs` 说了算，工作线程只决定同一瞬间
+    // 能有几个 HTTP 请求在处理。线程比额度多几条是故意的：额度满时那句拒绝、
+    // 以及 `GET /v1/runs/{}` 这类只读接口，得能在几个慢写入在飞的时候照样答得出来。
+    let terminated = AtomicBool::new(false);
+    let workers: Vec<_> = thread::scope(|scope| {
+        let handles: Vec<_> = (0..HTTP_WORKER_THREADS)
+            .map(|_| scope.spawn(|| accept_loop(&server, &api, &terminated)))
+            .collect();
+        handles
+            .into_iter()
+            // 一条工作线程 panic 了，剩下几条照常服务——但退出时得说出来，
+            // 否则「服务半死不活」会以退出码 0 收场。
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err("HTTP 工作线程 panic 退出".to_owned()))
+            })
+            .collect()
+    });
+    for outcome in workers {
+        outcome?;
+    }
+    Ok(())
+}
+
+/// 共用监听器的工作线程数。见 `serve` 里那段说明。
+const HTTP_WORKER_THREADS: usize = 8;
+
+/// 一条工作线程的一辈子：取一个请求、处理完、回头再取。
+///
+/// `recv_timeout` 在多条线程上同时调是 tiny_http 支持的（`Server: Send + Sync`，
+/// 内部自带队列）。用带超时的轮询而不是无限阻塞的 `recv()`，是为了让**任何一条线程
+/// 取请求失败时，其余几条也走得掉**：否则 `serve` 会卡在 `join` 上，进程既不服务
+/// 也不退出。sink 没有 SIGTERM 处理，收到信号按默认语义直接结束进程。
+fn accept_loop<F: DestinationFactory>(
+    server: &Server,
+    api: &Api<'_, F>,
+    terminated: &AtomicBool,
+) -> Result<(), String> {
+    while !terminated.load(Ordering::Relaxed) {
+        match server.recv_timeout(Duration::from_millis(100)) {
+            Ok(Some(request)) => handle_request(request, api),
+            Ok(None) => {}
+            Err(error) => {
+                terminated.store(true, Ordering::Relaxed);
+                return Err(format!("接收 HTTP 请求失败：{error}"));
+            }
+        }
     }
     Ok(())
 }
