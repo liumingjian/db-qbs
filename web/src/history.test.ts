@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import type { RunHistory } from "./api";
-import { historyPresentation, runIdPresentation } from "./history";
+import { historyPresentation, runIdPresentation, runTaskName } from "./history";
 
 const baseHistory: RunHistory = {
   run_record_id: "record-1",
   run_id: "run-1",
   task_id: "task-1",
+  task_name: "订单日增量",
   source_sql: "SELECT a.ID AS ID\n  FROM APP.ORDERS a",
   staging_table: "STG_1",
   started_at: "2026-08-15T10:00:00.000Z",
@@ -242,5 +243,20 @@ describe("run history presentation", () => {
     expect(runIdPresentation(history({ run_id: null }))).toBe(
       "未发起，目标端不知道这次运行",
     );
+  });
+});
+
+describe("the task name a run record carries", () => {
+  // 改名不回改历史：这一行说的是当时那次运行（#259）。
+  it("shows the name snapshotted at start, not what the task is called now", () => {
+    expect(runTaskName(history({ task_name: "订单日增量" }), "订单日增量（已停用）")).toBe(
+      "订单日增量",
+    );
+  });
+
+  it("falls back to the current name only for records older than the field", () => {
+    expect(runTaskName(history({ task_name: "" }), "订单日增量")).toBe("订单日增量");
+    expect(runTaskName(history({ task_name: "   " }), "订单日增量")).toBe("订单日增量");
+    expect(runTaskName({}, "订单日增量")).toBe("订单日增量");
   });
 });

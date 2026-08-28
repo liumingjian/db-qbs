@@ -130,6 +130,16 @@ branches on the version.
    situation has moved since, the two derivations disagree and **the run fails**; the statement kind
    is never switched silently under an unchanged definition.
 
+**Task Name**
+   A **display label on a task, nothing more**: it is not unique, it takes part in no identity, and
+   nothing is looked up by it — `task_id` is what identifies a task. It is edited **in the wizard**,
+   alongside everything else the task is made of, and saved with it; a hand-typed name is never
+   overwritten by a later table change (a mapping can be wrong, a label cannot).
+   Because it is a label that may change at any time, **each run-history row snapshots the name it
+   was started under** (`task_name`, beside the `source_sql` snapshot) — reading the name off the
+   task at display time would rename every past run the moment someone renames the task. Rows written
+   before that column existed carry an empty string, and only those fall back to the current name.
+
 **Task Draft**
    A Task Definition **while it is being built**, plus everything the interface needs to judge it:
    which fields the person typed or ticked by hand, which were derived for them (same-name mapping,

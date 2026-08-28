@@ -889,6 +889,41 @@ fn oversized_request_bodies_are_refused() {
 /// 任务定义的 CRUD：线上恰好三样，口令一个字节都不出现。
 ///
 /// （「重启之后还在」那一半留在 `source_skeleton.rs` 的哨兵里——那要一个真进程。）
+/// 改名不追写历史：运行记录上的名字是开跑那一刻的快照（#259）。
+///
+/// 任务名只是展示标签，向导里随时可以改；一次运行认领的是 `task_id`。名字若在展示时
+/// 回头到任务上现取，改一次名就会把**过去每一次**运行都改成新名字，而那些运行当时
+/// 并不叫这个名字——历史于是不再是历史。
+#[test]
+fn renaming_a_task_leaves_earlier_runs_carrying_the_old_name() {
+    let rig = Rig::new();
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let datasources = (source_id, target_id);
+    let task_id = rig.create_task("持仓明细", "HOLDINGS", &datasources);
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let detail = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(detail["task_name"], "持仓明细");
+
+    let renamed = rig.put(
+        &format!("/api/tasks/{task_id}"),
+        &task_json("持仓明细（日更）", "HOLDINGS", &datasources),
+    );
+    assert_eq!(renamed.status, 200, "{}", renamed.body_text());
+    assert_eq!(rig.json(&renamed)["name"], "持仓明细（日更）");
+
+    let listed = rig.json(&rig.get(&format!("/api/runs?task_id={task_id}")));
+    assert_eq!(listed[0]["task_id"], task_id);
+    assert_eq!(listed[0]["task_name"], "持仓明细");
+    let detail = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(detail["task_name"], "持仓明细");
+}
+
 #[test]
 fn task_crud_persists_stable_identity_without_exposing_credentials() {
     let rig = Rig::new();
@@ -1014,6 +1049,8 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
         serde_json::json!({
             "run_record_id": run_record_id,
             "run_id": "run-7",
+            // 开跑那一刻的任务名快照，跟着 live 投影一起出来（#259）。
+            "task_name": "holdings",
             "source_sql": EXPECTED_SOURCE_SQL,
             "staging_table": "STG_7",
             "stage": "STREAMING",

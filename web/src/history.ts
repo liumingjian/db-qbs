@@ -80,6 +80,19 @@ export function runIdPresentation(history: { run_id: string | null }): string {
   return history.run_id ?? "未发起，目标端不知道这次运行";
 }
 
+/**
+ * 一条运行记录顶上该写哪个名字（#259）。
+ *
+ * 任务名是展示标签，在向导里随时可以改。运行记录认领任务靠 `task_id`，名字则在开跑那一刻
+ * 快照进这一行——否则改一次名，屏幕上**过去每一次**运行都会跟着改名，而那些运行当时叫的
+ * 是别的名字。快照优先；只有空串（早于这个字段的老记录）才回退到任务当前的名字，
+ * 因为那时确实没有别的可说，用当前名总好过一片空白。
+ */
+export function runTaskName(run: { task_name?: string }, currentName: string): string {
+  const snapshot = (run.task_name ?? "").trim();
+  return snapshot === "" ? currentName : run.task_name!;
+}
+
 export function historyPresentation(history: RunHistory): HistoryPresentation {
   if (history.unknown_reason !== null) {
     return {

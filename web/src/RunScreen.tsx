@@ -19,7 +19,7 @@ import {
 } from "./writeMode";
 import { messageFrom } from "./errors";
 import { FailureEvidence } from "./FailureEvidence";
-import { runIdPresentation } from "./history";
+import { runIdPresentation, runTaskName } from "./history";
 import { PrecheckReports } from "./PrecheckReports";
 import { progressOfLiveRun } from "./progress";
 import { runPresentation } from "./run";
@@ -143,7 +143,7 @@ export function RunScreen({
             <ArrowLeft size={ICON.sm} aria-hidden="true" />
             返回任务
           </button>
-          <h1 id="run-title">{task.name}</h1>
+          <h1 id="run-title">{detail === null ? task.name : runTaskName(detail, task.name)}</h1>
           <span className="card-subtitle mono">运行记录 · {runRecordId}</span>
         </div>
         {detail?.live === true ? (

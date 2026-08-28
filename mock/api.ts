@@ -238,6 +238,8 @@ function finishedRow(
     run_record_id: String(overrides.run_record_id ?? newRunRecordId()),
     run_id: (overrides.run_id as string | null) ?? newRunId(),
     task_id: task.task_id,
+    // 开跑那一刻的名字快照：改名不回改历史（#259）。
+    task_name: String(task.name ?? ""),
     source_sql: generateSql(task.spec),
     evidence: evidenceFor(task),
     staging_table: `${task.spec.target_table}__stg_${overrides.run_id ?? "20260826010101_a1b2c3"}`,
@@ -1000,6 +1002,7 @@ const ROUTES: Route[] = [
         return ok({
           run_record_id: row.run_record_id,
           run_id: row.run_id,
+          task_name: row.task_name,
           source_sql: row.source_sql,
           evidence: row.evidence,
           staging_table: row.staging_table,

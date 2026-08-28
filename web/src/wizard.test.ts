@@ -821,6 +821,88 @@ describe("what goes out", () => {
   });
 });
 
+describe("the task name", () => {
+  it("prefills the saved name in edit mode and counts it as hand-entered", () => {
+    // 载入编辑的那一刻，屏幕上的每一格都与人自己敲的无从区分——名字也是。
+    const draft = openExisting(savedTask(), SOURCE, TARGET);
+    expect(taskName(draft)).toBe("客户主档");
+    expect(draft.hand.taskName).toBe(true);
+  });
+
+  it("never regenerates a loaded name behind a table change", () => {
+    let draft = openExisting(savedTask(), SOURCE, TARGET);
+    draft = confirm(draft, { type: "source-table", owner: "APP", table: "T_ORDER" });
+    draft = done(apply(draft, { type: "target-table", table: "t_order" }));
+    expect(taskName(draft)).toBe("客户主档");
+  });
+
+  it("keeps the loaded name across the biggest cascade there is", () => {
+    // 换源端数据源清掉的是源侧那一整边，确认语里逐条点名。名字不在里面，
+    // 也不该在：它是标签，没有对错，跟着表走只会把人写的东西吃掉。
+    const { draft, lines } = agreed(openExisting(savedTask(), SOURCE, TARGET), {
+      type: "source-datasource",
+      datasource: { datasource_id: "ds-other", name: "灾备 Oracle" },
+    });
+    expect(lines.join(" / ")).not.toContain("任务名");
+    expect(taskName(draft)).toBe("客户主档");
+  });
+
+  it("asks the same question about a hand-typed name as about a loaded one", () => {
+    // 「编辑模式下载入的值视为人工输入」的另一半：新建时手打出来的同一批值，
+    // 触发的确认与编辑模式一字不差。
+    let typed = withTargetColumns(workedDraft());
+    typed = done(apply(typed, { type: "task-name", name: "客户主档" }));
+    const change: Change = {
+      type: "source-datasource",
+      datasource: { datasource_id: "ds-other", name: "灾备 Oracle" },
+    };
+    const loaded = agreed(openExisting(savedTask(), SOURCE, TARGET), change);
+    expect(agreed(typed, change).lines).toEqual(loaded.lines);
+  });
+
+  it("blocks the last step while the name is blank", () => {
+    let draft = passingCheck(withTargetColumns(workedDraft()));
+    draft = done(apply(draft, { type: "task-name", name: "   " }));
+    expect(canAdvance(draft, 4)).toContainEqual({
+      step: 4,
+      kind: "todo",
+      column: null,
+      message: "任务名不能为空",
+    });
+    draft = done(apply(draft, { type: "task-name", name: "客户主档日更" }));
+    expect(canAdvance(draft, 4)).toEqual([]);
+  });
+
+  it("tells the confirmation page whether the name is the machine\u2019s or the person\u2019s", () => {
+    const generated = passingCheck(withTargetColumns(workedDraft()));
+    expect(view(generated, 4).step).toMatchObject({
+      confirm: { name: "APP.T_CUSTOMER \u2192 t_customer", nameGenerated: true },
+    });
+    const typed = done(apply(generated, { type: "task-name", name: "客户主档日更" }));
+    expect(view(typed, 4).step).toMatchObject({
+      confirm: { name: "客户主档日更", nameGenerated: false },
+    });
+  });
+
+  it("saves the edited name with the task and leaves the spec alone", () => {
+    // 名字不进 `TaskSpec`：它不参与任何标识，也不是搬运的一部分。
+    const before = openExisting(savedTask(), SOURCE, TARGET);
+    const draft = done(apply(before, { type: "task-name", name: "客户主档（日更）" }));
+    expect(taskName(draft)).toBe("客户主档（日更）");
+    expect(toSpec(draft)).toEqual(toSpec(before));
+  });
+
+  it("lets two tasks share a name", () => {
+    // 不唯一是产品决定：名字是标签，去重的是 `task_id`。
+    let first = withTargetColumns(workedDraft());
+    first = done(apply(first, { type: "task-name", name: "同名" }));
+    let second = openExisting(savedTask(), SOURCE, TARGET);
+    second = done(apply(second, { type: "task-name", name: "同名" }));
+    expect(taskName(first)).toBe(taskName(second));
+    expect(canAdvance(passingCheck(first), 4)).toEqual([]);
+  });
+});
+
 describe("opening a saved task", () => {
   it("opens ordinary editing at the mapping step", () => {
     expect(openExisting(savedTask(), SOURCE, TARGET).step).toBe(1);
