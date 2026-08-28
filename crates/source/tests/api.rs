@@ -1046,6 +1046,8 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
         serde_json::json!({
             "run_record_id": run_record_id,
             "run_id": "run-7",
+            // 开跑那一刻的任务名快照，跟着 live 投影一起出来（#259）。
+            "task_name": "holdings",
             "source_sql": EXPECTED_SOURCE_SQL,
             "staging_table": "STG_7",
             "stage": "STREAMING",
