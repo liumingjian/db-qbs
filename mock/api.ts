@@ -122,6 +122,7 @@ interface SpecShape {
   owner: string;
   table: string;
   target_table: string;
+  write_mode: "APPEND";
   primary_key: string[];
   columns: { source: string; target: string }[];
   where_clause?: string;
@@ -145,6 +146,7 @@ let tasks: TaskRow[] = [
       owner: "APPUSER",
       table: "CUSTOMER",
       target_table: "dim_customer",
+      write_mode: "APPEND",
       primary_key: ["customer_id"],
       columns: [
         { source: "CUSTOMER_ID", target: "customer_id" },
@@ -164,6 +166,7 @@ let tasks: TaskRow[] = [
       owner: "APPUSER",
       table: "ORDER_ITEM",
       target_table: "fact_order_item",
+      write_mode: "APPEND",
       primary_key: ["order_id", "line_no"],
       columns: [
         { source: "ORDER_ID", target: "order_id" },

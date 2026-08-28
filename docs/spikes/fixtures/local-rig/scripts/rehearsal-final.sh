@@ -242,6 +242,7 @@ sub "④ 组任务定义：四列映射 + 一段过滤条件（按业务日期�
 SPEC=$(jq -nc --arg owner "$(echo "$ORACLE_USER" | tr '[:lower:]' '[:upper:]')" \
   --arg table "$SOURCE_TABLE" --arg target "$TARGET_TABLE" --arg biz_date "$BIZ_DATE" '{
     owner:$owner, table:$table, target_table:$target,
+    write_mode:"APPEND",
     primary_key:["ROW_ID"],
     columns:[
       {source:"ROW_ID",    target:"ROW_ID"},
