@@ -1,10 +1,26 @@
 import type { RunHistory } from "./api";
 import { stageLabel } from "./runStage";
 
+/**
+ * 目标表最后被怎么了，**只有界面认得的那几个**（#264）。
+ *
+ * 三件事，三个词，一个都不能合并：`SWAPPED` 是「按主键合并进目标表」，`REPLACED`
+ * 是「整表被替换」（先清空再导入），`DISCARDED` 是「一根手指头都没碰」。
+ * 服务端那一列是字符串、会原样搬运没见过的拼写；这里认不出来的落到 `null`，
+ * 由调用方把原值直接显示出来，而不是拿一个认得的词去糊它。
+ */
+export type TerminalEffect = "SWAPPED" | "REPLACED" | "DISCARDED";
+
+const TERMINAL_EFFECTS: readonly TerminalEffect[] = [
+  "SWAPPED",
+  "REPLACED",
+  "DISCARDED",
+];
+
 export interface HistoryPresentation {
   kind: "live" | "succeeded" | "failed" | "unknown";
   conclusion: string;
-  terminalEffect: "SWAPPED" | "DISCARDED" | null;
+  terminalEffect: TerminalEffect | null;
   error: { code: string; httpStatus: number | null } | null;
 }
 
@@ -153,9 +169,10 @@ function failureConclusion(history: RunHistory): string {
  * source 回的 `message` 是英文原文（`run completed successfully`，属于 API 语义，不动），
  * 直接拿来当结论条会让同一个位置一半中文一半英文——映射预检失败那条是中文。
  * 这里照那条的句式在 web 侧成文，只说已核实的事：推了多少行、目标端认没认这次写入。
- * 目标端没报出 `SWAPPED` 时什么都不多说，别替它下结论。
+ * 目标端没报出结局时什么都不多说，别替它下结论。
  *
- * **`SWAPPED` 不是「整表换过」**（2026-08 UX 评审 P0-1）。sink 打的是
+ * **`SWAPPED` 不是「整表换过」**（2026-08 UX 评审 P0-1）——整表换过是 `REPLACED`，
+ * 那是先清空再导入这一档才会有的结局（#264）。`SWAPPED` 这边 sink 打的是
  * `INSERT ... ON DUPLICATE KEY UPDATE`（`crates/sink/src/mysql_destination.rs`），
  * 按主键合并：新增和变更进目标表，**源端删掉的行不会跟着消失**（CONTEXT.md「刻意欠的债」）。
  * 原话「暂存表已切换为目标表」描述的是一次没发生过的切换——照字面读会以为目标表此刻
@@ -167,8 +184,13 @@ function succeededConclusion(
 ): string {
   const rows =
     history.sink_reported_rows ?? history.staged_rows ?? history.rows_pushed;
+  // 三种结局三句话（#264）：整表替换与按主键合并是两件事，共用一句就有一句是假的。
   const merged =
-    terminalEffect === "SWAPPED" ? "，已按主键合并进目标表" : "";
+    terminalEffect === "SWAPPED"
+      ? "，已按主键合并进目标表"
+      : terminalEffect === "REPLACED"
+        ? "，目标表已整表替换为本次查询结果"
+        : "";
   return `目标端：运行成功：已推送 ${countFormatter.format(rows)} 行${merged}。`;
 }
 
@@ -184,10 +206,7 @@ function sinkTerminalEffect(
   }
 
   const effect = history.target_table_effect;
-  if (effect === "SWAPPED" || effect === "DISCARDED") {
-    return effect;
-  }
-  return null;
+  return TERMINAL_EFFECTS.find((known) => known === effect) ?? null;
 }
 
 /**

@@ -141,6 +141,40 @@ describe("run history presentation", () => {
     });
   });
 
+  // #264：整表替换与按主键合并是两件事，结论条上必须分得开。
+  it("整表替换那一档的结论条说的是整表替换，不是按主键合并", () => {
+    expect(
+      historyPresentation(
+        history({
+          outcome: "SUCCEEDED",
+          target_table_effect: "REPLACED",
+          sink_code: null,
+          sink_reported_rows: 42,
+          message: "run completed successfully",
+        }),
+      ),
+    ).toEqual({
+      kind: "succeeded",
+      conclusion: "目标端：运行成功：已推送 42 行，目标表已整表替换为本次查询结果。",
+      terminalEffect: "REPLACED",
+      error: null,
+    });
+  });
+
+  // 服务端那一列会原样搬运它不认识的拼写（#264）。界面认不出来就落 null，
+  // 由展示层把原值直接摆出来——**不能拿一个认得的词去糊它**。
+  it("认不出来的终态不被当成 SWAPPED，也不被当成 DISCARDED", () => {
+    expect(
+      historyPresentation(
+        history({
+          outcome: "SUCCEEDED",
+          target_table_effect: "SOMETHING_NEW",
+          sink_code: null,
+        }),
+      ).terminalEffect,
+    ).toBeNull();
+  });
+
   it("does not claim a swap the sink never reported", () => {
     expect(
       historyPresentation(

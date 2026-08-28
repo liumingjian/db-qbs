@@ -19,6 +19,7 @@ import {
   view,
 } from "./wizard";
 import type { PreviewResult, TargetCheckResult } from "./api";
+import { CLEAR_MODE_PRIMARY_KEY_NOTE } from "./writeMode";
 import type { Applied, Change, Draft } from "./wizard";
 
 const SOURCE = { datasource_id: "ds-oracle", name: "生产 Oracle" };
@@ -425,6 +426,67 @@ describe("the advance gate", () => {
     const before = toSpec(draft);
     const after = done(apply(draft, { type: "write-mode", mode: "APPEND" }));
     expect(toSpec(after)).toEqual(before);
+  });
+
+  // #264：清空模式下主键那一列灰掉，而灰掉必须自带理由。
+  it("greys out the primary-key column in clear mode and says why", () => {
+    let draft = withTargetColumns(
+      done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t" })),
+      [{ name: "PRIMARY", columns: ["ID"] }],
+    );
+    draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
+    draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
+    draft = done(apply(draft, { type: "write-mode", mode: "CLEAR_THEN_IMPORT" }));
+
+    const step = view(draft, 1).step;
+    if (step.step !== 1) throw new Error("expected step 1");
+    expect(step.write.primaryKeyLock).toBe(CLEAR_MODE_PRIMARY_KEY_NOTE);
+    for (const row of step.rows) {
+      expect(row.primaryKeyLock).toBe(CLEAR_MODE_PRIMARY_KEY_NOTE);
+    }
+    // 灰掉的是「选」，不是「记」：主键仍按目标表实际定义的那一份记下来，
+    // 因为写入语句还得靠它——清空一个字都没改语句的选择。
+    expect(toSpec(draft).primary_key).toEqual(["ID"]);
+    expect(step.write.statement).toBe("upsert");
+    expect(step.write.note).toContain("先清空再导入");
+  });
+
+  // 留着一个点不动、又还在生效的手勾主键，比清掉它更坏：屏幕上写着「按目标表实际
+  // 主键记录」，实际记的却是上一分钟某个人勾的另一组列。
+  it("takes back a hand-picked primary key when clear mode is chosen, and says so", () => {
+    let draft = withTargetColumns(
+      done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t" })),
+      [{ name: "PRIMARY", columns: ["ID"] }],
+    );
+    draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
+    draft = done(
+      apply(draft, {
+        type: "source-columns-arrived",
+        columns: [sourceColumn("ID"), sourceColumn("C_NAME")],
+      }),
+    );
+    draft = done(apply(draft, { type: "toggle-primary-key", target: "C_NAME" }));
+    expect(toSpec(draft).primary_key).toContain("C_NAME");
+
+    const asked = agreed(draft, { type: "write-mode", mode: "CLEAR_THEN_IMPORT" });
+    expect(asked.lines.join(" ")).toContain("主键列");
+    expect(toSpec(asked.draft).primary_key).toEqual(["ID"]);
+  });
+
+  it("leaves the primary key alone when the mode goes back to append", () => {
+    let draft = withTargetColumns(
+      done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t" })),
+      [{ name: "PRIMARY", columns: ["ID"] }],
+    );
+    draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
+    draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
+    draft = done(apply(draft, { type: "write-mode", mode: "CLEAR_THEN_IMPORT" }));
+
+    const back = done(apply(draft, { type: "write-mode", mode: "APPEND" }));
+    const step = view(back, 1).step;
+    if (step.step !== 1) throw new Error("expected step 1");
+    expect(step.write.primaryKeyLock).toBeNull();
+    expect(toSpec(back).write_mode).toBe("APPEND");
   });
 
   it("catches the target field shapes the server would reject", () => {

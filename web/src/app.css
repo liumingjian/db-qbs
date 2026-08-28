@@ -538,9 +538,16 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .write-mode-statement dd small { color: var(--mute); font-size: var(--size-meta); font-weight: normal; }
 .write-mode-card .upsert-note { margin: 0 12px 12px; }
 
+/* 清空模式下的「主键」一列（#264）。灰掉的是**整根列**，不只是那几颗勾选框：
+   一颗一颗地灰，看上去像是这几行刚好不能选；整列灰掉才读得出「这个决定不归你做」。
+   理由跟在表头里，字号与其它 small 一致——它是解释，不是告警，所以不着 --warn。 */
+.wizard-mapping .pk-head { white-space: normal; }
+.wizard-mapping .pk-head small { display: block; max-width: 22ch; color: var(--mute); font-size: var(--size-meta); font-weight: normal; }
+.wizard-mapping.is-pk-locked .pk-head, .wizard-mapping.is-pk-locked tbody td:nth-child(4) { color: var(--mute); background: var(--mute-bg); }
+
 /* 任务列表上的纯追加写标记。它不是告警，所以不着 --crit / --warn——
    这是一种合法的写法，只是它的代价必须在清单上就看得见。 */
-.write-mark { display: inline-block; margin-top: 2px; padding: 0 6px; border: 1px solid var(--line-strong); border-radius: var(--radius); color: var(--dim); font-size: var(--size-meta); line-height: 18px; }
+.write-mark { display: inline-block; margin-top: 2px; margin-right: 4px; padding: 0 6px; border: 1px solid var(--line-strong); border-radius: var(--radius); color: var(--dim); font-size: var(--size-meta); line-height: 18px; }
 .sql-editor-tools { flex: none; display: flex; align-items: center; gap: 6px; }
 .sql-editor-tools .button { height: 28px; padding: 0 10px; font-size: var(--size-meta); }
 /* 开着的开关要看得出是开着的：`aria-pressed` 只说给辅助技术听。 */

@@ -134,11 +134,16 @@ export function RunDrawer({
                 {presentation.kind === "succeeded" && (
                   <div className="success-conclusion">{presentation.conclusion}</div>
                 )}
-                {presentation.terminalEffect === "SWAPPED" && (
-                  <UpsertNote
-                    text={writeSemanticsDone(writeStatementOf(task.spec.primary_key))}
-                  />
-                )}
+                {/* 说法跟着写法与模式一起走（#261/#264）。`DISCARDED` 不挂这一行。 */}
+                {presentation.terminalEffect !== null &&
+                  presentation.terminalEffect !== "DISCARDED" && (
+                    <UpsertNote
+                      text={writeSemanticsDone(
+                        writeStatementOf(task.spec.primary_key),
+                        task.spec.write_mode,
+                      )}
+                    />
+                  )}
                 {presentation.kind === "live" && (
                   <div className="drawer-note">{presentation.conclusion}</div>
                 )}

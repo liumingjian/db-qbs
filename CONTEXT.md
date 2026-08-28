@@ -116,6 +116,12 @@ branches on the version.
    target states. It is allowed on purpose (#261) — "append this query into a flow table" had no
    outlet otherwise — and it is never silent: the precheck says it in its conclusion, the task
    definition records it, and the task list and run detail both carry a visible marker.
+   **Clear-then-import is the other way to run a task** (#264): the target table is emptied and this
+   run's rows imported, both inside one transaction, so afterwards the target table holds **exactly
+   this run's query result**. It is idempotent in the strongest sense — every run ends at the same
+   state regardless of what was there — and it is the only write mode under which rows deleted at
+   the source stop lingering at the target. What it costs is stated where it is chosen: the previous
+   contents are deleted, and there is no undo.
 
 **Task Definition**
    A **structured spec** (table, columns, filter clause, primary key, **write mode**). **It is the
@@ -123,9 +129,15 @@ branches on the version.
    truth, and the source SQL is generated from it.** **The SQL is not stored in the task definition**
    — it is recomputed on demand, and only pinned as a snapshot of what actually ran on each
    run-history row. **Only `source` reads it; `sink` is unaware it exists.**
-   The **write mode** is what the author chose (today only "append"); the **write statement** is what
-   the target end actually runs, and nobody chooses that — it follows from one fact alone, whether
-   the target table has a unique constraint. An **empty primary key is a value, not a blank**: it is
+   The **write mode** is what the author chose — `APPEND` or `CLEAR_THEN_IMPORT`; the **write
+   statement** is what the target end actually runs, and nobody chooses that — it follows from one
+   fact alone, whether the target table has a unique constraint. **The mode does not touch the
+   statement**: clearing only adds a whole-table `DELETE` ahead of the same insert, in the same
+   transaction. Keeping the upsert there is deliberate — it lets a clear-mode run tolerate duplicate
+   primary keys *within one run* instead of dying on `ERROR 1062` half way through the import.
+   The wizard therefore greys the primary-key column out in clear mode rather than hiding it: the
+   choice is not the author's there, but the key is still recorded, taken from what the target table
+   actually defines, because the statement still follows from it. An **empty primary key is a value, not a blank**: it is
    the definition's record of "the target table had nothing to merge on". If the target table's key
    situation has moved since, the two derivations disagree and **the run fails**; the statement kind
    is never switched silently under an unchanged definition.
@@ -240,8 +252,16 @@ branches on the version.
    (MySQL counts an update as 2, and `CLIENT_FOUND_ROWS` puts the floor at `staged` rather than 0),
    while the plain insert demands **strict equality**. One pure function in `shared` decides both,
    and the statement is passed into it rather than sniffed at each call site.
-   **Rows deleted at the source do not disappear at the target** — neither statement ever deletes.
-   That is a deliberate debt.
+   **Under the append write mode, rows deleted at the source do not disappear at the target** —
+   neither statement ever deletes. That is a deliberate debt.
+   **Under clear-then-import the swap has one more step, and it is inside the same transaction**
+   (#264): a whole-table `DELETE FROM <target>` immediately before the insert. It is a `DELETE` and
+   **never a `TRUNCATE`** — `TRUNCATE` is DDL and commits implicitly, which inside this transaction
+   would manufacture the one outcome the transaction exists to prevent: cleared successfully, import
+   failed, target table now empty. Because the two steps share a transaction, an import that fails
+   half way leaves the target table exactly as it was. The `purged_rows` the run reports is that
+   `DELETE`'s own count; on the append path it is 0, and that 0 is a fact rather than a placeholder.
+   **The statement choice is untouched by the clearing**, and so is the row-count adjudication above.
    **The swap leaves nothing behind but the target table.** It writes no per-row record of what it
    wrote: the write ledger `sink` used to keep in the customer's own database
    (`__db_qbs_write_ledger`, one row per written primary key) is gone, and with it the "undo a run"
@@ -251,10 +271,13 @@ branches on the version.
 
 **Tombstone**
    An in-memory record `sink` keeps for a finished run so that "what happened?" still has an answer
-   after the swap. It records the **resource's final state**, not the run's, and has only two values:
-   `SWAPPED` (the target table has absorbed this run's rows — **merged by primary key**, per **Swap**
-   above; it does not mean the table was replaced wholesale) and `DISCARDED` (the target table was
-   never touched). **It is a diagnostic cache, not a state store** — only the most recent 32 are kept, and
+   after the swap. It records the **resource's final state**, not the run's, and has three values:
+   `SWAPPED` (**merged by primary key** into the target table, per **Swap** above — it does **not**
+   mean the table was replaced wholesale), `REPLACED` (the target table was **replaced wholesale**:
+   a clear-then-import run emptied it and imported this run's result, so it now equals that result
+   exactly) and `DISCARDED` (the target table was never touched). `SWAPPED` and `REPLACED` cannot
+   share a word: a run history that describes a wholesale replacement as "merged by primary key"
+   reads false, which is the entire reason for the third value (#264). **It is a diagnostic cache, not a state store** — only the most recent 32 are kept, and
    losing them costs no correctness, only diagnosability. **Run history does not absorb it**: a
    tombstone answers "did the target table move?", a question `source` asks and only `sink` can answer.
 
@@ -568,8 +591,9 @@ gets paid off and when lives in the issue tracker, not here.
    no SQL shape precheck, so the problem surfaces only during a real run, or silently loses precision.
    **The mapping precheck is unaffected**: it describes through a cursor on the sink side and remains
    a hard gate.
-9. **Neither write statement ever deletes.** Rows removed at the source stay in the target table
-   forever; see **Swap**.
+9. **Under the append write mode, neither write statement ever deletes.** Rows removed at the
+   source stay in the target table forever; see **Swap**. Clear-then-import is the way out, and it
+   is a per-task choice, not a fix applied to existing tasks.
 9a. **A run against a primary-key-less target table is not idempotent.** Every re-run appends the
    whole result set again, and nothing in the product detects or repairs the duplicates: there is no
    dedupe pass, no "already imported" marker, and the verification gate only compares this run's
@@ -577,11 +601,24 @@ gets paid off and when lives in the issue tracker, not here.
    debt accepted with #261 in exchange for supporting flow-style target tables at all. It is made
    visible in four places (precheck conclusion, task definition, task list, run detail) and mitigated
    nowhere. The way out, when it is wanted, is the clear-then-import write mode.
+9b. **Clear-then-import empties the target table with a whole-table `DELETE`, and on a large table
+   that is slow.** The `DELETE` writes an undo log entry per row and holds the transaction open for
+   as long as it takes, so the cost grows with the target table rather than with the run. This is
+   accepted, not overlooked: the alternative that would be fast — `TRUNCATE` — is DDL and commits
+   implicitly, which would trade the slowness for the possibility of a cleared-but-not-imported
+   target table, and that trade is refused. If it is ever optimised the direction is **swapping
+   tables**, not `TRUNCATE`; taking that direction also means first fixing the fact that the staging
+   table's structure does not match the target table's (it is all-nullable, unindexed and
+   key-less by design), because a table swap requires the two to be interchangeable.
+9c. **A clear-then-import run cannot be reversed.** The rows it deleted are gone the moment the
+   transaction commits, and nothing recorded them — see limit 10; undo does not exist for any write
+   mode, and this is the mode where its absence is felt hardest. The recovery path is a corrected
+   re-run, which for this mode does restore the target table to a defined state.
 10. **A finished run cannot be undone.** There is no "undo" action and no record of which rows a
    run wrote. Undo used to exist, backed by a write ledger table `sink` created inside the
    customer's target database; it was removed whole, and the removal is irreversible (#256). Two
-   reasons. First, the promise could not be kept: once clear-then-import is a write mode, the rows
-   it deletes were never in the ledger, so "undo" could not put them back — and even for upsert,
+   reasons. First, the promise could not be kept: clear-then-import is now a write mode (#264) and the
+   rows it deletes were never in the ledger, so "undo" could not put them back — and even for upsert,
    undo deleted the rows the run had overwritten rather than restoring them. Second, the price was
    a product-owned table growing row-for-row with the customer's business data, inside the
    customer's own database, written on every commit and read by nothing else. The recovery path
