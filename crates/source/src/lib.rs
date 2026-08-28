@@ -14,6 +14,7 @@ pub mod http;
 mod oracle_source;
 mod protocol;
 mod run_history;
+mod run_log_store;
 pub mod server;
 mod secret;
 mod sql_builder;
@@ -58,6 +59,10 @@ pub use run_history::{
     expired_history_indices, fold_history_lines, AgentEvidence, HistoryChange, HistoryStore,
     RunCleanup, RunEvidence, RunHistory, RunParametersEvidence, SourceEvidence, TargetEvidence,
     UnknownReason,
+};
+pub use run_log_store::{
+    truncate_business_values, RunLogLine, RunLogStore, RunLogWriter, BUSINESS_VALUE_MAX_CHARS,
+    RUN_LOG_PAGE_LIMIT, RUN_LOG_RETENTION_DAYS, RUN_LOG_RETENTION_RUNS_PER_TASK,
 };
 pub use sql_builder::{
     builder_column_query, builder_dblink_query, builder_table_query, validate_builder_dblink,
