@@ -336,12 +336,12 @@ branches on the version.
    half way leaves the target table exactly as it was. The `purged_rows` the run reports is that
    `DELETE`'s own count; on the append path it is 0, and that 0 is a fact rather than a placeholder.
    **The statement choice is untouched by the clearing**, and so is the row-count adjudication above.
-   **The swap leaves nothing behind but the target table.** It writes no per-row record of what it
-   wrote: the write ledger `sink` used to keep in the customer's own database
-   (`__db_qbs_write_ledger`, one row per written primary key) is gone, and with it the "undo a run"
-   action that was its only consumer (#256). The reasoning is in **Standing limits** item 11; the
-   swap now drops that table when it finds one, so a deployment that has it sheds it on the next
-   run.
+   **The swap leaves nothing behind but the target table**, and writes no per-row record of what it
+   wrote — there is no write ledger, and no "undo a run" action for one to feed (#256; the reasoning
+   is in **Standing limits** item 10). The swap issues no DDL at all. Shedding a table an older
+   deployment left in the customer's database is **creating the staging table**'s job: that step is
+   the run's first DDL against the target, and it drops `__db_qbs_write_ledger` there
+   (`DROP TABLE IF EXISTS`, a no-op on a database that never had one).
 
 **Tombstone**
    An in-memory record `sink` keeps for a finished run so that "what happened?" still has an answer
@@ -692,14 +692,13 @@ gets paid off and when lives in the issue tracker, not here.
    mode, and this is the mode where its absence is felt hardest. The recovery path is a corrected
    re-run, which for this mode does restore the target table to a defined state.
 10. **A finished run cannot be undone.** There is no "undo" action and no record of which rows a
-   run wrote. Undo used to exist, backed by a write ledger table `sink` created inside the
-   customer's target database; it was removed whole, and the removal is irreversible (#256). Two
-   reasons. First, the promise could not be kept: clear-then-import is now a write mode (#264) and the
-   rows it deletes were never in the ledger, so "undo" could not put them back — and even for upsert,
-   undo deleted the rows the run had overwritten rather than restoring them. Second, the price was
-   a product-owned table growing row-for-row with the customer's business data, inside the
-   customer's own database, written on every commit and read by nothing else. The recovery path
-   for a bad run is a corrected re-run, not an undo.
+   run wrote, and neither is coming back (#256). Two reasons, both standing. First, the promise
+   cannot be kept: under clear-then-import (#264) the rows a run deletes are recorded nowhere, so
+   nothing could put them back — and on the upsert path an "undo" can only delete the rows the run
+   overwrote, never restore what they held. Second, the only way to record them is a product-owned
+   table growing row-for-row with the customer's business data, inside the customer's own database,
+   written on every commit and read by nothing else. The recovery path for a bad run is a corrected
+   re-run, not an undo.
 11. **On MySQL 5.7 the metadata reads are slower, and that is left alone.** 5.7's
    `information_schema` is not backed by a data dictionary — the `COLUMNS` / `STATISTICS` /
    `TABLES` queries the target agent runs are answered by opening table definitions, so on a
