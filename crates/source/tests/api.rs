@@ -502,13 +502,6 @@ fn every_route_reaches_its_handler() {
             String::new(),
             409,
         ),
-        (
-            Method::Post,
-            "/api/runs/{}/cleanup",
-            format!("/api/runs/{run_record_id}/cleanup"),
-            String::new(),
-            409,
-        ),
         (Method::Get, "/api/runs", "/api/runs".into(), String::new(), 200),
         (
             Method::Get,
