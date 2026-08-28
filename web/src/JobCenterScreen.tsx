@@ -8,7 +8,7 @@ import {
   Play,
   Plus,
   RefreshCw,
-  Tag,
+  ScrollText,
   Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -71,7 +71,13 @@ export interface JobCenterProps {
   onRefresh: () => void;
   onCreate: () => void;
   onEdit: (task: Task) => void;
-  onRename: (task: Task) => void;
+  /**
+   * 「查看日志」：直接进这条任务**最近一次**运行的日志（#263）。
+   *
+   * 参数是 `run_record_id` 而不是 `task_id`——哪一条是最近一次，`latestRuns` 已经判过了，
+   * 让调用方再判一遍等于把同一个判断放两处。从没跑过的任务这颗按钮按不动。
+   */
+  onViewLogs: (runRecordId: string) => void;
   onDelete: (task: Task) => void;
   /** 正在发起的那个任务的 id——**只有它那一行**的发起键在这段时间里按不动。 */
   startingTaskId: string | null;
@@ -94,7 +100,7 @@ export function JobCenterScreen({
   onRefresh,
   onCreate,
   onEdit,
-  onRename,
+  onViewLogs,
   onDelete,
   startingTaskId,
   onStart,
@@ -475,7 +481,7 @@ export function JobCenterScreen({
           onTogglePage={togglePage}
           onCreate={onCreate}
           onEdit={onEdit}
-          onRename={onRename}
+          onViewLogs={onViewLogs}
           onDelete={onDelete}
           startingTaskId={startingTaskId}
           onStart={onStart}
@@ -607,7 +613,7 @@ function JobResults({
   onTogglePage,
   onCreate,
   onEdit,
-  onRename,
+  onViewLogs,
   onDelete,
   startingTaskId,
   onStart,
@@ -631,7 +637,7 @@ function JobResults({
   onTogglePage: (checked: boolean) => void;
   onCreate: () => void;
   onEdit: (task: Task) => void;
-  onRename: (task: Task) => void;
+  onViewLogs: (runRecordId: string) => void;
   onDelete: (task: Task) => void;
   startingTaskId: string | null;
   onStart: (task: Task) => void;
@@ -879,10 +885,19 @@ function JobResults({
                       icon={<Pencil size={ICON.md} />}
                       onClick={() => onEdit(task)}
                     />
+                    {/* 改名这颗撤了：改名已经并进编辑向导（#259），这个位子留给
+                        「查看日志」（#263）——一步进到这条任务最近一次运行的日志，
+                        不必先猜是哪一条。位子照旧占住不撤（P2-15）：没跑过就按不动。 */}
                     <ActionButton
-                      label="改名"
-                      icon={<Tag size={ICON.md} />}
-                      onClick={() => onRename(task)}
+                      label="查看日志"
+                      icon={<ScrollText size={ICON.md} />}
+                      disabled={run === undefined}
+                      title={run === undefined ? "这个任务还没有跑过" : "查看日志"}
+                      onClick={() => {
+                        if (run !== undefined) {
+                          onViewLogs(run.run_record_id);
+                        }
+                      }}
                     />
                     <span className="divider" />
                     <ActionButton
