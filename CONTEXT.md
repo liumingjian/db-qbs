@@ -395,6 +395,20 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    the port can drive it with the credentials the caller supplies. Failure keeps the sink envelope —
    `{"error": {"code", "message", "run_id", "details"}}` — unchanged by this shape.
 
+**Concurrency**
+   **One person doing several things at once, and nothing more.** The `source` HTTP face is served
+   by a fixed pool of worker threads sharing one listener, so a slow Oracle column fetch or ten-row
+   preview on one screen does not freeze the task list on another. The SQLite-backed stores (tasks,
+   datasources, login, run history) are each safe to touch from several threads, and **no lock is
+   ever held across blocking IO** — Oracle calls, agent probes and sink requests all happen with
+   every lock released. The one mutual exclusion that is a product rule, not an implementation
+   detail, is **one task runs at most once at a time** (a second start returns 409).
+
+   **Multiple users are explicitly out of scope**: there is exactly one account, tasks have no
+   owner, and there is no per-user visibility, sharing or audit trail. Everyone who logs in sees and
+   can change everything. Concurrency here is about **not making one person wait for themselves**;
+   reading it as a step toward multi-tenancy would be a mistake.
+
 ## Standing limits
 
 Deliberate debts, not oversights. **Each is a fact about the code as it stands**, not a plan: what
