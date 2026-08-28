@@ -5,6 +5,7 @@ use db_qbs_shared::{MysqlServerInfo, OpenOutcome, RowCounts, Verdict};
 use regex::Regex;
 use serde_json::json;
 
+use crate::mysql_destination::PACKET_REMEDY;
 use crate::precheck::{
     precheck_with_primary_key, range_check_columns, range_check_issue, target_check_findings,
 };
@@ -831,7 +832,7 @@ fn write_batch_api_error(run_id: &str, seq: u64, error: WriteBatchError) -> ApiE
             status: 500,
             code: "SINK_ENVIRONMENT",
             message: format!(
-                "第 {seq} 批写入被 MySQL ERROR {mysql_code} 拒绝：max_allowed_packet 低于开连接仪式要求或运行期被改小；这是目标端环境配置错误，请恢复到至少 64 MiB，不要排查业务数据"
+                "第 {seq} 批写入被 MySQL ERROR {mysql_code} 拒绝：max_allowed_packet 低于开连接仪式要求或运行期被改小；{PACKET_REMEDY}"
             ),
             run_id: Some(run_id.to_owned()),
             details: json!({ "seq": seq, "mysql_code": mysql_code }),

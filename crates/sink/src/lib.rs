@@ -30,7 +30,9 @@ pub use db_qbs_shared::{
     is_supported_decimal_shape, ColumnShape, ShapeRejection, TargetShape,
 };
 pub use http::serve;
-pub use mysql_destination::{check_connection_settings, MysqlDestination, MysqlFactory};
+pub use mysql_destination::{
+    check_connection_settings, MysqlDestination, MysqlFactory, MIN_PACKET, PACKET_REMEDY,
+};
 // `precheck` 是不带主键那一支，只给「生成的表喂回预检必过」那道漂移闸用；
 // 带主键那一支同样导出，因为漂移闸现在还要守「生成的 DDL 带主键，ADR-0035 §2 三条得过」。
 pub use precheck::{precheck, precheck_with_primary_key, target_check_findings};

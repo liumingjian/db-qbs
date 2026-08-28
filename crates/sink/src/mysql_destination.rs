@@ -776,6 +776,23 @@ fn is_permission_error(code: u16) -> bool {
     matches!(code, 1044 | 1045 | 1142 | 1143 | 1227)
 }
 
+/// 开连接仪式对 `max_allowed_packet` 的下界，64 MiB（ADR-0024）。
+///
+/// **不放宽**（#262）：它守的是一整批 `INSERT` 被 MySQL 按包长截断——截断在协议层
+/// 就把语句砍成半截，报出来的是语法错，排查的人会去翻业务数据，而数据是好的。
+pub const MIN_PACKET: u64 = 64 * 1024 * 1024;
+
+/// 把 `max_allowed_packet` 调够的照做指令——开连接仪式与运行期两处报文共用这一份。
+///
+/// 5.7 的默认值是 4 MiB，8.0 的默认值才是 64 MiB，所以**每一台没调过参的 5.7 都会在
+/// 第一次开连接仪式上撞到这道门**（#262）。门不放宽，能改的只有报文：从「一次神秘的
+/// 环境故障」变成「照抄这两行」。
+///
+/// 两条都给，缺一不可：`SET GLOBAL` 当场生效但重启就没了；my.cnf 要重启才生效，
+/// 但能留到下一次重启之后。只给前者，客户重启一次数据库就退回原样；只给后者，
+/// 得先停一次库才能开工。
+pub const PACKET_REMEDY: &str = "请在目标库上以有 SUPER 权限的账号执行 `SET GLOBAL max_allowed_packet = 67108864;`（当场生效，但只对之后新建的连接生效，改完请重跑），并在 my.cnf 的 `[mysqld]` 段写上 `max_allowed_packet = 64M`，让它在 MySQL 重启之后仍然成立；MySQL 5.7 的默认值是 4 MiB，未调参的 5.7 实例都会停在这里。这是目标端环境配置，不要排查业务数据";
+
 pub fn check_connection_settings(
     character_set_client: &str,
     character_set_connection: &str,
@@ -785,7 +802,6 @@ pub fn check_connection_settings(
 ) -> Result<(), String> {
     const EXPECTED_CHARSET: &str = "utf8mb4";
     const EXPECTED_SQL_MODE: &str = "STRICT_ALL_TABLES";
-    const MIN_PACKET: u64 = 64 * 1024 * 1024;
 
     let mut problems = Vec::new();
     for (name, actual) in [
@@ -806,7 +822,7 @@ pub fn check_connection_settings(
     }
     if max_allowed_packet < MIN_PACKET {
         problems.push(format!(
-            "环境配置错误：max_allowed_packet 期望至少 {MIN_PACKET} 字节，实际 {max_allowed_packet} 字节；请调整 MySQL 配置，不要排查业务数据"
+            "环境配置错误：max_allowed_packet 期望至少 {MIN_PACKET} 字节（64 MiB），实际 {max_allowed_packet} 字节；{PACKET_REMEDY}"
         ));
     }
 

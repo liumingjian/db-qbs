@@ -285,6 +285,26 @@ fn the_three_nullability_branches_judge_mapped_and_unmapped_columns_apart() {
     auto_id.extra = "auto_increment".to_owned();
     assert_eq!(judge(&auto_id, false, true), Vec::new());
 
+    // #262：5.7 与 8.0 在 `EXTRA` 这一列上说的不是同一套话。判据只能是
+    // 「小写之后**包含** auto_increment」，不能拿 8.0 独有的 `DEFAULT_GENERATED` 做等值比较——
+    // 那样 5.7 上每一根自增列都会被判成非自增，预检于是放行了本该拦下的列。
+    for extra in [
+        "auto_increment",
+        "AUTO_INCREMENT",
+        "DEFAULT_GENERATED auto_increment",
+    ] {
+        let mut variant = auto_id.clone();
+        variant.extra = extra.to_owned();
+        assert_eq!(judge(&variant, false, true), Vec::new(), "EXTRA={extra}");
+    }
+
+    // 反过来：同一根 `NOT NULL DEFAULT CURRENT_TIMESTAMP` 的审计列，5.7 读回来的
+    // `EXTRA` 是空串（`DEFAULT_GENERATED` 是 8.0 才加的），放行的依据本就是
+    // `COLUMN_DEFAULT`，不是 `EXTRA`——两个版本上都得放行。
+    let mut with_default_on_57 = with_default.clone();
+    with_default_on_57.extra = String::new();
+    assert_eq!(judge(&with_default_on_57, false, true), Vec::new());
+
     // §4 子集判定：目标表多一列可空的，照样放行——「不多不少」里的「不多」半句已撤除。
     let mut spare = audit.clone();
     spare.nullable = true;
@@ -637,6 +657,40 @@ fn connection_ritual_reports_variable_expected_and_actual_values() {
     assert!(error.contains("max_allowed_packet"), "{error}");
     assert!(error.contains("67108864"), "{error}");
     assert!(error.contains("16777216"), "{error}");
+}
+
+/// #262：这道门不放宽，报文得把该敲的两行直接交到运维手里。
+///
+/// 5.7 的默认值是 4 MiB，所以这条报文是**每一台未调参的 5.7 见到的第一句话**。
+/// 只说「期望至少 67108864 字节」等于让人自己去查该改哪个变量、改在哪里、要不要重启。
+#[test]
+fn a_packet_that_is_too_small_hands_over_the_command_and_the_my_cnf_stanza() {
+    let error = check_connection_settings(
+        "utf8mb4",
+        "utf8mb4",
+        "utf8mb4",
+        "STRICT_ALL_TABLES",
+        4 * 1024 * 1024,
+    )
+    .unwrap_err();
+
+    assert!(
+        error.contains("SET GLOBAL max_allowed_packet = 67108864;"),
+        "当场生效的那条命令要能直接抄走：{error}"
+    );
+    assert!(
+        error.contains("my.cnf") && error.contains("[mysqld]"),
+        "还得说清写进 my.cnf 的哪一段：{error}"
+    );
+    assert!(
+        error.contains("max_allowed_packet = 64M"),
+        "my.cnf 里那一行本身也要给出来：{error}"
+    );
+    assert!(
+        error.contains("5.7"),
+        "要点破这是 5.7 默认值太小，而不是谁把它改坏了：{error}"
+    );
+    assert!(error.contains("不要排查业务数据"), "{error}");
 }
 
 fn open_request(source_columns: Vec<SourceColumn>) -> OpenRunRequest {
