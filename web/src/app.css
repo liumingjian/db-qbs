@@ -538,6 +538,26 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .write-mode-statement dd small { color: var(--mute); font-size: var(--size-meta); font-weight: normal; }
 .write-mode-card .upsert-note { margin: 0 12px 12px; }
 
+/* 周期调度那一格（#265），摆在最后一屏「任务名」下面。规格跟着 `.write-mode-card`
+   走：同样的边线、同样的 48px 表头——同一屏上两块卡差 1px 都看得出来。 */
+.schedule-card { overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); }
+.schedule-card > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.schedule-card > header > div { display: flex; flex-direction: column; gap: 2px; }
+.schedule-card strong { font-size: var(--size-body); font-weight: var(--weight-em); }
+.schedule-card header span { color: var(--mute); font-size: var(--size-meta); }
+.schedule-switch { display: flex; align-items: center; gap: 6px; font-size: var(--size-meta); }
+.schedule-expression { display: flex; flex-direction: column; gap: 4px; padding: 12px 12px 0; font-size: var(--size-meta); color: var(--mute); }
+.schedule-expression input { height: var(--ctl-h); padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-family: var(--font-num); font-size: var(--size-body); }
+.schedule-readout { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 12px; }
+.schedule-readout > div { display: grid; grid-template-columns: 72px 1fr; align-items: baseline; gap: 8px; }
+.schedule-readout dt { color: var(--mute); font-size: var(--size-meta); }
+.schedule-readout dd { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; font-size: var(--size-meta); }
+/* 触发时刻是等宽的：一串时间左右对不齐就读不出「每一刻钟一次」这件事。 */
+.schedule-fire { padding: 0 6px; border: 1px solid var(--line); border-radius: var(--radius); font-family: var(--font-num); line-height: 18px; }
+.schedule-none { color: var(--mute); }
+/* 表达式写错不是告警而是**当场的回答**，但它必须显眼——它和保存被拒时是同一句话。 */
+.schedule-error { color: var(--crit); }
+
 /* 任务列表上的纯追加写标记。它不是告警，所以不着 --crit / --warn——
    这是一种合法的写法，只是它的代价必须在清单上就看得见。 */
 .write-mark { display: inline-block; margin-top: 2px; padding: 0 6px; border: 1px solid var(--line-strong); border-radius: var(--radius); color: var(--dim); font-size: var(--size-meta); line-height: 18px; }

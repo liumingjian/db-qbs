@@ -427,6 +427,46 @@ describe("the advance gate", () => {
     expect(toSpec(after)).toEqual(before);
   });
 
+  it("carries the schedule fields into the saved spec and keeps them out of everything else", () => {
+    let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t" }));
+    draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
+    draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
+    draft = done(apply(draft, { type: "toggle-primary-key", target: "ID" }));
+
+    // 默认是没配周期，而不是「配了个空的」。
+    expect(toSpec(draft).schedule_cron).toBe("");
+    expect(toSpec(draft).schedule_enabled).toBe(false);
+
+    const before = toSpec(draft);
+    draft = done(apply(draft, { type: "schedule-cron", cron: " 0 2 * * * " }));
+    draft = done(apply(draft, { type: "schedule-enabled", enabled: true }));
+
+    // 原文照送，只掐首尾空白——服务端存的就是人写的那一行。
+    expect(toSpec(draft).schedule_cron).toBe("0 2 * * *");
+    expect(toSpec(draft).schedule_enabled).toBe(true);
+    // 调度不清空任何东西：列、主键、过滤条件一样不动。
+    expect(toSpec(draft).columns).toEqual(before.columns);
+    expect(toSpec(draft).primary_key).toEqual(before.primary_key);
+    // 停用不该把表达式一起带走——暂停不是删除。
+    draft = done(apply(draft, { type: "schedule-enabled", enabled: false }));
+    expect(toSpec(draft).schedule_cron).toBe("0 2 * * *");
+  });
+
+  it("loads a saved task's schedule back into the draft", () => {
+    const task = savedTask();
+    const scheduled = {
+      ...task,
+      spec: { ...task.spec, schedule_cron: "*/15 * * * *", schedule_enabled: true },
+    };
+    const draft = openExisting(scheduled, SOURCE, TARGET);
+    expect(draft.spec.schedule_cron).toBe("*/15 * * * *");
+    expect(draft.spec.schedule_enabled).toBe(true);
+    // 服务端没配调度时整个键不序列化，读回来必须是空串而不是 undefined——
+    // 少这一处 `?? ""`，输入框就会从受控变成非受控。
+    const bare = openExisting(task, SOURCE, TARGET);
+    expect(bare.spec.schedule_cron).toBe("");
+  });
+
   it("catches the target field shapes the server would reject", () => {
     // `specComplete` 曾是 `validate()` 的真子集：这几条它一条都不查，于是「保存」
     // 亮着，点下去被后端打回。
@@ -885,6 +925,7 @@ function savedTask(): Task {
         { source: "C_NAME", target: "C_NAME" },
       ],
       write_mode: "APPEND",
+      schedule_enabled: false,
       primary_key: ["ID"],
       where_clause: "STATUS = 1",
     },

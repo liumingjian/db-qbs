@@ -11,6 +11,7 @@ import {
   fetchBuilderSqlColumns,
   fetchBuilderTables,
   fetchColumns,
+  fetchSchedulePreview,
   fetchTargetColumns,
   fetchTargetTables,
   checkTargetTable,
@@ -49,6 +50,7 @@ function spec(overrides: Partial<TaskSpec> = {}): TaskSpec {
       { source: "D_BIZ", target: "D_BIZ" },
     ],
     write_mode: "APPEND",
+    schedule_enabled: false,
     primary_key: ["ID"],
     ...overrides,
   };
@@ -344,6 +346,59 @@ describe("SQL builder API", () => {
       method: "POST",
       body: JSON.stringify({ datasource_id: "ds-oracle" }),
     }));
+  });
+
+  it("asks the server for the timezone and the next fire times, and never computes them here", async () => {
+    const answer = {
+      timezone: "CST",
+      utc_offset: "+08:00",
+      now: "2026-08-28 10:07",
+      next_fire_times: ["2026-08-29 02:00", "2026-08-30 02:00"],
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify(answer), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchSchedulePreview("0 2 * * *")).resolves.toEqual(answer);
+    expect(fetchMock).toHaveBeenCalledWith("/api/builder/schedule", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ cron: "0 2 * * *" }),
+    }));
+  });
+
+  it("asks for the timezone even before an expression is typed", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          timezone: "CST",
+          utc_offset: "+08:00",
+          now: "2026-08-28 10:07",
+          next_fire_times: [],
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchSchedulePreview(null)).resolves.toMatchObject({ next_fire_times: [] });
+    expect(fetchMock).toHaveBeenCalledWith("/api/builder/schedule", expect.objectContaining({
+      body: JSON.stringify({ cron: null }),
+    }));
+  });
+
+  it("surfaces the parser's own words when the expression is refused", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { kind: "request", message: "小时字段的 25 超出取值范围 0-23" } }),
+        { status: 400 },
+      ),
+    ));
+
+    // 保存被拒时是同一句话，因为两条路径读的是服务端同一份解析器。
+    await expect(fetchSchedulePreview("0 25 * * *")).rejects.toThrow(
+      "小时字段的 25 超出取值范围 0-23",
+    );
   });
 
   it("describes columns from a custom source SELECT", async () => {

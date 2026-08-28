@@ -63,6 +63,7 @@ function taskWith(sourceId: string, targetId: string, name = "t"): Task {
       table: "T",
       target_table: "T",
       write_mode: "APPEND",
+      schedule_enabled: false,
       primary_key: ["ID"],
       columns: [{ source: "ID", target: "ID" }],
       where_clause: "",

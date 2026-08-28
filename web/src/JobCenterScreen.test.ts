@@ -16,6 +16,7 @@ const NEVER_RUN_TASK: Task = {
     target_table: "customer",
     columns: [{ source: "ID", target: "ID" }],
     write_mode: "APPEND",
+    schedule_enabled: false,
     primary_key: ["ID"],
     where_clause: "",
   },
