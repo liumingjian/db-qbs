@@ -1,7 +1,11 @@
 -- 目标端等价表 —— 与 t_types_probe 一一对应，用来验证「Oracle 读成字符串 → 原样写 MySQL」
 -- 这条链路是否真的一字不差（ADR-0003）。
 -- 全部 utf8mb4，与 CONTEXT.md 的目标端口径一致。
-ALTER DATABASE qbs CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+-- 不写死 COLLATE：`utf8mb4_0900_ai_ci` 是 8.0 才有的，5.7 上这条语句直接建不起来，
+-- 而这一份种子要同时喂 8.0 与 5.7 两个台架（#262）。省掉 COLLATE 就取该版本
+-- utf8mb4 的默认字符序——8.0 仍是 utf8mb4_0900_ai_ci，5.7 是 utf8mb4_general_ci，
+-- 正好是各自 `collation-server` 那一档，两边都对。
+ALTER DATABASE qbs CHARACTER SET utf8mb4;
 USE qbs;
 
 CREATE TABLE t_types_probe (
