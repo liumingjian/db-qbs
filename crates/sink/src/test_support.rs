@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use db_qbs_shared::RowCounts;
+use db_qbs_shared::{MysqlServerInfo, RowCounts};
 
 use crate::{
     AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, CleanupRunError, CreateStagingError,
@@ -72,6 +72,11 @@ pub struct InMemoryDestination {
     pub count_ms: Mutex<u64>,
     pub target_rows: Mutex<HashMap<(String, String), Vec<Option<String>>>>,
     pub write_ledger: Mutex<Vec<(String, String, String, bool)>>,
+    /// What this destination claims its MySQL is (#257). `None` is the resting
+    /// state — the fake is not connected to anything, so "never observed" is the
+    /// honest default, and it is also the state the info endpoint must report as
+    /// unknown rather than as 8.0.
+    pub server: Mutex<Option<MysqlServerInfo>>,
 }
 
 impl Default for InMemoryDestination {
@@ -97,11 +102,20 @@ impl Default for InMemoryDestination {
             count_ms: Mutex::new(0),
             target_rows: Mutex::new(HashMap::new()),
             write_ledger: Mutex::new(Vec::new()),
+            server: Mutex::new(None),
         }
     }
 }
 
 impl InMemoryDestination {
+    /// Arm what this destination reports as its MySQL version and collation.
+    pub fn report_mysql(&self, version: &str, utf8mb4_collation: &str) {
+        *self.server.lock().expect("server mutex poisoned") = Some(MysqlServerInfo {
+            version: version.to_owned(),
+            utf8mb4_collation: utf8mb4_collation.to_owned(),
+        });
+    }
+
     /// Every row that reached staging, across every staging table. The tests
     /// drive one run at a time, so this reads as "what is in the staging table".
     pub fn staged_row_values(&self) -> Vec<Vec<Option<String>>> {
@@ -151,6 +165,10 @@ impl InMemoryDestination {
 }
 
 impl Destination for InMemoryDestination {
+    fn server_info(&self) -> Option<MysqlServerInfo> {
+        self.server.lock().expect("server mutex poisoned").clone()
+    }
+
     fn target_columns(&self, _target_table: &str) -> Result<Vec<TargetColumn>, String> {
         Ok(self.columns.clone())
     }
