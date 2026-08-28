@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useEffect, useId, useReducer, useRef, useState } from "react";
 
 import { fetchRunLogs } from "./api";
 import { messageFrom } from "./errors";
@@ -28,16 +28,26 @@ const LOG_POLL_INTERVAL_MS = 1000;
 export function RunLogPanel({
   runRecordId,
   focus = false,
+  embedded = false,
 }: {
   runRecordId: string;
-  /** 从任务列表的「查看日志」进来时为真：进屏就把这一段滚到眼前。 */
+  /** 深链 `#runs/<id>/logs` 进来时为真：进屏就把这一段滚到眼前。 */
   focus?: boolean;
+  /**
+   * 摆在运行详情抽屉里（而不是整屏详情里）。
+   *
+   * 只换外壳：抽屉里的每一段都是 `.panel` + `<h3>`，整屏那边是 `.card` + `<h2>`。
+   * 里面那份日志一个字不变——两处看到的必须是同一份东西，否则「详情里有日志」
+   * 这句话就得分两种说法。
+   */
+  embedded?: boolean;
 }) {
   const [lines, setLines] = useState<LogLineView[]>([]);
   const [followState, dispatch] = useReducer(follow, INITIAL_FOLLOW);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [live, setLive] = useState(true);
+  const headingId = useId();
   const listRef = useRef<HTMLOListElement | null>(null);
   const sectionRef = useRef<HTMLElement | null>(null);
 
@@ -145,23 +155,41 @@ export function RunLogPanel({
     }
   }, [focus, runRecordId]);
 
+  /** 标题与右边那组动作是**两个兄弟节点**：卡片头靠 `space-between` 把它们推开，
+      抽屉里那个 `<h3>` 做同一件事。可读名字只取标题，不把「实时」念进去。 */
+  const title = <span id={headingId}>运行日志</span>;
+  const actions = (
+    <span className="run-logs-actions">
+      {live && <span className="run-logs-live">实时</span>}
+      {showsBackToLatest(followState) && (
+        <button
+          type="button"
+          className="button is-ghost"
+          onClick={() => dispatch({ type: "back-to-latest" })}
+        >
+          {backToLatestLabel(followState)}
+        </button>
+      )}
+    </span>
+  );
+
   return (
-    <section className="card run-logs" aria-labelledby="run-logs-title" ref={sectionRef}>
-      <header className="card-header">
-        <h2 id="run-logs-title">运行日志</h2>
-        <span className="run-logs-actions">
-          {live && <span className="run-logs-live">实时</span>}
-          {showsBackToLatest(followState) && (
-            <button
-              type="button"
-              className="button is-ghost"
-              onClick={() => dispatch({ type: "back-to-latest" })}
-            >
-              {backToLatestLabel(followState)}
-            </button>
-          )}
-        </span>
-      </header>
+    <section
+      className={embedded ? "panel run-logs is-embedded" : "card run-logs"}
+      aria-labelledby={headingId}
+      ref={sectionRef}
+    >
+      {embedded ? (
+        <h3>
+          {title}
+          {actions}
+        </h3>
+      ) : (
+        <header className="card-header">
+          <h2>{title}</h2>
+          {actions}
+        </header>
+      )}
       {loadError !== null && (
         <div className="form-error" role="alert">
           {loadError}

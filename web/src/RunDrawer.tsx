@@ -25,6 +25,7 @@ import {
   runTriggerLabel,
 } from "./history";
 import { PrecheckReports } from "./PrecheckReports";
+import { RunLogPanel } from "./RunLogPanel";
 import { HighlightedSql } from "./SqlEditor";
 import { rerunAction } from "./rerun";
 import { sourceSummary, whereSummary } from "./spec";
@@ -242,6 +243,12 @@ export function RunDrawer({
                 value={run.value ?? undefined}
               />
             )}
+
+          {/* 日志是运行详情的一段，抽屉里也一样（#263）：这个抽屉就是「运行详情」
+              那颗按钮打开的东西，而出事时唯一想看的正是「它卡在哪一步、上一句说了
+              什么」——把日志只放在整屏详情里，等于让人先猜到还有另一个地方。
+              渲染的是同一个组件，只换外壳。 */}
+          <RunLogPanel runRecordId={run.run_record_id} embedded />
         </div>
 
         <footer className="drawer-footer">

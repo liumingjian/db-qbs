@@ -1173,6 +1173,10 @@ select, .page-size {
    一条条人话，跟着运行往下滚。等宽只给时间与正文里的原文行——中文说明用正文字体，
    等宽的中文只会更难读。 */
 .run-logs { margin-top: var(--gap); }
+/* 抽屉里那一份：外壳是 `.panel`，标题行右边照旧摆「实时」与「回到最新」。
+   高度收一半——抽屉本身就在滚，里面再放一个 420px 的滚动区，两根滚动条会打架。 */
+.run-logs.is-embedded > h3 { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.run-logs.is-embedded .log-lines { max-height: 220px; }
 .run-logs-actions { display: flex; align-items: center; gap: 8px; }
 .run-logs-live { color: var(--ok); font-size: var(--size-meta); font-weight: var(--weight-em); }
 /* 固定高度而不是随内容长：日志会长到几千行，让它推着整屏往下长，等于没有「回到最新」
