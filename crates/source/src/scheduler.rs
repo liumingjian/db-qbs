@@ -43,6 +43,11 @@ use crate::{RunHistory, RunTrigger, Task};
 /// 而排队中的那些也靠它重试——额度腾出来之后最多 5 秒就会被派出去。
 const EVALUATE_INTERVAL: Duration = Duration::from_secs(5);
 
+/// 睡多小一段才回头看一眼 `terminated`。取值与 `accept_loop` 的 `recv_timeout` 一样是
+/// 100 毫秒，理由也一样：这条线程活在 `thread::scope` 里、退出时会被 join，
+/// 所以它对 SIGTERM 的反应速度就是优雅退出的下限。
+const TERMINATION_POLL: Duration = Duration::from_millis(100);
+
 /// 界面上那个时刻的格式，与 `http::SCHEDULE_TIME_FORMAT` 同一份写法。
 const SCHEDULE_TIME_FORMAT: &str = "%Y-%m-%d %H:%M";
 
@@ -186,19 +191,29 @@ impl ScheduleState {
 /// 它是 `thread::scope` 里的一条作用域线程（和 HTTP 工作线程同一个作用域），
 /// 所以能直接借栈上那几个 store，不必把每一份状态都搬进 `Arc`。
 pub fn scheduler_loop(state: &Api<'_>, schedule: &ScheduleRegistry, terminated: &AtomicBool) {
+    let slices = EVALUATE_INTERVAL.as_millis() / TERMINATION_POLL.as_millis();
     while !terminated.load(Ordering::Relaxed) {
-        evaluate(state, schedule);
-        for _ in 0..EVALUATE_INTERVAL.as_secs() {
+        evaluate(state, schedule, Local::now().naive_local(), terminated);
+        for _ in 0..slices {
             if terminated.load(Ordering::Relaxed) {
                 return;
             }
-            thread::sleep(Duration::from_secs(1));
+            thread::sleep(TERMINATION_POLL);
         }
     }
 }
 
 /// 一轮：对一遍时钟，把到点的收进队列（或跳过），再把队列尽量派出去。
-fn evaluate(state: &Api<'_>, schedule: &ScheduleRegistry) {
+///
+/// **`now` 是参数不是 `Local::now()`**：这一轮的全部行为——补不补跑、跳不跳过、
+/// 排不排队——都由它决定，而这些恰恰是最该被用例钉死的。真跑起来时由
+/// [`scheduler_loop`] 传本地挂钟时间。
+pub fn evaluate(
+    state: &Api<'_>,
+    schedule: &ScheduleRegistry,
+    now: NaiveDateTime,
+    terminated: &AtomicBool,
+) {
     let tasks = match state.tasks.list() {
         Ok(tasks) => tasks,
         Err(error) => {
@@ -210,7 +225,6 @@ fn evaluate(state: &Api<'_>, schedule: &ScheduleRegistry) {
             return;
         }
     };
-    let now = Local::now().naive_local();
     let due = match schedule.lock() {
         Ok(mut state) => state.observe(&tasks, now),
         Err(_) => return,
@@ -239,7 +253,7 @@ fn evaluate(state: &Api<'_>, schedule: &ScheduleRegistry) {
             });
         }
     }
-    drain_queue(state, schedule, &tasks);
+    drain_queue(state, schedule, &tasks, terminated);
 }
 
 /// 把队列尽量派出去。**先进先出**：排在前面的那个触发时刻先走。
@@ -247,12 +261,23 @@ fn evaluate(state: &Api<'_>, schedule: &ScheduleRegistry) {
 /// 额度满的那一条留在队里、只记下原因（界面上看得见），下一轮再试；
 /// 解不开的那一条（数据源没了、agent 不在线、这个任务又被人手动跑起来了）
 /// 落一行历史说明原因，然后出队——把它无限期留在队里只会让某个时刻突然冒出一次运行。
-fn drain_queue(state: &Api<'_>, schedule: &ScheduleRegistry, tasks: &[Task]) {
+fn drain_queue(
+    state: &Api<'_>,
+    schedule: &ScheduleRegistry,
+    tasks: &[Task],
+    terminated: &AtomicBool,
+) {
     let queued = match schedule.lock() {
         Ok(state) => state.queue_view(),
         Err(_) => return,
     };
     for occurrence in queued {
+        // 派一次活里头有秒级的阻塞 IO（解连接、当场探一次 agent）。SIGTERM 已经来了
+        // 就一个都不再发：队里那些留着，下次起来当成「第一次看到」——不补跑那条规则
+        // 本来就说了，停机期间错过的时刻作废。
+        if terminated.load(Ordering::Relaxed) {
+            return;
+        }
         let Some(task) = tasks.iter().find(|task| task.task_id == occurrence.task_id) else {
             // 任务被删了：它的运行历史也已经没有归属，队里这一条直接作废。
             if let Ok(mut state) = schedule.lock() {
@@ -424,10 +449,7 @@ mod tests {
         let on = vec![task("t1", Some("0 * * * *"), true)];
         // 打开开关那一刻正好是整点，也不许拿「刚才那一刻」当触发时刻。
         assert!(state.observe(&on, at("2026-08-28 04:00")).is_empty());
-        assert_eq!(
-            state.next_fires()[0].1.as_deref(),
-            Some("2026-08-28 05:00")
-        );
+        assert_eq!(state.next_fires()[0].1.as_deref(), Some("2026-08-28 05:00"));
     }
 
     #[test]
@@ -437,10 +459,7 @@ mod tests {
         state.observe(&hourly, at("2026-08-28 03:10"));
         let daily = vec![task("t1", Some("0 2 * * *"), true)];
         assert!(state.observe(&daily, at("2026-08-28 03:20")).is_empty());
-        assert_eq!(
-            state.next_fires()[0].1.as_deref(),
-            Some("2026-08-29 02:00")
-        );
+        assert_eq!(state.next_fires()[0].1.as_deref(), Some("2026-08-29 02:00"));
     }
 
     #[test]

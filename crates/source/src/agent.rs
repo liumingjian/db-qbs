@@ -311,7 +311,9 @@ impl AgentStore {
         };
         // 额度与上面同一条规则：只有探通且身份对得上才更新，否则留住上一次那份。
         let max_concurrent_runs = match result {
-            Ok(info) if info.agent_id == existing.instance_id || existing.instance_id.is_empty() => {
+            Ok(info)
+                if info.agent_id == existing.instance_id || existing.instance_id.is_empty() =>
+            {
                 reported_quota(info)
             }
             _ => existing.max_concurrent_runs,

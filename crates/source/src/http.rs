@@ -853,6 +853,9 @@ fn handle_get_run(
                 "run_record_id": run_record_id,
                 "run_id": record.run_id,
                 "task_name": record.task_name,
+                // 手动还是调度，**在飞的时候就要分得开**（#266）：一次半夜自己跑起来的
+                // 运行，最该问「这谁发起的」的时刻正是它还在跑的时候。
+                "trigger": record.trigger,
                 "source_sql": record.source_sql,
                 "evidence": record.evidence,
                 "staging_table": record.staging_table,

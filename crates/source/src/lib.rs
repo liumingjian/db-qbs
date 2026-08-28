@@ -66,7 +66,8 @@ pub use run_history::{
 };
 // 到点派活的那条常驻线程（#266）。行为定义在 `scheduler.rs` 模块头。
 pub use scheduler::{
-    scheduler_loop, DueOccurrence, QueuedOccurrence, ScheduleRegistry, ScheduleState,
+    evaluate as run_scheduler_pass, scheduler_loop, DueOccurrence, QueuedOccurrence,
+    ScheduleRegistry, ScheduleState,
 };
 pub use run_log_store::{
     truncate_business_values, RunLogLine, RunLogStore, RunLogWriter, BUSINESS_VALUE_MAX_CHARS,
