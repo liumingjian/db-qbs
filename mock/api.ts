@@ -122,7 +122,7 @@ interface SpecShape {
   owner: string;
   table: string;
   target_table: string;
-  write_mode: "APPEND";
+  write_mode: "APPEND" | "CLEAR_THEN_IMPORT";
   primary_key: string[];
   columns: { source: string; target: string }[];
   where_clause?: string;

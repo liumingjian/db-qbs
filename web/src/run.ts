@@ -1,5 +1,6 @@
 import type { RunDetail } from "./api";
 import { historyPresentation } from "./history";
+import type { TerminalEffect } from "./history";
 import type { RunPhase } from "./runStage";
 import { runPhase, stageLabel } from "./runStage";
 
@@ -15,7 +16,7 @@ export interface RunPresentation {
   kind: RunPresentationKind;
   phase: RunPhase | null;
   conclusion: string;
-  terminalEffect: "SWAPPED" | "DISCARDED" | null;
+  terminalEffect: TerminalEffect | null;
   error: { code: string; httpStatus: number | null } | null;
   metrics: {
     rows: number;

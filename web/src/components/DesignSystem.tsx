@@ -1,6 +1,7 @@
 import { Eye, EyeOff } from "lucide-react";
 import { useState } from "react";
 
+import type { TerminalEffect } from "../history";
 import type { RunPhase } from "../runStage";
 import { RUN_PHASES, stageLabel } from "../runStage";
 
@@ -49,23 +50,33 @@ export function PhaseLine({ current }: { current: RunPhase | null }) {
 }
 
 /**
- * 轴二说的**不是「整表换过」**（2026-08 UX 评审 P0-1）。
+ * 轴二有三个词，而**只有一个是「整表换过」**（2026-08 UX 评审 P0-1、#264）。
  *
  * `SWAPPED` 是目标端的协议词，本义只是「这次写入被目标端认下了」；实际打的是
  * `INSERT ... ON DUPLICATE KEY UPDATE`（无主键时是纯 `INSERT`，见 `writeMode.ts`）
  * ——**按主键合并**。原话「目标表已切换」把它读成了
  * 一次整表替换，于是目标表会被当成源端的全量快照拿去用，而**源端删掉的行还留在里面**
- * （CONTEXT.md 记的那笔刻意欠债）。标签本身照旧是一个词，长话在 `UpsertNote` 里。
+ * （CONTEXT.md 记的那笔刻意欠债）。
+ *
+ * `REPLACED` 才是整表换过：先清空再导入那一档（#264），跑完之后目标表精确等于本次
+ * 查询的结果。它和 `SWAPPED` **不能共用一句话**——那正是这一栏存在的意义，
+ * 而共用会让一半的运行历史读起来是假的。
  *
  * `DISCARDED` 一个字不动：那半边本来就是准的——目标表确实没被碰过。
+ *
+ * 标签本身照旧是一个词，长话在 `UpsertNote` 里。
  */
-export function TerminalBlock({ effect }: { effect: "SWAPPED" | "DISCARDED" }) {
+const TERMINAL_COPY: Readonly<Record<TerminalEffect, string>> = {
+  SWAPPED: "已按主键合并写入",
+  REPLACED: "目标表已整表替换",
+  DISCARDED: "目标表未被触碰",
+};
+
+export function TerminalBlock({ effect }: { effect: TerminalEffect }) {
   return (
     <span className={`terminal-block is-${effect.toLowerCase()}`}>
       <span>{effect}</span>
-      <span className="terminal-copy">
-        {effect === "SWAPPED" ? "已按主键合并写入" : "目标表未被触碰"}
-      </span>
+      <span className="terminal-copy">{TERMINAL_COPY[effect]}</span>
     </span>
   );
 }

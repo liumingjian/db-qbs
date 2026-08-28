@@ -66,8 +66,10 @@ pub struct InMemoryDestination {
     /// What `write_batch` reports back, when the test needs it to disagree with
     /// the number of rows it was handed.
     pub affected_rows: Mutex<Option<u64>>,
-    /// Always 0 in production (ADR-0035 §4). Settable here so a test can prove
-    /// the number is carried through rather than invented on the way out.
+    /// Always 0 on the append path (ADR-0035 §4). Settable here so a test can
+    /// prove the number is carried through rather than invented on the way out.
+    /// On the clear-then-import path (#264) this knob is ignored: the fake
+    /// reports how many target rows it actually deleted.
     pub purged_rows: Mutex<u64>,
     pub count_ms: Mutex<u64>,
     pub target_rows: Mutex<HashMap<(String, String), Vec<Option<String>>>>,
@@ -275,6 +277,24 @@ impl Destination for InMemoryDestination {
         let rows = self.staging.lock().unwrap()[&request.staging_table].clone();
         let statement = WriteStatement::for_primary_key(&request.primary_key);
         let mut target_rows = self.target_rows.lock().unwrap();
+        // Clear-then-import (#264). The order is the point of this fake: the
+        // clear happens **after** the row-count gate and **before** the insert,
+        // and nothing here can commit half of it — a test that arms
+        // `swap_error` must find the target table still holding its old rows.
+        let purged_rows = if request.write_mode.clears_target() {
+            let doomed = target_rows
+                .keys()
+                .filter(|(table, _)| table == &request.target_table)
+                .cloned()
+                .collect::<Vec<_>>();
+            let purged = doomed.len() as u64;
+            for key in doomed {
+                target_rows.remove(&key);
+            }
+            purged
+        } else {
+            *self.purged_rows.lock().unwrap()
+        };
         for row in rows {
             let key = match statement {
                 // Merge on the recorded key: a second run with the same keys
@@ -303,7 +323,7 @@ impl Destination for InMemoryDestination {
 
         Ok(AtomicSwapResult {
             staged_rows,
-            purged_rows: *self.purged_rows.lock().unwrap(),
+            purged_rows,
             // No real upsert here, so nothing can be counted twice: the interval
             // `swap_rows_consistent` allows on the upsert path is a MySQL
             // `affected_rows` fact, not something a test double should invent.

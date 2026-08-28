@@ -3,7 +3,7 @@
  *
  * 两件事分开，且**只有一件是人选的**：
  *
- * - `WriteMode` 是任务定义里存的那个值，今天只有「追加写」一档；
+ * - `WriteMode` 是任务定义里存的那个值：「追加写」与「先清空再导入」两档；
  * - `WriteStatement` 是目标端真正会跑的语句，**没人能选它**——目标表有主键就是
  *   `ON DUPLICATE KEY UPDATE`，没有就是纯 `INSERT ... SELECT`。
  *
@@ -15,18 +15,28 @@
 
 import type { TargetKey } from "./api";
 
-export type WriteMode = "APPEND";
+export type WriteMode = "APPEND" | "CLEAR_THEN_IMPORT";
 
 export type WriteStatement = "upsert" | "insert";
 
-/** 写入模式的清单。清空后导入那一档接进来时加在这里，向导里那组单选按钮自动多一项。 */
+/** 写入模式的清单。向导里那组单选按钮直接照它渲染，加一档就多一项。 */
 export const WRITE_MODES: readonly { mode: WriteMode; label: string; hint: string }[] = [
   {
     mode: "APPEND",
     label: "追加写",
     hint: "把查询结果写进目标表，已有的行一行都不删。",
   },
+  {
+    mode: "CLEAR_THEN_IMPORT",
+    label: "先清空再导入",
+    hint: "同一个事务里先清空目标表再导入，跑完之后目标表精确等于本次查询结果；原有数据不可恢复。",
+  },
 ];
+
+/** 这一档会不会清空目标表。判据只有一处，界面上问它，不各自比字符串。 */
+export function clearsTarget(mode: WriteMode): boolean {
+  return mode === "CLEAR_THEN_IMPORT";
+}
 
 /**
  * 语句形状的唯一派生：任务定义记下的主键为空，就是「目标表没有可合并的唯一约束」。
@@ -53,14 +63,41 @@ export const APPEND_ONLY_CONCLUSION =
  * 两种写法各有各的坑，说同一句话等于其中一句必然是假的：upsert 的坑是「源端删掉的行
  * 不会跟着消失」，纯追加的坑是「重跑翻倍」。
  */
-export function writeSemanticsNote(statement: WriteStatement): string {
+export function writeSemanticsNote(
+  statement: WriteStatement,
+  mode: WriteMode = "APPEND",
+): string {
+  if (clearsTarget(mode)) {
+    // 清空模式下，上面那两个坑一个都不存在——「源端删掉的行留着」正是它来解决的，
+    // 「重跑翻倍」也不会发生，因为每次都从空表开始。换来的是一笔新的代价，
+    // 而它必须在这里说满：原有数据没了，且没有撤销。
+    return `先清空再导入：同一个事务里先清空目标表再导入，跑完之后目标表精确等于本次查询结果；原有数据不可恢复，也没有撤销入口。写入语句仍是${writeStatementLabel(
+      statement,
+    )}——清空不改变它。`;
+  }
   return statement === "upsert"
     ? "按主键 upsert：新增和变更会写进目标表；源端删除的行不会跟着消失。"
     : `${APPEND_ONLY_CONCLUSION}。目标表上没有可去重的唯一约束，本次写入是纯 INSERT。`;
 }
 
+/**
+ * 清空模式下主键那一列为什么点不动（#264）。
+ *
+ * 灰掉不是「这里坏了」，是「这个决定不归你做」：清空模式不依赖主键去重，而任务定义
+ * 里那份主键仍然要记——它决定写入语句是 upsert 还是纯 INSERT，值取自目标表实际
+ * 定义的主键。这句话必须跟着灰掉一起出现，否则灰掉本身就是一个没有解释的拒绝。
+ */
+export const CLEAR_MODE_PRIMARY_KEY_NOTE =
+  "先清空再导入不依赖主键去重，这里按目标表实际定义的主键记录，只用来决定写入语句";
+
 /** 同一件事的过去时：跑完之后，陈述这次写入到底做了什么。 */
-export function writeSemanticsDone(statement: WriteStatement): string {
+export function writeSemanticsDone(
+  statement: WriteStatement,
+  mode: WriteMode = "APPEND",
+): string {
+  if (clearsTarget(mode)) {
+    return "先清空再导入：目标表已整表替换，此刻它精确等于本次查询的结果；原有数据已删除，不可恢复。";
+  }
   return statement === "upsert"
     ? "按主键 upsert：新增和变更已写入；源端删除的行仍保留在目标表。"
     : "纯追加写：这批数据已追加进目标表，一行都没有删；再跑一次会再追加一份。";

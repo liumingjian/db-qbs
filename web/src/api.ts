@@ -357,7 +357,20 @@ export interface RunHistory {
   started_at: string;
   finished_at: string | null;
   outcome: "SUCCEEDED" | "FAILED" | null;
-  target_table_effect: "SWAPPED" | "DISCARDED" | "UNKNOWN" | null;
+  /**
+   * 目标表最后被怎么了。`SWAPPED`「按主键合并进目标表」、`REPLACED`「整表被替换」
+   * （先清空再导入，#264）、`DISCARDED`「没被触碰」，外加 `UNKNOWN`「说不清」。
+   *
+   * `string` 那一支不是偷懒：服务端这一列原样搬运它不认识的拼写，前端也不能吞掉
+   * ——「后端比前端新」正是最该被看见的时候。
+   */
+  target_table_effect:
+    | "SWAPPED"
+    | "REPLACED"
+    | "DISCARDED"
+    | "UNKNOWN"
+    | (string & {})
+    | null;
   stage: string | null;
   source_rows: number | null;
   staged_rows: number | null;

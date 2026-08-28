@@ -163,6 +163,12 @@ pub struct RunHistory {
     pub started_at: String,
     pub finished_at: Option<String>,
     pub outcome: Option<String>,
+    /// 目标表最后被怎么了。三个值：`SWAPPED`「按主键合并进目标表」、
+    /// `REPLACED`「整表被替换」（清空后导入，#264）、`DISCARDED`「没被触碰」，
+    /// 外加一个 `UNKNOWN`「说不清」。
+    ///
+    /// 和 `stage` 一样**是字符串不是枚举，且不认识的值原样搬运**：这一列是日志的
+    /// 尽力投影，吞掉一个没见过的拼写等于把「子进程比父进程新」这件事藏起来。
     pub target_table_effect: Option<String>,
     /// 展示用的那一份，**是字符串不是枚举**，而且是故意的：运行历史按定义是
     /// 「日志的尽力投影」，它必须能原样搬运一个自己不认识的拼写。吞掉它，
@@ -319,11 +325,13 @@ impl RunHistory {
                 HistoryChange::MemoryOnly
             }
             Some("commit_diagnosed") => {
-                self.target_table_effect = match text(log, "terminal") {
-                    Some("SWAPPED") => Some("SWAPPED".to_owned()),
-                    Some("DISCARDED") => Some("DISCARDED".to_owned()),
-                    _ => Some("UNKNOWN".to_owned()),
-                };
+                // **不认识的拼写原样搬运**，和 `stage` 那一列同一个规矩（#264）。
+                // 从前这里是个把闭集外的值一律折成 `UNKNOWN` 的 `match`，于是
+                // 「子进程比父进程新、多报了一个终态词」这件事在屏幕上彻底消失——
+                // 而那正是最该被看见的时候。真正的「说不清」只有一种：子进程自己
+                // 就没能判定，`terminal` 是 `null`。
+                self.target_table_effect =
+                    Some(text(log, "terminal").unwrap_or("UNKNOWN").to_owned());
                 HistoryChange::MemoryOnly
             }
             Some("run_finished") => {
@@ -378,15 +386,19 @@ impl RunHistory {
         self.stage = owned_text(log, "stage");
         self.finished_at = owned_text(log, "ts");
         if self.target_table_effect.is_none() {
+            // 子进程若直说了目标表遭遇了什么，就照它的（#264）——写入模式只有跑数那一端
+            // 知道，「跑成功了 ⇒ 按主键合并」在清空后导入这条路上是假话。这一份同样
+            // 原样搬运，不做闭集裁决。下面那套折算是**后备**：老日志里没有这个字段。
+            let stated = owned_text(log, "target_table_effect");
             let stage = self.stage.as_deref().and_then(RunStage::parse);
-            self.target_table_effect =
-                match (self.outcome.as_deref(), stage, text(log, "sink_code")) {
-                    (Some("SUCCEEDED"), _, _) => Some("SWAPPED".to_owned()),
-                    (Some("FAILED"), _, Some("VERIFY_FAILED")) => Some("DISCARDED".to_owned()),
-                    (Some("FAILED"), Some(RunStage::Committing), _) => Some("UNKNOWN".to_owned()),
-                    (Some("FAILED"), _, _) => Some("DISCARDED".to_owned()),
-                    _ => None,
-                };
+            let folded = match (self.outcome.as_deref(), stage, text(log, "sink_code")) {
+                (Some("SUCCEEDED"), _, _) => Some("SWAPPED".to_owned()),
+                (Some("FAILED"), _, Some("VERIFY_FAILED")) => Some("DISCARDED".to_owned()),
+                (Some("FAILED"), Some(RunStage::Committing), _) => Some("UNKNOWN".to_owned()),
+                (Some("FAILED"), _, _) => Some("DISCARDED".to_owned()),
+                _ => None,
+            };
+            self.target_table_effect = stated.or(folded);
         }
         self.source_rows = number(log, "source_rows");
         self.staged_rows = number(log, "staged_rows");
