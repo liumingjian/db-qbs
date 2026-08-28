@@ -380,15 +380,14 @@ impl RunHistory {
             // 原样搬运，不做闭集裁决。下面那套折算是**后备**：老日志里没有这个字段。
             let stated = owned_text(log, "target_table_effect");
             let stage = self.stage.as_deref().and_then(RunStage::parse);
-            self.target_table_effect = stated.or_else(|| {
-                match (self.outcome.as_deref(), stage, text(log, "sink_code")) {
-                    (Some("SUCCEEDED"), _, _) => Some("SWAPPED".to_owned()),
-                    (Some("FAILED"), _, Some("VERIFY_FAILED")) => Some("DISCARDED".to_owned()),
-                    (Some("FAILED"), Some(RunStage::Committing), _) => Some("UNKNOWN".to_owned()),
-                    (Some("FAILED"), _, _) => Some("DISCARDED".to_owned()),
-                    _ => None,
-                }
-            });
+            let folded = match (self.outcome.as_deref(), stage, text(log, "sink_code")) {
+                (Some("SUCCEEDED"), _, _) => Some("SWAPPED".to_owned()),
+                (Some("FAILED"), _, Some("VERIFY_FAILED")) => Some("DISCARDED".to_owned()),
+                (Some("FAILED"), Some(RunStage::Committing), _) => Some("UNKNOWN".to_owned()),
+                (Some("FAILED"), _, _) => Some("DISCARDED".to_owned()),
+                _ => None,
+            };
+            self.target_table_effect = stated.or(folded);
         }
         self.source_rows = number(log, "source_rows");
         self.staged_rows = number(log, "staged_rows");

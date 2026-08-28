@@ -8,8 +8,8 @@ use std::time::Instant;
 use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
 use db_qbs_source::{
     fetch_agent_info, generate_run_id, load_source_config, load_task_config, run_transfer,
-    FailureKind, HttpSinkClient, OracleRowSource, RunStage, TransferEvent, TransferFailure,
-    TransferRequest, TransferSummary, Terminal, WriteMode,
+    FailureKind, HttpSinkClient, OracleRowSource, RunStage, Terminal, TransferEvent,
+    TransferFailure, TransferRequest, TransferSummary, WriteMode,
 };
 use serde_json::{json, Map, Value};
 

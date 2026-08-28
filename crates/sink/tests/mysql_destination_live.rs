@@ -294,7 +294,10 @@ fn a_clear_mode_run_tolerates_a_duplicate_key_within_itself() {
     );
     assert_eq!(
         rig.target_rows(),
-        vec![("1".to_owned(), "b".to_owned()), ("2".to_owned(), "c".to_owned())],
+        vec![
+            ("1".to_owned(), "b".to_owned()),
+            ("2".to_owned(), "c".to_owned())
+        ],
         "同键的后一行赢，运行不失败"
     );
 }
@@ -694,8 +697,10 @@ impl Rig {
         rows: &[(&str, &str)],
         write_mode: WriteMode,
     ) -> Result<AtomicSwapResult, String> {
-        let rows: Vec<(&str, Option<&str>)> =
-            rows.iter().map(|(key, value)| (*key, Some(*value))).collect();
+        let rows: Vec<(&str, Option<&str>)> = rows
+            .iter()
+            .map(|(key, value)| (*key, Some(*value)))
+            .collect();
         self.stage_and_swap_nullable(run, &rows, write_mode)
     }
 
@@ -721,9 +726,7 @@ impl Rig {
         let names: Vec<String> = columns.iter().map(|column| column.name.clone()).collect();
         let values: Vec<Vec<Option<String>>> = rows
             .iter()
-            .map(|(key, value)| {
-                vec![Some((*key).to_owned()), value.map(|value| value.to_owned())]
-            })
+            .map(|(key, value)| vec![Some((*key).to_owned()), value.map(str::to_owned)])
             .collect();
         self.destination
             .write_batch(&staging_table, &names, &values, 100)

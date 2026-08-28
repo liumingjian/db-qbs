@@ -52,7 +52,8 @@ fn the_write_mode_serialises_as_its_wire_spelling() {
         serde_json::from_value(serde_json::json!("APPEND")).expect("wire spelling must parse");
     assert_eq!(decoded, WriteMode::Append);
 
-    let encoded = serde_json::to_value(WriteMode::ClearThenImport).expect("write mode must serialise");
+    let encoded =
+        serde_json::to_value(WriteMode::ClearThenImport).expect("write mode must serialise");
     assert_eq!(encoded, serde_json::json!("CLEAR_THEN_IMPORT"));
     let decoded: WriteMode = serde_json::from_value(serde_json::json!("CLEAR_THEN_IMPORT"))
         .expect("wire spelling must parse");

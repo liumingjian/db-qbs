@@ -123,11 +123,17 @@ fn a_clear_then_import_run_replaces_the_target_and_says_replaced() {
     let destination = Arc::new(destination());
     // 目标表里先躺着两行旧数据，它们正是这次运行要清掉的东西。
     destination.target_rows.lock().unwrap().insert(
-        ("T_POSITION".to_owned(), "[\"2026-01-01 00:00:00\"]".to_owned()),
+        (
+            "T_POSITION".to_owned(),
+            "[\"2026-01-01 00:00:00\"]".to_owned(),
+        ),
         vec![Some("2026-01-01 00:00:00".to_owned())],
     );
     destination.target_rows.lock().unwrap().insert(
-        ("T_POSITION".to_owned(), "[\"2026-01-02 00:00:00\"]".to_owned()),
+        (
+            "T_POSITION".to_owned(),
+            "[\"2026-01-02 00:00:00\"]".to_owned(),
+        ),
         vec![Some("2026-01-02 00:00:00".to_owned())],
     );
     let service = SinkService::new("qbs", destination.clone());
@@ -168,7 +174,10 @@ fn a_clear_then_import_run_replaces_the_target_and_says_replaced() {
 fn an_append_run_still_leaves_what_was_there_and_says_swapped() {
     let destination = Arc::new(destination());
     destination.target_rows.lock().unwrap().insert(
-        ("T_POSITION".to_owned(), "[\"2026-01-01 00:00:00\"]".to_owned()),
+        (
+            "T_POSITION".to_owned(),
+            "[\"2026-01-01 00:00:00\"]".to_owned(),
+        ),
         vec![Some("2026-01-01 00:00:00".to_owned())],
     );
     let service = SinkService::new("qbs", destination.clone());
@@ -194,7 +203,10 @@ fn an_append_run_still_leaves_what_was_there_and_says_swapped() {
 fn a_clear_then_import_that_fails_its_gate_does_not_clear_anything() {
     let destination = Arc::new(destination());
     destination.target_rows.lock().unwrap().insert(
-        ("T_POSITION".to_owned(), "[\"2026-01-01 00:00:00\"]".to_owned()),
+        (
+            "T_POSITION".to_owned(),
+            "[\"2026-01-01 00:00:00\"]".to_owned(),
+        ),
         vec![Some("2026-01-01 00:00:00".to_owned())],
     );
     let service = SinkService::new("qbs", destination.clone());
