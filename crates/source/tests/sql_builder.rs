@@ -27,6 +27,8 @@ fn spec() -> TaskSpec {
         table: "T_R_FR_ASTSTAT".to_owned(),
         target_table: "T_POSITION".to_owned(),
         write_mode: WriteMode::Append,
+        schedule_cron: None,
+        schedule_enabled: false,
         columns: vec![identity("N_VA_PRICE"), identity("D_BIZ")],
         primary_key: vec!["D_BIZ".to_owned()],
         where_clause: None,
@@ -433,4 +435,61 @@ fn the_spec_serialises_to_toml_which_is_what_pins_the_field_order() {
     };
     let encoded = toml::to_string(&keyless).expect("无主键的任务定义同样要能落盘");
     assert!(encoded.contains("primary_key = []"), "{encoded}");
+
+    // #265 的两个调度标量落在同一条规矩下。`schedule_cron` 是 `Option`，缺席时整个键不
+    // 序列化，所以真正能证明顺序的是**配了表达式**的那一份。
+    let scheduled = TaskSpec {
+        schedule_cron: Some("0 2 * * *".to_owned()),
+        schedule_enabled: true,
+        ..spec()
+    };
+    let encoded = toml::to_string(&scheduled).expect("带调度的任务定义必须能落成 TOML");
+    let columns_at = encoded.find("[[columns]]").expect("columns 是 array-of-tables");
+    for scalar in ["schedule_cron", "schedule_enabled"] {
+        let at = encoded
+            .find(scalar)
+            .unwrap_or_else(|| panic!("{scalar} 必须落盘：\n{encoded}"));
+        assert!(
+            at < columns_at,
+            "{scalar} 必须排在 columns 之前，否则整个任务定义序列化不出来：\n{encoded}"
+        );
+    }
+}
+
+/// 无效的 cron 表达式在**保存这一刻**被拒，理由原样来自解析器（#265）。
+///
+/// 校验放在 `TaskSpec::validate` 上，而它是建任务、改任务、生成 SQL 三条路共用的那一道门——
+/// 于是「存下一个永远不会响的闹钟」在源端没有任何一条绕行的路。
+#[test]
+fn an_invalid_cron_expression_is_refused_when_the_task_is_saved() {
+    let mut scheduled = spec();
+    scheduled.schedule_cron = Some("0 2 * * *".to_owned());
+    scheduled.schedule_enabled = true;
+    scheduled.validate().unwrap();
+
+    // 关掉开关也照样校验：存下一行读不懂的文本，等到有人打开开关那天才报错，
+    // 那一天离写下它的那一刻已经隔了很久。
+    let mut broken = spec();
+    broken.schedule_cron = Some("0 25 * * *".to_owned());
+    broken.schedule_enabled = false;
+    assert_eq!(
+        broken.validate(),
+        Err("小时字段的 25 超出取值范围 0-23".to_owned())
+    );
+
+    // 开着开关却没有表达式是自相矛盾的：这个任务永远不会被自动发起，而界面上它写着「已启用」。
+    let mut enabled_without_expression = spec();
+    enabled_without_expression.schedule_enabled = true;
+    assert_eq!(
+        enabled_without_expression.validate(),
+        Err("启用了周期调度就必须写一条 cron 表达式".to_owned())
+    );
+
+    // 空白 = 没配，不是「配了个空的」。这与 `where_clause` 是同一套口径。
+    let mut blank = spec();
+    blank.schedule_cron = Some("   ".to_owned());
+    blank.validate().unwrap();
+
+    // 没配调度是默认状态，不该被判成错。
+    spec().validate().unwrap();
 }

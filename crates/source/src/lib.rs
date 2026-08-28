@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 mod agent;
 mod auth;
+mod cron;
 mod datasource;
 mod failure_kind;
 pub mod http;
@@ -31,6 +32,8 @@ pub use auth::{
     validate_new_password, AuthStore, IssuedSession, DEFAULT_PASSWORD, SESSION_COOKIE,
     SESSION_IDLE_SECONDS, USERNAME,
 };
+// 五字段 cron 的解析与推算（#265）。手写、无依赖，见 `cron.rs` 模块头。
+pub use cron::CronSchedule;
 // 报文形状的唯一定义在 `db-qbs-shared`（#124）。这里只保留门面，
 // crate 内部与既有测试的引用路径一个字不变。
 pub use db_qbs_shared::{

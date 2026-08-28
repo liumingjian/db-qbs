@@ -18,13 +18,20 @@ import {
   fetchBuilderDblinks,
   fetchBuilderSqlColumns,
   fetchBuilderTables,
+  fetchSchedulePreview,
   fetchTargetColumns,
   fetchTargetTables,
   generateBuilderSql,
   previewBuilderRows,
   previewErrorMessage,
 } from "./api";
-import type { BuilderColumn, BuilderSql, BuilderTable, PreviewResult } from "./api";
+import type {
+  BuilderColumn,
+  BuilderSql,
+  BuilderTable,
+  PreviewResult,
+  SchedulePreview,
+} from "./api";
 import { overlayOwnsKeyboard } from "./dialogFocus";
 import { messageFrom } from "./errors";
 import type { DatasourceOption } from "./entry";
@@ -53,6 +60,9 @@ import type {
   WriteView,
 } from "./wizard";
 import { WRITE_MODES } from "./writeMode";
+
+/** 停手多久之后才去问一次「下次触发」。边敲边问只会让红字在打字时一直闪。 */
+const SCHEDULE_PREVIEW_DEBOUNCE_MS = 300;
 
 export interface TaskWizardScreenProps {
   initial: Draft;
@@ -1364,6 +1374,11 @@ function StepBody({
   return <section className="wizard-step">
     <header><h1 ref={headingRef} tabIndex={-1}>确认并运行</h1></header>
     <label className="wizard-name">任务名<input value={taskName(draft)} onChange={(event) => change({ type: "task-name", name: event.target.value })} /></label>
+    <ScheduleCard
+      cron={draft.spec.schedule_cron ?? ""}
+      enabled={draft.spec.schedule_enabled}
+      change={change}
+    />
     <dl className="wizard-confirm-grid">
       <div><dt>源端</dt><dd>{confirmView.sourceLabel}</dd></div>
       <div><dt>目标表</dt><dd>{confirmView.targetTable}</dd></div>
@@ -1383,6 +1398,125 @@ function StepBody({
         文本按写法分叉（#261）：无主键那条路上「按主键 upsert」是句假话。 */}
     <UpsertNote text={confirmView.write.note} />
   </section>;
+}
+
+/**
+ * 周期调度那一格（#265），摆在最后一屏「任务名」的下面。
+ *
+ * 三样东西必须同时在屏幕上，少一样这一格就骗人：
+ *
+ * 1. **表达式**——人写的那一行，原文存进任务定义；
+ * 2. **开关**——和表达式分开。用清空表达式来「暂停」等于逼人丢掉自己写好的那一行；
+ * 3. **时区与下次触发**——「凌晨两点」到底是哪个两点，只有这一行能回答。
+ *
+ * 第三样是**问服务端算的**，不在浏览器里重算。跑 `source` 的那台机器才是将来真正到点
+ * 发起运行的地方，浏览器算出来的是另一个时区的两点；而一门语言有两份解析器，它们迟早
+ * 会在某个带步长的写法上说出两个答案。所以「下次触发」既是给人看的读数，也是解析器的
+ * **端到端验证**——它是同一份代码在保存时用来拒绝的那一份。
+ *
+ * 表达式不合法时这里当场把理由摆出来，和保存被拒时是同一句话；但**不拦人**——
+ * 拦截点在服务端的 `TaskSpec::validate`，这里再判一遍就是第二份判据。
+ */
+function ScheduleCard({
+  cron,
+  enabled,
+  change,
+}: {
+  cron: string;
+  enabled: boolean;
+  change: (intent: Change) => void;
+}) {
+  const [preview, setPreview] = useState<SchedulePreview | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const cronInputId = useId();
+
+  useEffect(() => {
+    let abandoned = false;
+    // 边敲边问会把每一个中间态都发出去，而中间态几乎全是非法的——那会让红字在人打字时
+    // 一直闪。停手之后再问。
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const answer = await fetchSchedulePreview(cron.trim() === "" ? null : cron);
+          if (!abandoned) {
+            setPreview(answer);
+            setError(null);
+          }
+        } catch (failure) {
+          if (!abandoned) {
+            setError(messageFrom(failure));
+          }
+        }
+      })();
+    }, SCHEDULE_PREVIEW_DEBOUNCE_MS);
+    return () => {
+      abandoned = true;
+      window.clearTimeout(timer);
+    };
+  }, [cron]);
+
+  const configured = cron.trim() !== "";
+  return (
+    <section className="schedule-card">
+      <header>
+        <div>
+          <strong>周期调度</strong>
+          <span>到点自动发起这个任务</span>
+        </div>
+        <label className="schedule-switch">
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(event) =>
+              change({ type: "schedule-enabled", enabled: event.target.checked })
+            }
+          />
+          <span>{enabled ? "已启用" : "已停用"}</span>
+        </label>
+      </header>
+      <label className="schedule-expression" htmlFor={cronInputId}>
+        cron 表达式
+        <input
+          id={cronInputId}
+          value={cron}
+          placeholder="0 2 * * *（分 时 日 月 周）"
+          spellCheck={false}
+          onChange={(event) => change({ type: "schedule-cron", cron: event.target.value })}
+        />
+      </label>
+      {/* 时区永远在，哪怕还没写表达式——它是这一格里唯一一句不依赖输入的话。 */}
+      <dl className="schedule-readout">
+        <div>
+          <dt>时区</dt>
+          <dd>
+            {preview === null
+              ? "读取中…"
+              : `服务器本地时区 ${preview.timezone}（UTC${preview.utc_offset}），此刻 ${preview.now}`}
+          </dd>
+        </div>
+        <div>
+          <dt>下次触发</dt>
+          <dd>
+            {error !== null ? (
+              <span className="schedule-error">{error}</span>
+            ) : !configured ? (
+              <span className="schedule-none">没配周期，只能手动发起</span>
+            ) : preview === null ? (
+              "读取中…"
+            ) : preview.next_fire_times.length === 0 ? (
+              <span className="schedule-error">这条表达式永远不会触发</span>
+            ) : (
+              preview.next_fire_times.map((fire) => (
+                <span className="schedule-fire" key={fire}>
+                  {fire}
+                </span>
+              ))
+            )}
+          </dd>
+        </div>
+      </dl>
+    </section>
+  );
 }
 
 /**

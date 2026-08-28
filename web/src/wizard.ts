@@ -126,6 +126,8 @@ export type Change =
   | { type: "rename-target"; source: string; target: string }
   | { type: "toggle-primary-key"; target: string }
   | { type: "write-mode"; mode: WriteMode }
+  | { type: "schedule-cron"; cron: string }
+  | { type: "schedule-enabled"; enabled: boolean }
   | { type: "where"; clause: string }
   | { type: "task-name"; name: string }
   | { type: "refresh-target-columns" }
@@ -271,7 +273,12 @@ export function openExisting(
     target,
     targetAgentOnline,
     fetchMode: sql === "" ? "table" : "sql",
-    spec: { ...task.spec, where_clause: task.spec.where_clause ?? "" },
+    spec: {
+      ...task.spec,
+      where_clause: task.spec.where_clause ?? "",
+      // 服务端那边 `schedule_cron` 是 `Option<String>`，没配时整个键不序列化。
+      schedule_cron: task.spec.schedule_cron ?? "",
+    },
     name: task.name,
     hand: allHandMade(),
     sourceColumns: [],
@@ -561,6 +568,24 @@ function reduce(draft: Draft, change: Change): Reduced {
       // 语句形状由目标表有没有主键决定，模式只说「这一次是追加还是清空后导入」。
       return {
         draft: { ...draft, spec: { ...draft.spec, write_mode: change.mode } },
+        cleared: [],
+      };
+
+    // 调度（#265）：和写入模式一样是纯粹的记录，不清空任何东西，也不牵动任何一列。
+    // 表达式与开关是两个 change，因为它们是两件事——把表达式清空来「暂停」，
+    // 等于让人为了停一次而丢掉自己写好的那一行。
+    case "schedule-cron":
+      return {
+        draft: { ...draft, spec: { ...draft.spec, schedule_cron: change.cron } },
+        cleared: [],
+      };
+
+    case "schedule-enabled":
+      return {
+        draft: {
+          ...draft,
+          spec: { ...draft.spec, schedule_enabled: change.enabled },
+        },
         cleared: [],
       };
 
@@ -1463,6 +1488,9 @@ export function toSpec(draft: Draft): TaskSpec {
     target_table: draft.spec.target_table.trim(),
     columns: draft.spec.columns.map((mapping) => ({ ...mapping })),
     write_mode: draft.spec.write_mode,
+    // 调度：原文照送，空白就是没配（服务端同一套口径，`schedule_expression`）。
+    schedule_cron: (draft.spec.schedule_cron ?? "").trim(),
+    schedule_enabled: draft.spec.schedule_enabled,
     primary_key: [...draft.spec.primary_key],
     where_clause: draft.fetchMode === "sql" ? "" : (draft.spec.where_clause ?? ""),
   };

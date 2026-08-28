@@ -30,6 +30,16 @@ export interface TaskSpec {
    * 唯一约束，本任务是纯追加写、重跑会产生重复数据。派生只有一处，`writeStatementOf`。
    */
   primary_key: string[];
+  /**
+   * 调度用的**五字段 cron 表达式**（#265），按**服务器本地时区**解读。
+   *
+   * 缺席或空白 = 没配周期，只能手动发起。存的是**原文**：人写的那一行是真相源，
+   * 解析与「下次触发」的推算都在服务端（`POST /api/builder/schedule`），前端不重写一遍——
+   * 一门语言有两份解析器，它们迟早会在某个带步长的写法上说出两个答案。
+   */
+  schedule_cron?: string;
+  /** 调度的启停开关（#265）。它和表达式是两件事：暂停不该逼人删掉自己写好的那一行。 */
+  schedule_enabled: boolean;
   columns: ColumnMapping[];
   /**
    * 过滤条件：**原样拼进 `WHERE` 后面的一段自由文本**，不含 `WHERE` 这个词本身。
@@ -41,6 +51,23 @@ export interface TaskSpec {
    * 少一处就是一个 `undefined.trim()`。
    */
   where_clause?: string;
+}
+
+/**
+ * 「下次触发」读数（#265）：服务器本地时区，以及接下来的几次触发时刻。
+ *
+ * 时刻是**已经格式化好的本地挂钟文本**（`YYYY-MM-DD HH:MM`），不是时间戳。送时间戳过来
+ * 前端就得再选一次时区去渲染它，而那正是这个读数存在的理由——时区只允许有一个答案。
+ */
+export interface SchedulePreview {
+  /** 时区缩写，例如 `CST`。 */
+  timezone: string;
+  /** 与 UTC 的偏移，例如 `+08:00`。缩写在世界上是有歧义的，偏移不是。 */
+  utc_offset: string;
+  /** 服务器此刻的本地时间，同一格式。人对账用的是它，不是自己手表上的时间。 */
+  now: string;
+  /** 接下来的几次触发。空数组 = 没配表达式，或者这条表达式永远不会触发。 */
+  next_fire_times: string[];
 }
 
 export type TargetCheckKind =
@@ -509,9 +536,29 @@ export function emptySpec(): TaskSpec {
     target_table: "",
     columns: [],
     write_mode: "APPEND",
+    schedule_enabled: false,
     primary_key: [],
     where_clause: "",
   };
+}
+
+/**
+ * 「这条 cron 下一次什么时候响」——问服务端，因为**时区是服务端的**。
+ *
+ * 浏览器自己也能算，但它算出来的是**浏览器所在时区**的两点。真正到点发起运行的是跑
+ * `source` 的那台机器，所以那台机器的本地时区才是唯一有意义的答案，而它必须被显示出来。
+ *
+ * 表达式不合法时这里抛错，错误文本就是服务端解析器那句原话——与保存被拒时一字不差。
+ */
+export async function fetchSchedulePreview(
+  cron: string | null,
+): Promise<SchedulePreview> {
+  const response = await fetch("/api/builder/schedule", {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ cron }),
+  });
+  return await readJson<SchedulePreview>(response, "推算下次触发时刻失败");
 }
 
 export function taskInputFrom(

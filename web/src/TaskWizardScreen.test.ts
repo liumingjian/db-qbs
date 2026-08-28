@@ -179,6 +179,25 @@ describe("the mapping step UI", () => {
     expect(html).not.toMatch(/>开始导入<\/button>/);
   });
 
+  it("puts the schedule, its switch and the timezone read-out on the last screen", () => {
+    const html = renderWizard({
+      ...mappingDraft(),
+      step: 4,
+      spec: { ...mappingDraft().spec, schedule_cron: "0 2 * * *", schedule_enabled: true },
+      sourceColumns: [],
+      targetColumns: [],
+      targetKeys: [],
+    });
+    expect(html).toContain("周期调度");
+    expect(html).toContain("cron 表达式");
+    expect(html).toContain('value="0 2 * * *"');
+    expect(html).toContain(">已启用<");
+    // 时区那一行永远在——它是这一格里唯一一句不依赖输入的话。静态渲染下读数还没回来，
+    // 所以这里能证明的是「格子在」，读数本身由 `api.test.ts` 与服务端那侧钉。
+    expect(html).toContain("时区");
+    expect(html).toContain("下次触发");
+  });
+
   it("offers described datasource changes only while editing", () => {
     // 数据源两行住在第 1 步「选择数据」里（#245），所以拿一份还没选完数据的草稿来渲染——
     // 选完了的草稿开在映射步上，那一屏本来就没有这两行。

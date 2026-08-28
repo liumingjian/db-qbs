@@ -277,7 +277,7 @@ fn mysql_datasource_json(name: &str, agent_id: &str) -> String {
 fn task_json(name: &str, target_table: &str, datasources: &(String, String)) -> String {
     let (source_datasource_id, target_datasource_id) = datasources;
     format!(
-        r#"{{"name":"{name}","source_datasource_id":"{source_datasource_id}","target_datasource_id":"{target_datasource_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"{target_table}","columns":[{{"source":"ID","target":"ID"}},{{"source":"D_BIZ","target":"D_BIZ"}}],"write_mode":"APPEND","primary_key":["ID"],"where_clause":"D_BIZ = DATE '2026-08-14'"}}}}"#
+        r#"{{"name":"{name}","source_datasource_id":"{source_datasource_id}","target_datasource_id":"{target_datasource_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"{target_table}","columns":[{{"source":"ID","target":"ID"}},{{"source":"D_BIZ","target":"D_BIZ"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"],"where_clause":"D_BIZ = DATE '2026-08-14'"}}}}"#
     )
 }
 
@@ -410,6 +410,13 @@ fn every_route_reaches_its_handler() {
             r#"{"source_datasource_id":"missing","spec":{},"limit":10}"#.into(),
             400,
         ),
+        (
+            Method::Post,
+            "/api/builder/schedule",
+            "/api/builder/schedule".into(),
+            r#"{"cron":"0 2 * * *"}"#.into(),
+            200,
+        ),
         (Method::Get, "/api/agents", "/api/agents".into(), String::new(), 200),
         (Method::Post, "/api/agents", "/api/agents".into(), "{}".into(), 400),
         (
@@ -488,7 +495,7 @@ fn every_route_reaches_its_handler() {
             Method::Post,
             "/api/target/check",
             "/api/target/check".into(),
-            format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","primary_key":["ID"]}}}}"#),
+            format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"]}}}}"#),
             502,
         ),
         (
@@ -842,28 +849,28 @@ fn builder_preview_validates_spec_and_limit_before_reaching_oracle() {
     let rig = Rig::new();
     let incomplete = rig.post(
         "/api/builder/preview",
-        r#"{"source_datasource_id":"missing","spec":{"owner":"","table":"","target_table":"","write_mode":"APPEND","primary_key":[],"columns":[]},"limit":10}"#,
+        r#"{"source_datasource_id":"missing","spec":{"owner":"","table":"","target_table":"","write_mode":"APPEND","schedule_enabled":false,"primary_key":[],"columns":[]},"limit":10}"#,
     );
     assert_eq!(incomplete.status, 400);
     assert!(incomplete.body_text().contains("owner"));
 
     let invalid_sql = rig.post(
         "/api/builder/preview",
-        r#"{"source_datasource_id":"missing","spec":{"source_sql":"DELETE FROM APP.T","owner":"","table":"","target_table":"T","write_mode":"APPEND","primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":10}"#,
+        r#"{"source_datasource_id":"missing","spec":{"source_sql":"DELETE FROM APP.T","owner":"","table":"","target_table":"T","write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":10}"#,
     );
     assert_eq!(invalid_sql.status, 400);
     assert!(invalid_sql.body_text().contains("SELECT"));
 
     let zero = rig.post(
         "/api/builder/preview",
-        r#"{"source_datasource_id":"missing","spec":{"source_sql":"SELECT ID FROM APP.T","owner":"","table":"","target_table":"T","write_mode":"APPEND","primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":0}"#,
+        r#"{"source_datasource_id":"missing","spec":{"source_sql":"SELECT ID FROM APP.T","owner":"","table":"","target_table":"T","write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":0}"#,
     );
     assert_eq!(zero.status, 400);
     assert!(zero.body_text().contains("limit 必须大于 0"));
 
     let custom_sql = rig.post(
         "/api/builder/preview",
-        r#"{"source_datasource_id":"missing","spec":{"source_sql":"SELECT ID FROM APP.T","owner":"","table":"","target_table":"T","write_mode":"APPEND","primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":1000}"#,
+        r#"{"source_datasource_id":"missing","spec":{"source_sql":"SELECT ID FROM APP.T","owner":"","table":"","target_table":"T","write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":1000}"#,
     );
     assert_eq!(custom_sql.status, 400);
     assert!(custom_sql.body_text().contains("数据源 missing 不存在"));
@@ -987,10 +994,89 @@ fn task_writes_reject_client_identity_and_incomplete_definitions() {
 
     let missing_name = rig.post(
         "/api/tasks",
-        r#"{"spec":{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{"source":"ID","target":"ID"}],"write_mode":"APPEND","primary_key":["ID"]}}"#,
+        r#"{"spec":{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{"source":"ID","target":"ID"}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"]}}"#,
     );
     assert_eq!(missing_name.status, 400, "{}", missing_name.body_text());
     assert_eq!(rig.json(&rig.get("/api/tasks")), serde_json::json!([]));
+}
+
+/// 调度这一半（#265）：两个字段存得下读得回，无效表达式在**保存时**被拒且理由能读，
+/// 「下次触发」读数拿的是服务器本地时区。
+#[test]
+fn scheduling_fields_round_trip_and_a_bad_cron_is_refused_at_save_time() {
+    let rig = Rig::new();
+    let (_agent_id, source_id, target_id) = rig.seed();
+
+    let body = |cron: &str, enabled: bool| {
+        format!(
+            r#"{{"name":"每日两点","source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","schedule_cron":"{cron}","schedule_enabled":{enabled},"primary_key":["ID"]}}}}"#
+        )
+    };
+
+    // 无效的表达式在保存这一刻就被拒，理由是解析器那句原话——不是「参数错误」四个字。
+    let refused = rig.post("/api/tasks", &body("0 25 * * *", true));
+    assert_eq!(refused.status, 400, "{}", refused.body_text());
+    assert_eq!(
+        rig.json(&refused)["error"]["message"],
+        "小时字段的 25 超出取值范围 0-23"
+    );
+    assert_eq!(rig.json(&rig.get("/api/tasks")), serde_json::json!([]));
+
+    // 开着开关却没有表达式，同样在保存时被拒。
+    let contradiction = rig.post(
+        "/api/tasks",
+        &format!(
+            r#"{{"name":"没写表达式","source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","schedule_enabled":true,"primary_key":["ID"]}}}}"#
+        ),
+    );
+    assert_eq!(contradiction.status, 400, "{}", contradiction.body_text());
+    assert_eq!(
+        rig.json(&contradiction)["error"]["message"],
+        "启用了周期调度就必须写一条 cron 表达式"
+    );
+
+    // 合法的存得下，读回来是**原文**。
+    let created = rig.post("/api/tasks", &body("0 2 * * *", true));
+    assert_eq!(created.status, 201, "{}", created.body_text());
+    let task_id = rig.json(&created)["task_id"].as_str().unwrap().to_owned();
+    let read_back = rig.json(&rig.get(&format!("/api/tasks/{task_id}")));
+    assert_eq!(read_back["spec"]["schedule_cron"], "0 2 * * *");
+    assert_eq!(read_back["spec"]["schedule_enabled"], true);
+}
+
+/// 「下次触发」读数（#265）：时区是**服务器本地时区**并且明写出来，触发时刻按它算。
+///
+/// 这个端点是解析器的端到端出口——界面上那句「下次 2026-08-29 02:00」就是它答的。
+#[test]
+fn the_schedule_preview_states_the_server_timezone_and_the_next_fire_times() {
+    let rig = Rig::new();
+
+    let answer = rig.json(&rig.post("/api/builder/schedule", r#"{"cron":"*/15 * * * *"}"#));
+    let times = answer["next_fire_times"].as_array().unwrap();
+    assert_eq!(times.len(), 5, "{answer}");
+    for time in times {
+        let text = time.as_str().unwrap();
+        assert_eq!(text.len(), 16, "呈现格式是 YYYY-MM-DD HH:MM：{text}");
+        let minute: u32 = text[14..].parse().unwrap();
+        assert_eq!(minute % 15, 0, "*/15 只落在四个一刻钟上：{text}");
+    }
+    // 时区不是可选的装饰：不写出来，「凌晨两点」就没人能对账。
+    let local = chrono::Local::now();
+    assert_eq!(answer["utc_offset"], local.format("%:z").to_string());
+    assert_eq!(answer["timezone"], local.format("%Z").to_string());
+
+    // 还没写表达式也要答得出时区——界面刚打开的那一刻正是最需要它的时候。
+    let empty = rig.json(&rig.post("/api/builder/schedule", r#"{"cron":null}"#));
+    assert_eq!(empty["next_fire_times"], serde_json::json!([]));
+    assert_eq!(empty["utc_offset"], local.format("%:z").to_string());
+
+    // 表达式不合法就是 400，理由与保存被拒时一字不差。
+    let refused = rig.post("/api/builder/schedule", r#"{"cron":"5/10 * * * *"}"#);
+    assert_eq!(refused.status, 400, "{}", refused.body_text());
+    assert_eq!(
+        rig.json(&refused)["error"]["message"],
+        "分钟字段的步长只能跟在 * 或 a-b 后面：5/10"
+    );
 }
 
 /// 发起一次运行：临时任务文件、子进程参数、活投影、终态历史，一条链走到底。
@@ -1082,7 +1168,15 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
         0o600
     );
     let task_toml = fs::read_to_string(&task_files[0]).unwrap();
-    for field in ["owner", "table", "columns", "write_mode", "primary_key", "where_clause"] {
+    for field in [
+        "owner",
+        "table",
+        "columns",
+        "write_mode",
+        "schedule_enabled",
+        "primary_key",
+        "where_clause",
+    ] {
         assert!(task_toml.contains(field), "{task_toml}");
     }
     // SQL 不落进任务文件：子进程从同一份规格现算。
@@ -1589,7 +1683,7 @@ fn column_fetch_rejects_an_invalid_spec_before_reaching_oracle() {
           "datasource_id":"unused-the-spec-gate-runs-first",
           "spec":{
             "owner":"APP","table":"ORDERS","target_table":"ORDERS",
-            "columns":[{"source":"ID","target":"ID"}],"write_mode":"APPEND","primary_key":["MISSING"]
+            "columns":[{"source":"ID","target":"ID"}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["MISSING"]
           }
         }"#,
     );
@@ -1619,7 +1713,7 @@ fn builder_sql_is_derived_from_the_spec_and_never_travels_back() {
           "table":"T_R_FR_ASTSTAT",
           "target_table":"T_POSITION",
           "columns":[{"source":"N_VA_PRICE","target":"N_VA_PRICE"},{"source":"D_BIZ","target":"D_BIZ"}],
-          "write_mode":"APPEND","primary_key":["D_BIZ"],
+          "write_mode":"APPEND","schedule_enabled":false,"primary_key":["D_BIZ"],
           "where_clause":"D_BIZ >= DATE '2026-08-01' AND STATUS IN ('OK','WARN')"
         }"#,
     );
@@ -1692,7 +1786,7 @@ fn column_fetch_oracle_failure_does_not_create_a_run_touch_sink_or_write_storage
           "datasource_id":"{source_datasource_id}",
           "spec":{{
             "owner":"APP","table":"MISSING_ORDERS","target_table":"ORDERS",
-            "columns":[{{"source":"ID","target":"ID"}},{{"source":"BIZ_DAY","target":"BIZ_DAY"}}],"write_mode":"APPEND","primary_key":["ID"]
+            "columns":[{{"source":"ID","target":"ID"}},{{"source":"BIZ_DAY","target":"BIZ_DAY"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"]
           }}
         }}"#
         ),
@@ -1801,7 +1895,7 @@ fn target_check_proxies_every_typed_kind_and_attaches_ddl_only_when_failed() {
         .unwrap()
         .to_owned();
     let target_id = rig.create_mysql_datasource("目标库", &agent_id);
-    let request = format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","primary_key":["ID"]}}}}"#);
+    let request = format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"]}}}}"#);
 
     let response = rig.post_with_describer("/api/target/check", &request, described_id);
     assert_eq!(response.status, 200, "{}", response.body_text());
@@ -1848,7 +1942,7 @@ fn target_check_maps_request_datasource_agent_and_sink_failures_at_their_boundar
     assert_eq!(rig.post("/api/target/check", "{}").status, 400);
 
     let source_id = rig.create_oracle_datasource("源库");
-    let check_body = |target_id: &str| format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","primary_key":["ID"]}}}}"#);
+    let check_body = |target_id: &str| format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"]}}}}"#);
     let invalid_target = check_body(&source_id);
     let wrong_kind = rig.post_with_describer("/api/target/check", &invalid_target, described_id);
     assert_eq!(wrong_kind.status, 400, "{}", wrong_kind.body_text());
@@ -2390,7 +2484,7 @@ fn a_slow_oracle_fetch_does_not_block_another_client_listing_tasks() {
     let (_agent_id, source_id, target_id) = rig.seed();
     rig.create_task("holdings", "HOLDINGS", &(source_id.clone(), target_id.clone()));
     let check = format!(
-        r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","primary_key":["ID"]}}}}"#
+        r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"]}}}}"#
     );
 
     thread::scope(|scope| {

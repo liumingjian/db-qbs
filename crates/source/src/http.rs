@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
+use chrono::{Local, Utc};
 use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel, RunStage};
 use rand::RngCore;
 use signal_hook::consts::SIGTERM;
@@ -31,6 +31,7 @@ use url::Url;
 
 use crate::{
     cleared_cookie_header, embedded_web_asset, fetch_agent_info, generate_target_ddl,
+    CronSchedule,
     session_cookie_header, session_token_from_cookie_header, validate_builder_dblink,
     validate_source_sql, Agent, AgentEndpoint, AgentEvidence, AgentInput, AgentStore, AuthStore,
     ColumnPrecision, DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess,
@@ -43,6 +44,10 @@ use crate::{
 
 const MAX_REQUEST_BODY_BYTES: u64 = 1024 * 1024;
 const DEFAULT_PREVIEW_LIMIT: usize = 10;
+/// 「下次触发」一次给几个。给一个说不清 `*/n` 的取整，给一串就一目了然。
+const SCHEDULE_PREVIEW_COUNT: usize = 5;
+/// 触发时刻的呈现格式。秒永远是 0，写出来只会让人以为它有意义。
+const SCHEDULE_TIME_FORMAT: &str = "%Y-%m-%d %H:%M";
 const MAX_PREVIEW_LIMIT: usize = 100;
 const PREVIEW_CALL_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const RUN_TASKS_DIRECTORY: &str = "run-tasks";
@@ -112,6 +117,17 @@ struct BuilderPreviewInput {
     source_datasource_id: String,
     spec: TaskSpec,
     limit: Option<usize>,
+}
+
+/// 「下次触发」读数的请求体（#265）。
+///
+/// `cron` 缺席或为空是**合法的一次提问**——界面刚打开、还没人写表达式时就是这样，
+/// 而那一刻正是它最需要知道「服务器现在是哪个时区」的时候。
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SchedulePreviewInput {
+    #[serde(default)]
+    cron: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -404,6 +420,12 @@ pub fn routes() -> &'static [Route] {
             }),
             Route::new(Post, "/api/builder/preview", |state, request, _id| {
                 handle_builder_preview(request, state)
+            }),
+            // 「这条 cron 下一次什么时候响」——纯算，不碰任何存储，因此 `_state`。
+            // 归在 `builder/` 下面是因为它服务的是**草稿**：任务还没保存，人已经想知道
+            // 自己写的那一行是不是他以为的那个意思。
+            Route::new(Post, "/api/builder/schedule", |_state, request, _id| {
+                handle_schedule_preview(request)
             }),
             Route::new(Get, "/api/agents", |state, _request, _id| {
                 handle_list_agents(state)
@@ -1260,6 +1282,12 @@ fn handle_create_task(request: &Request, store: &TaskStore) -> HttpResponse {
         Ok(input) => input,
         Err(error) => return bad_request(error),
     };
+    // 校验先判一次，好让它落在 400 上。`store.create` 里还会再判一次——那一次是存储层
+    // 自己的门，不依赖任何调用方记得先问；这一次只为把「你写错了」和「服务端坏了」
+    // 分成两个状态码。500 会让人去看服务端日志找一个根本不在那里的故障。
+    if let Err(error) = input.validate() {
+        return bad_request(error);
+    }
     match store.create(input) {
         Ok(task) => json_response(201, &task),
         Err(error) => internal_error(error),
@@ -1329,6 +1357,9 @@ fn handle_update_task(request: &Request, store: &TaskStore, task_id: &str) -> Ht
         Ok(input) => input,
         Err(error) => return bad_request(error),
     };
+    if let Err(error) = input.validate() {
+        return bad_request(error);
+    }
     match store.update(task_id, input) {
         Ok(Some(task)) => json_response(200, &task),
         Ok(None) => not_found(),
@@ -2108,6 +2139,48 @@ fn handle_builder_sql(request: &Request) -> HttpResponse {
     json_response(200, &json!({ "source_sql": spec.source_sql() }))
 }
 
+/// 把一条 cron 表达式翻译成人话：**服务器本地时区**是哪个，接下来几次什么时候触发。
+///
+/// 时区在这里被钉死，而且**必须显示出来**：任务定义里存的是一行没有时区的文本，
+/// 「凌晨两点」到底是哪个两点全靠这一层回答。答案是运行 `source` 的那台机器的本地时区，
+/// 不是浏览器的、也不是 UTC——那台机器才是将来真正到点发起运行的地方。
+/// 界面上不写出来的话，跨时区办公的人会拿自己的表去对一个别人的两点。
+///
+/// 表达式不合法就是 400，理由原样来自 [`CronSchedule::parse`]：这条路径与保存时的那道
+/// 校验读的是同一份解析器，所以界面上先看到的那句话，和保存被拒时的那句话一字不差。
+fn handle_schedule_preview(request: &Request) -> HttpResponse {
+    let input: SchedulePreviewInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    let now = Local::now();
+    let expression = input
+        .cron
+        .as_deref()
+        .map(str::trim)
+        .filter(|expression| !expression.is_empty());
+    // 没给表达式不是错，只是没有可算的东西：时区照答，触发时刻是空的一串。
+    let upcoming = match expression {
+        Some(expression) => match CronSchedule::parse(expression) {
+            Ok(schedule) => schedule.upcoming(now.naive_local(), SCHEDULE_PREVIEW_COUNT),
+            Err(error) => return bad_request(error),
+        },
+        None => Vec::new(),
+    };
+    json_response(
+        200,
+        &json!({
+            "timezone": now.format("%Z").to_string(),
+            "utc_offset": now.format("%:z").to_string(),
+            "now": now.format(SCHEDULE_TIME_FORMAT).to_string(),
+            "next_fire_times": upcoming
+                .iter()
+                .map(|fire| fire.format(SCHEDULE_TIME_FORMAT).to_string())
+                .collect::<Vec<_>>(),
+        }),
+    )
+}
+
 fn handle_builder_preview(request: &Request, state: &Api<'_>) -> HttpResponse {
     let input: BuilderPreviewInput = match read_json_body(request) {
         Ok(input) => input,
@@ -2364,6 +2437,8 @@ mod tests {
             target_table: "orders".to_owned(),
             where_clause: Some(where_clause.to_owned()),
             write_mode: WriteMode::Append,
+            schedule_cron: None,
+            schedule_enabled: false,
             primary_key: vec!["BIZ_ID".to_owned()],
             columns: vec![ColumnMapping {
                 source: "ID".to_owned(),
