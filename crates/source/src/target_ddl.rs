@@ -43,11 +43,22 @@ impl fmt::Display for TargetDdlColumnError {
 
 impl std::error::Error for TargetDdlError {}
 
+/// 生成目标表的建表 SQL。
+///
+/// `target_collation` 是**目标端 agent 上报的 utf8mb4 默认字符序**（#257）。source 一条
+/// MySQL 连接都不建，除了 agent 上报之外没有第二个信息源，而 8.0 与 5.7 的默认值不同
+/// （`utf8mb4_0900_ai_ci` / `utf8mb4_general_ci`）——5.7 上根本没有前者，照 8.0 写死会
+/// 直接建表失败。
+///
+/// **`None` 时不写 `COLLATE`**，只留 `DEFAULT CHARSET=utf8mb4`：那是本票之前的形态，
+/// 字符序交给目标库自己的默认值。旧版本 agent 报不出这一项，此时挑一个填进去就是猜——
+/// 猜错的代价是一张字符序不对的表，而它要到比较、排序出怪结果时才暴露。
 pub fn generate_target_ddl(
     columns: &[SourceColumn],
     target_table: &str,
     primary_key: &[String],
     column_precision: Option<&ColumnPrecision>,
+    target_collation: Option<&str>,
 ) -> Result<String, TargetDdlError> {
     let mut definitions = Vec::new();
     let mut errors = Vec::new();
@@ -121,11 +132,18 @@ pub fn generate_target_ddl(
         )
     };
 
+    // 字符序来自 agent 上报（#257）。没报就整段不写——见函数头上那段。
+    let collation_clause = target_collation
+        .map(str::trim)
+        .filter(|collation| !collation.is_empty())
+        .map(|collation| format!(" COLLATE={collation}"))
+        .unwrap_or_default();
+
     Ok(format!(
         "-- db-qbs 生成的目标表建表 SQL，请自行执行；产品不会替你建表。\n\
          -- 下面那条主键不是可选项：写入走 upsert，目标表没有它时重跑会静默出重复行。\n\
          {precision_note}CREATE TABLE {table_name} (\n{}\n\
-         ) DEFAULT CHARSET=utf8mb4;",
+         ) DEFAULT CHARSET=utf8mb4{collation_clause};",
         definitions.join(",\n")
     ))
 }
