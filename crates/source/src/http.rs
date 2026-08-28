@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use url::Url;
 
+use crate::scheduler::SCHEDULE_TIME_FORMAT;
 use crate::{
     cleared_cookie_header, embedded_web_asset, fetch_agent_info, generate_target_ddl,
     CronSchedule,
@@ -46,8 +47,6 @@ const MAX_REQUEST_BODY_BYTES: u64 = 1024 * 1024;
 const DEFAULT_PREVIEW_LIMIT: usize = 10;
 /// 「下次触发」一次给几个。给一个说不清 `*/n` 的取整，给一串就一目了然。
 const SCHEDULE_PREVIEW_COUNT: usize = 5;
-/// 触发时刻的呈现格式。秒永远是 0，写出来只会让人以为它有意义。
-const SCHEDULE_TIME_FORMAT: &str = "%Y-%m-%d %H:%M";
 const MAX_PREVIEW_LIMIT: usize = 100;
 const PREVIEW_CALL_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const RUN_TASKS_DIRECTORY: &str = "run-tasks";

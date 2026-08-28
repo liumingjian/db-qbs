@@ -127,10 +127,10 @@ impl AgentStore {
             .map_err(|error| format!("初始化 SQLite agent 表失败：{error}"))?;
         // #257 之前建的库没有这两列，老记录补出来就是 `NULL`：那是「这台 agent 还没报过
         // 版本」，与新 agent 从没被探到过是同一档，处置也一样。
-        ensure_nullable_text_column(&connection, "mysql_version")?;
-        ensure_nullable_text_column(&connection, "mysql_collation")?;
+        ensure_nullable_column(&connection, "mysql_version", "TEXT")?;
+        ensure_nullable_column(&connection, "mysql_collation", "TEXT")?;
         // #266 之前建的库没有这一列，老记录补出来是 `NULL` =「这台 agent 还没报过额度」。
-        ensure_nullable_integer_column(&connection, "max_concurrent_runs")?;
+        ensure_nullable_column(&connection, "max_concurrent_runs", "INTEGER")?;
         Ok(Self { connection })
     }
 
@@ -142,6 +142,7 @@ impl AgentStore {
         info: &AgentInfo,
         now: &str,
     ) -> Result<Agent, String> {
+        let (mysql_version, mysql_collation) = reported_mysql(info);
         let agent = Agent {
             agent_id: generate_agent_id(),
             name: display_name(&input.name, info),
@@ -151,12 +152,9 @@ impl AgentStore {
             last_seen_at: Some(now.to_owned()),
             status: AgentStatus::Online,
             last_error: None,
-            mysql_version: info.mysql.as_ref().map(|mysql| mysql.version.clone()),
-            mysql_collation: info
-                .mysql
-                .as_ref()
-                .map(|mysql| mysql.utf8mb4_collation.clone()),
-            max_concurrent_runs: reported_quota(info),
+            mysql_version,
+            mysql_collation,
+            max_concurrent_runs: info.max_concurrent_runs,
         };
         self.connection
             .execute(
@@ -192,6 +190,7 @@ impl AgentStore {
         if self.get(agent_id)?.is_none() {
             return Ok(None);
         }
+        let (mysql_version, mysql_collation) = reported_mysql(info);
         let agent = Agent {
             agent_id: agent_id.to_owned(),
             name: display_name(&input.name, info),
@@ -201,12 +200,9 @@ impl AgentStore {
             last_seen_at: Some(now.to_owned()),
             status: AgentStatus::Online,
             last_error: None,
-            mysql_version: info.mysql.as_ref().map(|mysql| mysql.version.clone()),
-            mysql_collation: info
-                .mysql
-                .as_ref()
-                .map(|mysql| mysql.utf8mb4_collation.clone()),
-            max_concurrent_runs: reported_quota(info),
+            mysql_version,
+            mysql_collation,
+            max_concurrent_runs: info.max_concurrent_runs,
         };
         self.connection
             .execute(
@@ -289,47 +285,32 @@ impl AgentStore {
         let Some(existing) = self.get(agent_id)? else {
             return Ok(None);
         };
-        // agent 上报的 MySQL 只在**探通且身份对得上**那一档才更新（#257）。
+        // agent 自报的那几样（MySQL 版本与字符序、并发额度）只在**探通且身份对得上**
+        // 那一档才更新——这条规则原来写了三遍，三个 `match` 各自重述一次身份判据。
         // 身份对不上那台报的是它自己那边的库，抄过来等于让顶替者改写被顶替者的档案；
         // 探不通就更没有新值可言，留住上一次的真值——把它抹成「未知」只会让建表语句
         // 在 agent 短暂离线期间悄悄换一份字符序。
-        let (mysql_version, mysql_collation) = match result {
-            Ok(info)
-                if (info.agent_id == existing.instance_id || existing.instance_id.is_empty())
-                    && info.mysql.is_some() =>
-            {
-                let mysql = info.mysql.as_ref().expect("just checked");
-                (
-                    Some(mysql.version.clone()),
-                    Some(mysql.utf8mb4_collation.clone()),
-                )
-            }
+        let reported = probed_self(result, &existing);
+        let (mysql_version, mysql_collation) = match reported.map(reported_mysql) {
+            Some((version @ Some(_), collation @ Some(_))) => (version, collation),
+            // 探通了但这台 agent 还没报过 MySQL：那也不是新值，同样留住上一次那份。
             _ => (
                 existing.mysql_version.clone(),
                 existing.mysql_collation.clone(),
             ),
         };
-        // 额度与上面同一条规则：只有探通且身份对得上才更新，否则留住上一次那份。
-        let max_concurrent_runs = match result {
-            Ok(info)
-                if info.agent_id == existing.instance_id || existing.instance_id.is_empty() =>
-            {
-                reported_quota(info)
-            }
-            _ => existing.max_concurrent_runs,
+        let max_concurrent_runs = match reported {
+            Some(info) => info.max_concurrent_runs,
+            None => existing.max_concurrent_runs,
         };
-        let (status, last_error, version, last_seen_at) = match result {
-            Ok(info)
-                if info.agent_id == existing.instance_id || existing.instance_id.is_empty() =>
-            {
-                (
-                    AgentStatus::Online,
-                    None,
-                    info.version.clone(),
-                    Some(now.to_owned()),
-                )
-            }
-            Ok(info) => (
+        let (status, last_error, version, last_seen_at) = match (reported, result) {
+            (Some(info), _) => (
+                AgentStatus::Online,
+                None,
+                info.version.clone(),
+                Some(now.to_owned()),
+            ),
+            (None, Ok(info)) => (
                 AgentStatus::Mismatch,
                 Some(format!(
                     "这个地址上应答的是另一台 agent（注册时钉的是 {}，现在应答的是 {}）",
@@ -338,7 +319,7 @@ impl AgentStore {
                 existing.version.clone(),
                 existing.last_seen_at.clone(),
             ),
-            Err(error) => (
+            (None, Err(error)) => (
                 AgentStatus::Offline,
                 Some(error.clone()),
                 existing.version.clone(),
@@ -402,8 +383,15 @@ impl AgentStore {
     }
 }
 
-/// 补一列可空 TEXT（#257）。判据是 `pragma_table_info`，与 `run_history` 那两处同一条路子。
-fn ensure_nullable_text_column(connection: &Connection, name: &str) -> Result<(), String> {
+/// 补一列可空的列（#257 的两列 TEXT、#266 的一列 INTEGER）。
+///
+/// 判据是 `pragma_table_info`，与 `run_history` 那两处同一条路子。类型是参数不是两份
+/// 拷贝：两份除了 `TEXT` / `INTEGER` 一个字不差，而差的那个字恰恰是唯一该看见的东西。
+fn ensure_nullable_column(
+    connection: &Connection,
+    name: &str,
+    column_type: &str,
+) -> Result<(), String> {
     let exists: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agents') WHERE name = ?1)",
@@ -415,32 +403,41 @@ fn ensure_nullable_text_column(connection: &Connection, name: &str) -> Result<()
         return Ok(());
     }
     connection
-        .execute(&format!("ALTER TABLE agents ADD COLUMN {name} TEXT"), [])
-        .map_err(|error| format!("迁移 SQLite agent 列 {name} 失败：{error}"))?;
-    Ok(())
-}
-
-/// 补一列可空 INTEGER（#266）。与上面那条同一条路子，只差列的类型。
-fn ensure_nullable_integer_column(connection: &Connection, name: &str) -> Result<(), String> {
-    let exists: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agents') WHERE name = ?1)",
-            [name],
-            |row| row.get(0),
+        .execute(
+            &format!("ALTER TABLE agents ADD COLUMN {name} {column_type}"),
+            [],
         )
-        .map_err(|error| format!("检查 SQLite agent 列 {name} 失败：{error}"))?;
-    if exists {
-        return Ok(());
-    }
-    connection
-        .execute(&format!("ALTER TABLE agents ADD COLUMN {name} INTEGER"), [])
         .map_err(|error| format!("迁移 SQLite agent 列 {name} 失败：{error}"))?;
     Ok(())
 }
 
-/// agent 自报的并发额度。没报就是 `None`，**不补默认值**。
-fn reported_quota(info: &AgentInfo) -> Option<u32> {
-    info.max_concurrent_runs
+/// 这次探测是不是**这台 agent 自己**应答的：探通，且身份与注册时钉下的那一份对得上。
+///
+/// 空的 `instance_id` 是迁移进来的老记录（ADR-0044 §5），第一次探通就认。
+/// 「谁有资格更新缓存下来的自报值」只有这一处判据——它原来在 `record_probe` 里
+/// 被三个 `match` 各自重述了一遍。
+fn probed_self<'a>(
+    result: &'a Result<AgentInfo, String>,
+    existing: &Agent,
+) -> Option<&'a AgentInfo> {
+    match result {
+        Ok(info) if info.agent_id == existing.instance_id || existing.instance_id.is_empty() => {
+            Some(info)
+        }
+        _ => None,
+    }
+}
+
+/// agent 自报的 MySQL 版本与字符序，收成入库的两列。没报过就是两个 `None`——
+/// **不补默认值**（见 [`Agent::mysql_collation`]）。
+fn reported_mysql(info: &AgentInfo) -> (Option<String>, Option<String>) {
+    match info.mysql.as_ref() {
+        Some(mysql) => (
+            Some(mysql.version.clone()),
+            Some(mysql.utf8mb4_collation.clone()),
+        ),
+        None => (None, None),
+    }
 }
 
 /// 名字留空就用 agent 自报的那一个。**名字不作判据**，所以随便退化都不伤正确性。
