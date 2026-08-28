@@ -903,8 +903,15 @@ fn handle_run_logs(state: &Api<'_>, run_record_id: &str, query: Option<&str>) ->
     // 认不认得这条运行由**运行历史**说了算，不由日志表说了算：日志的保留期（7 天）
     // 比历史（默认 90 天）短得多，一条老运行的原文早已清掉，但它本身还在——
     // 那种情况的正确答案是「200，一行都没有」，不是 404。
-    let known = match state.runs.lock() {
-        Ok(registry) => registry.live_histories.contains_key(run_record_id),
+    //
+    // 两个问题（认不认得、还在不在跑）**一把锁读完**：分两次拿锁的话，中间隔着一次
+    // 状态变化，答出来的会是两个时刻的组合——「不认得，但正在跑」这种自相矛盾的回答
+    // 就是这么来的。
+    let (known, live) = match state.runs.lock() {
+        Ok(registry) => (
+            registry.live_histories.contains_key(run_record_id),
+            registry.active_runs.contains_key(run_record_id),
+        ),
         Err(_) => return internal_error("run 投影锁已损坏".to_owned()),
     };
     if !known {
@@ -914,10 +921,6 @@ fn handle_run_logs(state: &Api<'_>, run_record_id: &str, query: Option<&str>) ->
             Err(error) => return internal_error(error),
         }
     }
-    let live = match state.runs.lock() {
-        Ok(registry) => registry.active_runs.contains_key(run_record_id),
-        Err(_) => return internal_error("run 控制锁已损坏".to_owned()),
-    };
     let lines = match state.run_logs.lines_after(run_record_id, after) {
         Ok(lines) => lines,
         Err(error) => return internal_error(error),
