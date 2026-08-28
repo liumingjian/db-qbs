@@ -34,10 +34,11 @@ use crate::{
     session_cookie_header, session_token_from_cookie_header, validate_builder_dblink,
     validate_source_sql, Agent, AgentEndpoint, AgentEvidence, AgentInput, AgentStore, AuthStore,
     ColumnPrecision, DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess,
-    OracleRowSource, RowSource, RunEvidence, RunHistory, RunParametersEvidence, SourceColumn,
-    SourceConfig, SourceEvidence, SourceReadError, TargetCheckRequest, TargetCheckResult,
-    TargetConnection, TargetEvidence, Task, TaskConfig, TaskInput, TaskSpec, TaskStore, UnknownReason,
-    SESSION_IDLE_SECONDS, USERNAME,
+    OracleRowSource, RowSource, RunEvidence, RunHistory, RunLogStore, RunLogWriter,
+    RunParametersEvidence,
+    SourceColumn, SourceConfig, SourceEvidence, SourceReadError, TargetCheckRequest,
+    TargetCheckResult, TargetConnection, TargetEvidence, Task, TaskConfig, TaskInput, TaskSpec,
+    TaskStore, UnknownReason, RUN_LOG_PAGE_LIMIT, SESSION_IDLE_SECONDS, USERNAME,
 };
 
 const MAX_REQUEST_BODY_BYTES: u64 = 1024 * 1024;
@@ -194,6 +195,9 @@ pub struct Api<'a> {
     pub datasources: &'a DatasourceStore,
     pub agents: &'a AgentRegistry,
     pub history: &'a HistoryStore,
+    /// 子进程吐出的**原始**日志行。运行历史是它折叠之后的结果，两者同库不同表：
+    /// 折叠会丢掉认不出来的事件，而排障要的恰恰是折叠之前的那份原文。
+    pub run_logs: &'a RunLogStore,
     pub runs: &'a RunRegistry,
     /// 登录、会话与口令。**只护得到这个进程的 HTTP 面**——sink 那半边仍然没有鉴权。
     pub auth: &'a AuthStore,
@@ -460,6 +464,11 @@ pub fn routes() -> &'static [Route] {
             Route::new(Get, "/api/runs/{}", |state, _request, id| {
                 handle_get_run(state.runs, state.history, id)
             }),
+            // 原始日志行的**游标增量**取用。放在 `/api/runs/{}` 之后不承重：
+            // 两条的段数不同（4 段 vs 3 段），匹配上互不干扰。
+            Route::new(Get, "/api/runs/{}/logs", |state, request, id| {
+                handle_run_logs(state, id, request.query())
+            }),
             Route::new(Get, "/api/tasks", |state, _request, _id| {
                 handle_list_tasks(state.tasks)
             }),
@@ -699,6 +708,7 @@ fn handle_start_run(request: &Request, state: &Api<'_>) -> HttpResponse {
         target,
         agent_endpoint(&agent),
         state.history,
+        state.run_logs,
         state.runs,
     ) {
         Ok(run_record_id) => json_response(202, &json!({ "run_record_id": run_record_id })),
@@ -805,6 +815,64 @@ fn handle_get_run(
     }
 }
 
+/// `GET /api/runs/{}/logs?after=<序号>` —— 原始日志行的增量取用。
+///
+/// **游标增量轮询，不是 SSE、不是长连接**：这套后端是同步阻塞栈，没有异步运行时，
+/// 一条挂着不放的连接会整根占死一个工作线程；而运行日志的自然节奏（界面每秒问一次）
+/// 用游标就够了。`after` 是上一次拿到的最后一个 `seq`，不给就是从头开始。
+///
+/// 运行进行中与已结束走的是**同一条路**：这里只读表，不问那条运行是不是还活着。
+/// `live` 只是顺带告诉调用方还该不该接着轮询，它不改变返回哪些行。
+fn handle_run_logs(state: &Api<'_>, run_record_id: &str, query: Option<&str>) -> HttpResponse {
+    let mut after: i64 = 0;
+    for (key, value) in url::form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
+        if key.as_ref() != "after" {
+            continue;
+        }
+        match value.parse::<i64>() {
+            Ok(parsed) if parsed >= 0 => after = parsed,
+            _ => return bad_request("查询参数 after 必须是非负整数".to_owned()),
+        }
+    }
+    // 认不认得这条运行由**运行历史**说了算，不由日志表说了算：日志的保留期（7 天）
+    // 比历史（默认 90 天）短得多，一条老运行的原文早已清掉，但它本身还在——
+    // 那种情况的正确答案是「200，一行都没有」，不是 404。
+    let known = match state.runs.lock() {
+        Ok(registry) => registry.live_histories.contains_key(run_record_id),
+        Err(_) => return internal_error("run 投影锁已损坏".to_owned()),
+    };
+    if !known {
+        match state.history.get(run_record_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => return not_found(),
+            Err(error) => return internal_error(error),
+        }
+    }
+    let live = match state.runs.lock() {
+        Ok(registry) => registry.active_runs.contains_key(run_record_id),
+        Err(_) => return internal_error("run 控制锁已损坏".to_owned()),
+    };
+    let lines = match state.run_logs.lines_after(run_record_id, after) {
+        Ok(lines) => lines,
+        Err(error) => return internal_error(error),
+    };
+    // 一页取完了并不代表没有更多：`has_more` 让调用方立刻带着新游标再来一次，
+    // 而不必等到下一个轮询周期才把积压的行取完。
+    let has_more = lines.len() >= RUN_LOG_PAGE_LIMIT;
+    let next_after = lines.last().map_or(after, |line| line.seq);
+    json_response(
+        200,
+        &json!({
+            "run_record_id": run_record_id,
+            "after": after,
+            "next_after": next_after,
+            "has_more": has_more,
+            "live": live,
+            "lines": lines,
+        }),
+    )
+}
+
 fn handle_list_history(
     runs: &RunRegistry,
     history_store: &HistoryStore,
@@ -893,6 +961,7 @@ fn start_run(
     target: TargetConnection,
     agent: AgentEndpoint,
     history_store: &HistoryStore,
+    run_log_store: &RunLogStore,
     runs: &RunRegistry,
 ) -> Result<String, StartRunError> {
     let run_record_id = generate_run_record_id();
@@ -984,6 +1053,12 @@ fn start_run(
     let worker_runs = Arc::clone(runs);
     let worker_record_id = run_record_id.clone();
     let worker_history_store = history_store.clone();
+    let run_log_writer = RunLogWriter::new(
+        run_log_store.clone(),
+        run_record_id.clone(),
+        task.task_id.clone(),
+        history.started_at_ms(),
+    );
     let retention_days = config.history_retention_days;
     thread::spawn(move || {
         supervise_run(
@@ -992,6 +1067,7 @@ fn start_run(
             task_path,
             worker_record_id,
             worker_history_store,
+            run_log_writer,
             retention_days,
             worker_runs,
         )
@@ -1048,6 +1124,7 @@ fn supervise_run(
     task_path: PathBuf,
     run_record_id: String,
     history_store: HistoryStore,
+    mut run_log: RunLogWriter,
     retention_days: u64,
     runs: RunRegistry,
 ) {
@@ -1061,6 +1138,9 @@ fn supervise_run(
             let mut writer = stdout.lock();
             let _ = writeln!(writer, "{line}");
         }
+        // 落库在解析**之前**：解析不出 JSON 的行也照存。运行历史那边可以忽略它，
+        // 排障那边不行——「来什么显什么，不吞」。
+        run_log.write(&line);
         let Ok(log) = serde_json::from_str::<Value>(&line) else {
             continue;
         };

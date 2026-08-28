@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use db_qbs_source::http::{routes, Access, Api, Method, Request, Response, RunState};
 use db_qbs_source::{
     AgentStore, AuthStore, DatasourceStore, HistoryStore, OracleAccess, OracleRowSource,
-    SourceColumn, SourceConfig, SourceReadError, TaskSpec, TaskStore, SESSION_COOKIE,
+    RunLogStore, SourceColumn, SourceConfig, SourceReadError, TaskSpec, TaskStore, SESSION_COOKIE,
 };
 use serde_json::Value;
 
@@ -85,6 +85,7 @@ struct Rig {
     datasources: DatasourceStore,
     agents: Arc<Mutex<AgentStore>>,
     history: HistoryStore,
+    run_logs: RunLogStore,
     runs: Arc<Mutex<RunState>>,
     auth: AuthStore,
     /// 这台 rig 的会话票据。**每条请求默认都带着它**——`/api/*` 现在整片要求登录，
@@ -125,6 +126,7 @@ impl Rig {
             datasources: DatasourceStore::open(&directory).unwrap(),
             agents: Arc::new(Mutex::new(AgentStore::open(&directory).unwrap())),
             history: HistoryStore::open(&directory).unwrap(),
+            run_logs: RunLogStore::open(&directory).unwrap(),
             runs: Arc::new(Mutex::new(RunState::default())),
             auth,
             session,
@@ -151,6 +153,7 @@ impl Rig {
             datasources: &self.datasources,
             agents: &self.agents,
             history: &self.history,
+            run_logs: &self.run_logs,
             runs: &self.runs,
             auth: &self.auth,
             describe_source,
@@ -507,6 +510,13 @@ fn every_route_reaches_its_handler() {
             Method::Get,
             "/api/runs/{}",
             format!("/api/runs/{run_record_id}"),
+            String::new(),
+            200,
+        ),
+        (
+            Method::Get,
+            "/api/runs/{}/logs",
+            format!("/api/runs/{run_record_id}/logs"),
             String::new(),
             200,
         ),
@@ -2549,4 +2559,97 @@ fn concurrent_sessions_are_issued_and_authenticated_without_crossing_wires() {
             });
         }
     });
+}
+
+/// 运行**进行中**与**已结束**两种情况下，游标接口都得答得出来。
+#[test]
+fn run_logs_are_served_incrementally_while_the_run_is_live_and_after_it_ends() {
+    let directory = temp_directory();
+    let release = directory.join("release-child");
+    let long_value = "值".repeat(200);
+    let rig = Rig::with_child(&format!(
+        r#"printf '%s\n' '{{"ts":"2026-08-15T10:00:00.000Z","level":"info","event":"source_started","run_id":null,"task":null,"message":"started"}}'
+printf '%s\n' '{{"ts":"2026-08-15T10:00:01.000Z","level":"info","event":"stage_changed","run_id":"run-9","task":null,"stage":"STREAMING","message":"streaming"}}'
+printf '%s\n' '这一行不是 JSON'
+while [ ! -f '{}' ]; do sleep 0.02; done
+printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"error","event":"run_finished","run_id":"run-9","task":null,"terminal":"FAILED","stage":"FAILED","message":"目标端拒绝","failure_kind":"TARGET_REJECTED","source_code":null,"sink_code":"WRITE_FAILED","column":"AMOUNT","value":"{}","source_rows":1,"source_batches":1,"staged_rows":0,"received_batches":1,"sink_reported_rows":0,"purged_rows":0,"fetch_ms":1,"push_ms":1,"commit_ms":0,"count_ms":0,"cursor_ms":0}}'
+"#,
+        release.display(),
+        long_value,
+    ));
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // 运行还活着的时候就能一段一段取。
+    let live = wait_for_json(&rig, &format!("/api/runs/{run_record_id}/logs"), |body| {
+        body["lines"].as_array().unwrap().len() >= 3
+    });
+    assert_eq!(live["live"], true);
+    assert_eq!(live["after"], 0);
+    assert_eq!(live["next_after"], 3);
+    assert_eq!(live["has_more"], false);
+    let lines = live["lines"].as_array().unwrap();
+    assert_eq!(lines[0]["seq"], 1);
+    let first: Value = serde_json::from_str(lines[0]["line"].as_str().unwrap()).unwrap();
+    // 原文照存：进程间那份 JSON Lines 契约一个字都没改。
+    assert_eq!(first["event"], "source_started");
+    // 解析不出 JSON 的那一行也照存——来什么显什么，不吞。
+    assert_eq!(lines[2]["line"], "这一行不是 JSON");
+
+    // 带上游标只拿新的那一段。
+    let after_two = rig.json(&rig.get(&format!("/api/runs/{run_record_id}/logs?after=2")));
+    let tail = after_two["lines"].as_array().unwrap();
+    assert_eq!(tail.len(), 1);
+    assert_eq!(tail[0]["seq"], 3);
+    // 游标停在末尾就是空段，不是错。
+    let caught_up = rig.json(&rig.get(&format!("/api/runs/{run_record_id}/logs?after=3")));
+    assert_eq!(caught_up["lines"].as_array().unwrap().len(), 0);
+    assert_eq!(caught_up["next_after"], 3);
+
+    fs::write(release, "").unwrap();
+    wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["live"] == false
+    });
+
+    // 结束之后同一条路照旧走得通，终态那一行也在里面。
+    let finished = wait_for_json(&rig, &format!("/api/runs/{run_record_id}/logs?after=3"), |body| {
+        !body["lines"].as_array().unwrap().is_empty()
+    });
+    assert_eq!(finished["live"], false);
+    let terminal: Value =
+        serde_json::from_str(finished["lines"][0]["line"].as_str().unwrap()).unwrap();
+    assert_eq!(terminal["event"], "run_finished");
+    assert_eq!(terminal["column"], "AMOUNT");
+    // 业务值落库前截到 64 个字符：够判断是哪一列坏了，不够当数据副本。
+    assert_eq!(terminal["value"].as_str().unwrap().chars().count(), 64);
+    assert_eq!(terminal["value_truncated"], true);
+    // 折叠出来的那一行运行历史照旧成立，格式没变过。
+    let history = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(history["outcome"], "FAILED");
+    assert_eq!(history["column"], "AMOUNT");
+}
+
+#[test]
+fn run_logs_refuse_an_unknown_run_and_a_nonsense_cursor() {
+    let rig = Rig::new();
+    assert_eq!(rig.get("/api/runs/no-such-run/logs").status, 404);
+
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for bad in ["abc", "-1", ""] {
+        let response = rig.get(&format!("/api/runs/{run_record_id}/logs?after={bad}"));
+        assert_eq!(response.status, 400, "after={bad} 本该被拒");
+    }
 }

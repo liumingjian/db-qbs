@@ -230,10 +230,25 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    **may be `null`**. **The contract is "the field set is stable, the formatting is not"**; fields are
    only ever added, never removed and never redefined.
    Failure lines carry `column` and `value`, **so the logs contain business data**: business values
-   can exist in three places on the source host (the child process's stdout, a file the deployer
-   redirected it into, and the run-history SQLite database), all held to 0600, and **moving them off
-   that host counts as exfiltration, which the product never does**. Logs go to stdout only; the
-   program creates no files and rotates nothing.
+   can exist in four places on the source host (the child process's stdout, a file the deployer
+   redirected it into, the run-history row, and the raw-line table described below), all held to
+   0600, and **moving them off that host counts as exfiltration, which the product never does**.
+   Logs go to stdout only; the program creates no files and rotates nothing.
+   **The parent also keeps the child's raw lines**, verbatim, in the same local database as run
+   history and related by run — because folding is lossy: an event the fold does not recognise is
+   ignored by definition, so "where did last night's run get stuck?" cannot be answered from the
+   folded row. Lines that are not even JSON are kept too, as they arrived. Three properties are
+   load-bearing:
+   **retention is the stricter of 7 days and the most recent 10 runs per task**, expired lines being
+   dropped by the same purge-on-write the history table uses (no background task);
+   **`value` is truncated to 64 characters before storage** — enough to tell which column went wrong,
+   not enough to be a copy of the data, and a truncated line carries `value_truncated: true` so the
+   display layer never reads half a value as a whole one;
+   and they are read back **by cursor** (`GET /api/runs/{}/logs?after=<seq>`, session-guarded),
+   returning only the lines after the cursor. **Polling, never a long connection** — this backend is
+   a synchronous blocking stack with no async runtime, and one hanging connection would occupy a
+   whole worker thread. Rendering a line as a sentence is the display layer's job; the wire format
+   stays structured, or the parent would be regex-matching prose.
 
 **Run History**
    A row the long-running `source` parent process writes for **every submission**, and the only basis
@@ -457,11 +472,17 @@ gets paid off and when lives in the issue tracker, not here.
    clause: **`/api/*` never returns a password, not even the ciphertext.**
 5. **Logs contain business values** — failure lines carry `column` and `value`. The mitigation is the
    host boundary and the file permissions, not the login: the logs go to stdout, which no session
-   guards.
+   guards. The parent's stored copy of those raw lines is the one exception — it sits behind the
+   login and carries `value` **truncated to 64 characters** — but the stdout stream it was copied
+   from is not truncated and not guarded.
 6. **stdout grows without bound** — `source` is long-running and its stdout neither rotates nor caps,
    and the program does not manage it.
-7. **The history SQLite database holds business values for 90 days**, sampled from the source
-   database, under the same 0600 as the credential files.
+7. **The history SQLite database holds business values**, sampled from the source database, under the
+   same 0600 as the credential files. Two retentions apply to two different copies: the folded
+   history row keeps `column` / `value` in full for 90 days, while the raw run-log lines in the same
+   file keep `value` truncated to 64 characters for the stricter of 7 days and the last 10 runs per
+   task. **The long one is the folded row, not the raw lines** — the copy that lives longest is the
+   one that was never truncated.
 8. **Columns of indeterminate precision are not intercepted before submission** — the source performs
    no SQL shape precheck, so the problem surfaces only during a real run, or silently loses precision.
    **The mapping precheck is unaffected**: it describes through a cursor on the sink side and remains
