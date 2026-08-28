@@ -48,7 +48,7 @@ QBS_MYSQL_PASSWORD_FILE=/root/.qbs-mysql-pass ./preflight-target.sh
 | D4 | sink 用给定凭据连得上目标库 | `POST /v1/target/test-connection` |
 | D5 | 会话字符集三项都是 `utf8mb4` | 同上 |
 | D6 | `sql_mode` 设得成 `STRICT_ALL_TABLES` | 同上 |
-| D7 | `max_allowed_packet` ≥ 64 MiB | 同上 |
+| D7 | `max_allowed_packet` ≥ 64 MiB | 同上。**目标库可以是 MySQL 5.7 或 8.0**；8.0 的默认值刚好够，5.7 的默认值是 4 MiB，所以未调参的 5.7 必红在这一项，红出来的补救话术直接给了 `SET GLOBAL` 与 my.cnf 两行 |
 | D8 | stunnel 服务端进程在跑 | pid 文件 + `/proc` |
 | D9 | 白名单口在听 | TCP，端口从 stunnel 配置里读，不写死 |
 

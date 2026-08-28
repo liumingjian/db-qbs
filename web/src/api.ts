@@ -182,7 +182,12 @@ export interface TargetColumn {
   ordinal: number;
   /** 无默认值时是 `null`。它与 `extra` 是 ADR-0038 §5 第 3 分支的判据。 */
   default_value: string | null;
-  /** `auto_increment` / `DEFAULT_GENERATED` 之类，没有就是空串。 */
+  /**
+   * `information_schema.COLUMNS.EXTRA`，例如 `auto_increment`；没有就是空串。
+   *
+   * 取值随目标端 MySQL 版本而变：`DEFAULT_GENERATED` 只有 8.0 会给，5.7 同一根列是空串。
+   * 判自增只能按「小写之后包含 `auto_increment`」，不能与某个版本独有的取值做等值比较（#262）。
+   */
   extra: string;
 }
 

@@ -20,13 +20,28 @@
 //! socket is the one outcome worth avoiding here. Ignored tests are counted as
 //! ignored, so a plain `cargo test` tells the truth on a machine with no docker.
 //!
+//! ## Two versions, one suite (#262)
+//!
+//! MySQL 5.7 joined the support matrix as an **addition, not a replacement**, and
+//! the two versions disagree on exactly the things this file is here to observe:
+//! 5.7 has no `utf8mb4_0900_ai_ci`, its `information_schema.COLUMNS.EXTRA` never
+//! says `DEFAULT_GENERATED`, and its stock `max_allowed_packet` is 4 MiB against
+//! the ritual's 64 MiB gate. **Nothing here branches on the version**: every test
+//! below states the behaviour that must hold on both, and the way to believe both
+//! is to run the same suite twice — `run-mysql-destination-live.sh both`.
+//!
 //! ## The environment it is pointed at
 //!
-//! All five of `DB_QBS_TEST_MYSQL_HOST` / `_PORT` / `_USER` / `_PASSWORD` /
-//! `_DATABASE` are **required**: these tests only run when someone asked for them
-//! by name, so a missing one is a broken environment and says so, and defaulting
-//! any of them risks running against the wrong database. [`RIG_SCRIPT`] sets all
-//! five and is the intended way in.
+//! All six of `DB_QBS_TEST_MYSQL_HOST` / `_PORT` / `_USER` / `_PASSWORD` /
+//! `_DATABASE` / `_ROOT_PASSWORD` are **required**: these tests only run when
+//! someone asked for them by name, so a missing one is a broken environment and
+//! says so, and defaulting any of them risks running against the wrong database.
+//! [`RIG_SCRIPT`] sets all six and is the intended way in.
+//!
+//! The root password buys exactly one thing — the right to move
+//! `max_allowed_packet` *down* for the length of one test and put it back. The
+//! migration account has no such privilege, and giving it one to make a test
+//! simpler would be the wrong trade.
 //!
 //! Every table this file creates is prefixed with a per-test unique name and
 //! dropped on the way out, so it is safe to point at a database that has other
@@ -39,8 +54,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use db_qbs_shared::swap_rows_in_range;
 use db_qbs_sink::{
-    build_staging_ddl, check_connection_settings, AtomicSwapRequest, AtomicSwapResult, Destination,
-    MysqlDestination, TargetConnection,
+    build_staging_ddl, check_connection_settings, precheck_with_primary_key, AtomicSwapRequest,
+    AtomicSwapResult, Destination, MysqlDestination, SourceColumn, TargetConnection, MIN_PACKET,
 };
 use mysql::prelude::Queryable;
 use mysql::{Conn, Opts, OptsBuilder};
@@ -175,6 +190,238 @@ fn the_second_connection_the_pool_opens_has_been_through_the_ritual() {
     .expect("the second connection the pool opened came up bare");
 }
 
+/// #262: an auto-increment column is recognised on whichever version answers.
+///
+/// The judgement is `EXTRA` **contains** `auto_increment`, case-insensitively — not
+/// an equality test against `DEFAULT_GENERATED`, which is a value only 8.0 ever
+/// produces. Against 5.7 that equality test made every auto-increment column read
+/// as an ordinary one, and the precheck then let through the very column it exists
+/// to stop: unmapped, `NOT NULL`, no default. The mistake is invisible on 8.0,
+/// which is exactly why it has to be asked of a real server on both versions.
+///
+/// The control at the end is what makes this a test rather than a coincidence: with
+/// the column's own `EXTRA` blanked — 5.7's answer under the old comparison — the
+/// same precheck rejects, so the pass above is attributable to the recognition and
+/// not to some other branch waving the column through.
+#[test]
+#[ignore = "needs a real MySQL; run docs/spikes/fixtures/local-rig/scripts/run-mysql-destination-live.sh"]
+fn an_unmapped_auto_increment_column_is_recognised_on_this_server() {
+    let rig = Rig::open_with_columns(
+        "autoinc",
+        "`SEQ_NO` BIGINT NOT NULL AUTO_INCREMENT, \
+         `K` VARCHAR(16) NOT NULL, \
+         `V` VARCHAR(32) NULL, \
+         `CREATE_TIME` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+         PRIMARY KEY (`SEQ_NO`), UNIQUE KEY `uk_k` (`K`)",
+    );
+
+    let columns = rig
+        .destination
+        .target_columns(&rig.target_table)
+        .expect("reading target columns");
+    let keys = rig
+        .destination
+        .target_keys(&rig.target_table)
+        .expect("reading target keys");
+
+    let sequence = columns
+        .iter()
+        .find(|column| column.name == "SEQ_NO")
+        .unwrap_or_else(|| panic!("{columns:?}"));
+    assert!(
+        sequence
+            .extra
+            .to_ascii_lowercase()
+            .contains("auto_increment"),
+        "this server spells EXTRA {:?}, and the judgement must survive its spelling",
+        sequence.extra
+    );
+    assert!(
+        !sequence.nullable && sequence.default_value.is_none(),
+        "the column has to be the hard case — NOT NULL with no default — or the \
+         precheck below would pass for an unrelated reason: {sequence:?}"
+    );
+
+    // Only K and V are mapped. SEQ_NO is filled by the database and CREATE_TIME by
+    // its default, so neither may be demanded of the source.
+    let sources = vec![varchar_source("K", 16), varchar_source("V", 32)];
+    let primary_key = vec!["K".to_owned()];
+    let issues =
+        precheck_with_primary_key(&rig.target_table, &primary_key, &sources, &columns, &keys);
+    assert_eq!(
+        issues,
+        Vec::new(),
+        "an unmapped auto-increment column is the database's to fill, not a rejection"
+    );
+
+    let blanked: Vec<_> = columns
+        .iter()
+        .cloned()
+        .map(|mut column| {
+            if column.name == "SEQ_NO" {
+                column.extra = String::new();
+            }
+            column
+        })
+        .collect();
+    let without_recognition =
+        precheck_with_primary_key(&rig.target_table, &primary_key, &sources, &blanked, &keys);
+    assert!(
+        without_recognition
+            .iter()
+            .any(|issue| issue.column == "SEQ_NO"),
+        "the control: unrecognised, the same column is refused — {without_recognition:?}"
+    );
+}
+
+/// #262: the 64 MiB gate holds, and says what to type.
+///
+/// MySQL 5.7 ships `max_allowed_packet` at 4 MiB, so **every untuned 5.7 meets this
+/// message before it ever moves a row**. The gate is not relaxed — it is what stops
+/// a large batch being truncated at the protocol layer, which surfaces as a syntax
+/// error and sends whoever is on call digging through business data that is fine.
+/// What changed is that the message now hands over the command and the my.cnf line.
+///
+/// The server really is lowered and really is put back: asserting on a message
+/// composed from a made-up number would prove the formatting, not the gate. The
+/// global is restored **before** the assertions so that a failing assertion leaves
+/// the rig usable for the next test.
+#[test]
+#[ignore = "needs a real MySQL; run docs/spikes/fixtures/local-rig/scripts/run-mysql-destination-live.sh"]
+fn an_untuned_max_allowed_packet_is_refused_with_the_command_that_fixes_it() {
+    let target = target_from_env();
+    let error = {
+        let _untuned = UntunedPacket::lower_to(4 * 1024 * 1024);
+        MysqlDestination::connect(&target)
+            .err()
+            .expect("a 4 MiB packet must not open — this gate is not relaxed")
+    };
+
+    assert!(
+        error.contains("max_allowed_packet") && error.contains(&MIN_PACKET.to_string()),
+        "{error}"
+    );
+    assert!(
+        error.contains("SET GLOBAL max_allowed_packet = 67108864;"),
+        "the command has to be copyable as it stands: {error}"
+    );
+    assert!(
+        error.contains("my.cnf")
+            && error.contains("[mysqld]")
+            && error.contains("max_allowed_packet = 64M"),
+        "and it has to survive the next restart: {error}"
+    );
+    assert!(
+        error.contains("不要排查业务数据"),
+        "the data is not the problem and the message must say so: {error}"
+    );
+}
+
+/// #257 on both halves of the matrix (#262): the version is observed, never inferred.
+///
+/// 5.7 has no `utf8mb4_0900_ai_ci` at all, so a collation guessed from a version
+/// number is a `CREATE TABLE` that fails on the customer's server after the mapping
+/// was already agreed. This test states only what must be true of any server this
+/// suite is legitimately pointed at, so it passes unchanged on either.
+#[test]
+#[ignore = "needs a real MySQL; run docs/spikes/fixtures/local-rig/scripts/run-mysql-destination-live.sh"]
+fn the_destination_reports_the_server_it_is_actually_talking_to() {
+    let rig = Rig::open("serverinfo");
+    let observed = rig
+        .destination
+        .server_info()
+        .expect("a credentialed destination has already read the server's own account of itself");
+
+    assert!(
+        observed.version.starts_with("5.7.") || observed.version.starts_with("8.0."),
+        "the support matrix is 5.7 and 8.0; this rig is pointed at {:?}",
+        observed.version
+    );
+    assert!(
+        observed.utf8mb4_collation.starts_with("utf8mb4_"),
+        "{observed:?}"
+    );
+    if observed.version.starts_with("5.7.") {
+        assert_ne!(
+            observed.utf8mb4_collation, "utf8mb4_0900_ai_ci",
+            "5.7 does not have that collation, so reporting it would produce DDL \
+             the server refuses"
+        );
+    }
+
+    // And the value is the server's, not a constant: it agrees with what the server
+    // says when asked directly, over a connection this test opened itself.
+    let mut reader = rig.new_plain_connection();
+    let (version, collation): (String, String) = reader
+        .query_first(
+            "SELECT @@version, \
+             (SELECT DEFAULT_COLLATE_NAME FROM information_schema.CHARACTER_SETS \
+               WHERE CHARACTER_SET_NAME = 'utf8mb4')",
+        )
+        .expect("asking the server directly")
+        .expect("one row");
+    assert_eq!(
+        (observed.version, observed.utf8mb4_collation),
+        (version, collation)
+    );
+}
+
+/// A source column of the shape the nine-row whitelist calls a character column.
+fn varchar_source(name: &str, length: u64) -> SourceColumn {
+    SourceColumn {
+        name: name.to_owned(),
+        data_type: "VARCHAR2".to_owned(),
+        precision: None,
+        scale: None,
+        length: Some(length),
+        fsp: None,
+        support: None,
+    }
+}
+
+/// `max_allowed_packet` held below the ritual's gate for the length of one test,
+/// and put back on the way out — including while unwinding from a failed assertion,
+/// which is the whole reason this is a guard and not two statements.
+struct UntunedPacket {
+    root: Conn,
+    previous: u64,
+}
+
+impl UntunedPacket {
+    fn lower_to(bytes: u64) -> Self {
+        let target = target_from_env();
+        let mut root = Conn::new(Opts::from(
+            OptsBuilder::new()
+                .ip_or_hostname(Some(target.host))
+                .tcp_port(target.port)
+                .user(Some("root".to_owned()))
+                .pass(Some(required("DB_QBS_TEST_MYSQL_ROOT_PASSWORD"))),
+        ))
+        .expect("moving a global needs the administrative account");
+        let previous: u64 = root
+            .query_first("SELECT @@GLOBAL.max_allowed_packet")
+            .expect("reading the global")
+            .expect("one row");
+        root.query_drop(format!("SET GLOBAL max_allowed_packet = {bytes}"))
+            .expect("lowering the global");
+        Self { root, previous }
+    }
+}
+
+impl Drop for UntunedPacket {
+    fn drop(&mut self) {
+        let previous = self.previous;
+        if let Err(error) = self
+            .root
+            .query_drop(format!("SET GLOBAL max_allowed_packet = {previous}"))
+        {
+            // Never panic while unwinding, but never lose it quietly either: every
+            // later test on this server would fail its Connection Ritual.
+            eprintln!("!! max_allowed_packet left at a lowered value: {error}");
+        }
+    }
+}
+
 /// What one connection reports about itself.
 #[derive(Debug)]
 struct ConnectionProbe {
@@ -204,17 +451,19 @@ struct Rig {
     locker: Mutex<Option<Conn>>,
 }
 
+/// The table [`Rig::open`] creates when a test does not ask for another shape.
+const DEFAULT_TABLE_BODY: &str =
+    "`K` VARCHAR(16) NOT NULL, `V` VARCHAR(32) NOT NULL, PRIMARY KEY (`K`)";
+
 impl Rig {
     fn open(label: &str) -> Self {
-        let target = TargetConnection {
-            host: required("DB_QBS_TEST_MYSQL_HOST"),
-            port: required("DB_QBS_TEST_MYSQL_PORT")
-                .parse()
-                .expect("DB_QBS_TEST_MYSQL_PORT must be a port number"),
-            username: required("DB_QBS_TEST_MYSQL_USER"),
-            password: required("DB_QBS_TEST_MYSQL_PASSWORD"),
-            database: required("DB_QBS_TEST_MYSQL_DATABASE"),
-        };
+        Self::open_with_columns(label, DEFAULT_TABLE_BODY)
+    }
+
+    /// The same rig over a target table of the caller's own shape — for the tests
+    /// that are about what `information_schema` says, rather than about the swap.
+    fn open_with_columns(label: &str, table_body: &str) -> Self {
+        let target = target_from_env();
 
         let plain_opts = Opts::from(
             OptsBuilder::new()
@@ -234,9 +483,8 @@ impl Rig {
         let target_table = format!("{prefix}_t");
         plain
             .query_drop(format!(
-                "CREATE TABLE `{}`.`{target_table}` (\
-             `K` VARCHAR(16) NOT NULL, `V` VARCHAR(32) NOT NULL, PRIMARY KEY (`K`)\
-             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+                "CREATE TABLE `{}`.`{target_table}` ({table_body}) \
+                 ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
                 target.database
             ))
             .expect("creating the target table");
@@ -469,6 +717,20 @@ impl Drop for Rig {
         if !left_behind.is_empty() {
             eprintln!("!! {} left behind {}", self.prefix, left_behind.join("; "));
         }
+    }
+}
+
+/// The one target connection every test in this file is pointed at. Which MySQL
+/// version answers on the other end is the environment's business, not the tests'.
+fn target_from_env() -> TargetConnection {
+    TargetConnection {
+        host: required("DB_QBS_TEST_MYSQL_HOST"),
+        port: required("DB_QBS_TEST_MYSQL_PORT")
+            .parse()
+            .expect("DB_QBS_TEST_MYSQL_PORT must be a port number"),
+        username: required("DB_QBS_TEST_MYSQL_USER"),
+        password: required("DB_QBS_TEST_MYSQL_PASSWORD"),
+        database: required("DB_QBS_TEST_MYSQL_DATABASE"),
     }
 }
 

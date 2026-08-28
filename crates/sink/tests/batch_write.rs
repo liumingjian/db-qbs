@@ -95,6 +95,20 @@ fn error_1153_points_to_environment_configuration_not_data() {
         "{}",
         error.message
     );
+    // #262：运行期撞上 1153 与开连接仪式撞上它，是同一件事的两个时刻，
+    // 所以给的补救办法必须是同一份，不能一处照做即可、另一处只说「请恢复到 64 MiB」。
+    assert!(
+        error
+            .message
+            .contains("SET GLOBAL max_allowed_packet = 67108864;"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains("my.cnf") && error.message.contains("max_allowed_packet = 64M"),
+        "{}",
+        error.message
+    );
 }
 
 #[test]
