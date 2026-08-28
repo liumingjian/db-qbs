@@ -90,16 +90,29 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    and unknown is reported as unknown. **Nothing downstream may substitute a guess for it.**
 
 **Import Task**
-   One complete job: query a batch of data from Oracle, move it into one MySQL table. A task is
-   re-runnable — running **the same task definition** twice must leave the target table in an
-   identical state. Consistency comes from **upserting on the primary key**; idempotence rests on the
-   target table's unique constraint.
+   One complete job: query a batch of data from Oracle, move it into one MySQL table.
+   **The idempotence promise is no longer unconditional.** A task whose target table has a unique
+   constraint is re-runnable in the old sense — running **the same task definition** twice leaves the
+   target table in an identical state, because consistency comes from **upserting on the primary
+   key** and idempotence rests on that constraint. A task whose target table has **no** unique
+   constraint writes a plain `INSERT ... SELECT`, and running it twice **doubles the data**. That is
+   the first place in the product where the same task definition, run twice, leaves two different
+   target states. It is allowed on purpose (#261) — "append this query into a flow table" had no
+   outlet otherwise — and it is never silent: the precheck says it in its conclusion, the task
+   definition records it, and the task list and run detail both carry a visible marker.
 
 **Task Definition**
-   A **structured spec** (table, columns, filter clause, primary key). **It is the single source of
+   A **structured spec** (table, columns, filter clause, primary key, **write mode**). **It is the
+   single source of
    truth, and the source SQL is generated from it.** **The SQL is not stored in the task definition**
    — it is recomputed on demand, and only pinned as a snapshot of what actually ran on each
    run-history row. **Only `source` reads it; `sink` is unaware it exists.**
+   The **write mode** is what the author chose (today only "append"); the **write statement** is what
+   the target end actually runs, and nobody chooses that — it follows from one fact alone, whether
+   the target table has a unique constraint. An **empty primary key is a value, not a blank**: it is
+   the definition's record of "the target table had nothing to merge on". If the target table's key
+   situation has moved since, the two derivations disagree and **the run fails**; the statement kind
+   is never switched silently under an unchanged definition.
 
 **Task Draft**
    A Task Definition **while it is being built**, plus everything the interface needs to judge it:
@@ -200,11 +213,19 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    Abort is not a state; it is an action on the `FAILED` path.
 
 **Swap**
-   Completed inside a single transaction on the target: `INSERT ... SELECT ... ON DUPLICATE KEY
-   UPDATE` from the staging table into the target table, then `DROP` the staging table. The target
-   table holds either all old data or all new data, never an intermediate state.
-   **Rows deleted at the source do not disappear at the target** — an upsert only writes, never
-   deletes. That is a deliberate debt.
+   Completed inside a single transaction on the target: an `INSERT ... SELECT` from the staging table
+   into the target table, then `DROP` the staging table. The target table holds either all old data
+   or all new data, never an intermediate state.
+   **There is more than one write statement, and the target table picks it, not the author.** With a
+   unique constraint it is `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE` — merge on the key. With
+   none it is the plain `INSERT ... SELECT`; the upsert clause is omitted rather than carried along,
+   because a clause that can never fire only misleads whoever reads the statement.
+   **The row-count adjudication forks with it**: the upsert path accepts `[staged, 2×staged]`
+   (MySQL counts an update as 2, and `CLIENT_FOUND_ROWS` puts the floor at `staged` rather than 0),
+   while the plain insert demands **strict equality**. One pure function in `shared` decides both,
+   and the statement is passed into it rather than sniffed at each call site.
+   **Rows deleted at the source do not disappear at the target** — neither statement ever deletes.
+   That is a deliberate debt.
    **The swap leaves nothing behind but the target table.** It writes no per-row record of what it
    wrote: the write ledger `sink` used to keep in the customer's own database
    (`__db_qbs_write_ledger`, one row per written primary key) is gone, and with it the "undo a run"
@@ -308,8 +329,15 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    The per-column check of "source column type → target column type" performed before a run is
    submitted. **It is a hard gate**: fail it and the run may not start. It rejects types outside the
    whitelist, `DECIMAL`s with insufficient precision, `NUMBER`s declared without precision, and
-   `TIMESTAMP` scales beyond 6 digits, and it **hard-rejects a target table lacking a primary key or
-   unique constraint** (without one, `ON DUPLICATE KEY UPDATE` silently degrades into a plain INSERT).
+   `TIMESTAMP` scales beyond 6 digits.
+   **The primary-key gate now applies to the upsert path only.** When the task ticks a primary key it
+   still **hard-rejects a target table lacking a matching primary key or unique constraint** (without
+   one, `ON DUPLICATE KEY UPDATE` silently degrades into a plain INSERT) — that rule is unchanged in
+   force, only in scope. When the task ticks none, the mirror-image rule applies and is just as hard:
+   the target table must **still** have no unique constraint. Either way this stays the **single**
+   interception point; no other place gets to decide the statement kind.
+   Passing is not the whole answer: the precheck also returns **conclusions**, which do not block but
+   must be read. Today there is one — "目标表无主键 → 本任务为纯追加写，重跑会产生重复数据".
    It is the **only defence** against values being silently altered — and the only defence that can
    be **switched off wholesale** — see **Standing limits**.
    A column whose fit cannot be settled from metadata alone gets a **3.5th step, the range check**:
@@ -487,8 +515,15 @@ gets paid off and when lives in the issue tracker, not here.
    no SQL shape precheck, so the problem surfaces only during a real run, or silently loses precision.
    **The mapping precheck is unaffected**: it describes through a cursor on the sink side and remains
    a hard gate.
-9. **An upsert never deletes.** Rows removed at the source stay in the target table forever; see
-   **Swap**.
+9. **Neither write statement ever deletes.** Rows removed at the source stay in the target table
+   forever; see **Swap**.
+9a. **A run against a primary-key-less target table is not idempotent.** Every re-run appends the
+   whole result set again, and nothing in the product detects or repairs the duplicates: there is no
+   dedupe pass, no "already imported" marker, and the verification gate only compares this run's
+   staged rows against this run's inserted rows, so a doubled target table passes it. This is the
+   debt accepted with #261 in exchange for supporting flow-style target tables at all. It is made
+   visible in four places (precheck conclusion, task definition, task list, run detail) and mitigated
+   nowhere. The way out, when it is wanted, is the clear-then-import write mode.
 10. **A finished run cannot be undone.** There is no "undo" action and no record of which rows a
    run wrote. Undo used to exist, backed by a write ledger table `sink` created inside the
    customer's target database; it was removed whole, and the removal is irreversible (#256). Two
