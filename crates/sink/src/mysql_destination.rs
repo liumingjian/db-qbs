@@ -25,12 +25,17 @@ use mysql::{
 
 use crate::service::quote_identifier;
 use crate::{
-    AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, CleanupRunError, ConnectedDestination,
-    CreateStagingError, Destination, DestinationFactory, DropStagingError, TargetColumn,
-    TargetConnection, TargetKey, WriteBatchError,
+    AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, ConnectedDestination, CreateStagingError,
+    Destination, DestinationFactory, DropStagingError, TargetColumn, TargetConnection, TargetKey,
+    WriteBatchError,
 };
 
-const WRITE_LEDGER_TABLE: &str = "__db_qbs_write_ledger";
+/// 曾经的写入台账表，随「撤销运行」一起废弃（#256）。
+///
+/// 名字留着只为**删**：老版本会在客户的目标库里建这张表、逐行记下每次运行写过的主键，
+/// 已经装出去的实例里它还在。产品不该在客户库里留下自建的附属表，所以每次切换前
+/// 顺手 `DROP TABLE IF EXISTS` 一次——不再建、只删。
+const LEGACY_WRITE_LEDGER_TABLE: &str = "__db_qbs_write_ledger";
 
 type MetadataRow = (
     String,
@@ -101,7 +106,7 @@ impl MysqlDestination {
                     r#"
 SELECT TABLE_NAME
  FROM information_schema.TABLES
- WHERE TABLE_SCHEMA = :database AND TABLE_NAME <> '__db_qbs_write_ledger'
+ WHERE TABLE_SCHEMA = :database
  ORDER BY TABLE_NAME
 "#,
                     params! { "database" => &self.database },
@@ -291,7 +296,9 @@ SELECT INDEX_NAME, COLUMN_NAME
         let outcome = self
             .pool
             .with_conn(|connection| {
-                connection.query_drop(write_ledger_ddl(&self.database))?;
+                // 台账已废（#256）：这里只把老版本留下的那张表删掉，不再建。
+                // `DROP TABLE` 会隐式提交，所以必须在切换事务开始之前做。
+                connection.query_drop(drop_legacy_write_ledger(&self.database))?;
                 let mut transaction = connection.start_transaction(TxOpts::default())?;
                 let count_statement = format!(
                     "SELECT COUNT(*) FROM {}.{}",
@@ -347,15 +354,6 @@ SELECT INDEX_NAME, COLUMN_NAME
                     );
                     return Ok(AtomicSwapOutcome::Failed(AtomicSwapError::Other(message)));
                 }
-                let ledger_statement = build_ledger_insert_statement(
-                    &self.database,
-                    &request.staging_table,
-                    &request.primary_key,
-                );
-                transaction.exec_drop(
-                    ledger_statement,
-                    (&request.target_table, &request.run_id),
-                )?;
                 transaction.commit()?;
                 Ok(AtomicSwapOutcome::Swapped(AtomicSwapResult {
                     staged_rows,
@@ -383,96 +381,13 @@ SELECT INDEX_NAME, COLUMN_NAME
             .with_conn(|connection| connection.query_drop(statement))
             .map_err(classify_drop_error)
     }
-
-    fn cleanup_run(
-        &self,
-        run_id: &str,
-        target_table: &str,
-        primary_key: &[String],
-    ) -> Result<u64, CleanupRunError> {
-        self.pool
-            .with_conn(|connection| {
-                connection.query_drop(write_ledger_ddl(&self.database))?;
-                let mut transaction = connection.start_transaction(TxOpts::default())?;
-                transaction.exec_drop(
-                    build_cleanup_delete_statement(&self.database, target_table, primary_key),
-                    (target_table, run_id),
-                )?;
-                let deleted_rows = transaction.affected_rows();
-                transaction.exec_drop(
-                    format!(
-                        "UPDATE {}.{} SET cleaned = 1 WHERE target_table = ? AND run_id = ?",
-                        quote_identifier(&self.database),
-                        quote_identifier(WRITE_LEDGER_TABLE),
-                    ),
-                    (target_table, run_id),
-                )?;
-                transaction.commit()?;
-                Ok(deleted_rows)
-            })
-            .map_err(|error| CleanupRunError::Environment(error.to_string()))
-    }
 }
 
-fn write_ledger_ddl(database: &str) -> String {
+fn drop_legacy_write_ledger(database: &str) -> String {
     format!(
-        "CREATE TABLE IF NOT EXISTS {}.{} (\
-         write_seq BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,\
-         target_table VARCHAR(64) NOT NULL, run_id VARCHAR(64) NOT NULL,\
-         key_hash CHAR(64) NOT NULL, key_json LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, cleaned BOOLEAN NOT NULL DEFAULT 0,\
-         INDEX ledger_run (target_table, run_id),\
-         INDEX ledger_key (target_table, key_hash, write_seq)) ENGINE=InnoDB",
+        "DROP TABLE IF EXISTS {}.{}",
         quote_identifier(database),
-        quote_identifier(WRITE_LEDGER_TABLE),
-    )
-}
-
-fn json_key_expression(prefix: &str, primary_key: &[String]) -> String {
-    let columns = primary_key
-        .iter()
-        .map(|column| format!("{prefix}.{}", quote_identifier(column)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("CAST(JSON_ARRAY({columns}) AS CHAR CHARACTER SET utf8mb4)")
-}
-
-fn build_ledger_insert_statement(
-    database: &str,
-    staging_table: &str,
-    primary_key: &[String],
-) -> String {
-    let key = json_key_expression("s", primary_key);
-    format!(
-        "INSERT INTO {}.{} (target_table, run_id, key_hash, key_json) \
-         SELECT ?, ?, SHA2({key}, 256), {key} FROM {}.{} s",
-        quote_identifier(database),
-        quote_identifier(WRITE_LEDGER_TABLE),
-        quote_identifier(database),
-        quote_identifier(staging_table),
-    )
-}
-
-fn build_cleanup_delete_statement(
-    database: &str,
-    target_table: &str,
-    primary_key: &[String],
-) -> String {
-    let key = json_key_expression("t", primary_key);
-    let ledger = format!(
-        "{}.{}",
-        quote_identifier(database),
-        quote_identifier(WRITE_LEDGER_TABLE)
-    );
-    format!(
-        "DELETE t FROM {}.{} t JOIN {ledger} l \
-           ON l.target_table = ? AND l.run_id = ? AND l.cleaned = 0 \
-          AND l.key_hash = SHA2({key}, 256) AND l.key_json = {key} \
-         WHERE NOT EXISTS (SELECT 1 FROM {ledger} newer \
-                WHERE newer.target_table = l.target_table \
-                  AND newer.key_hash = l.key_hash AND newer.key_json = l.key_json \
-                  AND newer.write_seq > l.write_seq)",
-        quote_identifier(database),
-        quote_identifier(target_table),
+        quote_identifier(LEGACY_WRITE_LEDGER_TABLE),
     )
 }
 
@@ -820,9 +735,8 @@ pub fn check_connection_settings(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cleanup_delete_statement, build_insert_statement, build_ledger_insert_statement,
-        build_swap_upsert_statement, classify_atomic_swap_error, classify_mysql_diagnostic,
-        PoolError,
+        build_insert_statement, build_swap_upsert_statement, classify_atomic_swap_error,
+        classify_mysql_diagnostic, PoolError,
     };
     use crate::{AtomicSwapError, WriteBatchError};
     use mysql::{Error as MysqlError, MySqlError};
@@ -850,19 +764,6 @@ mod tests {
                 value: Some("10000-01-01 00:00:00".to_owned()),
             }
         );
-    }
-
-    #[test]
-    fn ledger_records_each_composite_key_and_cleanup_protects_a_later_writer() {
-        let keys = vec!["ID".to_owned(), "TENANT".to_owned()];
-        let insert = build_ledger_insert_statement("qbs", "T__stg_run", &keys);
-        assert!(insert.contains("JSON_ARRAY(s.`ID`, s.`TENANT`)"));
-        assert!(insert.contains("SHA2("));
-
-        let cleanup = build_cleanup_delete_statement("qbs", "T", &keys);
-        assert!(cleanup.contains("DELETE t FROM `qbs`.`T` t"));
-        assert!(cleanup.contains("newer.write_seq > l.write_seq"));
-        assert!(cleanup.contains("newer.key_json = l.key_json"));
     }
 
     #[test]

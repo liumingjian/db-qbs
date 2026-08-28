@@ -56,8 +56,7 @@ pub use protocol::{
 };
 pub use run_history::{
     expired_history_indices, fold_history_lines, AgentEvidence, HistoryChange, HistoryStore,
-    RunCleanup, RunEvidence, RunHistory, RunParametersEvidence, SourceEvidence, TargetEvidence,
-    UnknownReason,
+    RunEvidence, RunHistory, RunParametersEvidence, SourceEvidence, TargetEvidence, UnknownReason,
 };
 pub use sql_builder::{
     builder_column_query, builder_dblink_query, builder_table_query, validate_builder_dblink,

@@ -269,8 +269,6 @@ function finishedRow(
     ms: 38_000,
     last_ts: new Date(Date.parse(startedAt) + 42_000).toISOString(),
     mapping_issues: [],
-    cleanup_status: "available",
-    cleaned_rows: null,
     ...overrides,
   } as RunRow;
 }
@@ -321,7 +319,6 @@ function seedRuns() {
       rows_pushed: 0,
       bytes: 0,
       ms: 0,
-      cleanup_status: null,
       mapping_issues: [
         {
           column: "AMOUNT",
@@ -539,7 +536,6 @@ function advance(row: RunRow): RunRow {
     commit_ms: COMMITTING_MS,
     count_ms: 140,
     cursor_ms: 90,
-    cleanup_status: "available",
   });
 }
 
@@ -962,7 +958,6 @@ const ROUTES: Route[] = [
         bytes: 0,
         ms: 0,
         last_ts: null,
-        cleanup_status: "pending",
       });
       row.__startedMs = Date.now();
       runs.push(row);
@@ -987,20 +982,8 @@ const ROUTES: Route[] = [
         finished_at: new Date().toISOString(),
         failure_kind: "CANCELLED",
         message: "运行被手动中止，暂存表已丢弃",
-        cleanup_status: null,
       });
       return ok({ message: "已请求中止，暂存表已丢弃" });
-    },
-  },
-  {
-    method: "POST",
-    pattern: "/api/runs/{}/cleanup",
-    handler: ({ id }) => {
-      const row = runs.find((r) => r.run_record_id === id);
-      if (row === undefined) return fail(404, "运行记录不存在");
-      const deleted = Number(row.rows_pushed ?? 0);
-      Object.assign(row, { cleanup_status: "cleaned", cleaned_rows: deleted });
-      return ok({ deleted_rows: deleted });
     },
   },
   {

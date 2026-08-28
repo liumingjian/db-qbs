@@ -112,6 +112,11 @@ name in full. It is simply attached to the wrong action.
    white text) reserved for the button that actually commits destruction; demote the toolbar
    trigger to a ghost.
 
+**Update (#256): change 3 is moot.** 「清理本次写入」and the write ledger behind it were removed
+whole; the run drawer has no such button any more. Changes 1, 2 and 4 stand — the danger hierarchy
+they introduced is still what 批量发起 / 批量删除 use. This paragraph stays because the review is a
+record of what was decided, not a to-do list.
+
 ## P0-3 · The confirmation page renders "never checked" as "passed"
 
 **Evidence:** `web/src/wizard.ts:1168` — `findings: checkIsFresh(draft) ? draft.check!.value.findings : []`.

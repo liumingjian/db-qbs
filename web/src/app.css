@@ -427,7 +427,6 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .bulk-task-target .mono { color: var(--dim); overflow-wrap: anywhere; }
 /* 「清理是删除，不是还原」——这句是**否定一个天然的误读**，不是提示，所以着告警色
    而不是中性色：读的人此刻正准备按下一颗真的会删生产数据的按钮。 */
-.cleanup-warning { margin: 10px 0 0; padding: 9px 12px; border-left: 3px solid var(--crit); background: var(--crit-bg); color: var(--crit); line-height: var(--lh-prose); }
 /* 确认屏那一格「目标表检查」的三态（P0-3）。「尚未检查」不是失败，所以它着 --warn 而不是
    --crit：还没做的事和做过没通过的事，在最后一屏上必须能一眼分开。 */
 .confirm-check.is-passed { color: var(--ok-ink); }

@@ -10,10 +10,10 @@ use crate::precheck::{
 };
 use crate::{
     AbortResponse, ActiveRun, ApiError, AtomicSwapError, AtomicSwapRequest, BatchPayload,
-    BatchResponse, CleanupRunError, CleanupRunRequest, CleanupRunResponse, CommitResponse,
-    CreateStagingError, Destination, DestinationFactory, DropStagingError, FixedDestination,
-    OpenRunRequest, PrecheckIssue, RangeCheckColumn, RangeCheckResult, RunResponse, SinkService,
-    SourceColumn, TargetCheckRequest, TargetCheckResult, TargetColumn, Terminal, WriteBatchError,
+    BatchResponse, CommitResponse, CreateStagingError, Destination, DestinationFactory,
+    DropStagingError, FixedDestination, OpenRunRequest, PrecheckIssue, RangeCheckColumn,
+    RangeCheckResult, RunResponse, SinkService, SourceColumn, TargetCheckRequest,
+    TargetCheckResult, TargetColumn, Terminal, WriteBatchError,
     MAX_PREPARED_STATEMENT_PLACEHOLDERS, TOMBSTONE_LIMIT,
 };
 
@@ -417,42 +417,6 @@ impl<F: DestinationFactory> SinkService<F> {
                 Err(error)
             }
         }
-    }
-
-    pub fn cleanup(&self, request: CleanupRunRequest) -> Result<CleanupRunResponse, ApiError> {
-        if request.primary_key.is_empty() {
-            return Err(ApiError {
-                status: 400,
-                code: "BAD_REQUEST",
-                message: "primary_key 不能为空".to_owned(),
-                run_id: Some(request.run_id),
-                details: json!({}),
-            });
-        }
-        let connected = self
-            .factory
-            .connect(&request.target)
-            .map_err(|message| ApiError {
-                status: 500,
-                code: "SINK_ENVIRONMENT",
-                message: format!("连接目标端失败：{message}"),
-                run_id: Some(request.run_id.clone()),
-                details: json!({ "kind": "OTHER" }),
-            })?;
-        let deleted_rows = connected
-            .destination
-            .cleanup_run(&request.run_id, &request.target_table, &request.primary_key)
-            .map_err(|CleanupRunError::Environment(message)| ApiError {
-                status: 500,
-                code: "SINK_ENVIRONMENT",
-                message: format!("清理运行写入的数据失败：{message}"),
-                run_id: Some(request.run_id.clone()),
-                details: json!({ "kind": "OTHER" }),
-            })?;
-        Ok(CleanupRunResponse {
-            run_id: request.run_id,
-            deleted_rows,
-        })
     }
 
     pub fn get(&self, run_id: &str) -> Result<RunResponse, ApiError> {

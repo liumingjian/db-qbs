@@ -229,41 +229,6 @@ fn sqlite_writes_lazily_remove_expired_rows_and_startup_seals_incomplete_rows() 
 }
 
 #[test]
-fn cleanup_metadata_persists_the_run_target_and_becomes_single_use() {
-    let suffix = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-    let directory = std::env::temp_dir().join(format!(
-        "db-qbs-run-cleanup-test-{}-{suffix}",
-        std::process::id()
-    ));
-    fs::create_dir(&directory).unwrap();
-    let store = HistoryStore::open(&directory).unwrap();
-
-    store
-        .register_cleanup(
-            "record-1",
-            "target-ds",
-            "ORDERS",
-            &["ID".to_owned(), "TENANT".to_owned()],
-        )
-        .unwrap();
-    let pending = store.cleanup("record-1").unwrap().unwrap();
-    assert_eq!(pending.status, "pending");
-    assert_eq!(pending.primary_key, vec!["ID", "TENANT"]);
-
-    store.mark_cleanup_available("record-1").unwrap();
-    assert_eq!(
-        store.cleanup("record-1").unwrap().unwrap().status,
-        "available"
-    );
-    store.mark_cleaned("record-1", 7).unwrap();
-    let cleaned = store.cleanup("record-1").unwrap().unwrap();
-    assert_eq!(cleaned.status, "cleaned");
-    assert_eq!(cleaned.deleted_rows, Some(7));
-
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
 fn evidence_round_trips_and_save_preserves_the_original_snapshot_without_passwords() {
     let suffix = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
     let directory = std::env::temp_dir().join(format!(
