@@ -7,7 +7,6 @@ import type { RunEvidence, TaskSpec } from "./api";
 import {
   APPEND_ONLY_CONCLUSION,
   clearsTarget,
-  CLEAR_MODE_PRIMARY_KEY_NOTE,
   runWriteSemantics,
   runWriteView,
   targetHasUniqueKey,
@@ -86,11 +85,6 @@ describe("写入语义那句话", () => {
     expect(done).toContain("整表替换");
     expect(done).not.toContain("源端删除的行仍保留");
     expect(done).not.toBe(writeSemanticsDone("upsert"));
-  });
-
-  it("主键区域被灰掉时那句理由是一份常量，向导两处抄的是同一句", () => {
-    expect(CLEAR_MODE_PRIMARY_KEY_NOTE).toContain("不依赖主键");
-    expect(CLEAR_MODE_PRIMARY_KEY_NOTE).toContain("目标表实际定义的主键");
   });
 
   it("短标签是给一格里放的，长句子是给交底用的", () => {

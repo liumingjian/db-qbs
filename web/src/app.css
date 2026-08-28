@@ -559,10 +559,6 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 /* 清空模式下的「主键」一列（#264）。灰掉的是**整根列**，不只是那几颗勾选框：
    一颗一颗地灰，看上去像是这几行刚好不能选；整列灰掉才读得出「这个决定不归你做」。
    理由跟在表头里，字号与其它 small 一致——它是解释，不是告警，所以不着 --warn。 */
-/* 锁定的理由不在这一格里（见 `.mapping-lock-note`）：一句三十几个字的话写进表头，
-   无论怎么换行都能把「主键」这一列撑得与邻列不成比例。 */
-.mapping-lock-note { margin: 0; color: var(--mute); font-size: var(--size-meta); }
-.wizard-mapping.is-pk-locked .pk-head, .wizard-mapping.is-pk-locked tbody td:nth-child(4) { color: var(--mute); background: var(--mute-bg); }
 
 /* 任务列表上的纯追加写标记。它不是告警，所以不着 --crit / --warn——
    这是一种合法的写法，只是它的代价必须在清单上就看得见。 */

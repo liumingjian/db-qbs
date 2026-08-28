@@ -1275,10 +1275,6 @@ function StepBody({
   loadCheck: () => void;
 }) {
   const model = view(draft).step;
-  // 清空模式下每一行的主键勾选框都是同一个理由被锁上的，那句话因此只写在表头一格里，
-  // 每行只用 `aria-describedby` 指过去（#264 原本是逐行渲染一份，同一句话抄一百遍，
-  // 把「主键」那一列撑到整张表都跟着变宽）。
-  const pkLockId = useId();
   if (model.step === 1) {
     return <section className="wizard-step">
       <header>{/* tabIndex={-1}：能用脚本聚焦，但不进 Tab 序（#239）。 */}<h1 ref={headingRef} tabIndex={-1}>选列与字段映射</h1></header>
@@ -1304,17 +1300,11 @@ function StepBody({
           目标表那一屏离它有一整个步骤的距离，把模式摆到那里，人会在还没有列清单、
           因而还看不见主键的时候先选写法。 */}
       <WriteModeCard write={model.write} change={change} />
-      {/* 锁定的理由摆在表**外**，占满整行（#264 原来写在表头那一格里，那一列因此
-          宽到与邻列不成比例——一句三十几个字的话，无论怎么换行都撑得起一整列）。
-          它照旧是可见正文，行里的勾选框用 aria-describedby 指过来。 */}
-      {model.primaryKeyLock !== null && (
-        <p className="mapping-lock-note" id={pkLockId}>主键：{model.primaryKeyLock}</p>
-      )}
       {model.rows.length === 0 ? <p className="wizard-empty">{draft.fetchMode === "sql" ? "尚未识别结果列" : "未选择源表"}</p> : (
-        /* 清空模式下整根「主键」列灰掉，理由就写在表头那一格里（#264）：
-           灰掉本身不解释任何事，一个没有理由的禁用控件读起来就是「这里坏了」。
-           每颗勾选框的 `Refusable` 也带着同一句话，两处说的是同一份常量。 */
-        <div className="table-wrap"><table className={`data-grid wizard-mapping${model.write.primaryKeyDimmed ? " is-pk-locked" : ""}`}><thead><tr><th>同步</th><th>源列</th><th>目标列</th><th className="pk-head">主键</th><th><span className="visually-hidden">操作</span></th></tr></thead><tbody>
+        /* 主键任何时候都归人做，包括先清空再导入那一档：那一档确实不靠主键去重，
+           但主键仍决定写入语句是 upsert 还是纯 INSERT，而那是一个人有权改的决定。
+           勾错了不会静默通过——第 3 步的目标表检查会当面说「主键定义对不上」。 */
+        <div className="table-wrap"><table className="data-grid wizard-mapping"><thead><tr><th>同步</th><th>源列</th><th>目标列</th><th>主键</th><th><span className="visually-hidden">操作</span></th></tr></thead><tbody>
           {model.rows.map((row) => <tr className={row.problem ? "is-problem" : ""} key={row.source}>
             <td><input type="checkbox" aria-label={`同步 ${row.source}`} checked={row.selected} onChange={() => change({ type: "toggle-column", source: row.source })} /></td>
             <td><span className="mono">{row.source}</span></td>
@@ -1324,11 +1314,10 @@ function StepBody({
               : row.control === "new" ? <span className="new-target-field"><input aria-label={`${row.source} 的目标列名`} aria-invalid={row.problem ? true : undefined} value={row.target} spellCheck={false} onChange={(event) => change({ type: "rename-target", source: row.source, target: event.target.value })} /><small className="new-mark">将新建</small></span>
               : <select aria-label={`${row.source} 的目标列`} aria-invalid={row.problem ? true : undefined} value={row.target} onChange={(event) => change({ type: "rename-target", source: row.source, target: event.target.value })}><option value="">请选择</option>{draft.targetColumns.map((column) => <option key={column.name}>{column.name}</option>)}</select>
             }{row.problem && <small>{row.problem}</small>}</>}</td>
-            {/* 这颗勾选框三种情况下都是 `disabled`，而 `title` 谁都看不到（#238），
-                所以理由必须读得到。两句是逐行不同的，写在行里；第三句「锁定」全表同文，
-                只写在表头，行里指过去就够了。 */}
+            {/* 按不动只剩两种情况，两句话都是**正文**不是 `title`——只能悬停看到的
+                解释，键盘用户拿不到（#238）。 */}
             <td><Refusable reason={!row.selected ? "先勾选这一列" : row.target === "" ? "先选择目标列" : null}>{(describedBy) => (
-              <input type="checkbox" aria-label={`${row.source} 设为主键`} disabled={!row.selected || row.target === "" || model.primaryKeyLock !== null} aria-describedby={describedBy ?? (model.primaryKeyLock === null ? undefined : pkLockId)} checked={row.primaryKey} onChange={() => change({ type: "toggle-primary-key", target: row.target })} />
+              <input type="checkbox" aria-label={`${row.source} 设为主键`} disabled={!row.selected || row.target === ""} aria-describedby={describedBy} checked={row.primaryKey} onChange={() => change({ type: "toggle-primary-key", target: row.target })} />
             )}</Refusable></td>
             <td><button className="icon-button is-danger" type="button" title={`删除列 ${row.source}`} aria-label={`删除列 ${row.source}`} onClick={() => change({ type: "remove-column", source: row.source })}><Trash2 size={ICON.sm} /></button></td>
           </tr>)}

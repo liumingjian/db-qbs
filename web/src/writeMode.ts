@@ -91,16 +91,6 @@ export function writeSemanticsNote(
     : `${APPEND_ONLY_CONCLUSION}。目标表上没有可去重的唯一约束，本次写入是纯 INSERT。`;
 }
 
-/**
- * 清空模式下主键那一列为什么点不动（#264）。
- *
- * 灰掉不是「这里坏了」，是「这个决定不归你做」：清空模式不依赖主键去重，而任务定义
- * 里那份主键仍然要记——它决定写入语句是 upsert 还是纯 INSERT，值取自目标表实际
- * 定义的主键。这句话必须跟着灰掉一起出现，否则灰掉本身就是一个没有解释的拒绝。
- */
-export const CLEAR_MODE_PRIMARY_KEY_NOTE =
-  "先清空再导入不依赖主键去重，这里按目标表实际定义的主键记录，只用来决定写入语句";
-
 /** 同一件事的过去时：跑完之后，陈述这次写入到底做了什么。 */
 export function writeSemanticsDone(
   statement: WriteStatement,

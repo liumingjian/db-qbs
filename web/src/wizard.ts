@@ -31,8 +31,6 @@ import type {
 } from "./api";
 import { matchSameNameTargets, sourceSummary, whereSummary } from "./spec";
 import {
-  clearsTarget,
-  CLEAR_MODE_PRIMARY_KEY_NOTE,
   writeSemanticsNote,
   writeStatementLabel,
   writeStatementOf,
@@ -566,27 +564,15 @@ function reduce(draft: Draft, change: Change): Reduced {
     }
 
     case "write-mode": {
-      // 写入模式不改任何一列，语句形状仍只由目标表有没有主键决定。
+      // 写入模式是**纯粹的记录**：不改任何一列，也不动主键。语句形状仍只由目标表
+      // 有没有主键决定（`writeStatementOf`），而清空与否不改变那条派生。
       //
-      // 它唯一动到的是主键那一格（#264）：清空模式下主键不再是人做的决定，界面把
-      // 那一列灰掉。**灰掉的同时必须把手勾的那一份收回来**——留着一个点不动、
-      // 又还在生效的手勾主键，是这两者里更坏的一种：屏幕上写着「按目标表实际主键
-      // 记录」，实际记的却是上一分钟某个人勾的另一组列。收回之后按目标表的主键重新
-      // 推导；推不出来（目标列还没读到、或目标表就是没有主键）就是空的，那也是一个
-      // 有含义的值——纯 INSERT。
-      const next = { ...draft, spec: { ...draft.spec, write_mode: change.mode } };
-      if (!clearsTarget(change.mode)) {
-        return { draft: next, cleared: [] };
-      }
-      const cleared: Cleared[] = draft.hand.primaryKey ? ["primary-key"] : [];
-      const inferred = inferPrimaryKey(draft.targetKeys, draft.spec.columns) ?? [];
+      // 它曾经在切到清空模式时把手勾的主键收回去重推（#264 那一版把主键当成
+      // 「清空模式下不归人做的决定」）。那条已经撤销：主键任何时候都归人做，
+      // 于是切换模式再把它改掉就成了一次背着人的改写。
       return {
-        draft: {
-          ...next,
-          spec: { ...next.spec, primary_key: inferred },
-          hand: { ...next.hand, primaryKey: false },
-        },
-        cleared,
+        draft: { ...draft, spec: { ...draft.spec, write_mode: change.mode } },
+        cleared: [],
       };
     }
 
@@ -1259,14 +1245,6 @@ export type StepView =
       step: 1;
       rows: MappingRow[];
       orphans: string[];
-      /**
-       * 主键那一列为什么整根点不动，或 `null`。
-       *
-       * **一句，不是一行一句。** 理由从来只由草稿决定（写入模式，或目标表已定义的主键），
-       * 每一行拿到的都是同一个字符串；逐行渲染它等于把同一句话抄进每一格，
-       * 「主键」那一列因此宽到把整张表撑开。界面把它渲染在表头，行里指过去。
-       */
-      primaryKeyLock: string | null;
       /** 写入模式那一格。它就摆在主键那一列旁边，两个决定一起做。 */
       write: WriteView;
       blockers: Blocker[];
@@ -1302,13 +1280,6 @@ export interface WriteView {
   statementLabel: string;
   /** 跟着语句与模式一起走的那句交底，永远不缺席。 */
   note: string;
-  /**
-   * 清空模式下主键那一列整根灰掉（#264）。
-   *
-   * 这里只答「灰不灰」：**理由是 `StepView` 的 `primaryKeyLock`**，全表一句，
-   * 两处各存一份文案的话，改口径时必然漏掉一处。
-   */
-  primaryKeyDimmed: boolean;
 }
 
 function writeView(draft: Draft): WriteView {
@@ -1319,9 +1290,6 @@ function writeView(draft: Draft): WriteView {
     statement,
     statementLabel: writeStatementLabel(statement),
     note: writeSemanticsNote(statement, draft.spec.write_mode),
-    // 清空模式下主键那一列点不动。**灰掉必须自带理由**——一个没有解释的禁用控件
-    // 读起来就是「这里坏了」（#264）；那句理由由 `lockedPrimaryKey` 给，摆在表头。
-    primaryKeyDimmed: clearsTarget(draft.spec.write_mode),
   };
 }
 
@@ -1410,7 +1378,6 @@ function stepView(draft: Draft, step: Step, blockers: Blocker[]): StepView {
     case 1: {
       const orphans = orphanSources(draft);
       const orphanSet = new Set(orphans);
-      const locked = lockedPrimaryKey(draft);
       const problems = new Map<string, string>();
       for (const blocker of blockers) {
         if (blocker.column !== null && !problems.has(blocker.column)) {
@@ -1445,7 +1412,7 @@ function stepView(draft: Draft, step: Step, blockers: Blocker[]): StepView {
           problem: problems.get(source) ?? null,
         };
       });
-      return { step: 1, rows, orphans, primaryKeyLock: locked, write: writeView(draft), blockers };
+      return { step: 1, rows, orphans, write: writeView(draft), blockers };
     }
     case 2:
       return {
@@ -1525,30 +1492,6 @@ function confirmTargetCheck(draft: Draft): ConfirmTargetCheck {
  *
  * A disabled control without a reason beside it reads as broken.
  */
-/**
- * 主键那一列为什么点不动，以及**为什么这不是坏了**。
- *
- * 两个理由，各自都足以锁上，而话不一样，所以不能合并成一个布尔：
- *
- * 1. 先清空再导入（#264）——主键不再是人做的决定。清空不靠主键去重，而任务定义里
- *    那份主键仍要记，因为它决定写入语句是 upsert 还是纯 INSERT，值取自目标表实际
- *    定义的主键。这一条排在前面：模式是人刚选的，它带来的解释优先于「目标表已定义
- *    主键」那句更弱的话。
- * 2. 目标表已经定义了主键，而人还没有自己动过手——那就按目标表的来。
- */
-function lockedPrimaryKey(draft: Draft): string | null {
-  if (clearsTarget(draft.spec.write_mode)) {
-    return CLEAR_MODE_PRIMARY_KEY_NOTE;
-  }
-  if (draft.hand.primaryKey) {
-    return null;
-  }
-  const inferred = inferPrimaryKey(draft.targetKeys, draft.spec.columns);
-  return inferred === null
-    ? null
-    : `目标表已定义主键（${inferred.join(", ")}），按它锁定`;
-}
-
 // ---------------------------------------------------------------------------
 // Out
 // ---------------------------------------------------------------------------

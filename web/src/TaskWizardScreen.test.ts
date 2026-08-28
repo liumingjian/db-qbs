@@ -327,20 +327,19 @@ describe("the mapping step UI", () => {
     }
   });
 
-  it("says why the primary-key column is locked once, outside the table", () => {
-    // 理由由草稿决定，每一行拿到的都是同一句话；它也不在表头那一格里——写进表里
-    // 的任何一格都会把「主键」这一列撑宽。摆在表外占满一行，行里指过去。
+  // 主键任何时候都归人做：目标表已经有主键时也只是**预填**，不是锁死。
+  it("leaves the primary-key ticks live even when the target table has one", () => {
     const draft = done(apply(mappingDraft(), {
       type: "target-columns-arrived",
       columns: [targetColumn("ID", 1), targetColumn("C_NAME", 2)],
       keys: [{ name: "PRIMARY", columns: ["ID"] }],
     }));
     const html = renderWizard(draft);
-    const note = /<p class="mapping-lock-note" id="([^"]+)">主键：目标表已定义主键（ID），按它锁定<\/p>/.exec(html);
-    expect(note).not.toBeNull();
-    expect(html.split("按它锁定")).toHaveLength(2);
-    // 两行的勾选框都读得到它，一行一份副本却一份都不存在。
-    expect(html.split(`aria-describedby="${note?.[1]}"`)).toHaveLength(3);
+
+    expect(html).not.toContain("按它锁定");
+    expect(html).not.toContain("不依赖主键去重");
+    expect(html).toContain('aria-label="ID 设为主键"');
+    expect(html).not.toContain('aria-label="ID 设为主键" disabled=""');
   });
 
   it("shows the SQL fetch refusal beside its own disabled button", () => {

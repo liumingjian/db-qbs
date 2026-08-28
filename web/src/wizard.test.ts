@@ -20,7 +20,6 @@ import {
   view,
 } from "./wizard";
 import type { PreviewResult, TargetCheckResult } from "./api";
-import { CLEAR_MODE_PRIMARY_KEY_NOTE } from "./writeMode";
 import type { Applied, Change, Draft } from "./wizard";
 
 const SOURCE = { datasource_id: "ds-oracle", name: "生产 Oracle" };
@@ -469,35 +468,34 @@ describe("the advance gate", () => {
     expect(bare.spec.schedule_cron).toBe("");
   });
 
-  // #264：清空模式下主键那一列灰掉，而灰掉必须自带理由。
-  it("greys out the primary-key column in clear mode and says why", () => {
-    let draft = withTargetColumns(
-      done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t" })),
-      [{ name: "PRIMARY", columns: ["ID"] }],
-    );
+  // 主键任何时候都归人做，先清空再导入这一档也一样（原来这一列在清空模式下整根
+  // 灰掉）。那一档确实不靠主键去重，但主键仍决定写入语句是 upsert 还是纯 INSERT，
+  // 而那是一个人有权改的决定；勾错了由第 3 步的目标表检查当面拒。
+  it("leaves the primary key editable in clear mode", () => {
+    let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t" }));
     draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
     draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
+    draft = withTargetColumns(draft, [{ name: "PRIMARY", columns: ["ID"] }]);
     draft = done(apply(draft, { type: "write-mode", mode: "CLEAR_THEN_IMPORT" }));
 
     const step = view(draft, 1).step;
     if (step.step !== 1) throw new Error("expected step 1");
-    expect(step.write.primaryKeyDimmed).toBe(true);
-    // 一句，不是一行一句：理由挂在这一步上，界面把它渲染在表头那一格。
-    expect(step.primaryKeyLock).toBe(CLEAR_MODE_PRIMARY_KEY_NOTE);
-    // 灰掉的是「选」，不是「记」：主键仍按目标表实际定义的那一份记下来，
-    // 因为写入语句还得靠它——清空一个字都没改语句的选择。
     expect(toSpec(draft).primary_key).toEqual(["ID"]);
     expect(step.write.statement).toBe("upsert");
     expect(step.write.note).toContain("先清空再导入");
+
+    // 取消掉它就是纯 INSERT——清空模式下这仍是一个合法且有含义的选择。
+    const off = done(apply(draft, { type: "toggle-primary-key", target: "ID" }));
+    expect(toSpec(off).primary_key).toEqual([]);
+    const offStep = view(off, 1).step;
+    if (offStep.step !== 1) throw new Error("expected step 1");
+    expect(offStep.write.statement).toBe("insert");
   });
 
-  // 留着一个点不动、又还在生效的手勾主键，比清掉它更坏：屏幕上写着「按目标表实际
-  // 主键记录」，实际记的却是上一分钟某个人勾的另一组列。
-  it("takes back a hand-picked primary key when clear mode is chosen, and says so", () => {
-    let draft = withTargetColumns(
-      done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t" })),
-      [{ name: "PRIMARY", columns: ["ID"] }],
-    );
+  // 切换写入模式是**纯粹的记录**：它曾经在切到清空模式时把手勾的主键收回去重推，
+  // 那是一次背着人的改写，撤销了。
+  it("keeps a hand-picked primary key when the write mode changes", () => {
+    let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t" }));
     draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
     draft = done(
       apply(draft, {
@@ -505,12 +503,12 @@ describe("the advance gate", () => {
         columns: [sourceColumn("ID"), sourceColumn("C_NAME")],
       }),
     );
+    draft = withTargetColumns(draft, [{ name: "PRIMARY", columns: ["ID"] }]);
     draft = done(apply(draft, { type: "toggle-primary-key", target: "C_NAME" }));
     expect(toSpec(draft).primary_key).toContain("C_NAME");
 
-    const asked = agreed(draft, { type: "write-mode", mode: "CLEAR_THEN_IMPORT" });
-    expect(asked.lines.join(" ")).toContain("主键列");
-    expect(toSpec(asked.draft).primary_key).toEqual(["ID"]);
+    const cleared = done(apply(draft, { type: "write-mode", mode: "CLEAR_THEN_IMPORT" }));
+    expect(toSpec(cleared).primary_key).toContain("C_NAME");
   });
 
   it("leaves the primary key alone when the mode goes back to append", () => {
@@ -525,7 +523,6 @@ describe("the advance gate", () => {
     const back = done(apply(draft, { type: "write-mode", mode: "APPEND" }));
     const step = view(back, 1).step;
     if (step.step !== 1) throw new Error("expected step 1");
-    expect(step.write.primaryKeyDimmed).toBe(false);
     expect(toSpec(back).write_mode).toBe("APPEND");
   });
 
@@ -693,8 +690,8 @@ describe("derived values", () => {
     expect(taskName(draft)).toBe("客户主档日更");
   });
 
-  it("infers the primary key from the target table and says why it is locked", () => {
-    // 任何被禁用的控件都配一句「为什么」，否则用户只会以为它坏了。
+  it("prefills the primary key from the target table without locking it", () => {
+    // 预填，不是锁死：目标表的主键是最可能对的那一组，但改它是人的权利。
     let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t_customer" }));
     draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
     draft = done(
@@ -707,7 +704,8 @@ describe("derived values", () => {
     expect(draft.spec.primary_key).toEqual(["ID"]);
     const step = view(draft, 1).step;
     if (step.step !== 1) throw new Error("expected step 1");
-    expect(step.primaryKeyLock).toBe("目标表已定义主键（ID），按它锁定");
+    // 勾选框上只剩逐行的两句拒绝（没勾这一列、没选目标列），没有第三句。
+    expect(step.rows.map((row) => row.primaryKey)).toEqual([true, false]);
   });
 
   it("does not overwrite a primary key the person ticked themselves", () => {
@@ -715,9 +713,6 @@ describe("derived values", () => {
     // 「主键定义对不上」当面说，不在背后改。
     const draft = withTargetColumns(workedDraft(), [{ name: "PRIMARY", columns: ["C_NAME"] }]);
     expect(draft.spec.primary_key).toEqual(["ID"]);
-    const step = view(draft, 1).step;
-    if (step.step !== 1) throw new Error("expected step 1");
-    expect(step.primaryKeyLock).toBeNull();
   });
 
   it("renders a same-name match read-only and everything else as a dropdown", () => {
@@ -755,10 +750,7 @@ describe("derived values", () => {
       columns: [targetColumn("ID")],
       keys: [{ name: "PRIMARY", columns: ["ID", "TENANT_ID"] }],
     }));
-    const step = view(draft, 1).step;
-    if (step.step !== 1) throw new Error("expected step 1");
     expect(draft.spec.primary_key).toEqual([]);
-    expect(step.primaryKeyLock).toBeNull();
   });
 
   it("drops a primary-key entry whose target field stops existing", () => {
