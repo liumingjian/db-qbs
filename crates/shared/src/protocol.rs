@@ -347,6 +347,17 @@ pub struct AgentInfo {
     /// 新 source 读旧 agent 得到 `None`，与「新 agent 还没观察过」同一档处理。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mysql: Option<MysqlServerInfo>,
+    /// 这台 agent 同时允许在飞的 run 数上限（`sink.toml` 的 `max_concurrent_runs`，#260）。
+    ///
+    /// **它由 agent 自报，因为额度是 agent 的东西**：判额度满不满、拒不拒（`RUN_QUOTA_EXCEEDED`）
+    /// 的是 sink 自己。source 侧的调度器要在**派发之前**就守住这条线（#266），否则配成
+    /// 「每天两点全跑」的那一刻并发峰值等于任务总数，大半会吃到拒绝。让 source 侧另配一份
+    /// 数值就是让同一条限额有两个真相源：配大了照旧被拒，配小了白白空着额度。
+    ///
+    /// **旧版本 agent 不带这个字段**，所以是 `default` + `skip_serializing_if`；读到 `None`
+    /// 的一方按「这台 agent 没说」处理，不许拿 4 顶上——见 `source` 侧调度器的取值规则。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_runs: Option<usize>,
 }
 
 /// 目标端 MySQL 的自述：版本，以及生成建表语句要用的那一项字符序。

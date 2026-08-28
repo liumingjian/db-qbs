@@ -70,6 +70,30 @@ export interface SchedulePreview {
   next_fire_times: string[];
 }
 
+/**
+ * 调度器此刻在干什么（#266）：**排队中的那些**，以及每个任务的下一次触发时刻。
+ *
+ * 队列活在服务端一条后台线程的内存里，不问这个端点就没有任何一处答得出「它在等什么」。
+ * 时刻与 [`SchedulePreview`] 同一份口径：服务器本地时区、已经格式化好的挂钟文本。
+ */
+export interface ScheduleState {
+  timezone: string;
+  utc_offset: string;
+  now: string;
+  queued: QueuedOccurrence[];
+  next_fire_times: { task_id: string; next_fire_time: string | null }[];
+}
+
+/** 一个已经到点、但还没派出去的触发时刻。 */
+export interface QueuedOccurrence {
+  task_id: string;
+  task_name: string;
+  /** 本该触发的那一刻。 */
+  due_at: string;
+  /** 上一次尝试派发时它为什么还没走成。空串 = 还没试过。 */
+  waiting_reason: string;
+}
+
 export type TargetCheckKind =
   | "missing_column"
   | "nullability_mismatch"
@@ -348,6 +372,13 @@ export interface RunHistory {
    */
   task_name: string;
   /**
+   * 这一次是谁发起的（#266）：`MANUAL` 人按的，`SCHEDULED` 到点了调度器发的。
+   *
+   * 缺席只有一种解释——**前端比服务端新**：服务端把老历史行一律迁成了 `MANUAL`。
+   * 所以缺席时什么都不显示，不拿「手动」去糊一个自己不知道的事实。
+   */
+  trigger?: "MANUAL" | "SCHEDULED" | (string & {});
+  /**
    * 当次**实际执行**的源端 SQL 快照：它回答「当时执行了什么」，规格之后怎么改都不动它。
    * 过滤条件就在这条语句里，没有另一半取值需要对照着读。
    */
@@ -420,6 +451,8 @@ export interface LiveRunDetail {
   run_id: string | null;
   /** 与 {@link RunHistory.task_name} 同一份快照。 */
   task_name: string;
+  /** 与 {@link RunHistory.trigger} 同一列：在飞的时候就要分得开手动与调度（#266）。 */
+  trigger?: "MANUAL" | "SCHEDULED" | (string & {});
   source_sql: string;
   evidence?: RunEvidence;
   staging_table: string | null;
@@ -572,6 +605,19 @@ export async function fetchSchedulePreview(
     body: JSON.stringify({ cron }),
   });
   return await readJson<SchedulePreview>(response, "推算下次触发时刻失败");
+}
+
+/**
+ * 调度器此刻的状态。**只读**：写它的是服务端那条调度线程。
+ *
+ * 读不到就当成「没有人在排队」——这一格是给现有清单加一枚徽标的，
+ * 它自己出问题不该让整屏任务列表跟着空掉。
+ */
+export async function fetchScheduleState(): Promise<ScheduleState> {
+  const response = await fetch("/api/schedule", {
+    headers: { Accept: "application/json" },
+  });
+  return await readJson<ScheduleState>(response, "读取调度状态失败");
 }
 
 export function taskInputFrom(

@@ -214,6 +214,10 @@ impl<F: DestinationFactory> Api<'_, F> {
     pub fn agent_info(&self) -> AgentInfo {
         AgentInfo {
             mysql: self.service.observed_mysql(),
+            // 并发额度也在这里补：它是 `sink.toml` 的值，而 source 侧的调度器要靠它
+            // 在派发之前就守住这条线（#266）。身份那三个字段之外，这是第二样
+            // 「进程起来之后才知道」的东西。
+            max_concurrent_runs: Some(self.service.max_concurrent_runs()),
             ..self.agent.clone()
         }
     }

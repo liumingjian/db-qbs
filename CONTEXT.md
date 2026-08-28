@@ -175,7 +175,46 @@ branches on the version.
    refuses a bad expression at save time — that read-out is what makes the parser's semantics
    visible instead of assumed.
 
-   **Nothing fires yet.** This is the configuration half; the loop that acts on it is a later ticket.
+**Scheduler**
+   The **thread inside `source`'s resident parent process** that acts on a Schedule — the same layer
+   as the agent-probe loop, and it exits the same way: it sleeps in short slices and checks the
+   termination flag between them, so SIGTERM's graceful shutdown is not held up. It reaches the same
+   dispatch path as the "run now" button; the two differ only in what the run history records about
+   who started it.
+
+   A run is started when the cron instant arrives **and** the switch is on. Three rules govern the
+   rest, and all three exist so that a fire time **always has an answer**:
+
+   **A collision skips the occurrence and says so.** If that task's previous run has not finished,
+   this occurrence is not started — and a **run-history row is written for it anyway**, saying
+   「上次尚未结束，本次跳过」. Dropping it silently would make "did the month-end one run?"
+   unanswerable. That row is structurally the same as a precheck refusal that never reached the
+   agent: **no run identifier**, the target table untouched, and a failure kind (`SKIPPED`) that is
+   the only value in the closed set meaning *nothing was done*.
+
+   **Occurrences missed while the service was down are not caught up.** When a task is first seen —
+   process start, task created, switch turned on, expression rewritten — only the **next** fire time
+   is computed; the scheduler never looks backwards. A restart therefore cannot set off a burst of
+   unexpected writes, and a three-day outage yields one occurrence, not seventy-two.
+
+   **Dispatch respects the concurrency cap by queueing on the source side**, rather than pushing
+   everything at the agent and letting it refuse: configure "everything at 2am" and the peak
+   concurrency equals the task count, most of which would come back `RUN_QUOTA_EXCEEDED`. The cap is
+   the number the **agent reports about itself** (`max_concurrent_runs`, below) — a second copy
+   configured on the source side would be a second source of truth for one limit, wrong in both
+   directions. An agent old enough not to report it is dispatched **one at a time**: that is the only
+   value that cannot collide with the quota, and the sink's default of 4 would be a guess. The queue
+   is **visible in the interface** (`GET /api/schedule`), with the instant it was due and what it is
+   waiting on; a queue living only in a background thread's memory would leave the screen saying
+   nothing happened. An occurrence that cannot be dispatched for a reason waiting will not fix —
+   datasource gone, agent offline — leaves the queue with a history row explaining itself.
+
+   **The timezone is the server's local one**, the same answer as the expression preview, read
+   through the same `Local` clock.
+
+   Scheduled runs are **distinguishable from manual ones in run history** (`run_trigger`: `MANUAL` or
+   `SCHEDULED`), while they are still in flight as well as after. Rows written before that column
+   existed migrate to `MANUAL` — before it, a run could only have been started by a person.
 
 **Task Draft**
    A Task Definition **while it is being built**, plus everything the interface needs to judge it:
@@ -568,7 +607,10 @@ branches on the version.
    How many runs may be in flight on one agent is a **configured number** (`max_concurrent_runs` in
    `sink.toml`, 4 by default), not an accident of process structure; over it, opening a run is
    **refused on the spot rather than queued** (`RUN_QUOTA_EXCEEDED`), because a caller hanging on a
-   connection that will not move is worse than being told the quota is full. Worker threads are a
+   connection that will not move is worse than being told the quota is full. The agent **reports that
+   number about itself** (`GET /v1/agent/info`) so the Scheduler can hold the line *before*
+   dispatching and queue on the source side instead of collecting refusals; the quota's adjudication
+   stays here, on the agent, because that is where the runs actually are. Worker threads are a
    separate, larger number: the refusal itself, and the read-only endpoints, must still answer while
    several slow writes are in flight.
 

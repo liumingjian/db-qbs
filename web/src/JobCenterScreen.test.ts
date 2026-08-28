@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { RunHistory, Task } from "./api";
-import { JobCenterScreen } from "./JobCenterScreen";
+import { JobCenterScreen, queuedTitle } from "./JobCenterScreen";
 
 const NEVER_RUN_TASK: Task = {
   task_id: "task-1",
@@ -176,5 +176,33 @@ describe("纯追加写的可见标记（#261）", () => {
     const html = render(NEVER_RUN_TASK);
 
     expect(html).not.toContain("纯追加写");
+  });
+});
+
+describe("queuedTitle", () => {
+  // 排队中的那一条要说得出**它在等什么**（#266）：队列活在服务端一条后台线程里，
+  // 只挂一枚「排队中」而不给理由，等于把「什么都没发生」换了个说法。
+  it("says when it should have fired and what it is waiting on", () => {
+    expect(
+      queuedTitle({
+        task_id: "task-1",
+        task_name: "客户主档",
+        due_at: "2026-08-28 02:00",
+        waiting_reason: "目标端 agent「上交」的并发额度已满（在飞 4，上限 4），排队等待",
+      }),
+    ).toBe(
+      "本该于 2026-08-28 02:00 触发；目标端 agent「上交」的并发额度已满（在飞 4，上限 4），排队等待",
+    );
+  });
+
+  it("still answers before the first dispatch attempt has happened", () => {
+    expect(
+      queuedTitle({
+        task_id: "task-1",
+        task_name: "客户主档",
+        due_at: "2026-08-28 02:00",
+        waiting_reason: "",
+      }),
+    ).toBe("本该于 2026-08-28 02:00 触发；已到触发时刻，等待派发");
   });
 });

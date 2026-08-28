@@ -53,6 +53,13 @@ impl<F: DestinationFactory> SinkService<F> {
         self
     }
 
+    /// 这台 agent 同时允许在飞的 run 数上限（#260）。`GET /v1/agent/info` 把它自报出去，
+    /// 好让 source 侧的调度器在派发之前就守住这条线，而不是推过来吃一个
+    /// `RUN_QUOTA_EXCEEDED`（#266）。
+    pub fn max_concurrent_runs(&self) -> usize {
+        self.max_concurrent_runs
+    }
+
     /// 最近一次连上目标端时读到的 MySQL 自述，从没连上过就是 `None`（#257）。
     /// `GET /v1/agent/info` 读的就是这里。
     pub fn observed_mysql(&self) -> Option<MysqlServerInfo> {

@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 use db_qbs_source::http::{routes, Access, Api, Method, Request, Response, RunState};
 use db_qbs_source::{
     AgentStore, AuthStore, DatasourceStore, HistoryStore, OracleAccess, OracleRowSource,
-    RunLogStore, SourceColumn, SourceConfig, SourceReadError, TaskSpec, TaskStore, SESSION_COOKIE,
+    RunLogStore, ScheduleState, SourceColumn, SourceConfig, SourceReadError, TaskSpec, TaskStore,
+    SESSION_COOKIE,
 };
 use serde_json::Value;
 
@@ -44,7 +45,7 @@ fn agent_stub_url() -> &'static str {
                     .to_owned();
                 let info = request_line.contains("/v1/agent/info");
                 let body = if info {
-                    r#"{"agent_id":"stub-agent","name":"桩 agent","version":"0.0.0-test"}"#
+                    r#"{"agent_id":"stub-agent","name":"桩 agent","version":"0.0.0-test","max_concurrent_runs":1}"#
                 } else {
                     r#"{"error":{"code":"BAD_REQUEST","message":"桩只认 /v1/agent/info","run_id":null,"details":{}}}"#
                 };
@@ -87,6 +88,7 @@ struct Rig {
     history: HistoryStore,
     run_logs: RunLogStore,
     runs: Arc<Mutex<RunState>>,
+    schedule: db_qbs_source::ScheduleRegistry,
     auth: AuthStore,
     /// 这台 rig 的会话票据。**每条请求默认都带着它**——`/api/*` 现在整片要求登录，
     /// 不带就是 401，而这个文件里的用例问的几乎都不是「没登录会怎样」。
@@ -128,6 +130,7 @@ impl Rig {
             history: HistoryStore::open(&directory).unwrap(),
             run_logs: RunLogStore::open(&directory).unwrap(),
             runs: Arc::new(Mutex::new(RunState::default())),
+            schedule: Arc::new(Mutex::new(ScheduleState::default())),
             auth,
             session,
             config,
@@ -155,6 +158,7 @@ impl Rig {
             history: &self.history,
             run_logs: &self.run_logs,
             runs: &self.runs,
+            schedule: &self.schedule,
             auth: &self.auth,
             describe_source,
         }
@@ -415,6 +419,13 @@ fn every_route_reaches_its_handler() {
             "/api/builder/schedule",
             "/api/builder/schedule".into(),
             r#"{"cron":"0 2 * * *"}"#.into(),
+            200,
+        ),
+        (
+            Method::Get,
+            "/api/schedule",
+            "/api/schedule".into(),
+            String::new(),
             200,
         ),
         (Method::Get, "/api/agents", "/api/agents".into(), String::new(), 200),
@@ -1137,6 +1148,7 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
             "run_id": "run-7",
             // 开跑那一刻的任务名快照，跟着 live 投影一起出来（#259）。
             "task_name": "holdings",
+            "trigger": "MANUAL",
             "source_sql": EXPECTED_SOURCE_SQL,
             "staging_table": "STG_7",
             "stage": "STREAMING",
@@ -2783,4 +2795,165 @@ fn run_logs_refuse_an_unknown_run_and_a_nonsense_cursor() {
         let response = rig.get(&format!("/api/runs/{run_record_id}/logs?after={bad}"));
         assert_eq!(response.status, 400, "after={bad} 本该被拒");
     }
+}
+
+// ------------------------------------------------------------------ 调度派活
+//
+// 「不补跑」「开关关着不触发」这两条是 `ScheduleState::observe` 的纯函数性质，
+// 用例在 `scheduler.rs` 里。这里守的是另外三条**必须有 store 和子进程才成立**的：
+// 到点真的发得出去、上一次没结束时留下的那行历史长什么样、额度满时排在哪儿。
+//
+// 时钟是参数（`run_scheduler_pass` 的 `now`），所以这三条一秒都不用等。
+
+/// 调度器的一轮，时钟由用例给。
+fn scheduler_pass(rig: &Rig, now: &str) {
+    let terminated = std::sync::atomic::AtomicBool::new(false);
+    db_qbs_source::run_scheduler_pass(
+        &rig.api(),
+        &rig.schedule,
+        chrono::NaiveDateTime::parse_from_str(now, "%Y-%m-%d %H:%M").unwrap(),
+        &terminated,
+    );
+}
+
+fn scheduled_task_json(
+    name: &str,
+    target_table: &str,
+    datasources: &(String, String),
+    cron: &str,
+) -> String {
+    let (source_datasource_id, target_datasource_id) = datasources;
+    format!(
+        r#"{{"name":"{name}","source_datasource_id":"{source_datasource_id}","target_datasource_id":"{target_datasource_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"{target_table}","columns":[{{"source":"ID","target":"ID"}},{{"source":"D_BIZ","target":"D_BIZ"}}],"write_mode":"APPEND","schedule_cron":"{cron}","schedule_enabled":true,"primary_key":["ID"],"where_clause":"D_BIZ = DATE '2026-08-14'"}}}}"#
+    )
+}
+
+fn create_scheduled_task(
+    rig: &Rig,
+    name: &str,
+    target_table: &str,
+    datasources: &(String, String),
+    cron: &str,
+) -> String {
+    let response = rig.post(
+        "/api/tasks",
+        &scheduled_task_json(name, target_table, datasources, cron),
+    );
+    assert_eq!(response.status, 201, "{}", response.body_text());
+    rig.json(&response)["task_id"].as_str().unwrap().to_owned()
+}
+
+/// 到点了就自己跑起来，而且历史上认得出这是**调度发起的**，不是有人按的。
+///
+/// 起服务那一刻不算触发（不补跑）：第一轮只把下一个时刻算出来，一次运行都不该发出去。
+#[test]
+fn the_cron_instant_starts_a_run_that_history_marks_as_scheduled() {
+    let rig = Rig::new();
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let datasources = (source_id, target_id);
+    let task_id = create_scheduled_task(&rig, "每分钟", "HOLDINGS", &datasources, "* * * * *");
+
+    scheduler_pass(&rig, "2026-08-28 03:10");
+    let quiet = rig.json(&rig.get(&format!("/api/runs?task_id={task_id}")));
+    assert!(
+        quiet.as_array().unwrap().is_empty(),
+        "刚看到这个任务的那一轮不该触发任何运行：{quiet}"
+    );
+
+    scheduler_pass(&rig, "2026-08-28 03:11");
+    let listed = rig.json(&rig.get(&format!("/api/runs?task_id={task_id}")));
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(listed[0]["trigger"], "SCHEDULED");
+    assert_eq!(listed[0]["task_name"], "每分钟");
+    // 真发出去了：有运行标识那一半由子进程补，但临时任务文件此刻已经在磁盘上。
+    assert!(listed[0]["run_record_id"].as_str().is_some_and(|id| !id.is_empty()));
+
+    // 同一分钟内再评估一次不会再触发一回（`next_after` 是严格之后）。
+    scheduler_pass(&rig, "2026-08-28 03:11");
+    let again = rig.json(&rig.get(&format!("/api/runs?task_id={task_id}")));
+    assert_eq!(again.as_array().unwrap().len(), 1, "{again}");
+}
+
+/// 上一次还没结束，本次跳过——**但那个触发时刻在历史里留了一行**。
+///
+/// 这行与「预检拒绝、从未到达代理」同构：`run_id` 是空的，目标表一个字节都没动过。
+/// 它存在的唯一理由是「月末那次到底跑没跑」得有答案。
+#[test]
+fn an_occurrence_that_collides_with_a_live_run_is_recorded_without_a_run_id() {
+    let rig = Rig::new();
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let datasources = (source_id, target_id);
+    let task_id = create_scheduled_task(&rig, "每分钟", "HOLDINGS", &datasources, "* * * * *");
+
+    // 有人手动跑了一次，而假子进程睡着不动——到点时它还在飞。
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let manual_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    scheduler_pass(&rig, "2026-08-28 03:10");
+    scheduler_pass(&rig, "2026-08-28 03:11");
+
+    let listed = rig.json(&rig.get(&format!("/api/runs?task_id={task_id}")));
+    let rows = listed.as_array().unwrap();
+    assert_eq!(rows.len(), 2, "被跳过的那一次也要留一行：{listed}");
+    let skipped = rows
+        .iter()
+        .find(|row| row["run_record_id"] != manual_id.as_str())
+        .unwrap();
+    assert_eq!(skipped["run_id"], Value::Null, "跳过的那一次没有运行标识");
+    assert_eq!(skipped["trigger"], "SCHEDULED");
+    assert_eq!(skipped["failure_kind"], "SKIPPED");
+    assert_eq!(skipped["message"], "上次尚未结束，本次跳过");
+    assert_eq!(skipped["outcome"], "FAILED");
+    assert_eq!(skipped["target_table_effect"], "DISCARDED");
+    assert_eq!(skipped["task_name"], "每分钟");
+    assert_eq!(skipped["live"], false);
+}
+
+/// 额度满时**在 source 侧排队**，不推给代理去吃 `RUN_QUOTA_EXCEEDED`——
+/// 而且排着的那一条在界面上看得见它在等什么（`GET /api/schedule`）。
+#[test]
+fn an_occurrence_over_the_agent_quota_waits_in_a_queue_the_interface_can_see() {
+    let rig = Rig::new();
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let datasources = (source_id, target_id);
+    // 桩 agent 自报的额度是 1，所以第一个任务一开跑，第二个就只能等。
+    let busy = rig.create_task("占额度的", "BUSY", &datasources);
+    let waiting = create_scheduled_task(&rig, "排队的", "HOLDINGS", &datasources, "* * * * *");
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{busy}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+
+    scheduler_pass(&rig, "2026-08-28 03:10");
+    scheduler_pass(&rig, "2026-08-28 03:11");
+
+    // 没被推给代理：这个任务一条运行历史都没有。
+    let listed = rig.json(&rig.get(&format!("/api/runs?task_id={waiting}")));
+    assert!(
+        listed.as_array().unwrap().is_empty(),
+        "额度满时不该发出去，也不该记成一次失败：{listed}"
+    );
+
+    let schedule = rig.json(&rig.get("/api/schedule"));
+    let queued = schedule["queued"].as_array().unwrap();
+    assert_eq!(queued.len(), 1, "{schedule}");
+    assert_eq!(queued[0]["task_id"], waiting);
+    assert_eq!(queued[0]["task_name"], "排队的");
+    assert_eq!(queued[0]["due_at"], "2026-08-28 03:11");
+    assert!(
+        queued[0]["waiting_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("并发额度已满")),
+        "排队的那一条要说得出它在等什么：{schedule}"
+    );
+    // 时区写出来，与「下次触发」预览同一份口径。
+    assert!(schedule["utc_offset"].as_str().is_some());
+    assert!(schedule["next_fire_times"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["task_id"] == waiting.as_str()));
 }
