@@ -101,8 +101,12 @@ fn d_biz_destination() -> InMemoryDestination {
 }
 
 fn open_body(run_id: &str) -> String {
+    open_body_on(run_id, "T_POSITION")
+}
+
+fn open_body_on(run_id: &str, target_table: &str) -> String {
     format!(
-        r#"{{"run_id":"{run_id}",{TARGET_JSON}"target_table":"T_POSITION","primary_key":["D_BIZ"],"source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
+        r#"{{"run_id":"{run_id}",{TARGET_JSON}"target_table":"{target_table}","primary_key":["D_BIZ"],"source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
     )
 }
 
@@ -123,12 +127,14 @@ fn every_route_reaches_its_handler() {
             String::new(),
             200,
         ),
-        // 已经开过一次的 run 再开一次是幂等的 200，所以这一行换个 id 走首开那一支。
+        // 已经开过一次的 run 再开一次是幂等的 200，所以这一行换个 id 走首开那一支；
+        // 目标表也得换一张——同一张表上同时只允许一次运行（#260），
+        // 拿 `T_POSITION` 再开一次会被 `TARGET_TABLE_BUSY` 挡下。
         (
             Method::Post,
             "/v1/runs",
             "/v1/runs".into(),
-            open_body("20260814091531_b4e20d"),
+            open_body_on("20260814091531_b4e20d", "T_POSITION_2"),
             200,
         ),
         (
