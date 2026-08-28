@@ -224,6 +224,7 @@ describe("run history API", () => {
     const live = {
       run_record_id: accepted.run_record_id,
       run_id: null,
+      task_name: "持仓明细",
       source_sql: "SELECT a.ID AS ID\n  FROM APP.HOLDINGS a",
       staging_table: null,
       stage: null,

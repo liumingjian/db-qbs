@@ -8,6 +8,7 @@ function history(overrides: Partial<RunHistory> = {}): RunHistory {
     run_record_id: "record-7",
     run_id: "run-7",
     task_id: "task-1",
+    task_name: "订单日增量",
     source_sql: "SELECT ID FROM APP.ORDERS",
     staging_table: "STG_7",
     started_at: "2026-08-25T00:00:00.000Z",

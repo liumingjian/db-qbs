@@ -284,6 +284,12 @@ export interface RunHistory {
   run_id: string | null;
   task_id: string;
   /**
+   * 开跑那一刻的任务名称快照。任务名只是展示标签，随时可以改；认领一次运行靠的是
+   * `task_id`。名字每次都回头去任务上现取的话，改一次名会把过去所有运行记录上的
+   * 名字一起改写。空串表示这条记录早于本字段，展示层这时才回退到当前名称。
+   */
+  task_name: string;
+  /**
    * 当次**实际执行**的源端 SQL 快照：它回答「当时执行了什么」，规格之后怎么改都不动它。
    * 过滤条件就在这条语句里，没有另一半取值需要对照着读。
    */
@@ -343,6 +349,8 @@ export interface RunHistory {
 export interface LiveRunDetail {
   run_record_id: string;
   run_id: string | null;
+  /** 与 {@link RunHistory.task_name} 同一份快照。 */
+  task_name: string;
   source_sql: string;
   evidence?: RunEvidence;
   staging_table: string | null;
