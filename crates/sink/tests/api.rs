@@ -34,6 +34,8 @@ const UNROUTED: &str = "请求的 sink v1 资源不存在";
 struct Rig {
     service: SinkService<Fixture>,
     agent: AgentInfo,
+    /// 同一份目的地，测试这一侧也留一把手：#257 要在它身上装「这台 MySQL 报什么版本」。
+    destination: Arc<InMemoryDestination>,
 }
 
 impl Rig {
@@ -42,13 +44,17 @@ impl Rig {
     }
 
     fn with_destination(destination: InMemoryDestination) -> Self {
+        let destination = Arc::new(destination);
         Self {
-            service: SinkService::new("qbs", Arc::new(destination)),
+            service: SinkService::new("qbs", Arc::clone(&destination)),
             agent: AgentInfo {
                 agent_id: "fixture-agent".to_owned(),
                 name: "fixture".to_owned(),
                 version: "0.0.0-test".to_owned(),
+                mysql: None,
+                max_concurrent_runs: None,
             },
+            destination,
         }
     }
 
@@ -96,8 +102,12 @@ fn d_biz_destination() -> InMemoryDestination {
 }
 
 fn open_body(run_id: &str) -> String {
+    open_body_on(run_id, "T_POSITION")
+}
+
+fn open_body_on(run_id: &str, target_table: &str) -> String {
     format!(
-        r#"{{"run_id":"{run_id}",{TARGET_JSON}"target_table":"T_POSITION","primary_key":["D_BIZ"],"source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
+        r#"{{"run_id":"{run_id}",{TARGET_JSON}"target_table":"{target_table}","primary_key":["D_BIZ"],"source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
     )
 }
 
@@ -118,23 +128,15 @@ fn every_route_reaches_its_handler() {
             String::new(),
             200,
         ),
-        // 已经开过一次的 run 再开一次是幂等的 200，所以这一行换个 id 走首开那一支。
+        // 已经开过一次的 run 再开一次是幂等的 200，所以这一行换个 id 走首开那一支；
+        // 目标表也得换一张——同一张表上同时只允许一次运行（#260），
+        // 拿 `T_POSITION` 再开一次会被 `TARGET_TABLE_BUSY` 挡下。
         (
             Method::Post,
             "/v1/runs",
             "/v1/runs".into(),
-            open_body("20260814091531_b4e20d"),
+            open_body_on("20260814091531_b4e20d", "T_POSITION_2"),
             200,
-        ),
-        // `primary_key` 空 → 400，不必真连目标端。
-        (
-            Method::Post,
-            "/v1/runs/cleanup",
-            "/v1/runs/cleanup".into(),
-            format!(
-                r#"{{"run_id":"{run_id}","target_table":"T_POSITION","target":{UNREACHABLE_TARGET},"primary_key":[]}}"#
-            ),
-            400,
         ),
         (
             Method::Post,
@@ -232,19 +234,67 @@ fn every_route_reaches_its_handler() {
 }
 
 /// 表里的先后**不承重**：字面量样式永远压过带占位的样式。
+///
+/// 从前这条测试的主语是 `/v1/runs/cleanup`——「撤销运行」那条路由，#256 已整套移除，
+/// 表里眼下再没有会被 `/v1/runs/{}` 吃掉的字面量。性质仍然要钉住：**下一条**写进
+/// `/v1/runs/` 底下的字面量路由必须走自己的 handler，而不是被当成一个 run id。
+/// 所以这里不再点名某条路由，而是从 `routes()` 现推：谁会被同方法的占位样式盖住，
+/// 就把谁的真实 URL 送进 `Api::handle`，看它到没到自己家。
 #[test]
 fn literal_patterns_win_over_placeholder_patterns() {
     let rig = Rig::new();
 
-    // `cleanup` 从前靠写在按 run id 分发的那一支之前才不会被当成一个 run id。
-    let cleanup = rig.post("/v1/runs/cleanup", "{}");
-    assert_eq!(cleanup.status, 400, "{}", cleanup.body_text());
-    assert!(!cleanup.body_text().contains(UNROUTED));
-
-    // 同一段路径换成 GET 就只剩按 run id 那条路由——它是个认不出的 run。
-    let as_a_run = rig.get("/v1/runs/cleanup");
+    // 占位那一趟确实在跑：认不出的 run id 落到 `/v1/runs/{}`，而不是通用 404。
+    let as_a_run = rig.get("/v1/runs/20260814091599_zzzzzz");
     assert_eq!(as_a_run.status, 404);
     assert_eq!(rig.json(&as_a_run)["error"]["code"], "RUN_UNKNOWN");
+    assert!(!as_a_run.body_text().contains(UNROUTED));
+
+    // 字面量那一趟压得住：凡是会被占位样式盖住的字面量路由，都必须自己接住。
+    let table = routes::<Fixture>();
+    for route in &table {
+        if route.has_placeholder() {
+            continue;
+        }
+        let shadowed = table.iter().any(|other| {
+            other.has_placeholder()
+                && other.method == route.method
+                && placeholder_covers(other.pattern, route.pattern)
+        });
+        if !shadowed {
+            continue;
+        }
+        let response = match route.method {
+            Method::Get => rig.get(route.pattern),
+            Method::Post => rig.post(route.pattern, "{}"),
+            Method::Other => continue,
+        };
+        assert!(
+            !response.body_text().contains(UNROUTED),
+            "{} 被占位样式吃掉了",
+            route.pattern
+        );
+        assert_ne!(
+            rig.json(&response)["error"]["code"],
+            "RUN_UNKNOWN",
+            "{} 被当成了一个 run id",
+            route.pattern
+        );
+    }
+}
+
+/// 带占位的样式 `pattern` 会不会把字面量路径 `path` 也吃下去。
+///
+/// 测试自备一份匹配规则，和路由自反那几条一个路子：库里那份是被测对象，
+/// 拿它自己校自己等于什么都没校。
+fn placeholder_covers(pattern: &str, path: &str) -> bool {
+    let pattern = pattern.split('/').collect::<Vec<_>>();
+    let path = path.split('/').collect::<Vec<_>>();
+    pattern.len() == path.len()
+        && pattern
+            .iter()
+            .zip(&path)
+            .all(|(expected, actual)| *expected == "{}" || expected == actual)
 }
 
 /// 路由表里不许有两行同方法同样式——重复的那条永远是死的。
@@ -501,4 +551,58 @@ fn agent_info_is_served() {
     assert_eq!(body["agent_id"], "fixture-agent");
     assert_eq!(body["name"], "fixture");
     assert!(body.get("version").is_some(), "{body}");
+}
+
+/// #257 的核心：这台 agent 连的是哪个 MySQL，只有**手上有凭据的那些请求**才知道
+/// （sink 自己不持有目标端凭据，ADR-0037 §2）。所以信息接口在第一次目标端检查之前
+/// **必须报「未知」**——不带 `mysql` 字段，而不是端出一个 8.0 来。
+#[test]
+fn agent_info_reports_no_mysql_until_a_credentialed_request_has_observed_one() {
+    let rig = Rig::new();
+    rig.destination
+        .report_mysql("5.7.44-log", "utf8mb4_general_ci");
+
+    let before = rig.json(&rig.get("/v1/agent/info"));
+    assert_eq!(
+        before.get("mysql"),
+        None,
+        "还没连过目标端就报版本，等于凭空猜一个出来：{before}"
+    );
+
+    let checked = rig.post(
+        "/v1/target/check",
+        &format!(
+            r#"{{{TARGET_JSON}"target_table":"T_POSITION","primary_key":["D_BIZ"],"source_columns":[{{"name":"D_BIZ","type":"DATE","precision":null,"scale":null,"length":null}}]}}"#
+        ),
+    );
+    assert_eq!(checked.status, 200, "{}", checked.body_text());
+
+    let after = rig.json(&rig.get("/v1/agent/info"));
+    assert_eq!(after["mysql"]["version"], "5.7.44-log");
+    assert_eq!(after["mysql"]["utf8mb4_collation"], "utf8mb4_general_ci");
+}
+
+/// 开跑那条路径也算一次观察——两条路径都带着凭据，谁先来谁把版本记上。
+#[test]
+fn opening_a_run_also_records_the_observed_mysql() {
+    let rig = Rig::new();
+    rig.destination.report_mysql("8.0.36", "utf8mb4_0900_ai_ci");
+
+    rig.open_run("20260814091530_a3f19c");
+
+    let info = rig.json(&rig.get("/v1/agent/info"));
+    assert_eq!(info["mysql"]["version"], "8.0.36");
+    assert_eq!(info["mysql"]["utf8mb4_collation"], "utf8mb4_0900_ai_ci");
+}
+
+/// 目的地报不出版本（连得上、但字符集表查不了）时，信息接口照旧报「未知」——
+/// 一台连得上的 MySQL 不会因为这一项读不到就让整条链停摆，但也不许因此被猜成 8.0。
+#[test]
+fn a_destination_that_reports_nothing_leaves_the_info_endpoint_at_unknown() {
+    let rig = Rig::new();
+
+    rig.open_run("20260814091530_a3f19c");
+
+    let info = rig.json(&rig.get("/v1/agent/info"));
+    assert_eq!(info.get("mysql"), None, "{info}");
 }

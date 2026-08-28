@@ -8,7 +8,7 @@ fn target_ddl_is_derived_from_describe_columns() {
         source_column("D_BIZ", "DATE", None, None, None),
     ];
 
-    let ddl = generate_target_ddl(&columns, "T_POSITION", &key("D_BIZ"), None).unwrap();
+    let ddl = generate_target_ddl(&columns, "T_POSITION", &key("D_BIZ"), None, None).unwrap();
 
     assert_eq!(
         ddl,
@@ -30,7 +30,7 @@ fn target_ddl_is_derived_from_describe_columns() {
 fn empty_target_table_uses_the_visible_placeholder() {
     let columns = vec![source_column("D_BIZ", "DATE", None, None, None)];
 
-    let ddl = generate_target_ddl(&columns, "", &key("D_BIZ"), None).unwrap();
+    let ddl = generate_target_ddl(&columns, "", &key("D_BIZ"), None, None).unwrap();
 
     assert!(ddl.contains("CREATE TABLE <目标表名> ("));
 }
@@ -52,7 +52,14 @@ fn target_ddl_uses_all_m3_source_shapes() {
     let mut precision = ColumnPrecision::new();
     precision.insert("N_RAW".to_owned(), [12, 2]);
 
-    let ddl = generate_target_ddl(&columns, "T_POSITION", &key("D_BIZ"), Some(&precision)).unwrap();
+    let ddl = generate_target_ddl(
+        &columns,
+        "T_POSITION",
+        &key("D_BIZ"),
+        Some(&precision),
+        None,
+    )
+    .unwrap();
 
     for expected in [
         "`N_REGULAR` DECIMAL(18,4) NULL",
@@ -80,7 +87,7 @@ fn target_ddl_leaves_unconfigured_number_shapes_as_placeholders() {
         source_column("D_BIZ", "DATE", None, None, None),
     ];
 
-    let ddl = generate_target_ddl(&columns, "T_POSITION", &key("D_BIZ"), None).unwrap();
+    let ddl = generate_target_ddl(&columns, "T_POSITION", &key("D_BIZ"), None, None).unwrap();
 
     assert!(ddl.contains("-- N_RAW、N_EXPR 列的精度 describe 给不出，请在取列面为它们配 (p,s)。"));
     assert_eq!(ddl.matches("DECIMAL(<p>,<s>)").count(), 2);
@@ -93,7 +100,7 @@ fn target_ddl_escapes_placeholder_names_inside_the_sql_comment() {
         source_column("D_BIZ", "DATE", None, None, None),
     ];
 
-    let ddl = generate_target_ddl(&columns, "T_POSITION", &key("D_BIZ"), None).unwrap();
+    let ddl = generate_target_ddl(&columns, "T_POSITION", &key("D_BIZ"), None, None).unwrap();
 
     assert!(ddl.contains("-- N_RAW\\nDROP TABLE `T_AUDIT`; 列的精度"));
     assert!(!ddl.contains("\nDROP TABLE `T_AUDIT`;"));
@@ -110,7 +117,8 @@ fn target_ddl_rejects_derived_shapes_at_both_decimal_boundaries() {
             source_column("D_BIZ", "DATE", None, None, None),
         ];
 
-        let error = generate_target_ddl(&columns, "T_POSITION", &key("D_BIZ"), None).unwrap_err();
+        let error =
+            generate_target_ddl(&columns, "T_POSITION", &key("D_BIZ"), None, None).unwrap_err();
 
         assert_eq!(error.columns.len(), 1);
         assert_eq!(error.columns[0].column, name);
@@ -127,7 +135,7 @@ fn target_ddl_error_reports_all_unsupported_columns() {
         source_column("D_BIZ", "DATE", None, None, None),
     ];
 
-    let error = generate_target_ddl(&columns, "T_POSITION", &key("D_BIZ"), None).unwrap_err();
+    let error = generate_target_ddl(&columns, "T_POSITION", &key("D_BIZ"), None, None).unwrap_err();
 
     assert_eq!(
         error
@@ -159,6 +167,7 @@ fn a_composite_primary_key_makes_every_key_column_not_null() {
         "T_POSITION",
         &["C_FUND".to_owned(), "D_BIZ".to_owned()],
         None,
+        None,
     )
     .unwrap();
 
@@ -169,11 +178,30 @@ fn a_composite_primary_key_makes_every_key_column_not_null() {
     assert!(ddl.contains("PRIMARY KEY (`C_FUND`, `D_BIZ`)"));
 }
 
+/// #261：一列主键都没勾时，语句里不出现主键约束，而且每一列都可空。
+///
+/// 表头那句交底也跟着换：说的不再是「别去掉这条主键」，而是「重跑会再追加一份」。
+#[test]
+fn no_primary_key_means_no_constraint_and_a_note_that_says_why() {
+    let columns = vec![
+        source_column("C_FUND", "VARCHAR2", None, None, Some(20)),
+        source_column("N_AMT", "NUMBER", Some(18), Some(2), None),
+    ];
+
+    let ddl = generate_target_ddl(&columns, "T_FLOW", &[], None, None).unwrap();
+
+    assert!(!ddl.contains("PRIMARY KEY"), "{ddl}");
+    assert!(ddl.contains("`C_FUND` VARCHAR(20) NULL"), "{ddl}");
+    assert!(ddl.contains("`N_AMT` DECIMAL(18,2) NULL"), "{ddl}");
+    assert!(ddl.contains("每跑一次都会把这批数据再追加一份"), "{ddl}");
+}
+
 #[test]
 fn a_primary_key_column_missing_from_describe_is_named() {
     let columns = vec![source_column("D_BIZ", "DATE", None, None, None)];
 
-    let error = generate_target_ddl(&columns, "T_POSITION", &key("C_FUND"), None).unwrap_err();
+    let error =
+        generate_target_ddl(&columns, "T_POSITION", &key("C_FUND"), None, None).unwrap_err();
 
     assert_eq!(error.columns.len(), 1);
     assert_eq!(error.columns[0].column, "C_FUND");

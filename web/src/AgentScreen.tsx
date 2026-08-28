@@ -145,6 +145,7 @@ export function AgentScreen({
                 <th>状态</th>
                 <th>身份</th>
                 <th>版本</th>
+                <th>MySQL</th>
                 <th>最近可见</th>
                 <th>被引用</th>
                 <th className="action-column">操作</th>
@@ -182,6 +183,20 @@ export function AgentScreen({
                     </td>
                     <td className="mono">
                       {agent.version === "" ? "—" : agent.version}
+                    </td>
+                    {/* agent 连的那台 MySQL（#257）。**没报过就写「未知」**，不是「8.0」：
+                        agent 自己不持有目标库凭据，要等它经手过一次目标端检查或一次开跑
+                        才知道；旧版本 agent 则永远报不出来。字符序挂在 `title` 上——
+                        它是建表语句要用的那一项，列表里摊开会把这一栏撑爆。 */}
+                    <td
+                      className="mono"
+                      title={
+                        agent.mysql_collation === null
+                          ? "这台 agent 还没报过它所连 MySQL 的字符序"
+                          : `utf8mb4 默认字符序：${agent.mysql_collation}`
+                      }
+                    >
+                      {agent.mysql_version === null ? "未知" : agent.mysql_version}
                     </td>
                     {/* 与列表屏同一种时间格式（`formatTimestamp`）：同一个时刻在两屏上
                         不该长得不一样，原始的 RFC 3339 串还会在窄列里从中间折断。 */}

@@ -361,6 +361,7 @@ narrow_spec() {
   local target=${1:-M1_NARROW} date=${2:-$BIZ_DATE}
   jq -nc --arg target "$target" --arg date "$date" '{
     owner:"SPIKE", table:"T_M1_NARROW", target_table:$target,
+    write_mode:"APPEND",
     primary_key:["ROW_ID"],
     columns:[
       {source:"ROW_ID", target:"ROW_ID"},
@@ -452,6 +453,7 @@ scenario_a4() {
   # 表不存在这一态由规格里的 `table` 造：SQL 由规格现算，ORA-942 仍在 describe 那一步炸。
   missing_table_spec=$(jq -nc '{
     owner:"SPIKE", table:"TABLE_THAT_DOES_NOT_EXIST", target_table:"M1_NARROW",
+    write_mode:"APPEND",
     primary_key:["D_BIZ"],
     columns:[{source:"D_BIZ", target:"D_BIZ"}]
   }') || return 1

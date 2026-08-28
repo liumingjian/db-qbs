@@ -11,21 +11,23 @@ mod protocol;
 mod run_stage;
 mod target_shape;
 mod verification;
+mod write_mode;
 
 pub use open_outcome::OpenOutcome;
 pub use protocol::{
-    AbortResponse, AgentInfo, BatchPayload, BatchResponse, CleanupRunRequest, CleanupRunResponse,
-    ColumnSupport, CommitRequest, CommitResponse, ErrorBody, ErrorEnvelope, OpenRunRequest,
-    OpenRunResponse, PrecheckIssue, RangeCheckColumn, RangeCheckResult, RunResponse, SourceColumn,
-    TargetCheckKind, TargetCheckRequest, TargetCheckResult, TargetConnection, Terminal,
-    TargetCheckFinding,
+    AbortResponse, AgentInfo, BatchPayload, BatchResponse, ColumnSupport, CommitRequest,
+    CommitResponse, ErrorBody, ErrorEnvelope, MysqlServerInfo, OpenRunRequest, OpenRunResponse,
+    PrecheckIssue, RangeCheckColumn, RangeCheckResult, RunResponse, SourceColumn,
+    TargetCheckFinding, TargetCheckKind, TargetCheckRequest, TargetCheckResult, TargetConnection,
+    Terminal,
 };
 pub use run_stage::RunStage;
 pub use target_shape::{
     classify_column, column_support, derive_number_shape, is_business_date_column,
     is_supported_decimal_shape, ColumnShape, ShapeRejection, TargetShape,
 };
-pub use verification::{swap_rows_in_range, RowCounts, Verdict};
+pub use verification::{swap_rows_consistent, RowCounts, Verdict};
+pub use write_mode::{WriteMode, WriteStatement};
 
 static CANONICAL_NUMBER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(0|-?[1-9][0-9]*(\.[0-9]*[1-9])?|-?0\.[0-9]*[1-9])$")

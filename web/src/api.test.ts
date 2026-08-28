@@ -11,6 +11,7 @@ import {
   fetchBuilderSqlColumns,
   fetchBuilderTables,
   fetchColumns,
+  fetchSchedulePreview,
   fetchTargetColumns,
   fetchTargetTables,
   checkTargetTable,
@@ -18,7 +19,6 @@ import {
   previewBuilderRows,
   previewErrorMessage,
   cancelRun,
-  cleanupRun,
   fetchRun,
   listRunHistory,
   listTasks,
@@ -49,6 +49,8 @@ function spec(overrides: Partial<TaskSpec> = {}): TaskSpec {
       { source: "ID", target: "ID" },
       { source: "D_BIZ", target: "D_BIZ" },
     ],
+    write_mode: "APPEND",
+    schedule_enabled: false,
     primary_key: ["ID"],
     ...overrides,
   };
@@ -224,6 +226,7 @@ describe("run history API", () => {
     const live = {
       run_record_id: accepted.run_record_id,
       run_id: null,
+      task_name: "持仓明细",
       source_sql: "SELECT a.ID AS ID\n  FROM APP.HOLDINGS a",
       staging_table: null,
       stage: null,
@@ -237,19 +240,16 @@ describe("run history API", () => {
       live: true,
     };
     const canceled = { message: "已发送 SIGTERM" };
-    const cleaned = { deleted_rows: 3 };
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(accepted), { status: 202 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(live), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify(canceled), { status: 202 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify(cleaned), { status: 200 }));
+      .mockResolvedValueOnce(new Response(JSON.stringify(canceled), { status: 202 }));
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(startRun("task-01")).resolves.toEqual(accepted);
     await expect(fetchRun(accepted.run_record_id)).resolves.toEqual(live);
     await expect(cancelRun(accepted.run_record_id)).resolves.toEqual(canceled);
-    await expect(cleanupRun(accepted.run_record_id)).resolves.toEqual(cleaned);
 
     expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/runs", expect.objectContaining({
       method: "POST",
@@ -260,9 +260,6 @@ describe("run history API", () => {
       headers: { Accept: "application/json" },
     });
     expect(fetchMock).toHaveBeenNthCalledWith(3, "/api/runs/record%2F01/cancel", expect.objectContaining({
-      method: "POST",
-    }));
-    expect(fetchMock).toHaveBeenNthCalledWith(4, "/api/runs/record%2F01/cleanup", expect.objectContaining({
       method: "POST",
     }));
   });
@@ -352,6 +349,59 @@ describe("SQL builder API", () => {
     }));
   });
 
+  it("asks the server for the timezone and the next fire times, and never computes them here", async () => {
+    const answer = {
+      timezone: "CST",
+      utc_offset: "+08:00",
+      now: "2026-08-28 10:07",
+      next_fire_times: ["2026-08-29 02:00", "2026-08-30 02:00"],
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify(answer), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchSchedulePreview("0 2 * * *")).resolves.toEqual(answer);
+    expect(fetchMock).toHaveBeenCalledWith("/api/builder/schedule", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ cron: "0 2 * * *" }),
+    }));
+  });
+
+  it("asks for the timezone even before an expression is typed", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          timezone: "CST",
+          utc_offset: "+08:00",
+          now: "2026-08-28 10:07",
+          next_fire_times: [],
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchSchedulePreview(null)).resolves.toMatchObject({ next_fire_times: [] });
+    expect(fetchMock).toHaveBeenCalledWith("/api/builder/schedule", expect.objectContaining({
+      body: JSON.stringify({ cron: null }),
+    }));
+  });
+
+  it("surfaces the parser's own words when the expression is refused", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { kind: "request", message: "小时字段的 25 超出取值范围 0-23" } }),
+        { status: 400 },
+      ),
+    ));
+
+    // 保存被拒时是同一句话，因为两条路径读的是服务端同一份解析器。
+    await expect(fetchSchedulePreview("0 25 * * *")).rejects.toThrow(
+      "小时字段的 25 超出取值范围 0-23",
+    );
+  });
+
   it("describes columns from a custom source SELECT", async () => {
     const columns = [
       {
@@ -389,8 +439,26 @@ describe("SQL builder API", () => {
 
   it("asks the target end for tables and columns by datasource id alone", async () => {
     // 界面只报数据源 id——凭据由 source 解一次再过线，前端一次也不碰（ADR-0037 §1/§8）。
+    // `extra` 按 **MySQL 5.7** 的取值写（#262）：5.7 的 `information_schema.COLUMNS.EXTRA`
+    // 对一根 `NOT NULL DEFAULT CURRENT_TIMESTAMP` 的列给空串，`DEFAULT_GENERATED` 是 8.0 才加的。
+    // 夹具里写死 8.0 独有的取值，等于把「只在 8.0 上成立」当成了通例。
+    // 自增列两版都报 `auto_increment`，所以这里一并放一根，两个版本共有的形状各占一行。
     const metadata = {
       columns: [
+        {
+          name: "ID",
+          column_type: "bigint(20)",
+          data_type: "bigint",
+          precision: 20,
+          scale: 0,
+          length: null,
+          datetime_precision: null,
+          nullable: false,
+          character_set: null,
+          ordinal: 1,
+          default_value: null,
+          extra: "auto_increment",
+        },
         {
           name: "CREATE_TIME",
           column_type: "datetime",
@@ -401,9 +469,9 @@ describe("SQL builder API", () => {
           datetime_precision: 0,
           nullable: false,
           character_set: null,
-          ordinal: 1,
+          ordinal: 2,
           default_value: "CURRENT_TIMESTAMP",
-          extra: "DEFAULT_GENERATED",
+          extra: "",
         },
       ],
       keys: [{ name: "PRIMARY", columns: ["ID"] }],

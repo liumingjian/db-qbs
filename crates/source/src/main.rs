@@ -8,8 +8,8 @@ use std::time::Instant;
 use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel};
 use db_qbs_source::{
     fetch_agent_info, generate_run_id, load_source_config, load_task_config, run_transfer,
-    FailureKind, HttpSinkClient, OracleRowSource, RunStage, TransferEvent, TransferFailure,
-    TransferRequest, TransferSummary,
+    FailureKind, HttpSinkClient, OracleRowSource, RunStage, Terminal, TransferEvent,
+    TransferFailure, TransferRequest, TransferSummary, WriteMode,
 };
 use serde_json::{json, Map, Value};
 
@@ -209,6 +209,7 @@ fn run() -> bool {
         // 子进程不碰数据源库、也不碰密钥文件。
         target: task.target.clone(),
         primary_key: task.spec.primary_key.clone(),
+        write_mode: task.spec.write_mode,
     };
     let result = run_transfer(&mut source, &mut sink, request, |event| {
         emit_transfer_event(event, &run_id, &task_path)
@@ -216,7 +217,7 @@ fn run() -> bool {
 
     match result {
         Ok(summary) => {
-            emit_successful_run(&summary, &run_id, &task_path);
+            emit_successful_run(&summary, task.spec.write_mode, &run_id, &task_path);
             true
         }
         Err(failure) => {
@@ -247,7 +248,22 @@ fn verify_agent(task: &db_qbs_source::TaskConfig) -> Result<(), String> {
     Ok(())
 }
 
-fn emit_successful_run(summary: &TransferSummary, run_id: &str, task: &Path) {
+/// 跑成功的那条终态日志。
+///
+/// **`target_table_effect` 在这里就说清楚，不留给父进程去猜**（#264）：目标表到底是
+/// 「按主键合并」还是「整表被替换」，只有跑数的这一端知道本次运行的写入模式。
+/// 父进程从前拿 `SUCCEEDED` 一律折成 `SWAPPED`，清空后导入接进来之后那就是假话了。
+fn emit_successful_run(
+    summary: &TransferSummary,
+    write_mode: WriteMode,
+    run_id: &str,
+    task: &Path,
+) {
+    let target_table_effect = if write_mode.clears_target() {
+        Terminal::Replaced
+    } else {
+        Terminal::Swapped
+    };
     emit_with_run(
         LogLevel::Info,
         LogEvent::RunFinished,
@@ -256,6 +272,7 @@ fn emit_successful_run(summary: &TransferSummary, run_id: &str, task: &Path) {
         [
             ("terminal", json!(RunStage::Succeeded.as_str())),
             ("stage", json!(RunStage::Succeeded.as_str())),
+            ("target_table_effect", json!(target_table_effect.as_str())),
             ("message", json!("run completed successfully")),
             ("failure_kind", Value::Null),
             ("source_code", Value::Null),

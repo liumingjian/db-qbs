@@ -46,6 +46,8 @@ function agent(id: string, name: string, status: Agent["status"]): Agent {
     last_seen_at: "2026-08-25T02:00:00Z",
     status,
     last_error: null,
+    mysql_version: "8.0.36",
+    mysql_collation: "utf8mb4_0900_ai_ci",
   };
 }
 

@@ -17,11 +17,11 @@ use serde_json::Value;
 // 报文形状的唯一定义在 `db-qbs-shared`（#124）。这里只保留门面，
 // crate 内部与既有测试的引用路径一个字不变。
 pub use db_qbs_shared::{
-    AbortResponse, BatchPayload, BatchResponse, CleanupRunRequest, CleanupRunResponse,
-    ColumnSupport, CommitRequest, CommitResponse, ErrorBody, ErrorEnvelope, OpenOutcome,
-    OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn, RangeCheckResult,
-    RunResponse, SourceColumn, TargetCheckFinding,
-    TargetCheckKind, TargetCheckRequest, TargetCheckResult, TargetConnection, Terminal,
+    AbortResponse, BatchPayload, BatchResponse, ColumnSupport, CommitRequest, CommitResponse,
+    ErrorBody, ErrorEnvelope, MysqlServerInfo, OpenOutcome, OpenRunRequest, OpenRunResponse,
+    PrecheckIssue, RangeCheckColumn, RangeCheckResult, RunResponse, SourceColumn,
+    TargetCheckFinding, TargetCheckKind, TargetCheckRequest, TargetCheckResult, TargetConnection,
+    Terminal, WriteMode, WriteStatement,
 };
 // 九行形态的推导也只有一份定义（#125）——判定式仍两端各一份。
 pub use agent::load_or_create as load_agent_identity;
@@ -30,14 +30,31 @@ pub use db_qbs_shared::{
     is_supported_decimal_shape, ColumnShape, ShapeRejection, TargetShape,
 };
 pub use http::serve;
-pub use mysql_destination::{check_connection_settings, MysqlDestination, MysqlFactory};
+pub use mysql_destination::{
+    check_connection_settings, MysqlDestination, MysqlFactory, MIN_PACKET, PACKET_REMEDY,
+};
 // `precheck` 是不带主键那一支，只给「生成的表喂回预检必过」那道漂移闸用；
 // 带主键那一支同样导出，因为漂移闸现在还要守「生成的 DDL 带主键，ADR-0035 §2 三条得过」。
-pub use precheck::{precheck, precheck_with_primary_key, target_check_findings};
+pub use precheck::{
+    precheck, precheck_conclusions, precheck_with_primary_key, target_check_findings,
+    APPEND_ONLY_CONCLUSION,
+};
 pub use service::build_staging_ddl;
 
 const MAX_PREPARED_STATEMENT_PLACEHOLDERS: usize = 65_535;
 const TOMBSTONE_LIMIT: usize = 32;
+
+/// 一台 agent 上同时允许在飞的 run 数上限，`max_concurrent_runs` 不写时取它（#260）。
+///
+/// 4 不是算出来的，是**保守的默认**：每个 run 各持一份自己的目标端连接池
+/// （[`MysqlDestination`]），4 个 run 在最坏情况下也就是十几条 MySQL 连接。
+/// 现场要更高就在 `sink.toml` 里写明——但那是一次**明示**的决定，
+/// 不该由「谁先把请求发过来谁就占住」来隐式决定。
+pub const DEFAULT_MAX_CONCURRENT_RUNS: usize = 4;
+
+fn default_max_concurrent_runs() -> usize {
+    DEFAULT_MAX_CONCURRENT_RUNS
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -58,6 +75,12 @@ pub struct SinkConfig {
     /// 不需要人来准备，没有就现生成（见 [`crate::load_agent_identity`]）。
     #[serde(default)]
     pub agent_id_file: Option<PathBuf>,
+    /// 这台 agent 同时允许在飞多少个 run（#260），不写取 [`DEFAULT_MAX_CONCURRENT_RUNS`]。
+    ///
+    /// 超限时 `POST /v1/runs` 当场拒，**不排队**：排队等于让 source 那边挂着一条
+    /// 看不出为什么不动的连接，而「额度满了，等在跑的那几个结束再来」是句能读懂的话。
+    #[serde(default = "default_max_concurrent_runs")]
+    pub max_concurrent_runs: usize,
     /// `sink.toml` 所在目录，**不来自配置文件本身**：`agent_id_file` 留空时的默认位置按它算。
     /// [`SinkConfig::parse`] 出来的配置里它是空的，那条路径只有测试在走。
     #[serde(skip)]
@@ -125,6 +148,9 @@ pub struct AtomicSwapRequest {
     pub run_id: String,
     pub staging_table: String,
     pub target_table: String,
+    /// 任务定义里的写入模式（#264）。清空后导入时，切换事务里先对目标表整表
+    /// `DELETE` 再导入；追加写时这一步根本不存在。**它不参与选语句**。
+    pub write_mode: WriteMode,
     /// upsert 的去重键（ADR-0035 §1）。`ON DUPLICATE KEY UPDATE` 的更新列
     /// = `columns` 减去这里的列。
     pub primary_key: Vec<String>,
@@ -137,7 +163,8 @@ pub struct AtomicSwapRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AtomicSwapResult {
     pub staged_rows: u64,
-    /// 恒为 0（ADR-0035 §4）——新写入模型不删任何行，字段保留。
+    /// 追加写下恒为 0（ADR-0035 §4）——那条路不删任何行。
+    /// 清空后导入下是切换事务里那条整表 `DELETE` 报告的行数（#264）。
     pub purged_rows: u64,
     pub swapped_rows: u64,
     pub count_ms: u64,
@@ -164,11 +191,6 @@ pub enum DropStagingError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CleanupRunError {
-    Environment(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteBatchError {
     DataValue {
         mysql_code: u16,
@@ -187,6 +209,13 @@ pub enum WriteBatchError {
 }
 
 pub trait Destination: Send + Sync {
+    /// 这条连接背后那台 MySQL 的自述（版本 + utf8mb4 默认字符序，见 [`MysqlServerInfo`]）。
+    ///
+    /// **建连接的时候就读掉**，之后只是把读到的那一份交出来：`GET /v1/agent/info` 手上
+    /// 没有任何凭据（ADR-0037 §2），临时去连是连不上的。读不到就是 `None`——
+    /// 一台连得上、但连自己的字符集表都查不了的 MySQL 不该因此让整条搬运链停摆。
+    fn server_info(&self) -> Option<MysqlServerInfo>;
+
     fn target_columns(&self, target_table: &str) -> Result<Vec<TargetColumn>, String>;
     fn target_keys(&self, target_table: &str) -> Result<Vec<TargetKey>, String>;
     fn create_staging(&self, staging_table: &str, ddl: &str) -> Result<(), CreateStagingError>;
@@ -200,12 +229,6 @@ pub trait Destination: Send + Sync {
     fn atomic_swap(&self, request: &AtomicSwapRequest)
         -> Result<AtomicSwapResult, AtomicSwapError>;
     fn drop_staging(&self, staging_table: &str) -> Result<(), DropStagingError>;
-    fn cleanup_run(
-        &self,
-        run_id: &str,
-        target_table: &str,
-        primary_key: &[String],
-    ) -> Result<u64, CleanupRunError>;
 }
 
 /// 一条按 run 建起来的目标端连接：库名 + 目的地。
@@ -263,6 +286,12 @@ impl<D: Destination> DestinationFactory for FixedDestination<D> {
 
 struct ActiveRun<D> {
     run_id: String,
+    /// 本次 run 的写入模式（#264），从 `POST /v1/runs` 原样收下。
+    /// 它决定切换时要不要先整表 `DELETE`，以及终态是 `SWAPPED` 还是 `REPLACED`。
+    write_mode: WriteMode,
+    /// 本次 run 写的是哪个库——互斥键的前半截（#260）。
+    /// 取自工厂给的 [`ConnectedDestination::database`]，不从请求里另取一份。
+    database: String,
     staging_table: String,
     source_columns: Vec<String>,
     swap_columns: Vec<String>,
@@ -282,6 +311,8 @@ impl<D> Clone for ActiveRun<D> {
     fn clone(&self) -> Self {
         Self {
             run_id: self.run_id.clone(),
+            write_mode: self.write_mode,
+            database: self.database.clone(),
             staging_table: self.staging_table.clone(),
             source_columns: self.source_columns.clone(),
             swap_columns: self.swap_columns.clone(),
@@ -296,10 +327,32 @@ impl<D> Clone for ActiveRun<D> {
     }
 }
 
+/// 一个已受理但尚未进 `active_runs` 的 run 占的位子（#260）。
+pub(crate) struct RunAdmission {
+    pub(crate) database: String,
+    pub(crate) target_table: String,
+}
+
 pub struct SinkService<F: DestinationFactory> {
     factory: F,
+    /// 同时在飞的 run 数上限（#260），来自 `sink.toml` 的 `max_concurrent_runs`。
+    max_concurrent_runs: usize,
     active_runs: Mutex<HashMap<String, ActiveRun<F::Dest>>>,
+    /// 已经受理、但还没走完「连库 → 读元数据 → 预检 → 建暂存表」的 run（#260）。
+    ///
+    /// 为什么不能只看 `active_runs`：那张表要到 `open` 的**最后一行**才有条目，
+    /// 而在它之前是好几秒的 MySQL 往返。只看它的话，两个指向同一张目标表的 run
+    /// 会双双通过判定、双双开跑，互斥键等于没设。受理的那一刻先在这里占个位，
+    /// 无论 `open` 成功还是中途出错，位子都由 `AdmissionGuard` 的 `Drop` 归还。
+    admitting: Mutex<HashMap<String, RunAdmission>>,
     tombstones: Mutex<VecDeque<RunResponse>>,
+    /// 最近一次连上目标端时读到的 MySQL 自述（#257）。
+    ///
+    /// **这是缓存，不是配置。** sink 启动时不连 MySQL，`GET /v1/agent/info` 也拿不到凭据，
+    /// 所以「这台 agent 连的是哪个版本」只能在**手上有凭据的那些路径**上顺手记一笔：
+    /// 目标端检查（`POST /v1/target/check`）与开跑（`POST /v1/runs`）。在那之前是
+    /// `None`，信息接口照实报「未知」——猜一个 8.0 出来，正是本票要避免的那种静默。
+    observed_mysql: Mutex<Option<MysqlServerInfo>>,
 }
 
 /// sink 内部的错误模型。**它不是线上形状**——过线的是 [`ErrorEnvelope`]，

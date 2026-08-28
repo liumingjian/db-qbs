@@ -11,12 +11,22 @@ import {
   TerminalBlock,
   UnknownConclusion,
   UpsertNote,
-  UPSERT_NOTE_DONE,
 } from "./components/DesignSystem";
+import {
+  runWriteSemantics,
+  runWriteView,
+  writeStatementLabel,
+} from "./writeMode";
 import { messageFrom } from "./errors";
 import { FailureEvidence } from "./FailureEvidence";
-import { runIdPresentation } from "./history";
+import {
+  knownTerminalEffect,
+  runIdPresentation,
+  runTaskName,
+  runTriggerLabel,
+} from "./history";
 import { PrecheckReports } from "./PrecheckReports";
+import { RunLogPanel } from "./RunLogPanel";
 import { progressOfLiveRun } from "./progress";
 import { runPresentation } from "./run";
 import type { RunPresentation } from "./run";
@@ -29,12 +39,15 @@ const countFormatter = new Intl.NumberFormat("zh-CN");
 export function RunScreen({
   task,
   runRecordId,
+  focusLogs = false,
   onBack,
   onRelaunch,
   onEditTask,
 }: {
   task: Task;
   runRecordId: string;
+  /** 地址点名的是日志那一段（`#runs/<id>/logs`，任务列表的「查看日志」）。 */
+  focusLogs?: boolean;
   onBack: () => void;
   onRelaunch: () => void;
   onEditTask: (step: Step) => void;
@@ -132,6 +145,7 @@ export function RunScreen({
   }
 
   return (
+    <>
     <section className="card run-card" aria-labelledby="run-title">
       <header className="card-header run-header">
         <div>
@@ -139,7 +153,7 @@ export function RunScreen({
             <ArrowLeft size={ICON.sm} aria-hidden="true" />
             返回任务
           </button>
-          <h1 id="run-title">{task.name}</h1>
+          <h1 id="run-title">{detail === null ? task.name : runTaskName(detail, task.name)}</h1>
           <span className="card-subtitle mono">运行记录 · {runRecordId}</span>
         </div>
         {detail?.live === true ? (
@@ -192,12 +206,17 @@ export function RunScreen({
             <FinishedRun
               detail={detail}
               presentation={presentation}
+              task={task}
               onEditTask={onEditTask}
             />
           )}
         </div>
       )}
     </section>
+    {/* 日志摆在详情下面，进行中与已结束走同一段（#263）：折叠出来的那几个数字答不出
+        「它卡在哪一步、上一句说了什么」，而那正是出事时唯一想看的东西。 */}
+    <RunLogPanel runRecordId={runRecordId} focus={focusLogs} />
+    </>
   );
 }
 
@@ -226,6 +245,17 @@ function RunIdentity({ task, detail }: { task: Task; detail: RunDetail }) {
         value={runIdPresentation(detail)}
       />
       <DetailValue label="所属任务" value={task.task_id} />
+      {/* 谁发起的（#266）：夜里那次是自动跑的还是有人手动补的，只有这一格答得出来。
+          服务端没给这一列（前端比它新）就整行不渲染，不猜。 */}
+      {runTriggerLabel(detail.trigger) !== null && (
+        <DetailValue label="发起方式" value={runTriggerLabel(detail.trigger)!} />
+      )}
+      {/* 写入方式在运行详情上必须看得见（#261）：一条跑完的记录，光看行数看不出
+          这次是「合并」还是「又追加了一份」。读的是当次快照，不是任务此刻的主键。 */}
+      <DetailValue
+        label="写入方式"
+        value={writeStatementLabel(runWriteView(detail.evidence, task.spec).statement)}
+      />
       <DetailValue label="暂存表" value={detail.staging_table ?? "—"} />
     </dl>
   );
@@ -293,13 +323,18 @@ function LiveRun({
 function FinishedRun({
   detail,
   presentation,
+  task,
   onEditTask,
 }: {
   detail: RunDetail & { live: false };
   presentation: RunPresentation;
+  /** 写入方式那句交底读的是任务定义，不是这一次运行的结果（#261）。 */
+  task: Task;
   onEditTask: (step: Step) => void;
 }) {
   const mappingFailed = presentation.kind === "mapping-failed";
+  /** 判断走认得的那一份，显示走原样那一份（见 `history.ts`）。 */
+  const knownEffect = knownTerminalEffect(presentation.terminalEffect);
   return (
     <>
       <section className={`run-result is-${presentation.kind}`}>
@@ -312,8 +347,16 @@ function FinishedRun({
           )}
         </div>
         <RunConclusion detail={detail} presentation={presentation} />
-        {presentation.terminalEffect === "SWAPPED" && (
-          <UpsertNote text={UPSERT_NOTE_DONE} />
+        {/* 说法跟着写法与模式一起走（#261/#264），而且跟着的是**当时那一次**的写法：
+            主键与模式都读运行证据里的快照，不读任务此刻的定义，否则今天改一次任务
+            就把过去每一条记录声称做过的事一起改写了（同 #259 的名称快照）。
+            无主键那条路上「按主键 upsert」是句假话，先清空再导入那条路上「源端删掉的
+            行仍保留」也是。
+            挂不挂问 `knownTerminalEffect`：`DISCARDED` 不挂（目标表没被碰过），产品
+            不认识的那个词也不挂——原样透出是一回事，据它断言写入做了什么是另一回事，
+            后者这里没有资格做（#263 的同一条原则）。 */}
+        {knownEffect !== null && knownEffect !== "DISCARDED" && (
+          <UpsertNote text={runWriteSemantics(detail.evidence, task.spec)} />
         )}
       </section>
 

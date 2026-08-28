@@ -253,8 +253,7 @@ pre.drawer-sql,
 .ddl-output,
 .run-identity dd, .run-metrics dd,
 .outcome-label,
-.unknown-effect,
-.effect-text, .source-code,
+.source-code,
 .precheck-reports code,
 .precheck-exit code,
 .diagnostic-table td,
@@ -287,7 +286,7 @@ pre.drawer-sql,
 .job-grid tbody tr:hover td.action-column { background: var(--mute-bg); }
 .job-grid th.action-column { z-index: 2; }
 .row-actions { display: flex; align-items: center; }
-/* 两道分隔线把「跑」｜「看 / 改 / 改名」｜「删」分成三组——位置因此是有结构的，不是硬记。 */
+/* 两道分隔线把「跑」｜「看 / 改 / 看日志」｜「删」分成三组——位置因此是有结构的，不是硬记。 */
 .row-actions .divider { width: 1px; height: 14px; margin: 0 4px; background: var(--line-mid); }
 
 /* ---------------------------------------------------------------- 迁移进度
@@ -427,7 +426,6 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .bulk-task-target .mono { color: var(--dim); overflow-wrap: anywhere; }
 /* 「清理是删除，不是还原」——这句是**否定一个天然的误读**，不是提示，所以着告警色
    而不是中性色：读的人此刻正准备按下一颗真的会删生产数据的按钮。 */
-.cleanup-warning { margin: 10px 0 0; padding: 9px 12px; border-left: 3px solid var(--crit); background: var(--crit-bg); color: var(--crit); line-height: var(--lh-prose); }
 /* 确认屏那一格「目标表检查」的三态（P0-3）。「尚未检查」不是失败，所以它着 --warn 而不是
    --crit：还没做的事和做过没通过的事，在最后一屏上必须能一眼分开。 */
 .confirm-check.is-passed { color: var(--ok-ink); }
@@ -521,6 +519,53 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .sql-editor-toolbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .sql-editor-toolbar .spec-note { margin: 0; }
 .sql-editor-toolbar .button { flex: none; }
+
+/* 写入模式那一格（#261）。规格与 `.where-clause-card` 同一档：同样的边线、同样的
+   48px 表头，因为它就摆在第 1 步映射表的正上方，两块卡差 1px 都看得出来。 */
+.write-mode-card { overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); }
+.write-mode-card > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.write-mode-card > header > div { display: flex; flex-direction: column; gap: 2px; }
+.write-mode-card strong { font-size: var(--size-body); font-weight: var(--weight-em); }
+.write-mode-card header span { color: var(--mute); font-size: var(--size-meta); }
+.write-mode-body { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 24px; padding: 12px; }
+.write-mode-choices { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; border: 0; }
+.write-mode-choices label { display: grid; grid-template-columns: auto 1fr; align-items: baseline; gap: 2px 8px; }
+.write-mode-choices label small { grid-column: 2; color: var(--mute); font-size: var(--size-meta); }
+.write-mode-statement { display: flex; flex-direction: column; gap: 2px; margin: 0; }
+.write-mode-statement dt { color: var(--mute); font-size: var(--size-meta); }
+.write-mode-statement dd { display: flex; flex-direction: column; gap: 2px; margin: 0; font-weight: var(--weight-em); }
+.write-mode-statement dd small { color: var(--mute); font-size: var(--size-meta); font-weight: normal; }
+.write-mode-card .upsert-note { margin: 0 12px 12px; }
+
+/* 周期调度那一格（#265），摆在最后一屏「任务名」下面。规格跟着 `.write-mode-card`
+   走：同样的边线、同样的 48px 表头——同一屏上两块卡差 1px 都看得出来。 */
+.schedule-card { overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); }
+.schedule-card > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.schedule-card > header > div { display: flex; flex-direction: column; gap: 2px; }
+.schedule-card strong { font-size: var(--size-body); font-weight: var(--weight-em); }
+.schedule-card header span { color: var(--mute); font-size: var(--size-meta); }
+.schedule-switch { display: flex; align-items: center; gap: 6px; font-size: var(--size-meta); }
+.schedule-expression { display: flex; flex-direction: column; gap: 4px; padding: 12px 12px 0; font-size: var(--size-meta); color: var(--mute); }
+.schedule-expression input { height: var(--ctl-h); padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-family: var(--font-num); font-size: var(--size-body); }
+.schedule-readout { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 12px; }
+.schedule-readout > div { display: grid; grid-template-columns: 72px 1fr; align-items: baseline; gap: 8px; }
+.schedule-readout dt { color: var(--mute); font-size: var(--size-meta); }
+.schedule-readout dd { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; font-size: var(--size-meta); }
+/* 触发时刻是等宽的：一串时间左右对不齐就读不出「每一刻钟一次」这件事。 */
+.schedule-fire { padding: 0 6px; border: 1px solid var(--line); border-radius: var(--radius); font-family: var(--font-num); line-height: 18px; }
+.schedule-none { color: var(--mute); }
+/* 表达式写错不是告警而是**当场的回答**，但它必须显眼——它和保存被拒时是同一句话。 */
+.schedule-error { color: var(--crit); }
+/* 清空模式下的「主键」一列（#264）。灰掉的是**整根列**，不只是那几颗勾选框：
+   一颗一颗地灰，看上去像是这几行刚好不能选；整列灰掉才读得出「这个决定不归你做」。
+   理由跟在表头里，字号与其它 small 一致——它是解释，不是告警，所以不着 --warn。 */
+
+/* 任务列表上的纯追加写标记。它不是告警，所以不着 --crit / --warn——
+   这是一种合法的写法，只是它的代价必须在清单上就看得见。 */
+.write-mark { display: inline-block; margin-top: 2px; margin-right: 4px; padding: 0 6px; border: 1px solid var(--line-strong); border-radius: var(--radius); color: var(--dim); font-size: var(--size-meta); line-height: 18px; }
+/* 排队中是一个**会自己变**的状态，不是任务的一项属性——所以它比旁边那两枚
+   写入模式标记显眼一档，用品牌色而不是灰线（#266）。 */
+.write-mark.is-queued { border-color: var(--brand); background: var(--brand-dim); color: var(--brand); }
 .sql-editor-tools { flex: none; display: flex; align-items: center; gap: 6px; }
 .sql-editor-tools .button { height: 28px; padding: 0 10px; font-size: var(--size-meta); }
 /* 开着的开关要看得出是开着的：`aria-pressed` 只说给辅助技术听。 */
@@ -961,9 +1006,8 @@ select, .page-size {
 .detail-status { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
 .outcome-label { color: var(--mute); font-family: var(--font-num); font-size: var(--size-meta); }
 .outcome-label strong { margin-left: 5px; color: var(--text); font-weight: var(--weight-em); }
-.unknown-effect { color: var(--dim); font-family: var(--font-num); font-size: var(--size-meta); }
-.effect-text, .source-code { color: var(--mute); font-family: var(--font-num); font-size: var(--size-meta); }
-.effect-text strong, .source-code strong { margin-left: 5px; color: var(--dim); font-weight: var(--weight-em); }
+.source-code { color: var(--mute); font-family: var(--font-num); font-size: var(--size-meta); }
+.source-code strong { margin-left: 5px; color: var(--dim); font-weight: var(--weight-em); }
 
 /* 形状预检整段随 ADR-0036 §5 取消，这里只剩映射预检一段：容器不再分栏、不留占位空栏（#132）。 */
 .precheck-reports { border: 1px solid var(--line); background: var(--panel); }
@@ -1002,6 +1046,9 @@ select, .page-size {
    #89：反过来那半边也要成立——SWAPPED 的填充用 --ok-fill 而不是 --ok-bg，
    后者灰度下只比白底深 3.1%，「实心」这半边等于没画。 */
 .terminal-block.is-discarded { background: transparent; border-color: var(--line-strong); color: var(--dim); }
+/* 产品不认识的那个词（#263/#264）。虚线边是它自己的一档：既不是成功的实心块，也不是
+   DISCARDED 那种确定的描边块——它是「这个词我没见过，原样给你看」。 */
+.terminal-block.is-unrecognised { background: transparent; border-style: dashed; border-color: var(--line-strong); color: var(--dim); }
 .terminal-copy { color: var(--dim); font-family: var(--font-cn); }
 /* 轴二后面那句写入语义（P0-1）。语义常驻，不是错误也不是告警：只用中性色 + 一道左边线，
    不着 --crit / --warn，否则每一次成功的运行都会看着像出了事。 */
@@ -1120,3 +1167,28 @@ select, .page-size {
 .confirm-none { color: var(--dim); font-size: var(--size-meta); }
 /* 没勾的列：与 `.mapping-chip` 同形，但删除线 + 灰底，一眼看出「这些不会过线」。 */
 .mapping-chip.is-dropped { border-style: dashed; color: var(--mute); text-decoration: line-through; }
+
+
+/* ---------------------------------------------------------------- 运行日志（#263）
+   一条条人话，跟着运行往下滚。等宽只给时间与正文里的原文行——中文说明用正文字体，
+   等宽的中文只会更难读。 */
+.run-logs { margin-top: var(--gap); }
+/* 抽屉里那一份：外壳是 `.panel`，标题行右边照旧摆「实时」与「回到最新」。
+   高度收一半——抽屉本身就在滚，里面再放一个 420px 的滚动区，两根滚动条会打架。 */
+.run-logs.is-embedded > h3 { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.run-logs.is-embedded .log-lines { max-height: 220px; }
+.run-logs-actions { display: flex; align-items: center; gap: 8px; }
+.run-logs-live { color: var(--ok); font-size: var(--size-meta); font-weight: var(--weight-em); }
+/* 固定高度而不是随内容长：日志会长到几千行，让它推着整屏往下长，等于没有「回到最新」
+   可言——整页的滚动条不是这个面板的滚动条。 */
+.log-lines { margin: 0; padding: 8px var(--pad); max-height: 420px; overflow-y: auto; list-style: none; }
+.log-line { display: grid; grid-template-columns: 72px 56px minmax(0, 1fr); gap: 8px; padding: 2px 0; align-items: baseline; font-size: var(--size-meta); }
+.log-time { color: var(--mute); font-family: var(--font-num); }
+.log-event { color: var(--dim); font-weight: var(--weight-em); }
+.log-text { color: var(--text); word-break: break-word; }
+.log-line.is-warn .log-event, .log-line.is-warn .log-text { color: var(--warn); }
+.log-line.is-error .log-event, .log-line.is-error .log-text { color: var(--crit); }
+/* 认不出来的行照原样显示，并且**看得出来它是原样**：等宽 + 一道左边框，
+   免得一行 JSON 被当成一句写坏了的人话。 */
+.log-line.is-unknown .log-text { font-family: var(--font-num); }
+.log-line.is-unknown { border-left: 2px solid var(--line-mid); padding-left: 6px; }

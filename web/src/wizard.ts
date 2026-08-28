@@ -30,6 +30,13 @@ import type {
   TaskSpec,
 } from "./api";
 import { matchSameNameTargets, sourceSummary, whereSummary } from "./spec";
+import {
+  writeSemanticsNote,
+  writeStatementLabel,
+  writeStatementOf,
+  WRITE_MODES,
+} from "./writeMode";
+import type { WriteMode, WriteStatement } from "./writeMode";
 
 export type Mode = "create" | "edit";
 export type Step = 1 | 2 | 3 | 4;
@@ -118,6 +125,9 @@ export type Change =
   | { type: "remove-column"; source: string }
   | { type: "rename-target"; source: string; target: string }
   | { type: "toggle-primary-key"; target: string }
+  | { type: "write-mode"; mode: WriteMode }
+  | { type: "schedule-cron"; cron: string }
+  | { type: "schedule-enabled"; enabled: boolean }
   | { type: "where"; clause: string }
   | { type: "task-name"; name: string }
   | { type: "refresh-target-columns" }
@@ -263,7 +273,12 @@ export function openExisting(
     target,
     targetAgentOnline,
     fetchMode: sql === "" ? "table" : "sql",
-    spec: { ...task.spec, where_clause: task.spec.where_clause ?? "" },
+    spec: {
+      ...task.spec,
+      where_clause: task.spec.where_clause ?? "",
+      // 服务端那边 `schedule_cron` 是 `Option<String>`，没配时整个键不序列化。
+      schedule_cron: task.spec.schedule_cron ?? "",
+    },
     name: task.name,
     hand: allHandMade(),
     sourceColumns: [],
@@ -547,6 +562,37 @@ function reduce(draft: Draft, change: Change): Reduced {
         cleared: [],
       };
     }
+
+    case "write-mode": {
+      // 写入模式是**纯粹的记录**：不改任何一列，也不动主键。语句形状仍只由目标表
+      // 有没有主键决定（`writeStatementOf`），而清空与否不改变那条派生。
+      //
+      // 它曾经在切到清空模式时把手勾的主键收回去重推（#264 那一版把主键当成
+      // 「清空模式下不归人做的决定」）。那条已经撤销：主键任何时候都归人做，
+      // 于是切换模式再把它改掉就成了一次背着人的改写。
+      return {
+        draft: { ...draft, spec: { ...draft.spec, write_mode: change.mode } },
+        cleared: [],
+      };
+    }
+
+    // 调度（#265）：和写入模式一样是纯粹的记录，不清空任何东西，也不牵动任何一列。
+    // 表达式与开关是两个 change，因为它们是两件事——把表达式清空来「暂停」，
+    // 等于让人为了停一次而丢掉自己写好的那一行。
+    case "schedule-cron":
+      return {
+        draft: { ...draft, spec: { ...draft.spec, schedule_cron: change.cron } },
+        cleared: [],
+      };
+
+    case "schedule-enabled":
+      return {
+        draft: {
+          ...draft,
+          spec: { ...draft.spec, schedule_enabled: change.enabled },
+        },
+        cleared: [],
+      };
 
     case "toggle-primary-key": {
       const primary_key = draft.spec.primary_key.includes(change.target)
@@ -1056,9 +1102,12 @@ export function canAdvance(draft: Draft, step: Step): Blocker[] {
       }
     }
 
-    if (draft.spec.columns.length > 0 && draft.spec.primary_key.length === 0) {
-      at("主键必选：至少要勾一列作为 upsert 的去重键");
-    }
+    // 主键不再是必选（#261）。一列都不勾是一个**有含义的选择**——目标表没有可合并的
+    // 唯一约束，这个任务写纯 INSERT。挡在这里等于把「我就是要往流水表里追加」这条
+    // 合法路径重新关掉，而需求方明确不要为它加勾选框。
+    //
+    // 代价（重跑翻倍）不靠拦，靠说：写入模式那一格就在这张表旁边，它下面那句
+    // `writeSemanticsNote` 会当场改口，第 3 步的预检结论和第 4 步的确认页再各说一遍。
     const seen = new Set<string>();
     for (const name of draft.spec.primary_key) {
       if (!seen.add(name.toUpperCase())) {
@@ -1089,11 +1138,36 @@ export function canAdvance(draft: Draft, step: Step): Blocker[] {
     }
   }
 
+  // 字段虽然搬去了第 1 步，这条却仍旧只挂在第 4 步上：`canAdvance(draft, 1)` 另有两个
+  // 调用点拿它当「映射已经成立、可以去查目标表了」用，把任务名塞进去会让一个空名字
+  // 顺手关掉目标表检查。空名字由「保存 / 开始导入」那颗按钮拦（见 `saveGate`），而
+  // 编辑模式下那颗按钮就在字段旁边，每一步都在。
   if (step === 4 && taskName(draft).trim() === "") {
     todo("任务名不能为空");
   }
 
   return blockers;
+}
+
+/**
+ * 「保存」这颗按钮在这一步上摆不摆，摆出来又拦不拦。
+ *
+ * 每一步的门（`canAdvance`）挡的是**往下走**，从来不是**保存**：保存自己的门只有
+ * 一条，任务名不能为空。把这两件事绑到同一颗按钮上，会长出一个谁也解不开的死局
+ * ——目标表在数据库那边漂了（少一列、改了类型），第 3 步的检查过不去，人就到不了
+ * 第 4 步；而改任务名的字段原来就在第 4 步。于是「改个名字」这件跟目标表毫无关系
+ * 的事被目标表挡死，#263 又把任务列表上那颗改名按钮撤了（改名并进了向导），两条路
+ * 同时断掉，story 29 落空。
+ *
+ * 两处一起修：名字字段搬到第 1 步——它不依赖任何东西，没有理由排在最后；编辑模式下
+ * 页脚每一步都摆「保存」。新建模式照旧只在第 4 步收尾：那条路的终点是「开始导入」，
+ * 走完四步是它应有的代价。
+ */
+export function saveGate(draft: Draft): { offered: boolean; refusal: string | null } {
+  return {
+    offered: draft.mode === "edit" || draft.step === 4,
+    refusal: canAdvance(draft, 4)[0]?.message ?? null,
+  };
 }
 
 /** Source columns mapped to a target field the target table does not have. */
@@ -1144,8 +1218,6 @@ export interface MappingRow {
    */
   control: "auto" | "manual" | "new";
   primaryKey: boolean;
-  /** Why the primary-key tick cannot be moved, or `null`. */
-  primaryKeyLock: string | null;
   /** The row's own problem, or `null`. */
   problem: string | null;
 }
@@ -1169,7 +1241,14 @@ export interface RailEntry {
 }
 
 export type StepView =
-  | { step: 1; rows: MappingRow[]; orphans: string[]; blockers: Blocker[] }
+  | {
+      step: 1;
+      rows: MappingRow[];
+      orphans: string[];
+      /** 写入模式那一格。它就摆在主键那一列旁边，两个决定一起做。 */
+      write: WriteView;
+      blockers: Blocker[];
+    }
   | {
       step: 2;
       where: string;
@@ -1185,6 +1264,35 @@ export type StepView =
     }
   | { step: 4; confirm: ConfirmView; blockers: Blocker[] };
 
+/**
+ * 写入那一格：选的是什么，落到的语句是什么，以及那句必须被读到的话。
+ *
+ * 「模式」和「语句」是两件事，界面上也分成两行摆：上面一行是**可选的**（`WRITE_MODES`
+ * 那两档），下面一行是**推导出来的**，人改不了它——它只由目标表有没有主键决定。
+ * 把它们并成一个下拉框会让人以为「无主键」是自己选的，而它不是。
+ */
+export interface WriteView {
+  /** 可选的模式清单，直接来自 `WRITE_MODES`。 */
+  modes: readonly { mode: WriteMode; label: string; hint: string }[];
+  mode: WriteMode;
+  /** 推导出来的语句形状。 */
+  statement: WriteStatement;
+  statementLabel: string;
+  /** 跟着语句与模式一起走的那句交底，永远不缺席。 */
+  note: string;
+}
+
+function writeView(draft: Draft): WriteView {
+  const statement = writeStatementOf(draft.spec.primary_key);
+  return {
+    modes: WRITE_MODES,
+    mode: draft.spec.write_mode,
+    statement,
+    statementLabel: writeStatementLabel(statement),
+    note: writeSemanticsNote(statement, draft.spec.write_mode),
+  };
+}
+
 export interface ConfirmView {
   name: string;
   nameGenerated: boolean;
@@ -1192,6 +1300,8 @@ export interface ConfirmView {
   where: string;
   mappings: ColumnMapping[];
   primaryKey: string[];
+  /** 最后一屏上的写入那一格，与第 1 步读的是同一份。 */
+  write: WriteView;
   targetTable: string;
   targetCheck: ConfirmTargetCheck;
   preview: PreviewResult | null;
@@ -1268,7 +1378,6 @@ function stepView(draft: Draft, step: Step, blockers: Blocker[]): StepView {
     case 1: {
       const orphans = orphanSources(draft);
       const orphanSet = new Set(orphans);
-      const locked = lockedPrimaryKey(draft);
       const problems = new Map<string, string>();
       for (const blocker of blockers) {
         if (blocker.column !== null && !problems.has(blocker.column)) {
@@ -1300,11 +1409,10 @@ function stepView(draft: Draft, step: Step, blockers: Blocker[]): StepView {
           // columns to match; a dropdown would be empty.
           control: draft.targetTableExists ? (auto ? "auto" : "manual") : "new",
           primaryKey: target !== "" && draft.spec.primary_key.includes(target),
-          primaryKeyLock: locked,
           problem: problems.get(source) ?? null,
         };
       });
-      return { step: 1, rows, orphans, blockers };
+      return { step: 1, rows, orphans, write: writeView(draft), blockers };
     }
     case 2:
       return {
@@ -1337,6 +1445,7 @@ function stepView(draft: Draft, step: Step, blockers: Blocker[]): StepView {
           where: whereSummary(draft.spec),
           mappings: draft.spec.columns,
           primaryKey: draft.spec.primary_key,
+          write: writeView(draft),
           targetTable: draft.spec.target_table,
           targetCheck: confirmTargetCheck(draft),
           preview: previewIsFresh(draft) ? draft.preview!.value : null,
@@ -1383,16 +1492,6 @@ function confirmTargetCheck(draft: Draft): ConfirmTargetCheck {
  *
  * A disabled control without a reason beside it reads as broken.
  */
-function lockedPrimaryKey(draft: Draft): string | null {
-  if (draft.hand.primaryKey) {
-    return null;
-  }
-  const inferred = inferPrimaryKey(draft.targetKeys, draft.spec.columns);
-  return inferred === null
-    ? null
-    : `目标表已定义主键（${inferred.join(", ")}），按它锁定`;
-}
-
 // ---------------------------------------------------------------------------
 // Out
 // ---------------------------------------------------------------------------
@@ -1404,6 +1503,10 @@ export function toSpec(draft: Draft): TaskSpec {
     table: draft.fetchMode === "sql" ? "" : draft.spec.table,
     target_table: draft.spec.target_table.trim(),
     columns: draft.spec.columns.map((mapping) => ({ ...mapping })),
+    write_mode: draft.spec.write_mode,
+    // 调度：原文照送，空白就是没配（服务端同一套口径，`schedule_expression`）。
+    schedule_cron: (draft.spec.schedule_cron ?? "").trim(),
+    schedule_enabled: draft.spec.schedule_enabled,
     primary_key: [...draft.spec.primary_key],
     where_clause: draft.fetchMode === "sql" ? "" : (draft.spec.where_clause ?? ""),
   };
@@ -1445,8 +1548,10 @@ export function historyDivider(before: Task, draft: Draft): string | null {
     changes.push("列与映射");
   }
   if (JSON.stringify(before.spec.primary_key) !== JSON.stringify(after.primary_key)) {
+    // 主键动了就是写法动了（#261）：从有到无，重跑从幂等变成翻倍。
     changes.push("主键");
   }
+  if (before.spec.write_mode !== after.write_mode) changes.push("写入模式");
   if ((before.spec.where_clause ?? "") !== (after.where_clause ?? "")) {
     changes.push("过滤条件");
   }

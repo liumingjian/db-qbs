@@ -11,6 +11,7 @@ import {
   leaving,
   leavingConfirmation,
   openExisting,
+  saveGate,
   openNew,
   previewIsFresh,
   selectionBlocker,
@@ -383,16 +384,146 @@ describe("the advance gate", () => {
     ]);
   });
 
-  it("blocks on a missing primary key and says so", () => {
+  it("no longer blocks on a missing primary key — it states the consequence instead", () => {
+    // #261：一列都不勾是合法的，它就是「目标表无主键，纯追加写」。挡在这里等于把
+    // 「我就是要往流水表里追加」这条路重新关掉，而需求方明确不要为它加勾选框。
     let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t" }));
     draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
     draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
-    expect(canAdvance(draft, 1)).toContainEqual({
-      step: 1,
-      kind: "error",
-      column: null,
-      message: "主键必选：至少要勾一列作为 upsert 的去重键",
-    });
+
+    expect(draft.spec.primary_key).toEqual([]);
+    expect(canAdvance(draft, 1)).toEqual([]);
+
+    // 代价不靠拦，靠说：写入那一格当场改口，而且就在主键那一列旁边。
+    const step = view(draft, 1).step;
+    if (step.step !== 1) throw new Error("expected step 1");
+    expect(step.write.statement).toBe("insert");
+    expect(step.write.statementLabel).toBe("纯追加写");
+    expect(step.write.note).toContain("重跑会产生重复数据");
+  });
+
+  it("switches the write statement the moment a primary key is ticked", () => {
+    let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t" }));
+    draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
+    draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
+    draft = done(apply(draft, { type: "toggle-primary-key", target: "ID" }));
+
+    const step = view(draft, 1).step;
+    if (step.step !== 1) throw new Error("expected step 1");
+    expect(step.write.statement).toBe("upsert");
+    expect(step.write.note).toContain("源端删除的行");
+    // 模式那一格没动过：语句由主键决定，模式是另一件事。
+    expect(step.write.mode).toBe("APPEND");
+  });
+
+  it("carries the write mode into the saved spec and names it when it moves", () => {
+    let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t" }));
+    draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
+    draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
+
+    expect(toSpec(draft).write_mode).toBe("APPEND");
+    // 写入模式不清空任何东西：改它不该把已选的列或主键抹掉。
+    const before = toSpec(draft);
+    const after = done(apply(draft, { type: "write-mode", mode: "APPEND" }));
+    expect(toSpec(after)).toEqual(before);
+  });
+
+  it("carries the schedule fields into the saved spec and keeps them out of everything else", () => {
+    let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t" }));
+    draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
+    draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
+    draft = done(apply(draft, { type: "toggle-primary-key", target: "ID" }));
+
+    // 默认是没配周期，而不是「配了个空的」。
+    expect(toSpec(draft).schedule_cron).toBe("");
+    expect(toSpec(draft).schedule_enabled).toBe(false);
+
+    const before = toSpec(draft);
+    draft = done(apply(draft, { type: "schedule-cron", cron: " 0 2 * * * " }));
+    draft = done(apply(draft, { type: "schedule-enabled", enabled: true }));
+
+    // 原文照送，只掐首尾空白——服务端存的就是人写的那一行。
+    expect(toSpec(draft).schedule_cron).toBe("0 2 * * *");
+    expect(toSpec(draft).schedule_enabled).toBe(true);
+    // 调度不清空任何东西：列、主键、过滤条件一样不动。
+    expect(toSpec(draft).columns).toEqual(before.columns);
+    expect(toSpec(draft).primary_key).toEqual(before.primary_key);
+    // 停用不该把表达式一起带走——暂停不是删除。
+    draft = done(apply(draft, { type: "schedule-enabled", enabled: false }));
+    expect(toSpec(draft).schedule_cron).toBe("0 2 * * *");
+  });
+
+  it("loads a saved task's schedule back into the draft", () => {
+    const task = savedTask();
+    const scheduled = {
+      ...task,
+      spec: { ...task.spec, schedule_cron: "*/15 * * * *", schedule_enabled: true },
+    };
+    const draft = openExisting(scheduled, SOURCE, TARGET);
+    expect(draft.spec.schedule_cron).toBe("*/15 * * * *");
+    expect(draft.spec.schedule_enabled).toBe(true);
+    // 服务端没配调度时整个键不序列化，读回来必须是空串而不是 undefined——
+    // 少这一处 `?? ""`，输入框就会从受控变成非受控。
+    const bare = openExisting(task, SOURCE, TARGET);
+    expect(bare.spec.schedule_cron).toBe("");
+  });
+
+  // 主键任何时候都归人做，先清空再导入这一档也一样（原来这一列在清空模式下整根
+  // 灰掉）。那一档确实不靠主键去重，但主键仍决定写入语句是 upsert 还是纯 INSERT，
+  // 而那是一个人有权改的决定；勾错了由第 3 步的目标表检查当面拒。
+  it("leaves the primary key editable in clear mode", () => {
+    let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t" }));
+    draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
+    draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
+    draft = withTargetColumns(draft, [{ name: "PRIMARY", columns: ["ID"] }]);
+    draft = done(apply(draft, { type: "write-mode", mode: "CLEAR_THEN_IMPORT" }));
+
+    const step = view(draft, 1).step;
+    if (step.step !== 1) throw new Error("expected step 1");
+    expect(toSpec(draft).primary_key).toEqual(["ID"]);
+    expect(step.write.statement).toBe("upsert");
+    expect(step.write.note).toContain("先清空再导入");
+
+    // 取消掉它就是纯 INSERT——清空模式下这仍是一个合法且有含义的选择。
+    const off = done(apply(draft, { type: "toggle-primary-key", target: "ID" }));
+    expect(toSpec(off).primary_key).toEqual([]);
+    const offStep = view(off, 1).step;
+    if (offStep.step !== 1) throw new Error("expected step 1");
+    expect(offStep.write.statement).toBe("insert");
+  });
+
+  // 切换写入模式是**纯粹的记录**：它曾经在切到清空模式时把手勾的主键收回去重推，
+  // 那是一次背着人的改写，撤销了。
+  it("keeps a hand-picked primary key when the write mode changes", () => {
+    let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t" }));
+    draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
+    draft = done(
+      apply(draft, {
+        type: "source-columns-arrived",
+        columns: [sourceColumn("ID"), sourceColumn("C_NAME")],
+      }),
+    );
+    draft = withTargetColumns(draft, [{ name: "PRIMARY", columns: ["ID"] }]);
+    draft = done(apply(draft, { type: "toggle-primary-key", target: "C_NAME" }));
+    expect(toSpec(draft).primary_key).toContain("C_NAME");
+
+    const cleared = done(apply(draft, { type: "write-mode", mode: "CLEAR_THEN_IMPORT" }));
+    expect(toSpec(cleared).primary_key).toContain("C_NAME");
+  });
+
+  it("leaves the primary key alone when the mode goes back to append", () => {
+    let draft = withTargetColumns(
+      done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t" })),
+      [{ name: "PRIMARY", columns: ["ID"] }],
+    );
+    draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
+    draft = done(apply(draft, { type: "source-columns-arrived", columns: [sourceColumn("ID")] }));
+    draft = done(apply(draft, { type: "write-mode", mode: "CLEAR_THEN_IMPORT" }));
+
+    const back = done(apply(draft, { type: "write-mode", mode: "APPEND" }));
+    const step = view(back, 1).step;
+    if (step.step !== 1) throw new Error("expected step 1");
+    expect(toSpec(back).write_mode).toBe("APPEND");
   });
 
   it("catches the target field shapes the server would reject", () => {
@@ -463,6 +594,42 @@ describe("the advance gate", () => {
     }]);
   });
 
+  it("keeps 保存 reachable on every step while editing, even behind a failing check", () => {
+    // story 29：改名并进了编辑向导，#263 又把列表上那颗改名按钮撤了。于是「往下走」
+    // 的门一旦当成「保存」的门，就有一种任务谁都改不了名——目标表在库里漂了一列，
+    // 第 3 步过不去，而名字字段原来就在第 4 步。名字字段搬到第 1 步，保存每一步都在。
+    let editing: Draft = { ...withTargetColumns(openExisting(savedTask(), SOURCE, TARGET)), step: 3 };
+    editing = done(apply(editing, {
+      type: "check-arrived",
+      check: {
+        ok: false,
+        findings: [{
+          column: "C_NAME",
+          kind: "missing_column",
+          expected: "VARCHAR(30)",
+          actual: "不存在",
+          message: "目标表缺少这一列",
+        }],
+        suggested_ddl: null,
+      },
+    }));
+    expect(canAdvance(editing, 3)).not.toEqual([]);
+    expect(saveGate(editing)).toEqual({ offered: true, refusal: null });
+
+    const renamed = done(apply(editing, { type: "task-name", name: "客户主档（改）" }));
+    expect(taskName(renamed)).toBe("客户主档（改）");
+    expect(saveGate(renamed).refusal).toBeNull();
+  });
+
+  it("still refuses to save an empty task name, and still finishes creating on step 4", () => {
+    const blank = done(apply(openExisting(savedTask(), SOURCE, TARGET), { type: "task-name", name: "  " }));
+    expect(saveGate(blank)).toEqual({ offered: true, refusal: "任务名不能为空" });
+    // 新建那条路的终点是「开始导入」，走完四步是它应有的代价：中途不给保存。
+    const creating = withTargetColumns(workedDraft());
+    expect(saveGate(creating).offered).toBe(false);
+    expect(saveGate({ ...creating, step: 4 as const }).offered).toBe(true);
+  });
+
   it("excuses the check when editing against an offline agent", () => {
     // 编辑以「保存」收尾，不跑；拦在这里等于「先去把 Agent 弄活，才准改一行 WHERE」。
     const editing = { ...openExisting(savedTask(), SOURCE, TARGET, false), step: 3 as const };
@@ -523,8 +690,8 @@ describe("derived values", () => {
     expect(taskName(draft)).toBe("客户主档日更");
   });
 
-  it("infers the primary key from the target table and says why it is locked", () => {
-    // 任何被禁用的控件都配一句「为什么」，否则用户只会以为它坏了。
+  it("prefills the primary key from the target table without locking it", () => {
+    // 预填，不是锁死：目标表的主键是最可能对的那一组，但改它是人的权利。
     let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t_customer" }));
     draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
     draft = done(
@@ -537,7 +704,8 @@ describe("derived values", () => {
     expect(draft.spec.primary_key).toEqual(["ID"]);
     const step = view(draft, 1).step;
     if (step.step !== 1) throw new Error("expected step 1");
-    expect(step.rows[0].primaryKeyLock).toBe("目标表已定义主键（ID），按它锁定");
+    // 勾选框上只剩逐行的两句拒绝（没勾这一列、没选目标列），没有第三句。
+    expect(step.rows.map((row) => row.primaryKey)).toEqual([true, false]);
   });
 
   it("does not overwrite a primary key the person ticked themselves", () => {
@@ -545,9 +713,6 @@ describe("derived values", () => {
     // 「主键定义对不上」当面说，不在背后改。
     const draft = withTargetColumns(workedDraft(), [{ name: "PRIMARY", columns: ["C_NAME"] }]);
     expect(draft.spec.primary_key).toEqual(["ID"]);
-    const step = view(draft, 1).step;
-    if (step.step !== 1) throw new Error("expected step 1");
-    expect(step.rows[0].primaryKeyLock).toBeNull();
   });
 
   it("renders a same-name match read-only and everything else as a dropdown", () => {
@@ -585,10 +750,7 @@ describe("derived values", () => {
       columns: [targetColumn("ID")],
       keys: [{ name: "PRIMARY", columns: ["ID", "TENANT_ID"] }],
     }));
-    const step = view(draft, 1).step;
-    if (step.step !== 1) throw new Error("expected step 1");
     expect(draft.spec.primary_key).toEqual([]);
-    expect(step.rows[0].primaryKeyLock).toBeNull();
   });
 
   it("drops a primary-key entry whose target field stops existing", () => {
@@ -789,6 +951,88 @@ describe("what goes out", () => {
   });
 });
 
+describe("the task name", () => {
+  it("prefills the saved name in edit mode and counts it as hand-entered", () => {
+    // 载入编辑的那一刻，屏幕上的每一格都与人自己敲的无从区分——名字也是。
+    const draft = openExisting(savedTask(), SOURCE, TARGET);
+    expect(taskName(draft)).toBe("客户主档");
+    expect(draft.hand.taskName).toBe(true);
+  });
+
+  it("never regenerates a loaded name behind a table change", () => {
+    let draft = openExisting(savedTask(), SOURCE, TARGET);
+    draft = confirm(draft, { type: "source-table", owner: "APP", table: "T_ORDER" });
+    draft = done(apply(draft, { type: "target-table", table: "t_order" }));
+    expect(taskName(draft)).toBe("客户主档");
+  });
+
+  it("keeps the loaded name across the biggest cascade there is", () => {
+    // 换源端数据源清掉的是源侧那一整边，确认语里逐条点名。名字不在里面，
+    // 也不该在：它是标签，没有对错，跟着表走只会把人写的东西吃掉。
+    const { draft, lines } = agreed(openExisting(savedTask(), SOURCE, TARGET), {
+      type: "source-datasource",
+      datasource: { datasource_id: "ds-other", name: "灾备 Oracle" },
+    });
+    expect(lines.join(" / ")).not.toContain("任务名");
+    expect(taskName(draft)).toBe("客户主档");
+  });
+
+  it("asks the same question about a hand-typed name as about a loaded one", () => {
+    // 「编辑模式下载入的值视为人工输入」的另一半：新建时手打出来的同一批值，
+    // 触发的确认与编辑模式一字不差。
+    let typed = withTargetColumns(workedDraft());
+    typed = done(apply(typed, { type: "task-name", name: "客户主档" }));
+    const change: Change = {
+      type: "source-datasource",
+      datasource: { datasource_id: "ds-other", name: "灾备 Oracle" },
+    };
+    const loaded = agreed(openExisting(savedTask(), SOURCE, TARGET), change);
+    expect(agreed(typed, change).lines).toEqual(loaded.lines);
+  });
+
+  it("blocks the last step while the name is blank", () => {
+    let draft = passingCheck(withTargetColumns(workedDraft()));
+    draft = done(apply(draft, { type: "task-name", name: "   " }));
+    expect(canAdvance(draft, 4)).toContainEqual({
+      step: 4,
+      kind: "todo",
+      column: null,
+      message: "任务名不能为空",
+    });
+    draft = done(apply(draft, { type: "task-name", name: "客户主档日更" }));
+    expect(canAdvance(draft, 4)).toEqual([]);
+  });
+
+  it("tells the confirmation page whether the name is the machine\u2019s or the person\u2019s", () => {
+    const generated = passingCheck(withTargetColumns(workedDraft()));
+    expect(view(generated, 4).step).toMatchObject({
+      confirm: { name: "APP.T_CUSTOMER \u2192 t_customer", nameGenerated: true },
+    });
+    const typed = done(apply(generated, { type: "task-name", name: "客户主档日更" }));
+    expect(view(typed, 4).step).toMatchObject({
+      confirm: { name: "客户主档日更", nameGenerated: false },
+    });
+  });
+
+  it("saves the edited name with the task and leaves the spec alone", () => {
+    // 名字不进 `TaskSpec`：它不参与任何标识，也不是搬运的一部分。
+    const before = openExisting(savedTask(), SOURCE, TARGET);
+    const draft = done(apply(before, { type: "task-name", name: "客户主档（日更）" }));
+    expect(taskName(draft)).toBe("客户主档（日更）");
+    expect(toSpec(draft)).toEqual(toSpec(before));
+  });
+
+  it("lets two tasks share a name", () => {
+    // 不唯一是产品决定：名字是标签，去重的是 `task_id`。
+    let first = withTargetColumns(workedDraft());
+    first = done(apply(first, { type: "task-name", name: "同名" }));
+    let second = openExisting(savedTask(), SOURCE, TARGET);
+    second = done(apply(second, { type: "task-name", name: "同名" }));
+    expect(taskName(first)).toBe(taskName(second));
+    expect(canAdvance(passingCheck(first), 4)).toEqual([]);
+  });
+});
+
 describe("opening a saved task", () => {
   it("opens ordinary editing at the mapping step", () => {
     expect(openExisting(savedTask(), SOURCE, TARGET).step).toBe(1);
@@ -799,9 +1043,17 @@ describe("opening a saved task", () => {
   });
 
   it("falls back to the earliest failed prerequisite", () => {
+    // 空主键**不再是**一条失败的前置条件（#261），所以这里换成一条真的过不了的：
+    // 目标字段留空，第 1 步照旧拦得住。
     const broken = savedTask();
-    broken.spec.primary_key = [];
+    broken.spec.columns = [{ source: "ID", target: "" }];
     expect(openExisting(broken, SOURCE, TARGET, true, 3).step).toBe(1);
+  });
+
+  it("opens a saved append-only task straight through, because empty is a value", () => {
+    const keyless = savedTask();
+    keyless.spec.primary_key = [];
+    expect(canAdvance(openExisting(keyless, SOURCE, TARGET, true, 1), 1)).toEqual([]);
   });
 
   it("stops a confirmation-page request at the missing target check", () => {
@@ -844,6 +1096,8 @@ function savedTask(): Task {
         { source: "ID", target: "ID" },
         { source: "C_NAME", target: "C_NAME" },
       ],
+      write_mode: "APPEND",
+      schedule_enabled: false,
       primary_key: ["ID"],
       where_clause: "STATUS = 1",
     },

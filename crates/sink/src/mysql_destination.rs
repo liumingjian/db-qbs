@@ -4,7 +4,7 @@
 //! 的验收台架**（需要一台起得了 docker MySQL 的机器）：
 //!
 //! - `CLIENT_FOUND_ROWS` 把「值未变的既有行记 0」抹平（#138），也就是
-//!   `swap_rows_in_range` 的下界之所以能是 `staged_rows` 的前提；
+//!   `swap_rows_consistent` 在 upsert 那一支的下界之所以能是 `staged_rows` 的前提；
 //! - upsert 的 `affected_rows` 落在 `[staged, 2×staged]`（`run-v1-acceptance.sh` 的 C4②）；
 //! - Connection Ritual 挂在连接池的建连钩子上，池里第**二**条连接也照做。
 //!
@@ -13,10 +13,10 @@
 //! 拿测试替身换掉本文件时，换掉的正是这三件事——见 `test_support` 的模块说明。
 
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
-use db_qbs_shared::{swap_rows_in_range, RowCounts};
+use db_qbs_shared::{swap_rows_consistent, MysqlServerInfo, RowCounts, WriteStatement};
 use mysql::prelude::Queryable;
 use mysql::{
     consts::CapabilityFlags, params, Conn, Error as MysqlError, Opts, OptsBuilder, Params, TxOpts,
@@ -25,12 +25,25 @@ use mysql::{
 
 use crate::service::quote_identifier;
 use crate::{
-    AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, CleanupRunError, ConnectedDestination,
-    CreateStagingError, Destination, DestinationFactory, DropStagingError, TargetColumn,
-    TargetConnection, TargetKey, WriteBatchError,
+    AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, ConnectedDestination, CreateStagingError,
+    Destination, DestinationFactory, DropStagingError, TargetColumn, TargetConnection, TargetKey,
+    WriteBatchError,
 };
 
-const WRITE_LEDGER_TABLE: &str = "__db_qbs_write_ledger";
+/// 曾经的写入台账表，随「撤销运行」一起废弃（#256）。
+///
+/// 名字留着只为**删**：老版本会在客户的目标库里建这张表、逐行记下每次运行写过的主键，
+/// 已经装出去的实例里它还在。#256 要的不只是「不再建」，还有「跑完一次导入之后，
+/// 目标库里除目标表外没有任何产品自建的表」——升级上来的实例得有人替它把这张表收掉，
+/// 而产品只在跑运行的时候碰得到客户的库，没有别的时机。
+///
+/// 收在**建暂存表那一步**：那一步本来就是这次运行对客户库下的第一条 DDL，删这张表
+/// 与建那张表是同一类动作，一起做完，切换那条路上从此一条 DDL 都没有。
+/// 摆在切换里是有代价的：`DROP TABLE` 隐式提交，紧挨着「原子清空+导入」那个事务的
+/// 开头写一条会隐式提交的语句，全靠下一个人记得两行的先后顺序。
+///
+/// `IF EXISTS`，所以在从来没建过它的库上是一条空操作。
+const LEGACY_WRITE_LEDGER_TABLE: &str = "__db_qbs_write_ledger";
 
 type MetadataRow = (
     String,
@@ -50,6 +63,9 @@ type MetadataRow = (
 pub struct MysqlDestination {
     database: String,
     pool: RitualPool,
+    /// 建连接那一刻读到的服务端自述（#257）。**读一次就够**：一条连接活着的时候
+    /// 服务端不会换版本，而 `GET /v1/agent/info` 那边一秒可能来好几次。
+    server: Option<MysqlServerInfo>,
 }
 
 impl MysqlDestination {
@@ -76,9 +92,11 @@ impl MysqlDestination {
             // `SWAP_FAILED`（#138）。带上之后这一档记 1，`[n, 2n]` 重新精确。
             .additional_capabilities(CapabilityFlags::CLIENT_FOUND_ROWS);
         let pool = RitualPool::new(Opts::from(opts))?;
+        let server = read_server_info(&pool);
         Ok(Self {
             database: target.database.clone(),
             pool,
+            server,
         })
     }
 
@@ -96,7 +114,7 @@ impl MysqlDestination {
                     r#"
 SELECT TABLE_NAME
  FROM information_schema.TABLES
- WHERE TABLE_SCHEMA = :database AND TABLE_NAME <> '__db_qbs_write_ledger'
+ WHERE TABLE_SCHEMA = :database
  ORDER BY TABLE_NAME
 "#,
                     params! { "database" => &self.database },
@@ -133,6 +151,10 @@ impl DestinationFactory for MysqlFactory {
 }
 
 impl Destination for MysqlDestination {
+    fn server_info(&self) -> Option<MysqlServerInfo> {
+        self.server.clone()
+    }
+
     fn target_columns(&self, target_table: &str) -> Result<Vec<TargetColumn>, String> {
         self.pool
             .with_conn(|connection| {
@@ -216,7 +238,12 @@ SELECT INDEX_NAME, COLUMN_NAME
 
     fn create_staging(&self, _staging_table: &str, ddl: &str) -> Result<(), CreateStagingError> {
         self.pool
-            .with_conn(|connection| connection.query_drop(ddl))
+            .with_conn(|connection| {
+                // 这次运行对客户库下的第一条 DDL，顺手把老版本留下的写入台账表收掉
+                // （#256，见 `LEGACY_WRITE_LEDGER_TABLE`）。只删不建，`IF EXISTS`。
+                connection.query_drop(drop_legacy_write_ledger(&self.database))?;
+                connection.query_drop(ddl)
+            })
             .map_err(classify_create_error)
     }
 
@@ -282,7 +309,6 @@ SELECT INDEX_NAME, COLUMN_NAME
         let outcome = self
             .pool
             .with_conn(|connection| {
-                connection.query_drop(write_ledger_ddl(&self.database))?;
                 let mut transaction = connection.start_transaction(TxOpts::default())?;
                 let count_statement = format!(
                     "SELECT COUNT(*) FROM {}.{}",
@@ -315,43 +341,78 @@ SELECT INDEX_NAME, COLUMN_NAME
                     return Ok(AtomicSwapOutcome::Failed(error));
                 }
 
-                let insert_statement = build_swap_upsert_statement(
-                    &self.database,
-                    &request.target_table,
-                    &request.staging_table,
-                    &request.columns,
-                    &request.primary_key,
-                );
+                // 写哪一种语句**只由目标表有没有主键决定**，而那件事已经在 `POST /v1/runs`
+                // 的映射预检里与任务定义记的那一份核对过了（#261）。这里不再重读一次
+                // `information_schema`：重读等于给「预检说无主键、切换时又发现有」留一条
+                // 静默改写法的路，而那正是预检拒跑要挡的东西。
+                let statement = WriteStatement::for_primary_key(&request.primary_key);
+                // 清空后导入（#264）：整表 `DELETE` **就在这个事务里**，紧挨着下面那条
+                // 导入语句。两件事一起成、一起败——导入中途失败时事务回滚，目标表原样不动。
+                //
+                // **绝不用 `TRUNCATE`**：它是 DDL、会隐式提交，放进这里等于制造
+                // 「清空成功、导入失败、目标表变空」这个最坏结果。大表上整表 DELETE 的
+                // 代价是明知故犯，记在 CONTEXT.md 的「刻意欠的债」里。
+                //
+                // 它也**不改写下面选哪条语句**：有主键仍 upsert，无主键仍纯 INSERT。
+                // 保留 upsert 是为了容忍同一次运行内出现重复主键——对着刚清空的表打纯
+                // INSERT，两行同键就会撞 `ERROR 1062` 半途而废。
+                let purged_rows = if request.write_mode.clears_target() {
+                    transaction.query_drop(build_clear_statement(
+                        &self.database,
+                        &request.target_table,
+                    ))?;
+                    transaction.affected_rows()
+                } else {
+                    0
+                };
+                let insert_statement = match statement {
+                    WriteStatement::Upsert => build_swap_upsert_statement(
+                        &self.database,
+                        &request.target_table,
+                        &request.staging_table,
+                        &request.columns,
+                        &request.primary_key,
+                    ),
+                    WriteStatement::Insert => build_swap_insert_statement(
+                        &self.database,
+                        &request.target_table,
+                        &request.staging_table,
+                        &request.columns,
+                    ),
+                };
                 transaction.query_drop(insert_statement)?;
                 let swapped_rows = transaction.affected_rows();
-                // 区间判据（而非等值）连同它的三条理由都在 `swap_rows_in_range` 的文档里，
+                // 判据按语句分叉、以及 upsert 那一支为什么是区间而非等值，都在
+                // `swap_rows_consistent` 的文档里（#261），
                 // source 侧那面镜子读的也是它——上一次两端各写一份时，
                 // sink 改了区间、source 的等值断言没跟上，「重跑改值」整条主路径必失败（#135 C4④）。
                 // 这一档最后落到 `SWAP_FAILED` / `SinkWrite`，而 source 那面镜子同样这件事
                 // 落 `Defect`（#196）——**不是同一个故障两个标签**：这里是第一手判断，
                 // 数字确实不对；那里只有在本端已经放行之后才可能响，那时问题在两端判据不同。
-                if !swap_rows_in_range(staged_rows, swapped_rows) {
+                if !swap_rows_consistent(statement, staged_rows, swapped_rows) {
                     transaction.rollback()?;
+                    let expected = match statement {
+                        WriteStatement::Upsert => {
+                            format!("落在 [{staged_rows}, {}] 区间内", staged_rows.saturating_mul(2))
+                        }
+                        // 纯 INSERT 没有更新那条腿，判据因此收紧成等值（#261）。
+                        WriteStatement::Insert => format!("严格等于 {staged_rows}"),
+                    };
+                    let kind = match statement {
+                        WriteStatement::Upsert => "upsert",
+                        WriteStatement::Insert => "纯追加 INSERT",
+                    };
                     let message = format!(
-                        "暂存表有 {staged_rows} 行，切换 upsert 报告影响 {swapped_rows} 行，不落在 [{staged_rows}, {}] 区间内",
-                        staged_rows.saturating_mul(2)
+                        "暂存表有 {staged_rows} 行，切换 {kind} 报告影响 {swapped_rows} 行，不{expected}"
                     );
                     return Ok(AtomicSwapOutcome::Failed(AtomicSwapError::Other(message)));
                 }
-                let ledger_statement = build_ledger_insert_statement(
-                    &self.database,
-                    &request.staging_table,
-                    &request.primary_key,
-                );
-                transaction.exec_drop(
-                    ledger_statement,
-                    (&request.target_table, &request.run_id),
-                )?;
                 transaction.commit()?;
                 Ok(AtomicSwapOutcome::Swapped(AtomicSwapResult {
                     staged_rows,
-                    // 新模型不删任何行；这个 0 是事实，不是拿 0 糊弄（ADR-0035 §4）。
-                    purged_rows: 0,
+                    // 追加写下这个 0 是事实，不是拿 0 糊弄（ADR-0035 §4）；
+                    // 清空后导入下它是上面那条整表 DELETE 真的删掉的行数（#264）。
+                    purged_rows,
                     swapped_rows,
                     count_ms,
                 }))
@@ -374,96 +435,26 @@ SELECT INDEX_NAME, COLUMN_NAME
             .with_conn(|connection| connection.query_drop(statement))
             .map_err(classify_drop_error)
     }
-
-    fn cleanup_run(
-        &self,
-        run_id: &str,
-        target_table: &str,
-        primary_key: &[String],
-    ) -> Result<u64, CleanupRunError> {
-        self.pool
-            .with_conn(|connection| {
-                connection.query_drop(write_ledger_ddl(&self.database))?;
-                let mut transaction = connection.start_transaction(TxOpts::default())?;
-                transaction.exec_drop(
-                    build_cleanup_delete_statement(&self.database, target_table, primary_key),
-                    (target_table, run_id),
-                )?;
-                let deleted_rows = transaction.affected_rows();
-                transaction.exec_drop(
-                    format!(
-                        "UPDATE {}.{} SET cleaned = 1 WHERE target_table = ? AND run_id = ?",
-                        quote_identifier(&self.database),
-                        quote_identifier(WRITE_LEDGER_TABLE),
-                    ),
-                    (target_table, run_id),
-                )?;
-                transaction.commit()?;
-                Ok(deleted_rows)
-            })
-            .map_err(|error| CleanupRunError::Environment(error.to_string()))
-    }
 }
 
-fn write_ledger_ddl(database: &str) -> String {
+/// 清空后导入那一步的整表删除（#264）。
+///
+/// 是 `DELETE` 不是 `TRUNCATE`，而且这件事写在函数名和这段注释里，不指望调用方记得：
+/// `TRUNCATE` 是 DDL，隐式提交，放进切换事务里会把「原子清空+导入」变成
+/// 「先不可逆地清空，再赌导入成功」。
+fn build_clear_statement(database: &str, target_table: &str) -> String {
     format!(
-        "CREATE TABLE IF NOT EXISTS {}.{} (\
-         write_seq BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,\
-         target_table VARCHAR(64) NOT NULL, run_id VARCHAR(64) NOT NULL,\
-         key_hash CHAR(64) NOT NULL, key_json LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, cleaned BOOLEAN NOT NULL DEFAULT 0,\
-         INDEX ledger_run (target_table, run_id),\
-         INDEX ledger_key (target_table, key_hash, write_seq)) ENGINE=InnoDB",
+        "DELETE FROM {}.{}",
         quote_identifier(database),
-        quote_identifier(WRITE_LEDGER_TABLE),
+        quote_identifier(target_table)
     )
 }
 
-fn json_key_expression(prefix: &str, primary_key: &[String]) -> String {
-    let columns = primary_key
-        .iter()
-        .map(|column| format!("{prefix}.{}", quote_identifier(column)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("CAST(JSON_ARRAY({columns}) AS CHAR CHARACTER SET utf8mb4)")
-}
-
-fn build_ledger_insert_statement(
-    database: &str,
-    staging_table: &str,
-    primary_key: &[String],
-) -> String {
-    let key = json_key_expression("s", primary_key);
+fn drop_legacy_write_ledger(database: &str) -> String {
     format!(
-        "INSERT INTO {}.{} (target_table, run_id, key_hash, key_json) \
-         SELECT ?, ?, SHA2({key}, 256), {key} FROM {}.{} s",
+        "DROP TABLE IF EXISTS {}.{}",
         quote_identifier(database),
-        quote_identifier(WRITE_LEDGER_TABLE),
-        quote_identifier(database),
-        quote_identifier(staging_table),
-    )
-}
-
-fn build_cleanup_delete_statement(
-    database: &str,
-    target_table: &str,
-    primary_key: &[String],
-) -> String {
-    let key = json_key_expression("t", primary_key);
-    let ledger = format!(
-        "{}.{}",
-        quote_identifier(database),
-        quote_identifier(WRITE_LEDGER_TABLE)
-    );
-    format!(
-        "DELETE t FROM {}.{} t JOIN {ledger} l \
-           ON l.target_table = ? AND l.run_id = ? AND l.cleaned = 0 \
-          AND l.key_hash = SHA2({key}, 256) AND l.key_json = {key} \
-         WHERE NOT EXISTS (SELECT 1 FROM {ledger} newer \
-                WHERE newer.target_table = l.target_table \
-                  AND newer.key_hash = l.key_hash AND newer.key_json = l.key_json \
-                  AND newer.write_seq > l.write_seq)",
-        quote_identifier(database),
-        quote_identifier(target_table),
+        quote_identifier(LEGACY_WRITE_LEDGER_TABLE),
     )
 }
 
@@ -566,7 +557,8 @@ fn build_insert_statement(
     )
 }
 
-/// 切换段：`INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`，**不再 DELETE**（ADR-0035 §1）。
+/// 切换段的一种形状：`INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`，**不再 DELETE**
+/// （ADR-0035 §1）。**目标表有主键时走这一支**，另一支见 [`build_swap_insert_statement`]。
 ///
 /// 更新列 = 全部选中列**排除主键列本身**，语义是「同一主键的行，以本次源端数据为准」。
 /// 不做部分更新：没有对应需求，且会引入「这列这次没更新是有意还是漏了」的排查成本。
@@ -613,26 +605,84 @@ fn build_swap_upsert_statement(
     statement
 }
 
-// Connections enter this pool only after the creation hook has completed.
+/// 切换段的另一种形状：目标表**没有主键**时的纯 `INSERT ... SELECT`（#261）。
+///
+/// 没有 `ON DUPLICATE KEY UPDATE`，因为没有可撞的唯一约束——带上那一段，MySQL 不报错、
+/// 语句照跑，只是那个子句永远不会触发。留着它的唯一效果是让读语句的人以为这次写入
+/// 会去重。**重跑会把数据再追加一份**，这不是缺陷，是这条路的定义；它在任务定义、
+/// 预检结论、任务列表和运行详情四处都被写出来过。
+fn build_swap_insert_statement(
+    database: &str,
+    target_table: &str,
+    staging_table: &str,
+    columns: &[String],
+) -> String {
+    let quoted_columns = columns
+        .iter()
+        .map(|column| quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "INSERT INTO {}.{} ({quoted_columns}) SELECT {quoted_columns} FROM {}.{}",
+        quote_identifier(database),
+        quote_identifier(target_table),
+        quote_identifier(database),
+        quote_identifier(staging_table)
+    )
+}
+
+/// 一个 run 的目标端连接池：有上限、会复用，**每条新连接照旧跑完整套开连接仪式**（#260）。
+///
+/// 从前这里是一个没有上限的 `Vec<Conn>`：`new` 急开一条，`with_conn` 拿不到空闲的就
+/// 现开一条，用完一律塞回去。低并发下它实际只有一条连接（于是同一个 run 的所有操作
+/// 互相排队），高并发下它又没有任何刹车（于是能把目标库的 `max_connections` 顶穿）。
+///
+/// 现在：空闲的优先复用；没有空闲但活着的连接还没到 [`MAX_POOL_CONNECTIONS`] 就新建；
+/// 已经到顶就在条件变量上等，等别人还回来一条。**排队发生在这里，不发生在目标库上**。
+///
+/// 仪式那一环一个字没动：[`Self::connect`] 是**唯一**造连接的地方，它无条件调用
+/// [`run_connection_ritual`]。第一条如此，第 N 条也如此、重连出来的那条同样如此——
+/// 那四条断言就是「这台 agent 可用」的定义，池化不是省掉它们的理由。
 struct RitualPool {
     opts: Opts,
-    idle: Mutex<Vec<Conn>>,
+    state: Mutex<PoolState>,
+    returned: Condvar,
 }
+
+struct PoolState {
+    idle: Vec<Conn>,
+    /// 已经造出来、还没销毁的连接数（含此刻正被人用着的那些）。上限就管着它。
+    live: usize,
+}
+
+/// 一个 run 的池子最多同时持有几条 MySQL 连接。
+///
+/// 一个 run 内部本来就是**顺序**推批次的，所以 1 条也够用；留到 4 是因为切换那一步
+/// 与元数据读取可能与批次写入交错，而多备几条的代价只是几个空闲会话。真正管住
+/// 「这台 agent 一共开多少连接」的是 `max_concurrent_runs`——池子是**每个 run 一个**。
+const MAX_POOL_CONNECTIONS: usize = 4;
 
 impl RitualPool {
     fn new(opts: Opts) -> Result<Self, String> {
         let pool = Self {
             opts,
-            idle: Mutex::new(Vec::new()),
+            state: Mutex::new(PoolState {
+                idle: Vec::new(),
+                live: 0,
+            }),
+            returned: Condvar::new(),
         };
+        // 急开第一条：`test_connection` 与 `POST /v1/runs` 都指望「池子建得起来」
+        // 等价于「这台 MySQL 过得了开连接仪式」。这条断言不能改成惰性的。
         let connection = pool.connect()?;
-        pool.idle
-            .lock()
-            .expect("MySQL pool mutex poisoned")
-            .push(connection);
+        let mut state = pool.state.lock().expect("MySQL pool mutex poisoned");
+        state.live += 1;
+        state.idle.push(connection);
+        drop(state);
         Ok(pool)
     }
 
+    /// **唯一**造连接的地方：开一条，然后无条件跑完开连接仪式。
     fn connect(&self) -> Result<Conn, String> {
         let mut connection =
             Conn::new(self.opts.clone()).map_err(|error| format!("连接 MySQL 失败：{error}"))?;
@@ -640,29 +690,104 @@ impl RitualPool {
         Ok(connection)
     }
 
+    /// 借一条连接出来用，用完还回去。
+    ///
+    /// 借与还都只在锁里改计数，**操作本身在锁外跑**——否则这把锁会变成第二个串行点。
     fn with_conn<T>(
         &self,
         operation: impl FnOnce(&mut Conn) -> Result<T, MysqlError>,
     ) -> Result<T, PoolError> {
-        let pooled = self.idle.lock().expect("MySQL pool mutex poisoned").pop();
-        let mut connection = match pooled {
-            Some(mut connection) => {
-                if connection.ping().is_ok() {
-                    connection
-                } else {
-                    self.connect().map_err(PoolError::ConnectionRitual)?
-                }
-            }
-            None => self.connect().map_err(PoolError::ConnectionRitual)?,
-        };
-
+        let mut connection = self.acquire()?;
         let result = operation(&mut connection).map_err(PoolError::Mysql);
-        self.idle
-            .lock()
-            .expect("MySQL pool mutex poisoned")
-            .push(connection);
+        self.release(connection);
         result
     }
+
+    fn acquire(&self) -> Result<Conn, PoolError> {
+        let mut state = self.state.lock().expect("MySQL pool mutex poisoned");
+        loop {
+            if let Some(mut connection) = state.idle.pop() {
+                drop(state);
+                if connection.ping().is_ok() {
+                    return Ok(connection);
+                }
+                // 这条已经死了：连它占的那个名额一起交出去，再按新建走一遍仪式。
+                // 直接复用一个 ping 不通的会话，等于把仪式设过的会话变量赌在
+                // 服务端的自动重连上——那正是仪式要排除的不确定。
+                drop(connection);
+                let mut state = self.state.lock().expect("MySQL pool mutex poisoned");
+                state.live -= 1;
+                drop(state);
+                return self.open_counted();
+            }
+            if state.live < MAX_POOL_CONNECTIONS {
+                state.live += 1;
+                drop(state);
+                return self.open_counted_reserved();
+            }
+            // 到顶了：等别人还一条回来。等在这里比多开一条连接强——
+            // 目标库的 `max_connections` 是个硬上限，撞上它是整台 agent 一起失败。
+            state = self
+                .returned
+                .wait(state)
+                .expect("MySQL pool mutex poisoned");
+        }
+    }
+
+    /// 名额还没占：占一个再开。
+    fn open_counted(&self) -> Result<Conn, PoolError> {
+        let mut state = self.state.lock().expect("MySQL pool mutex poisoned");
+        state.live += 1;
+        drop(state);
+        self.open_counted_reserved()
+    }
+
+    /// 名额已经占好了：开不出来就把名额退回去，并叫醒一个等的人。
+    fn open_counted_reserved(&self) -> Result<Conn, PoolError> {
+        match self.connect() {
+            Ok(connection) => Ok(connection),
+            Err(message) => {
+                let mut state = self.state.lock().expect("MySQL pool mutex poisoned");
+                state.live -= 1;
+                drop(state);
+                self.returned.notify_one();
+                Err(PoolError::ConnectionRitual(message))
+            }
+        }
+    }
+
+    fn release(&self, connection: Conn) {
+        let mut state = self.state.lock().expect("MySQL pool mutex poisoned");
+        state.idle.push(connection);
+        drop(state);
+        self.returned.notify_one();
+    }
+}
+
+/// 读一次服务端自述：`@@version` 与 utf8mb4 的默认字符序（#257）。
+///
+/// **字符序是查出来的，不是按版本号推出来的**：8.0 给 `utf8mb4_0900_ai_ci`、
+/// 5.7 给 `utf8mb4_general_ci`，但部署方完全可以把 `collation-server` 改成别的，
+/// 而这份值最终会写进 source 生成的建表语句里。推一份出来只会在建完表之后才暴露错误。
+///
+/// **读失败不是错误**：回 `None`，调用方当「没观察到」处理。这两项只喂建表语句的
+/// 字符序与界面上的版本一列，够不着搬运链的正确性；为它让 `POST /v1/runs` 失败，
+/// 换来的是一次本来能跑完的同步跑不起来。
+fn read_server_info(pool: &RitualPool) -> Option<MysqlServerInfo> {
+    let row: Option<(String, Option<String>)> = pool
+        .with_conn(|connection| {
+            connection.query_first(
+                "SELECT @@version, \
+                        (SELECT DEFAULT_COLLATE_NAME FROM information_schema.CHARACTER_SETS \
+                          WHERE CHARACTER_SET_NAME = 'utf8mb4')",
+            )
+        })
+        .ok()?;
+    let (version, utf8mb4_collation) = row?;
+    Some(MysqlServerInfo {
+        version,
+        utf8mb4_collation: utf8mb4_collation?,
+    })
 }
 
 fn run_connection_ritual(connection: &mut Conn) -> Result<(), String> {
@@ -741,6 +866,23 @@ fn is_permission_error(code: u16) -> bool {
     matches!(code, 1044 | 1045 | 1142 | 1143 | 1227)
 }
 
+/// 开连接仪式对 `max_allowed_packet` 的下界，64 MiB（ADR-0024）。
+///
+/// **不放宽**（#262）：它守的是一整批 `INSERT` 被 MySQL 按包长截断——截断在协议层
+/// 就把语句砍成半截，报出来的是语法错，排查的人会去翻业务数据，而数据是好的。
+pub const MIN_PACKET: u64 = 64 * 1024 * 1024;
+
+/// 把 `max_allowed_packet` 调够的照做指令——开连接仪式与运行期两处报文共用这一份。
+///
+/// 5.7 的默认值是 4 MiB，8.0 的默认值才是 64 MiB，所以**每一台没调过参的 5.7 都会在
+/// 第一次开连接仪式上撞到这道门**（#262）。门不放宽，能改的只有报文：从「一次神秘的
+/// 环境故障」变成「照抄这两行」。
+///
+/// 两条都给，缺一不可：`SET GLOBAL` 当场生效但重启就没了；my.cnf 要重启才生效，
+/// 但能留到下一次重启之后。只给前者，客户重启一次数据库就退回原样；只给后者，
+/// 得先停一次库才能开工。
+pub const PACKET_REMEDY: &str = "请在目标库上以有 SUPER 权限的账号执行 `SET GLOBAL max_allowed_packet = 67108864;`（当场生效，但只对之后新建的连接生效，改完请重跑），并在 my.cnf 的 `[mysqld]` 段写上 `max_allowed_packet = 64M`，让它在 MySQL 重启之后仍然成立；MySQL 5.7 的默认值是 4 MiB，未调参的 5.7 实例都会停在这里。这是目标端环境配置，不要排查业务数据";
+
 pub fn check_connection_settings(
     character_set_client: &str,
     character_set_connection: &str,
@@ -750,7 +892,6 @@ pub fn check_connection_settings(
 ) -> Result<(), String> {
     const EXPECTED_CHARSET: &str = "utf8mb4";
     const EXPECTED_SQL_MODE: &str = "STRICT_ALL_TABLES";
-    const MIN_PACKET: u64 = 64 * 1024 * 1024;
 
     let mut problems = Vec::new();
     for (name, actual) in [
@@ -771,7 +912,7 @@ pub fn check_connection_settings(
     }
     if max_allowed_packet < MIN_PACKET {
         problems.push(format!(
-            "环境配置错误：max_allowed_packet 期望至少 {MIN_PACKET} 字节，实际 {max_allowed_packet} 字节；请调整 MySQL 配置，不要排查业务数据"
+            "环境配置错误：max_allowed_packet 期望至少 {MIN_PACKET} 字节（64 MiB），实际 {max_allowed_packet} 字节；{PACKET_REMEDY}"
         ));
     }
 
@@ -785,11 +926,12 @@ pub fn check_connection_settings(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cleanup_delete_statement, build_insert_statement, build_ledger_insert_statement,
+        build_clear_statement, build_insert_statement, build_swap_insert_statement,
         build_swap_upsert_statement, classify_atomic_swap_error, classify_mysql_diagnostic,
         PoolError,
     };
     use crate::{AtomicSwapError, WriteBatchError};
+    use db_qbs_shared::WriteStatement;
     use mysql::{Error as MysqlError, MySqlError};
 
     #[test]
@@ -815,19 +957,6 @@ mod tests {
                 value: Some("10000-01-01 00:00:00".to_owned()),
             }
         );
-    }
-
-    #[test]
-    fn ledger_records_each_composite_key_and_cleanup_protects_a_later_writer() {
-        let keys = vec!["ID".to_owned(), "TENANT".to_owned()];
-        let insert = build_ledger_insert_statement("qbs", "T__stg_run", &keys);
-        assert!(insert.contains("JSON_ARRAY(s.`ID`, s.`TENANT`)"));
-        assert!(insert.contains("SHA2("));
-
-        let cleanup = build_cleanup_delete_statement("qbs", "T", &keys);
-        assert!(cleanup.contains("DELETE t FROM `qbs`.`T` t"));
-        assert!(cleanup.contains("newer.write_seq > l.write_seq"));
-        assert!(cleanup.contains("newer.key_json = l.key_json"));
     }
 
     #[test]
@@ -894,5 +1023,47 @@ mod tests {
                 "ON DUPLICATE KEY UPDATE `C_ONLY` = `C_ONLY`"
             )
         );
+    }
+
+    #[test]
+    fn a_target_table_without_a_primary_key_gets_a_plain_insert_select() {
+        // 没有 `ON DUPLICATE KEY UPDATE`，一个字都没有：这条语句就是纯追加（#261）。
+        let statement = build_swap_insert_statement(
+            "qbs",
+            "T_FLOW",
+            "T_FLOW__stg_run",
+            &["C_FIRST".to_owned(), "C_SECOND".to_owned()],
+        );
+        assert_eq!(
+            statement,
+            concat!(
+                "INSERT INTO `qbs`.`T_FLOW` (`C_FIRST`, `C_SECOND`) ",
+                "SELECT `C_FIRST`, `C_SECOND` FROM `qbs`.`T_FLOW__stg_run`"
+            )
+        );
+        assert!(!statement.contains("ON DUPLICATE KEY"));
+    }
+
+    #[test]
+    fn the_statement_shape_follows_the_recorded_primary_key_and_nothing_else() {
+        assert_eq!(
+            WriteStatement::for_primary_key(&["C_ONLY".to_owned()]),
+            WriteStatement::Upsert
+        );
+        assert_eq!(WriteStatement::for_primary_key(&[]), WriteStatement::Insert);
+    }
+
+    /// 清空那一步是 `DELETE`，**不是 `TRUNCATE`**，而且这条测试就是那个理由的守卫。
+    ///
+    /// `TRUNCATE` 是 DDL、隐式提交：放进切换事务里，一次失败的导入会留下一张空表——
+    /// 也就是「清空成功、导入失败、数据没了」这个最坏结果。把它钉成一条断言，
+    /// 是因为改成 `TRUNCATE` 在读代码时看起来只是「换个更快的写法」。
+    #[test]
+    fn clearing_the_target_is_a_delete_and_never_a_truncate() {
+        let statement = build_clear_statement("app", "HOLDINGS");
+        assert_eq!(statement, "DELETE FROM `app`.`HOLDINGS`");
+        assert!(!statement.to_ascii_uppercase().contains("TRUNCATE"));
+        // 没有 WHERE：整表。有 WHERE 就不是「跑完之后目标表精确等于本次查询结果」了。
+        assert!(!statement.to_ascii_uppercase().contains("WHERE"));
     }
 }

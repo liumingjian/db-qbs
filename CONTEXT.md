@@ -62,8 +62,24 @@ published to the internet.
 
 Both sides are written in **Rust** with synchronous blocking IO. `source` reaches Oracle **11g**
 through the `oracle` crate (ODPI-C), so the source machine must carry a full **Oracle Instant
-Client 19c Basic** bundle (brought in offline, no root required). The target is **MySQL 8.0**,
-`utf8mb4` throughout.
+Client 19c Basic** bundle (brought in offline, no root required). The target is **MySQL 5.7 or
+8.0**, `utf8mb4` throughout.
+
+**5.7 is an addition to the support matrix, not a replacement for 8.0** — a great many sites have
+not upgraded, and "cannot connect" is not an answer to give them. Nothing in the SQL had to move:
+no CTE, no window function, and the upsert was already in the form 5.7 accepts. Two things did:
+
+- **`max_allowed_packet` must be raised on 5.7.** Its stock value is 4 MiB against the Connection
+  Ritual's hard 64 MiB, so *every untuned 5.7 instance* is judged unusable on its first run. The
+  gate is not relaxed — see **Connection Ritual** — so the target's DBA raises it, and the refusal
+  message carries the `SET GLOBAL` command and the `my.cnf` stanza to make it stick.
+- **Auto-increment is read from `EXTRA` by containment, never by equality.** 8.0 also writes
+  `DEFAULT_GENERATED` into that column and 5.7 never does; comparing the whole value against an
+  8.0-only spelling made every 5.7 auto-increment column read as ordinary.
+
+The same live round-trip suite is pointed at both versions in turn
+(`docs/spikes/fixtures/local-rig/scripts/run-mysql-destination-live.sh both`); nothing in it
+branches on the version.
 
 ## Glossary
 
@@ -80,17 +96,137 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    before each use. **An identity mismatch does not count as online** — "a different agent is
    answering at this address" and "nothing is running" are two distinct incidents, reported separately.
 
+   The agent also reports **which MySQL it is connected to**: `@@version`, and the default collation
+   of `utf8mb4` on that server. `source` opens no MySQL connection of its own, so the agent is the
+   **only** source of this information, and the generated **target DDL** depends on it.
+   The report is a **cache, not configuration**: the agent holds no target credentials of its own
+   (they arrive with each run), so it learns the answer only on a path that carries them — a target
+   check or the opening of a run — and repeats the last thing it observed afterwards. Before it has
+   ever observed one, and for agents built before this was reported at all, the answer is **unknown**,
+   and unknown is reported as unknown. **Nothing downstream may substitute a guess for it.**
+
 **Import Task**
-   One complete job: query a batch of data from Oracle, move it into one MySQL table. A task is
-   re-runnable — running **the same task definition** twice must leave the target table in an
-   identical state. Consistency comes from **upserting on the primary key**; idempotence rests on the
-   target table's unique constraint.
+   One complete job: query a batch of data from Oracle, move it into one MySQL table.
+   **The idempotence promise is conditional.** A task whose target table has a unique
+   constraint is re-runnable in the old sense — running **the same task definition** twice leaves the
+   target table in an identical state, because consistency comes from **upserting on the primary
+   key** and idempotence rests on that constraint. A task whose target table has **no** unique
+   constraint writes a plain `INSERT ... SELECT`, and running it twice **doubles the data**. That is
+   the first place in the product where the same task definition, run twice, leaves two different
+   target states. It is allowed on purpose (#261) — "append this query into a flow table" had no
+   outlet otherwise — and it is never silent: the precheck says it in its conclusion, the task
+   definition records it, and the task list and run detail both carry a visible marker.
+   **Clear-then-import is the other way to run a task** (#264): the target table is emptied and this
+   run's rows imported, both inside one transaction, so afterwards the target table holds **exactly
+   this run's query result**. It is idempotent in the strongest sense — every run ends at the same
+   state regardless of what was there — and it is the only write mode under which rows deleted at
+   the source stop lingering at the target. What it costs is stated where it is chosen: the previous
+   contents are deleted, and there is no undo.
 
 **Task Definition**
-   A **structured spec** (table, columns, filter clause, primary key). **It is the single source of
+   A **structured spec** (table, columns, filter clause, primary key, **write mode**, **schedule**).
+   **It is the
+   single source of
    truth, and the source SQL is generated from it.** **The SQL is not stored in the task definition**
    — it is recomputed on demand, and only pinned as a snapshot of what actually ran on each
    run-history row. **Only `source` reads it; `sink` is unaware it exists.**
+   The **write mode** is what the author chose — `APPEND` or `CLEAR_THEN_IMPORT`; the **write
+   statement** is what the target end actually runs, and nobody chooses that — it follows from one
+   fact alone, whether the target table has a unique constraint. **The mode does not touch the
+   statement**: clearing only adds a whole-table `DELETE` ahead of the same insert, in the same
+   transaction. Keeping the upsert there is deliberate — it lets a clear-mode run tolerate duplicate
+   primary keys *within one run* instead of dying on `ERROR 1062` half way through the import.
+   The wizard therefore greys the primary-key column out in clear mode rather than hiding it: the
+   choice is not the author's there, but the key is still recorded, taken from what the target table
+   actually defines, because the statement still follows from it. An **empty primary key is a value, not a blank**: it is
+   the definition's record of "the target table had nothing to merge on". If the target table's key
+   situation has moved since, the two derivations disagree and **the run fails**; the statement kind
+   is never switched silently under an unchanged definition.
+
+**Task Name**
+   A **display label on a task, nothing more**: it is not unique, it takes part in no identity, and
+   nothing is looked up by it — `task_id` is what identifies a task. It is edited **in the wizard**,
+   alongside everything else the task is made of, and saved with it; a hand-typed name is never
+   overwritten by a later table change (a mapping can be wrong, a label cannot). It is **the wizard's
+   first step**, and **editing a task offers 保存 on every step**, because renaming has to stay
+   reachable: the name depends on nothing, and there is no second route to it. Put the field last and
+   every gate in front of it becomes a gate on renaming — a target table that drifted in the database
+   blocks the target-table step, and a task nobody can rename is the result. The per-step gates guard
+   *walking the wizard*; the only gate on saving is that the name is not empty.
+   Because it is a label that may change at any time, **each run-history row snapshots the name it
+   was started under** (`task_name`, beside the `source_sql` snapshot) — reading the name off the
+   task at display time would rename every past run the moment someone renames the task. Rows written
+   before that column existed carry an empty string, and only those fall back to the current name.
+   The same reasoning covers **how the run wrote**: a run's evidence snapshots the primary key and
+   the write mode it ran under, and the run detail states its write semantics from those, never from
+   the task's current definition — otherwise editing a task rewrites what every past run claims to
+   have done.
+
+**Schedule**
+   Two fields on the task definition: a **five-field cron expression** and an **enable switch**.
+   They are two fields because they are two things — clearing the expression to pause a task would
+   make someone throw away the line they wrote. An enabled task with no expression is a
+   contradiction and is **refused when the task is saved**, as is any expression the parser cannot
+   read; the reason it gives is the sentence the person sees, never an error code.
+
+   The expression is stored **as written**. The parser is **hand-written and depends on nothing**:
+   the packaging chain is an offline cross-compile, and the only forms in play are `*`, `a`, `a-b`,
+   `*/n`, `a-b/n` and comma lists, so `L`, `W`, `#` and seconds fields would all be dead weight. It
+   is a **pure function** — an expression plus an instant in, the next fire time out — which is what
+   lets the whole semantics be pinned by a table of cases. There is exactly one surprising rule and
+   it is Vixie cron's: when **both** the day-of-month and the day-of-week field are restricted, they
+   are **or**-ed, not and-ed.
+
+   **The timezone is the server's local timezone**, and the interface states it. The machine running
+   `source` is the one that will fire the run, so its wall clock is the only meaningful answer; the
+   browser's would be a different two o'clock. The interface therefore shows the timezone and the
+   **next fire times** beside the expression, computed by the server through the same parser that
+   refuses a bad expression at save time — that read-out is what makes the parser's semantics
+   visible instead of assumed.
+
+**Scheduler**
+   The **thread inside `source`'s resident parent process** that acts on a Schedule — the same layer
+   as the agent-probe loop, and it exits the same way: it sleeps in short slices and checks the
+   termination flag between them, so SIGTERM's graceful shutdown is not held up. It reaches the same
+   dispatch path as the "run now" button; the two differ only in what the run history records about
+   who started it.
+
+   A run is started when the cron instant arrives **and** the switch is on. Three rules govern the
+   rest, and all three exist so that a fire time **always has an answer**:
+
+   **A collision skips the occurrence and says so.** If that task's previous run has not finished,
+   this occurrence is not started — and a **run-history row is written for it anyway**, saying
+   「上次尚未结束，本次跳过」. Dropping it silently would make "did the month-end one run?"
+   unanswerable. That row is structurally the same as a precheck refusal that never reached the
+   agent: **no run identifier**, the target table untouched, and a failure kind (`SKIPPED`) that is
+   the only value in the closed set meaning *nothing was done*.
+
+   **Occurrences missed while the service was down are not caught up.** When a task is first seen —
+   process start, task created, switch turned on, expression rewritten — only the **next** fire time
+   is computed; the scheduler never looks backwards. A restart therefore cannot set off a burst of
+   unexpected writes, and a three-day outage yields one occurrence, not seventy-two.
+
+   **Dispatch respects the concurrency cap by queueing on the source side**, rather than pushing
+   everything at the agent and letting it refuse: configure "everything at 2am" and the peak
+   concurrency equals the task count, most of which would come back `RUN_QUOTA_EXCEEDED`. The cap is
+   the number the **agent reports about itself** (`max_concurrent_runs`, below) — a second copy
+   configured on the source side would be a second source of truth for one limit, wrong in both
+   directions. An agent old enough not to report it is dispatched **one at a time**, and that
+   one is a fact about such an agent rather than a cautious guess: an agent that predates the
+   quota field also predates concurrency on the target side, and served requests strictly one
+   after another. The sink's default of 4 is the number *a person configuring a current agent*
+   chose; borrowing it for an agent that never had it would be the guess. The queue
+   is **visible in the interface** (`GET /api/schedule`), with the instant it was due and what it is
+   waiting on; a queue living only in a background thread's memory would leave the screen saying
+   nothing happened. An occurrence that cannot be dispatched for a reason waiting will not fix —
+   datasource gone, agent offline — leaves the queue with a history row explaining itself.
+
+   **The timezone is the server's local one**, the same answer as the expression preview, read
+   through the same `Local` clock.
+
+   Scheduled runs are **distinguishable from manual ones in run history** (`run_trigger`: `MANUAL` or
+   `SCHEDULED`), while they are still in flight as well as after. Rows written before that column
+   existed migrate to `MANUAL` — before it, a run could only have been started by a person.
 
 **Task Draft**
    A Task Definition **while it is being built**, plus everything the interface needs to judge it:
@@ -191,18 +327,43 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    Abort is not a state; it is an action on the `FAILED` path.
 
 **Swap**
-   Completed inside a single transaction on the target: `INSERT ... SELECT ... ON DUPLICATE KEY
-   UPDATE` from the staging table into the target table, then `DROP` the staging table. The target
-   table holds either all old data or all new data, never an intermediate state.
-   **Rows deleted at the source do not disappear at the target** — an upsert only writes, never
-   deletes. That is a deliberate debt.
+   Completed inside a single transaction on the target: an `INSERT ... SELECT` from the staging table
+   into the target table, then `DROP` the staging table. The target table holds either all old data
+   or all new data, never an intermediate state.
+   **There is more than one write statement, and the target table picks it, not the author.** With a
+   unique constraint it is `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE` — merge on the key. With
+   none it is the plain `INSERT ... SELECT`; the upsert clause is omitted rather than carried along,
+   because a clause that can never fire only misleads whoever reads the statement.
+   **The row-count adjudication forks with it**: the upsert path accepts `[staged, 2×staged]`
+   (MySQL counts an update as 2, and `CLIENT_FOUND_ROWS` puts the floor at `staged` rather than 0),
+   while the plain insert demands **strict equality**. One pure function in `shared` decides both,
+   and the statement is passed into it rather than sniffed at each call site.
+   **Under the append write mode, rows deleted at the source do not disappear at the target** —
+   neither statement ever deletes. That is a deliberate debt.
+   **Under clear-then-import the swap has one more step, and it is inside the same transaction**
+   (#264): a whole-table `DELETE FROM <target>` immediately before the insert. It is a `DELETE` and
+   **never a `TRUNCATE`** — `TRUNCATE` is DDL and commits implicitly, which inside this transaction
+   would manufacture the one outcome the transaction exists to prevent: cleared successfully, import
+   failed, target table now empty. Because the two steps share a transaction, an import that fails
+   half way leaves the target table exactly as it was. The `purged_rows` the run reports is that
+   `DELETE`'s own count; on the append path it is 0, and that 0 is a fact rather than a placeholder.
+   **The statement choice is untouched by the clearing**, and so is the row-count adjudication above.
+   **The swap leaves nothing behind but the target table**, and writes no per-row record of what it
+   wrote — there is no write ledger, and no "undo a run" action for one to feed (#256; the reasoning
+   is in **Standing limits** item 10). The swap issues no DDL at all. Shedding a table an older
+   deployment left in the customer's database is **creating the staging table**'s job: that step is
+   the run's first DDL against the target, and it drops `__db_qbs_write_ledger` there
+   (`DROP TABLE IF EXISTS`, a no-op on a database that never had one).
 
 **Tombstone**
    An in-memory record `sink` keeps for a finished run so that "what happened?" still has an answer
-   after the swap. It records the **resource's final state**, not the run's, and has only two values:
-   `SWAPPED` (the target table has absorbed this run's rows — **merged by primary key**, per **Swap**
-   above; it does not mean the table was replaced wholesale) and `DISCARDED` (the target table was
-   never touched). **It is a diagnostic cache, not a state store** — only the most recent 32 are kept, and
+   after the swap. It records the **resource's final state**, not the run's, and has three values:
+   `SWAPPED` (**merged by primary key** into the target table, per **Swap** above — it does **not**
+   mean the table was replaced wholesale), `REPLACED` (the target table was **replaced wholesale**:
+   a clear-then-import run emptied it and imported this run's result, so it now equals that result
+   exactly) and `DISCARDED` (the target table was never touched). `SWAPPED` and `REPLACED` cannot
+   share a word: a run history that describes a wholesale replacement as "merged by primary key"
+   reads false, which is the entire reason for the third value (#264). **It is a diagnostic cache, not a state store** — only the most recent 32 are kept, and
    losing them costs no correctness, only diagnosability. **Run history does not absorb it**: a
    tombstone answers "did the target table move?", a question `source` asks and only `sink` can answer.
 
@@ -215,10 +376,25 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    **may be `null`**. **The contract is "the field set is stable, the formatting is not"**; fields are
    only ever added, never removed and never redefined.
    Failure lines carry `column` and `value`, **so the logs contain business data**: business values
-   can exist in three places on the source host (the child process's stdout, a file the deployer
-   redirected it into, and the run-history SQLite database), all held to 0600, and **moving them off
-   that host counts as exfiltration, which the product never does**. Logs go to stdout only; the
-   program creates no files and rotates nothing.
+   can exist in four places on the source host (the child process's stdout, a file the deployer
+   redirected it into, the run-history row, and the raw-line table described below), all held to
+   0600, and **moving them off that host counts as exfiltration, which the product never does**.
+   Logs go to stdout only; the program creates no files and rotates nothing.
+   **The parent also keeps the child's raw lines**, verbatim, in the same local database as run
+   history and related by run — because folding is lossy: an event the fold does not recognise is
+   ignored by definition, so "where did last night's run get stuck?" cannot be answered from the
+   folded row. Lines that are not even JSON are kept too, as they arrived. Three properties are
+   load-bearing:
+   **retention is the stricter of 7 days and the most recent 10 runs per task**, expired lines being
+   dropped by the same purge-on-write the history table uses (no background task);
+   **`value` is truncated to 64 characters before storage** — enough to tell which column went wrong,
+   not enough to be a copy of the data, and a truncated line carries `value_truncated: true` so the
+   display layer never reads half a value as a whole one;
+   and they are read back **by cursor** (`GET /api/runs/{}/logs?after=<seq>`, session-guarded),
+   returning only the lines after the cursor. **Polling, never a long connection** — this backend is
+   a synchronous blocking stack with no async runtime, and one hanging connection would occupy a
+   whole worker thread. Rendering a line as a sentence is the display layer's job; the wire format
+   stays structured, or the parent would be regex-matching prose.
 
 **Run History**
    A row the long-running `source` parent process writes for **every submission**, and the only basis
@@ -249,6 +425,20 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    **It hangs off the pool's connection-creation hook, not the top of the business code** — otherwise
    the second connection in the pool comes up bare. It concerns no particular column and happens
    before the mapping precheck, so it never appears in the precheck's per-column report.
+   The pool behind it is a real one — **bounded, and reusing** — but that changed nothing about the
+   ritual: the pool has exactly one place that creates a connection, and it runs the ritual
+   unconditionally. First connection, Nth connection, and the replacement for one that stopped
+   answering are all the same case. A pooled connection that fails its ping is **thrown away rather
+   than reused**: keeping it would bet the ritual's session variables on the server's reconnect
+   behaviour, which is precisely the uncertainty the ritual exists to remove. The four assertions are
+   the definition of an agent being usable; **pooling is not a licence to skip them**.
+
+   **The 64 MiB is a hard gate on both supported versions**; it is what stops a large batch being
+   truncated at the protocol layer, which surfaces as a syntax error and sends whoever is on call
+   digging through business data that is fine. MySQL 5.7's stock value is 4 MiB, so on 5.7 the
+   refusal is the *normal* first outcome rather than a rare misconfiguration — which is why the
+   message is written to be obeyed rather than investigated: it names the `SET GLOBAL` command and
+   the `my.cnf` line, one to take effect now and one to survive the restart.
 
 **Verification**
    A mandatory gate before the swap, not an optional step. **It compares the row count the source
@@ -278,8 +468,15 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    The per-column check of "source column type → target column type" performed before a run is
    submitted. **It is a hard gate**: fail it and the run may not start. It rejects types outside the
    whitelist, `DECIMAL`s with insufficient precision, `NUMBER`s declared without precision, and
-   `TIMESTAMP` scales beyond 6 digits, and it **hard-rejects a target table lacking a primary key or
-   unique constraint** (without one, `ON DUPLICATE KEY UPDATE` silently degrades into a plain INSERT).
+   `TIMESTAMP` scales beyond 6 digits.
+   **The primary-key gate now applies to the upsert path only.** When the task ticks a primary key it
+   still **hard-rejects a target table lacking a matching primary key or unique constraint** (without
+   one, `ON DUPLICATE KEY UPDATE` silently degrades into a plain INSERT) — that rule is unchanged in
+   force, only in scope. When the task ticks none, the mirror-image rule applies and is just as hard:
+   the target table must **still** have no unique constraint. Either way this stays the **single**
+   interception point; no other place gets to decide the statement kind.
+   Passing is not the whole answer: the precheck also returns **conclusions**, which do not block but
+   must be read. Today there is one — "目标表无主键 → 本任务为纯追加写，重跑会产生重复数据".
    It is the **only defence** against values being silently altered — and the only defence that can
    be **switched off wholesale** — see **Standing limits**.
    A column whose fit cannot be settled from metadata alone gets a **3.5th step, the range check**:
@@ -311,6 +508,13 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    determines it uniquely, and **no input from the target side is needed** (the table does not exist
    yet). **Primary key columns are `NOT NULL` with a `PRIMARY KEY (...)`, every other column
    nullable**, and `utf8mb4` is explicit.
+   The **collation** is the one exception to "no input from the target side is needed": MySQL's
+   default collation for `utf8mb4` differs between server versions, so it is taken from what the
+   **target agent** reported (see *Target Agent*) and written out as an explicit `COLLATE`.
+   When the agent reported nothing, the statement carries `DEFAULT CHARSET=utf8mb4` and **no
+   `COLLATE` at all**, leaving the choice to the target server's own default — the behaviour that
+   predates the report. Picking a collation on the agent's behalf is forbidden: a wrong one surfaces
+   only much later, as comparisons and sorts quietly giving the wrong answer.
    **It grants no clearance of any kind**: after a person creates the table from it, the mapping
    precheck still runs from scratch and may still reject. There is exactly one interception point, and
    it is the mapping precheck. The **staging table**'s DDL is a different thing: that one is *copied*
@@ -380,13 +584,15 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    three places in that file — `serve`'s listener loop, the `handle_request` that feeds it, and the
    translation pair at the bottom — and no route or handler knows it exists. Unlike `source`, `sink`
    keeps that process-level half in the same file rather than a `server.rs`; the file is 700 lines,
-   not 2400. Tests drive all eleven routes in-process (`crates/sink/tests/api.rs`), against
+   not 2400. Tests drive all ten routes in-process (`crates/sink/tests/api.rs`), against
    `test_support::InMemoryDestination` behind the `SinkService` seam.
 
    Routes are **data** (`routes()`) and matched in the same two passes, literal before placeholder, so
-   `/v1/runs/cleanup` cannot be swallowed by a run id however the table is written. A placeholder is
-   exactly one path segment: non-empty, no `/` — one `match_pattern`, where there used to be a
-   `run_resource` and a `run_action` saying the same thing twice.
+   a literal such as `/v1/runs/probe` could not be swallowed by `/v1/runs/{}` however the table is
+   written — the table holds no such pair today, and the guard in `api.rs` is written against
+   `routes()` rather than against one named route, so it covers the next one added. A placeholder is
+   exactly one path segment: non-empty, no `/`, decided by **one** `match_pattern` rather than one
+   predicate per route shape.
    `every_route_reaches_its_handler` reconciles its own table against `routes()`, so a new route
    without a test fails the suite. The failure log reads the same table, so a run-scoped route added
    later names its `run_id` without anyone remembering to go and say so.
@@ -394,6 +600,46 @@ Client 19c Basic** bundle (brought in offline, no root required). The target is 
    **There is no authentication column**, because `sink` has no login at all: anything that can reach
    the port can drive it with the credentials the caller supplies. Failure keeps the sink envelope —
    `{"error": {"code", "message", "run_id", "details"}}` — unchanged by this shape.
+
+**Concurrency**
+   **One person doing several things at once, and nothing more.** The `source` HTTP face is served
+   by a fixed pool of worker threads sharing one listener, so a slow Oracle column fetch or ten-row
+   preview on one screen does not freeze the task list on another. The SQLite-backed stores (tasks,
+   datasources, login, run history) are each safe to touch from several threads, and **no lock is
+   ever held across blocking IO** — Oracle calls, agent probes and sink requests all happen with
+   every lock released. The one mutual exclusion that is a product rule, not an implementation
+   detail, is **one task runs at most once at a time** (a second start returns 409).
+
+   The **agent** side is built the same way and for the same reason. Its HTTP face is served by a
+   fixed pool of worker threads over one listener; the run registry lock is taken only long enough to
+   hand out a run's destination handle and reserve its batch sequence number, with **every MySQL
+   write happening outside it**; and the target-side connection pool is bounded and reusing. Those
+   three were one thing, not three: while any of them serialised the process, the other two bought
+   nothing — a single commit's table-wide rewrite would still hold up every other task's batches.
+   How many runs may be in flight on one agent is a **configured number** (`max_concurrent_runs` in
+   `sink.toml`, 4 by default), not an accident of process structure; over it, opening a run is
+   **refused on the spot rather than queued** (`RUN_QUOTA_EXCEEDED`), because a caller hanging on a
+   connection that will not move is worse than being told the quota is full. The agent **reports that
+   number about itself** (`GET /v1/agent/info`) so the Scheduler can hold the line *before*
+   dispatching and queue on the source side instead of collecting refusals; the quota's adjudication
+   stays here, on the agent, because that is where the runs actually are. Worker threads are a
+   separate, larger number: the refusal itself, and the read-only endpoints, must still answer while
+   several slow writes are in flight.
+
+   Concurrency also **widens the mutual exclusion key from a task to a task ∪ its target table**:
+   at most one run at a time per (agent, database, target table). A target table is just a string
+   with no uniqueness constraint, so two unrelated tasks may legitimately point at the same one. In
+   the serial era that was harmless; concurrently it is silent data loss — one run rewriting the
+   whole table while another upserts rows into it deletes those rows, and **both runs report
+   success**. This one is **adjudicated on the agent side, never on the source's honour**: there may
+   be several sources, and none of them holds the truth about the target database. The refusal
+   (`TARGET_TABLE_BUSY`) names **which target table is held by which run**, and the comparison
+   ignores letter case, because whether MySQL table names are case-sensitive depends on the host.
+
+   **Multiple users are explicitly out of scope**: there is exactly one account, tasks have no
+   owner, and there is no per-user visibility, sharing or audit trail. Everyone who logs in sees and
+   can change everything. Concurrency here is about **not making one person wait for themselves**;
+   reading it as a step toward multi-tenancy would be a mistake.
 
 ## Standing limits
 
@@ -419,18 +665,60 @@ gets paid off and when lives in the issue tracker, not here.
    clause: **`/api/*` never returns a password, not even the ciphertext.**
 5. **Logs contain business values** — failure lines carry `column` and `value`. The mitigation is the
    host boundary and the file permissions, not the login: the logs go to stdout, which no session
-   guards.
+   guards. The parent's stored copy of those raw lines is the one exception — it sits behind the
+   login and carries `value` **truncated to 64 characters** — but the stdout stream it was copied
+   from is not truncated and not guarded.
 6. **stdout grows without bound** — `source` is long-running and its stdout neither rotates nor caps,
    and the program does not manage it.
-7. **The history SQLite database holds business values for 90 days**, sampled from the source
-   database, under the same 0600 as the credential files.
+7. **The history SQLite database holds business values**, sampled from the source database, under the
+   same 0600 as the credential files. Two retentions apply to two different copies: the folded
+   history row keeps `column` / `value` in full for 90 days, while the raw run-log lines in the same
+   file keep `value` truncated to 64 characters for the stricter of 7 days and the last 10 runs per
+   task. **The long one is the folded row, not the raw lines** — the copy that lives longest is the
+   one that was never truncated.
 8. **Columns of indeterminate precision are not intercepted before submission** — the source performs
    no SQL shape precheck, so the problem surfaces only during a real run, or silently loses precision.
    **The mapping precheck is unaffected**: it describes through a cursor on the sink side and remains
    a hard gate.
-9. **An upsert never deletes.** Rows removed at the source stay in the target table forever; see
-   **Swap**.
-10. **The wizard's first-step two-pane geometry is a CSS-only invariant** — one row that renders only
+9. **Under the append write mode, neither write statement ever deletes.** Rows removed at the
+   source stay in the target table forever; see **Swap**. Clear-then-import is the way out, and it
+   is a per-task choice, not a fix applied to existing tasks.
+9a. **A run against a primary-key-less target table is not idempotent.** Every re-run appends the
+   whole result set again, and nothing in the product detects or repairs the duplicates: there is no
+   dedupe pass, no "already imported" marker, and the verification gate only compares this run's
+   staged rows against this run's inserted rows, so a doubled target table passes it. This is the
+   debt accepted with #261 in exchange for supporting flow-style target tables at all. It is made
+   visible in four places (precheck conclusion, task definition, task list, run detail) and mitigated
+   nowhere. The way out, when it is wanted, is the clear-then-import write mode.
+9b. **Clear-then-import empties the target table with a whole-table `DELETE`, and on a large table
+   that is slow.** The `DELETE` writes an undo log entry per row and holds the transaction open for
+   as long as it takes, so the cost grows with the target table rather than with the run. This is
+   accepted, not overlooked: the alternative that would be fast — `TRUNCATE` — is DDL and commits
+   implicitly, which would trade the slowness for the possibility of a cleared-but-not-imported
+   target table, and that trade is refused. If it is ever optimised the direction is **swapping
+   tables**, not `TRUNCATE`; taking that direction also means first fixing the fact that the staging
+   table's structure does not match the target table's (it is all-nullable, unindexed and
+   key-less by design), because a table swap requires the two to be interchangeable.
+9c. **A clear-then-import run cannot be reversed.** The rows it deleted are gone the moment the
+   transaction commits, and nothing recorded them — see limit 10; undo does not exist for any write
+   mode, and this is the mode where its absence is felt hardest. The recovery path is a corrected
+   re-run, which for this mode does restore the target table to a defined state.
+10. **A finished run cannot be undone.** There is no "undo" action and no record of which rows a
+   run wrote, and neither is coming back (#256). Two reasons, both standing. First, the promise
+   cannot be kept: under clear-then-import (#264) the rows a run deletes are recorded nowhere, so
+   nothing could put them back — and on the upsert path an "undo" can only delete the rows the run
+   overwrote, never restore what they held. Second, the only way to record them is a product-owned
+   table growing row-for-row with the customer's business data, inside the customer's own database,
+   written on every commit and read by nothing else. The recovery path for a bad run is a corrected
+   re-run, not an undo.
+11. **On MySQL 5.7 the metadata reads are slower, and that is left alone.** 5.7's
+   `information_schema` is not backed by a data dictionary — the `COLUMNS` / `STATISTICS` /
+   `TABLES` queries the target agent runs are answered by opening table definitions, so on a
+   database with many tables listing tables and reading a table's columns take visibly longer than
+   on 8.0. It costs seconds on the wizard's metadata steps and nothing on the transfer itself,
+   so **no optimisation is planned**: caching it would introduce a staleness question that the
+   product does not otherwise have.
+12. **The wizard's first-step two-pane geometry is a CSS-only invariant** — one row that renders only
    for certain data breaks the alignment; the rules and the worked counter-example live in the
    「两栏取数区的框线」 section of `web/src/app.css`. The row both panes share is rendered by one
    component (`DatasourceRow`), not copied per pane: a hand-written copy makes the invariant depend

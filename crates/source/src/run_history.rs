@@ -8,7 +8,7 @@ use rusqlite::{named_params, params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{ColumnMapping, FailureKind, RunStage};
+use crate::{ColumnMapping, FailureKind, RunStage, WriteMode};
 
 const DATABASE_FILE: &str = "db-qbs.sqlite3";
 
@@ -17,7 +17,9 @@ macro_rules! history_params {
         named_params! {
             ":run_record_id": $history.run_record_id,
             ":run_id": $history.run_id,
+            ":run_trigger": $history.trigger,
             ":task_id": $history.task_id,
+            ":task_name": $history.task_name,
             ":staging_table": $history.staging_table,
             ":started_at": $history.started_at,
             ":started_at_ms": $history.started_at_ms,
@@ -99,6 +101,16 @@ pub struct RunParametersEvidence {
     pub target_table: String,
     pub columns: Vec<ColumnMapping>,
     pub primary_key: Vec<String>,
+    /// 开跑那一刻的写入模式快照（#264）。
+    ///
+    /// 和 `primary_key` 一样是**当时的事实**，不是任务此刻的定义。这两份合起来才
+    /// 说得出「这一次到底做了什么」：主键决定语句是 upsert 还是纯 INSERT，模式决定
+    /// 之前有没有先清空整张表。回头去任务定义现取，改一次任务就会把**过去所有**
+    /// 运行记录声称做过的事一起改写——与 `task_name` 同一条道理（#259）。
+    ///
+    /// 缺席的老历史行落到 `Append`：本字段之前，产品只有追加写这一档。
+    #[serde(default)]
+    pub write_mode: WriteMode,
     pub source_sql: String,
 }
 
@@ -111,6 +123,25 @@ pub enum HistoryChange {
     FieldsChanged,
     StageChanged,
     Terminal,
+}
+
+/// 一次运行是**谁发起的**：人按的，还是到点了调度器发的（#266）。
+///
+/// 两者在运行历史里必须分得开：夜里两点那次是不是自动跑的、还是有人手动补的一次，
+/// 事后只有这一列答得出来。它**不是**结局的一部分，也不参与任何判定——纯粹是出处。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunTrigger {
+    Manual,
+    Scheduled,
+}
+
+impl RunTrigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "MANUAL",
+            Self::Scheduled => "SCHEDULED",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,7 +170,20 @@ impl UnknownReason {
 pub struct RunHistory {
     pub run_record_id: String,
     pub run_id: Option<String>,
+    /// 这一次是谁发起的（[`RunTrigger`]，#266）。落库的列名是 `run_trigger`，
+    /// `trigger` 在 SQLite 里是保留字。老历史行迁移出来是 `MANUAL`——本字段之前
+    /// 一次运行只可能是人按出来的。
+    pub trigger: String,
     pub task_id: String,
+    /// 开跑那一刻的任务名称快照。
+    ///
+    /// 名称在产品里只是展示标签：不唯一、不参与任何标识，随时可以在向导里改。
+    /// 认领一次运行靠的是 `task_id`；名称如果每次展示都回头去任务表现取，
+    /// 改一次名就会把**过去所有**运行记录上的名字一起改掉——历史于是不再是历史。
+    /// 所以这一份和 `source_sql` 同一性质：当时是什么就永远是什么。
+    ///
+    /// 空串表示这条历史早于本字段（老库迁移后的默认值），展示层这时才回退到当前名称。
+    pub task_name: String,
     /// 当次**实际执行**的源端 SQL 快照。
     ///
     /// 它与任务定义现算的那份性质根本不同：这份回答「当时执行了什么」，是审计事实，
@@ -153,6 +197,12 @@ pub struct RunHistory {
     pub started_at: String,
     pub finished_at: Option<String>,
     pub outcome: Option<String>,
+    /// 目标表最后被怎么了。三个值：`SWAPPED`「按主键合并进目标表」、
+    /// `REPLACED`「整表被替换」（清空后导入，#264）、`DISCARDED`「没被触碰」，
+    /// 外加一个 `UNKNOWN`「说不清」。
+    ///
+    /// 和 `stage` 一样**是字符串不是枚举，且不认识的值原样搬运**：这一列是日志的
+    /// 尽力投影，吞掉一个没见过的拼写等于把「子进程比父进程新」这件事藏起来。
     pub target_table_effect: Option<String>,
     /// 展示用的那一份，**是字符串不是枚举**，而且是故意的：运行历史按定义是
     /// 「日志的尽力投影」，它必须能原样搬运一个自己不认识的拼写。吞掉它，
@@ -208,7 +258,9 @@ impl RunHistory {
         Self {
             run_record_id: run_record_id.to_owned(),
             run_id: None,
+            trigger: RunTrigger::Manual.as_str().to_owned(),
             task_id: task_id.to_owned(),
+            task_name: String::new(),
             source_sql: source_sql.to_owned(),
             evidence: RunEvidence::default(),
             staging_table: None,
@@ -308,11 +360,13 @@ impl RunHistory {
                 HistoryChange::MemoryOnly
             }
             Some("commit_diagnosed") => {
-                self.target_table_effect = match text(log, "terminal") {
-                    Some("SWAPPED") => Some("SWAPPED".to_owned()),
-                    Some("DISCARDED") => Some("DISCARDED".to_owned()),
-                    _ => Some("UNKNOWN".to_owned()),
-                };
+                // **不认识的拼写原样搬运**，和 `stage` 那一列同一个规矩（#264）。
+                // 从前这里是个把闭集外的值一律折成 `UNKNOWN` 的 `match`，于是
+                // 「子进程比父进程新、多报了一个终态词」这件事在屏幕上彻底消失——
+                // 而那正是最该被看见的时候。真正的「说不清」只有一种：子进程自己
+                // 就没能判定，`terminal` 是 `null`。
+                self.target_table_effect =
+                    Some(text(log, "terminal").unwrap_or("UNKNOWN").to_owned());
                 HistoryChange::MemoryOnly
             }
             Some("run_finished") => {
@@ -358,6 +412,19 @@ impl RunHistory {
         self.failure_kind = Some(FailureKind::Orchestrator.as_str().to_owned());
     }
 
+    /// 到点了但**没发起**的那一次（#266）。
+    ///
+    /// 它与「预检拒绝、从未到达代理」同构：**没有运行标识**（`run_id` 一直是 `None`），
+    /// 目标表一个字节都没动过。写它的理由只有一条——绝不静默丢弃一个触发时刻，
+    /// 否则「月末那次到底跑没跑」没人答得上来。
+    pub fn mark_skipped(&mut self, message: String, at: DateTime<Utc>) {
+        self.outcome = Some("FAILED".to_owned());
+        self.target_table_effect = Some("DISCARDED".to_owned());
+        self.finished_at = Some(at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        self.message = Some(message);
+        self.failure_kind = Some(FailureKind::Skipped.as_str().to_owned());
+    }
+
     pub fn started_at_ms(&self) -> i64 {
         self.started_at_ms
     }
@@ -367,15 +434,19 @@ impl RunHistory {
         self.stage = owned_text(log, "stage");
         self.finished_at = owned_text(log, "ts");
         if self.target_table_effect.is_none() {
+            // 子进程若直说了目标表遭遇了什么，就照它的（#264）——写入模式只有跑数那一端
+            // 知道，「跑成功了 ⇒ 按主键合并」在清空后导入这条路上是假话。这一份同样
+            // 原样搬运，不做闭集裁决。下面那套折算是**后备**：老日志里没有这个字段。
+            let stated = owned_text(log, "target_table_effect");
             let stage = self.stage.as_deref().and_then(RunStage::parse);
-            self.target_table_effect =
-                match (self.outcome.as_deref(), stage, text(log, "sink_code")) {
-                    (Some("SUCCEEDED"), _, _) => Some("SWAPPED".to_owned()),
-                    (Some("FAILED"), _, Some("VERIFY_FAILED")) => Some("DISCARDED".to_owned()),
-                    (Some("FAILED"), Some(RunStage::Committing), _) => Some("UNKNOWN".to_owned()),
-                    (Some("FAILED"), _, _) => Some("DISCARDED".to_owned()),
-                    _ => None,
-                };
+            let folded = match (self.outcome.as_deref(), stage, text(log, "sink_code")) {
+                (Some("SUCCEEDED"), _, _) => Some("SWAPPED".to_owned()),
+                (Some("FAILED"), _, Some("VERIFY_FAILED")) => Some("DISCARDED".to_owned()),
+                (Some("FAILED"), Some(RunStage::Committing), _) => Some("UNKNOWN".to_owned()),
+                (Some("FAILED"), _, _) => Some("DISCARDED".to_owned()),
+                _ => None,
+            };
+            self.target_table_effect = stated.or(folded);
         }
         self.source_rows = number(log, "source_rows");
         self.staged_rows = number(log, "staged_rows");
@@ -402,15 +473,6 @@ pub struct HistoryStore {
     database_path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RunCleanup {
-    pub target_datasource_id: String,
-    pub target_table: String,
-    pub primary_key: Vec<String>,
-    pub status: String,
-    pub deleted_rows: Option<u64>,
-}
-
 impl HistoryStore {
     pub fn open(data_dir: &Path) -> Result<Self, String> {
         fs::create_dir_all(data_dir)
@@ -435,7 +497,9 @@ impl HistoryStore {
                 "CREATE TABLE IF NOT EXISTS run_history (
                     run_record_id       TEXT PRIMARY KEY NOT NULL,
                     run_id              TEXT,
+                    run_trigger         TEXT NOT NULL DEFAULT 'MANUAL',
                     task_id             TEXT NOT NULL,
+                    task_name           TEXT NOT NULL DEFAULT '',
                     source_sql          TEXT NOT NULL DEFAULT '',
                     staging_table       TEXT,
                     started_at          TEXT NOT NULL,
@@ -474,16 +538,15 @@ impl HistoryStore {
                 );
                  CREATE INDEX IF NOT EXISTS run_history_task_started
                      ON run_history(task_id, started_at_ms);
-                 CREATE TABLE IF NOT EXISTS run_cleanup (
-                    run_record_id        TEXT PRIMARY KEY NOT NULL,
-                    target_datasource_id TEXT NOT NULL,
-                    target_table         TEXT NOT NULL,
-                    primary_key          TEXT NOT NULL,
-                    status               TEXT NOT NULL DEFAULT 'pending',
-                    deleted_rows         INTEGER
-                 );",
+                 -- 「撤销运行」整套移除（#256），本地这张清理记录表跟着退役。
+                 -- 只删不建：光把 CREATE 拿掉，已经开过库的实例里它还在。
+                 DROP TABLE IF EXISTS run_cleanup;",
             )
             .map_err(|error| format!("初始化 SQLite 运行历史表失败：{error}"))?;
+        // 老库里没有这一列：迁移出来的行拿空串，展示层据此回退到当前名称。
+        ensure_text_column(&connection, "task_name")?;
+        // 老库里没有这一列：迁移出来的行拿 `MANUAL`——本列之前一次运行只可能是人按的（#266）。
+        ensure_column_with_default(&connection, "run_trigger", "MANUAL")?;
         ensure_json_column(&connection, "mapping_issues", "[]")?;
         ensure_json_column(&connection, "evidence", "{}")?;
         ensure_nullable_text_column(&connection, "failure_kind")?;
@@ -507,7 +570,7 @@ impl HistoryStore {
         transaction
             .execute(
                 "INSERT INTO run_history (
-                    run_record_id, run_id, task_id, source_sql, staging_table,
+                    run_record_id, run_id, run_trigger, task_id, task_name, source_sql, staging_table,
                     started_at, started_at_ms, finished_at, outcome, target_table_effect, stage,
                     source_rows, staged_rows, sink_reported_rows, purged_rows, source_batches,
                     received_batches, total_rows, precount_ms,
@@ -515,7 +578,7 @@ impl HistoryStore {
                     source_code, sink_code, [column], [value], message, unknown_reason,
                     failure_kind, seq, rows_pushed, bytes, ms, last_ts, mapping_issues, evidence
                  ) VALUES (
-                    :run_record_id, :run_id, :task_id, :source_sql, :staging_table,
+                    :run_record_id, :run_id, :run_trigger, :task_id, :task_name, :source_sql, :staging_table,
                     :started_at, :started_at_ms, :finished_at, :outcome, :target_table_effect,
                     :stage, :source_rows, :staged_rows, :sink_reported_rows, :purged_rows,
                     :source_batches, :received_batches, :total_rows, :precount_ms,
@@ -548,7 +611,7 @@ impl HistoryStore {
         transaction
             .execute(
                 "UPDATE run_history SET
-                    run_id=:run_id, task_id=:task_id,
+                    run_id=:run_id, run_trigger=:run_trigger, task_id=:task_id, task_name=:task_name,
                     source_sql=:source_sql,
                     staging_table=:staging_table, started_at=:started_at,
                     started_at_ms=:started_at_ms, finished_at=:finished_at, outcome=:outcome,
@@ -583,69 +646,6 @@ impl HistoryStore {
             )
             .optional()
             .map_err(|error| format!("查询 SQLite 运行历史失败：{error}"))
-    }
-
-    pub fn register_cleanup(
-        &self,
-        run_record_id: &str,
-        target_datasource_id: &str,
-        target_table: &str,
-        primary_key: &[String],
-    ) -> Result<(), String> {
-        let encoded = serde_json::to_string(primary_key)
-            .map_err(|error| format!("序列化运行写入账本主键失败：{error}"))?;
-        self.connection()?.execute(
-            "INSERT INTO run_cleanup (run_record_id, target_datasource_id, target_table, primary_key)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![run_record_id, target_datasource_id, target_table, encoded],
-        ).map_err(|error| format!("登记运行写入账本失败：{error}"))?;
-        Ok(())
-    }
-
-    pub fn cleanup(&self, run_record_id: &str) -> Result<Option<RunCleanup>, String> {
-        self.connection()?
-            .query_row(
-                "SELECT target_datasource_id, target_table, primary_key, status, deleted_rows
-               FROM run_cleanup WHERE run_record_id = ?1",
-                [run_record_id],
-                |row| {
-                    let encoded: String = row.get("primary_key")?;
-                    let primary_key = serde_json::from_str(&encoded).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            row.as_ref().column_index("primary_key").unwrap(),
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })?;
-                    Ok(RunCleanup {
-                        target_datasource_id: row.get("target_datasource_id")?,
-                        target_table: row.get("target_table")?,
-                        primary_key,
-                        status: row.get("status")?,
-                        deleted_rows: row.get("deleted_rows")?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(|error| format!("查询运行写入账本失败：{error}"))
-    }
-
-    pub fn mark_cleanup_available(&self, run_record_id: &str) -> Result<(), String> {
-        self.connection()?
-            .execute(
-                "UPDATE run_cleanup SET status = 'available' WHERE run_record_id = ?1",
-                [run_record_id],
-            )
-            .map_err(|error| format!("开放运行清理动作失败：{error}"))?;
-        Ok(())
-    }
-
-    pub fn mark_cleaned(&self, run_record_id: &str, deleted_rows: u64) -> Result<(), String> {
-        self.connection()?.execute(
-            "UPDATE run_cleanup SET status = 'cleaned', deleted_rows = ?2 WHERE run_record_id = ?1",
-            params![run_record_id, deleted_rows],
-        ).map_err(|error| format!("记录运行清理结果失败：{error}"))?;
-        Ok(())
     }
 
     /// 按业务日期筛选随「业务日期」这个一等概念一起退役（ADR-0035 §3）：
@@ -755,10 +755,6 @@ fn cleanup_transaction(
             [cutoff.timestamp_millis()],
         )
         .map_err(|error| format!("清理过期 SQLite 运行历史失败：{error}"))?;
-    transaction.execute(
-        "DELETE FROM run_cleanup WHERE run_record_id NOT IN (SELECT run_record_id FROM run_history)",
-        [],
-    ).map_err(|error| format!("清理孤立运行写入账本失败：{error}"))?;
     Ok(())
 }
 
@@ -793,7 +789,23 @@ fn retention_cutoff(now: DateTime<Utc>, retention_days: u64) -> Option<DateTime<
     now.checked_sub_signed(TimeDelta::try_days(days)?)
 }
 
+/// 补一列非空 TEXT，老库迁移出来的行拿空串。
+///
+/// 空串在这里是**实话**：那些运行跑完的时候还没有这一列可记，拿当前的值补写过去
+/// 才是造假。展示层看见空串就回退，看见内容就照抄。
+fn ensure_text_column(connection: &Connection, name: &str) -> Result<(), String> {
+    ensure_column_with_default(connection, name, "")
+}
+
 fn ensure_json_column(connection: &Connection, name: &str, default: &str) -> Result<(), String> {
+    ensure_column_with_default(connection, name, default)
+}
+
+fn ensure_column_with_default(
+    connection: &Connection,
+    name: &str,
+    default: &str,
+) -> Result<(), String> {
     let exists: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('run_history') WHERE name = ?1)",
@@ -878,7 +890,7 @@ fn number(value: &Value, key: &str) -> Option<u64> {
 }
 
 const HISTORY_SELECT: &str = "SELECT
-    run_record_id, run_id, task_id, source_sql, staging_table, started_at,
+    run_record_id, run_id, run_trigger, task_id, task_name, source_sql, staging_table, started_at,
     started_at_ms, finished_at, outcome, target_table_effect, stage, source_rows, staged_rows,
     sink_reported_rows, purged_rows, source_batches, received_batches, fetch_ms, push_ms,
     total_rows, precount_ms,
@@ -891,7 +903,9 @@ fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunHistory> {
     Ok(RunHistory {
         run_record_id: row.get("run_record_id")?,
         run_id: row.get("run_id")?,
+        trigger: row.get("run_trigger")?,
         task_id: row.get("task_id")?,
+        task_name: row.get("task_name")?,
         source_sql: row.get("source_sql")?,
         evidence: json_object_from_row(row, "evidence")?,
         staging_table: row.get("staging_table")?,

@@ -8,12 +8,15 @@ use serde::Deserialize;
 
 mod agent;
 mod auth;
+mod cron;
 mod datasource;
 mod failure_kind;
 pub mod http;
 mod oracle_source;
 mod protocol;
 mod run_history;
+mod run_log_store;
+mod scheduler;
 pub mod server;
 mod secret;
 mod sql_builder;
@@ -30,6 +33,8 @@ pub use auth::{
     validate_new_password, AuthStore, IssuedSession, DEFAULT_PASSWORD, SESSION_COOKIE,
     SESSION_IDLE_SECONDS, USERNAME,
 };
+// 五字段 cron 的解析与推算（#265）。手写、无依赖，见 `cron.rs` 模块头。
+pub use cron::CronSchedule;
 // 报文形状的唯一定义在 `db-qbs-shared`（#124）。这里只保留门面，
 // crate 内部与既有测试的引用路径一个字不变。
 pub use db_qbs_shared::{
@@ -48,7 +53,7 @@ pub use db_qbs_shared::{
     is_supported_decimal_shape, ColumnShape, ShapeRejection, TargetShape,
 };
 // 校验门禁的判据同样只有一份定义，与 sink 共用（`shared::verification`）。
-pub use db_qbs_shared::{swap_rows_in_range, RowCounts, Verdict};
+pub use db_qbs_shared::{swap_rows_consistent, RowCounts, Verdict, WriteMode, WriteStatement};
 pub use failure_kind::{oracle_kind, FailureKind};
 pub use oracle_source::OracleRowSource;
 pub use protocol::{
@@ -56,8 +61,17 @@ pub use protocol::{
 };
 pub use run_history::{
     expired_history_indices, fold_history_lines, AgentEvidence, HistoryChange, HistoryStore,
-    RunCleanup, RunEvidence, RunHistory, RunParametersEvidence, SourceEvidence, TargetEvidence,
+    RunEvidence, RunHistory, RunParametersEvidence, RunTrigger, SourceEvidence, TargetEvidence,
     UnknownReason,
+};
+// 到点派活的那条常驻线程（#266）。行为定义在 `scheduler.rs` 模块头。
+pub use scheduler::{
+    evaluate as run_scheduler_pass, scheduler_loop, DueOccurrence, QueuedOccurrence,
+    ScheduleRegistry, ScheduleState,
+};
+pub use run_log_store::{
+    truncate_business_values, RunLogLine, RunLogStore, RunLogWriter, BUSINESS_VALUE_MAX_CHARS,
+    RUN_LOG_PAGE_LIMIT, RUN_LOG_RETENTION_DAYS, RUN_LOG_RETENTION_RUNS_PER_TASK,
 };
 pub use sql_builder::{
     builder_column_query, builder_dblink_query, builder_table_query, validate_builder_dblink,

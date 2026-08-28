@@ -355,6 +355,7 @@ assert_column_values() {
 b1_spec() {
   jq -nc --arg date "$BIZ_DATE" '{
     owner:"SPIKE", table:"T_M3_B1", target_table:"M3_B1",
+    write_mode:"APPEND",
     primary_key:["ROW_ID"],
     columns:[
       {source:"ROW_ID", target:"ROW_ID"},
@@ -379,6 +380,7 @@ b1_spec() {
 b2_spec() {
   jq -nc --arg date "$BIZ_DATE" '{
     owner:"SPIKE", table:"T_M3_B2", target_table:"M3_B2",
+    write_mode:"APPEND",
     primary_key:["ROW_ID"],
     columns:[
       {source:"ROW_ID", target:"ROW_ID"},
@@ -399,6 +401,7 @@ b2_spec() {
 b3_spec() {
   jq -nc --arg date "$BIZ_DATE" '{
     owner:"SPIKE", table:"T_M3_B3", target_table:"M3_B3",
+    write_mode:"APPEND",
     primary_key:["ROW_ID"],
     columns:[
       {source:"ROW_ID", target:"ROW_ID"},
@@ -412,6 +415,7 @@ b3_spec() {
 b4_spec() {
   jq -nc --arg date "$BIZ_DATE" '{
     owner:"SPIKE", table:"T_M3_B4", target_table:"M3_B4",
+    write_mode:"APPEND",
     primary_key:["ROW_ID"],
     columns:[
       {source:"ROW_ID", target:"ROW_ID"},
@@ -425,6 +429,7 @@ b4_spec() {
 b5_spec() {
   jq -nc --arg date "$BIZ_DATE" '{
     owner:"SPIKE", table:"T_M3_B5", target_table:"M3_B5",
+    write_mode:"APPEND",
     primary_key:["ROW_ID"],
     columns:[
       {source:"ROW_ID", target:"ROW_ID"},
@@ -441,6 +446,7 @@ b5_spec() {
 b6_spec() {
   jq -nc --arg date "$BIZ_DATE" '{
     owner:"SPIKE", table:"T_M3_B6", target_table:"M3_B6",
+    write_mode:"APPEND",
     primary_key:["ROW_ID"],
     columns:[
       {source:"ROW_ID", target:"ROW_ID"},

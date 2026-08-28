@@ -8,10 +8,10 @@
 //! 附带作用：以后谁再把定义抄回两端，这组测试会立刻变成两份、自己暴露出来。
 
 use db_qbs_shared::{
-    AbortResponse, AgentInfo, BatchPayload, BatchResponse, CleanupRunRequest, CleanupRunResponse,
-    ColumnSupport, CommitRequest, CommitResponse, ErrorBody, ErrorEnvelope, OpenOutcome,
-    OpenRunRequest, OpenRunResponse, PrecheckIssue, RangeCheckColumn, RangeCheckResult, RunResponse,
-    SourceColumn, TargetConnection, Terminal,
+    AbortResponse, AgentInfo, BatchPayload, BatchResponse, ColumnSupport, CommitRequest,
+    CommitResponse, ErrorBody, ErrorEnvelope, MysqlServerInfo, OpenOutcome, OpenRunRequest,
+    OpenRunResponse, PrecheckIssue, RangeCheckColumn, RangeCheckResult, RunResponse, SourceColumn,
+    TargetCheckResult, TargetConnection, Terminal, WriteMode,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -193,6 +193,7 @@ fn open_run_request_shape_with_range_check_results() {
             run_id: "20260818120000_a1b2c3".to_owned(),
             target_table: "ORDERS".to_owned(),
             target: target(),
+            write_mode: WriteMode::Append,
             primary_key: vec!["ID".to_owned()],
             source_columns: vec![column_minimal()],
             range_check_results: Some(vec![RangeCheckResult {
@@ -204,6 +205,7 @@ fn open_run_request_shape_with_range_check_results() {
             "run_id": "20260818120000_a1b2c3",
             "target_table": "ORDERS",
             "target": target_json(),
+            "write_mode": "APPEND",
             "primary_key": ["ID"],
             "source_columns": [{
                 "name": "ID",
@@ -224,6 +226,7 @@ fn open_run_request_shape_omits_absent_range_check_results() {
             run_id: "20260818120000_a1b2c3".to_owned(),
             target_table: "ORDERS".to_owned(),
             target: target(),
+            write_mode: WriteMode::Append,
             primary_key: vec!["ID".to_owned()],
             source_columns: vec![],
             range_check_results: None,
@@ -232,8 +235,93 @@ fn open_run_request_shape_omits_absent_range_check_results() {
             "run_id": "20260818120000_a1b2c3",
             "target_table": "ORDERS",
             "target": target_json(),
+            "write_mode": "APPEND",
             "primary_key": ["ID"],
             "source_columns": []
+        }),
+    );
+}
+
+/// 无主键那一支的线上形状（#261）：`primary_key` 是**空数组，不是缺席**。
+///
+/// 这件事值得单钉一份：空数组在这个报文里是一个有含义的值——「目标表没有可合并的
+/// 唯一约束，本次写纯 INSERT」。哪天有人顺手给它加上 `skip_serializing_if`，
+/// 收方就再也分不清「无主键」和「老版本没送这个字段」，而这两者的写法不一样。
+#[test]
+fn open_run_request_shape_carries_an_empty_primary_key_as_an_empty_array() {
+    round_trip(
+        OpenRunRequest {
+            run_id: "20260818120000_a1b2c3".to_owned(),
+            target_table: "T_FLOW".to_owned(),
+            target: target(),
+            write_mode: WriteMode::Append,
+            primary_key: vec![],
+            source_columns: vec![],
+            range_check_results: None,
+        },
+        json!({
+            "run_id": "20260818120000_a1b2c3",
+            "target_table": "T_FLOW",
+            "target": target_json(),
+            "write_mode": "APPEND",
+            "primary_key": [],
+            "source_columns": []
+        }),
+    );
+}
+
+/// 清空后导入的线上形状（#264）：写入模式随任务定义过线，`primary_key` 照旧。
+///
+/// **模式与语句是两件事**，这份报文里看得最清楚：`write_mode` 是清空后导入，
+/// `primary_key` 仍然非空，于是收方派生出的仍是 upsert。清空只是在导入前多一步
+/// 同事务的整表 DELETE。
+#[test]
+fn open_run_request_shape_carries_the_clear_then_import_mode() {
+    round_trip(
+        OpenRunRequest {
+            run_id: "20260818120000_a1b2c3".to_owned(),
+            target_table: "ORDERS".to_owned(),
+            target: target(),
+            write_mode: WriteMode::ClearThenImport,
+            primary_key: vec!["ID".to_owned()],
+            source_columns: vec![],
+            range_check_results: None,
+        },
+        json!({
+            "run_id": "20260818120000_a1b2c3",
+            "target_table": "ORDERS",
+            "target": target_json(),
+            "write_mode": "CLEAR_THEN_IMPORT",
+            "primary_key": ["ID"],
+            "source_columns": []
+        }),
+    );
+}
+
+/// 预检结论那一栏（#261）：空的时候整个字段不出现，非空时原样过线。
+#[test]
+fn target_check_result_carries_its_conclusions_only_when_it_has_any() {
+    round_trip(
+        TargetCheckResult {
+            ok: true,
+            findings: vec![],
+            suggested_ddl: None,
+            notes: vec![],
+        },
+        json!({ "ok": true, "findings": [], "suggested_ddl": null }),
+    );
+    round_trip(
+        TargetCheckResult {
+            ok: true,
+            findings: vec![],
+            suggested_ddl: None,
+            notes: vec!["目标表无主键 → 本任务为纯追加写，重跑会产生重复数据".to_owned()],
+        },
+        json!({
+            "ok": true,
+            "findings": [],
+            "suggested_ddl": null,
+            "notes": ["目标表无主键 → 本任务为纯追加写，重跑会产生重复数据"]
         }),
     );
 }
@@ -384,37 +472,6 @@ fn commit_request_and_response_shapes() {
 }
 
 #[test]
-fn cleanup_request_and_response_shapes() {
-    round_trip(
-        CleanupRunRequest {
-            run_id: "20260814091530_a3f19c".to_owned(),
-            target_table: "T_POSITION".to_owned(),
-            target: target(),
-            primary_key: vec!["ID".to_owned(), "TENANT".to_owned()],
-        },
-        json!({
-            "run_id": "20260814091530_a3f19c",
-            "target_table": "T_POSITION",
-            "target": {
-                "host": "10.0.0.9",
-                "port": 3306,
-                "username": "sink",
-                "password": "change-me",
-                "database": "qbs"
-            },
-            "primary_key": ["ID", "TENANT"]
-        }),
-    );
-    round_trip(
-        CleanupRunResponse {
-            run_id: "20260814091530_a3f19c".to_owned(),
-            deleted_rows: 7,
-        },
-        json!({ "run_id": "20260814091530_a3f19c", "deleted_rows": 7 }),
-    );
-}
-
-#[test]
 fn abort_response_shape() {
     round_trip(
         AbortResponse {
@@ -429,9 +486,14 @@ fn abort_response_shape() {
 fn terminal_shape() {
     // 大写字面量与 `Terminal::as_str()` 必须一致——两处漂了，运行历史就对不上。
     round_trip(Terminal::Swapped, json!("SWAPPED"));
+    round_trip(Terminal::Replaced, json!("REPLACED"));
     round_trip(Terminal::Discarded, json!("DISCARDED"));
     assert_eq!(Terminal::Swapped.as_str(), "SWAPPED");
+    assert_eq!(Terminal::Replaced.as_str(), "REPLACED");
     assert_eq!(Terminal::Discarded.as_str(), "DISCARDED");
+    // 三个值，各说各的事（#264）。`SWAPPED` 是「按主键合并」，`REPLACED` 是
+    // 「整表被替换」——合并成一个词，运行历史就会对着一次清空后导入说假话。
+    assert_ne!(Terminal::Swapped.as_str(), Terminal::Replaced.as_str());
 }
 
 #[test]
@@ -549,11 +611,42 @@ fn agent_info_shape() {
             agent_id: "6f1a9c2d4e8b47f0a1b2c3d4e5f60718".to_owned(),
             name: "target-a".to_owned(),
             version: "0.1.0".to_owned(),
+            mysql: None,
+            max_concurrent_runs: None,
         },
         json!({
             "agent_id": "6f1a9c2d4e8b47f0a1b2c3d4e5f60718",
             "name": "target-a",
             "version": "0.1.0",
+        }),
+    );
+}
+
+/// 报过版本的那一份（#257）。`None` 那一份在上面——两种取值各钉一份，
+/// 否则 `skip_serializing_if` 合并错了测不出来：那正好是「旧版本 agent 不带这个字段」
+/// 与「新 agent 还没观察过」必须序列化成同一份字节的地方。
+#[test]
+fn agent_info_carries_the_observed_mysql_when_there_is_one() {
+    round_trip(
+        AgentInfo {
+            agent_id: "6f1a9c2d4e8b47f0a1b2c3d4e5f60718".to_owned(),
+            name: "target-a".to_owned(),
+            version: "0.1.0".to_owned(),
+            mysql: Some(MysqlServerInfo {
+                version: "5.7.44-log".to_owned(),
+                utf8mb4_collation: "utf8mb4_general_ci".to_owned(),
+            }),
+            max_concurrent_runs: Some(4),
+        },
+        json!({
+            "agent_id": "6f1a9c2d4e8b47f0a1b2c3d4e5f60718",
+            "name": "target-a",
+            "version": "0.1.0",
+            "mysql": {
+                "version": "5.7.44-log",
+                "utf8mb4_collation": "utf8mb4_general_ci",
+            },
+            "max_concurrent_runs": 4,
         }),
     );
 }

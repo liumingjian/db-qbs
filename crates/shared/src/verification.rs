@@ -18,6 +18,8 @@
 //! it crosses the process line. The *wording* deliberately does not — each end
 //! phrases the failure for its own reader, and only the verdict is shared.
 
+use crate::WriteStatement;
+
 /// The four numbers the gate is made of.
 ///
 /// `source_rows` is the source's fetch-loop accumulator and `staged_rows` is
@@ -79,12 +81,32 @@ impl Verdict {
 
 /// Whether the swap's reported `affected_rows` is consistent with what was staged.
 ///
-/// The judgement is an interval, not an equality: under `ON DUPLICATE KEY UPDATE`
-/// MySQL counts an insert as 1 and an update as 2 (ADR-0035 §4), so a re-run that
-/// genuinely changed values reports more than it staged. The lower bound stays at
-/// `staged_rows` rather than 0 because `CLIENT_FOUND_ROWS` already absorbs the
-/// third case, "an existing row whose values did not change" (#138) — without that
-/// connection flag this bound would be wrong.
-pub const fn swap_rows_in_range(staged_rows: u64, swapped_rows: u64) -> bool {
-    swapped_rows >= staged_rows && swapped_rows <= staged_rows.saturating_mul(2)
+/// **The judgement forks on the statement, and the statement is passed in rather
+/// than sniffed at the call site** — this module exists because the same rule
+/// once had five implementations that drifted, and a `match` at each caller
+/// would be that mistake again in a new shape.
+///
+/// - [`WriteStatement::Upsert`] — an interval, not an equality: under
+///   `ON DUPLICATE KEY UPDATE` MySQL counts an insert as 1 and an update as 2
+///   (ADR-0035 §4), so a re-run that genuinely changed values reports more than
+///   it staged. The lower bound stays at `staged_rows` rather than 0 because
+///   `CLIENT_FOUND_ROWS` already absorbs the third case, "an existing row whose
+///   values did not change" (#138) — without that connection flag this bound
+///   would be wrong.
+/// - [`WriteStatement::Insert`] — **strictly equal**. A plain `INSERT ... SELECT`
+///   has no update leg and no matched-row leg, so every one of the three cases
+///   that widened the upsert interval is gone. Keeping the interval here would
+///   mean accepting a swap that wrote twice what it staged, which on a
+///   primary-key-less target is precisely the accident worth catching.
+pub const fn swap_rows_consistent(
+    statement: WriteStatement,
+    staged_rows: u64,
+    swapped_rows: u64,
+) -> bool {
+    match statement {
+        WriteStatement::Upsert => {
+            swapped_rows >= staged_rows && swapped_rows <= staged_rows.saturating_mul(2)
+        }
+        WriteStatement::Insert => swapped_rows == staged_rows,
+    }
 }

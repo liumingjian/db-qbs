@@ -1,3 +1,5 @@
+import type { WriteMode } from "./writeMode";
+
 export type ColumnPrecision = Record<string, [number, number]>;
 
 /**
@@ -18,9 +20,26 @@ export interface TaskSpec {
   table: string;
   target_table: string;
   /**
-   * upsert 的去重键，必选。存的是**目标列名**，与 `columns[].target` 同一个名字空间。
+   * 写入模式（#261/#264）：「追加写」与「先清空再导入」两档，`WRITE_MODES` 是它的清单。
+   */
+  write_mode: WriteMode;
+  /**
+   * 去重键，**可以为空**（#261）。存的是**目标列名**，与 `columns[].target` 同一个名字空间。
+   *
+   * 它同时是任务定义记下的**写入语义**：非空 = 按主键 upsert，空 = 目标表没有可合并的
+   * 唯一约束，本任务是纯追加写、重跑会产生重复数据。派生只有一处，`writeStatementOf`。
    */
   primary_key: string[];
+  /**
+   * 调度用的**五字段 cron 表达式**（#265），按**服务器本地时区**解读。
+   *
+   * 缺席或空白 = 没配周期，只能手动发起。存的是**原文**：人写的那一行是真相源，
+   * 解析与「下次触发」的推算都在服务端（`POST /api/builder/schedule`），前端不重写一遍——
+   * 一门语言有两份解析器，它们迟早会在某个带步长的写法上说出两个答案。
+   */
+  schedule_cron?: string;
+  /** 调度的启停开关（#265）。它和表达式是两件事：暂停不该逼人删掉自己写好的那一行。 */
+  schedule_enabled: boolean;
   columns: ColumnMapping[];
   /**
    * 过滤条件：**原样拼进 `WHERE` 后面的一段自由文本**，不含 `WHERE` 这个词本身。
@@ -32,6 +51,47 @@ export interface TaskSpec {
    * 少一处就是一个 `undefined.trim()`。
    */
   where_clause?: string;
+}
+
+/**
+ * 「下次触发」读数（#265）：服务器本地时区，以及接下来的几次触发时刻。
+ *
+ * 时刻是**已经格式化好的本地挂钟文本**（`YYYY-MM-DD HH:MM`），不是时间戳。送时间戳过来
+ * 前端就得再选一次时区去渲染它，而那正是这个读数存在的理由——时区只允许有一个答案。
+ */
+export interface SchedulePreview {
+  /** 时区缩写，例如 `CST`。 */
+  timezone: string;
+  /** 与 UTC 的偏移，例如 `+08:00`。缩写在世界上是有歧义的，偏移不是。 */
+  utc_offset: string;
+  /** 服务器此刻的本地时间，同一格式。人对账用的是它，不是自己手表上的时间。 */
+  now: string;
+  /** 接下来的几次触发。空数组 = 没配表达式，或者这条表达式永远不会触发。 */
+  next_fire_times: string[];
+}
+
+/**
+ * 调度器此刻在干什么（#266）：**排队中的那些**，以及每个任务的下一次触发时刻。
+ *
+ * 队列活在服务端一条后台线程的内存里，不问这个端点就没有任何一处答得出「它在等什么」。
+ * 时刻与 [`SchedulePreview`] 同一份口径：服务器本地时区、已经格式化好的挂钟文本。
+ */
+export interface ScheduleState {
+  timezone: string;
+  utc_offset: string;
+  now: string;
+  queued: QueuedOccurrence[];
+  next_fire_times: { task_id: string; next_fire_time: string | null }[];
+}
+
+/** 一个已经到点、但还没派出去的触发时刻。 */
+export interface QueuedOccurrence {
+  task_id: string;
+  task_name: string;
+  /** 本该触发的那一刻。 */
+  due_at: string;
+  /** 上一次尝试派发时它为什么还没走成。空串 = 还没试过。 */
+  waiting_reason: string;
 }
 
 export type TargetCheckKind =
@@ -53,6 +113,14 @@ export interface TargetCheckResult {
   ok: boolean;
   findings: CheckFinding[];
   suggested_ddl: string | null;
+  /**
+   * 预检的**结论**，与 `findings` 分开（#261）：不阻塞，但必须被读到。
+   *
+   * `findings` 是「这里不对，去改」，`ok` 就是它空不空；结论说的是「通过了，而这次
+   * 通过意味着什么」。目前唯一一条是无主键 → 纯追加写。**服务端为空时整个字段不出现**，
+   * 所以每个读它的地方都得 `?? []`。
+   */
+  notes?: string[];
 }
 
 /**
@@ -121,6 +189,15 @@ export interface Agent {
   last_seen_at: string | null;
   status: AgentStatus;
   last_error: string | null;
+  /**
+   * agent 上报的、它所连 MySQL 的版本（#257）。
+   *
+   * **`null` 是「还没报过」，不是「8.0」**：agent 自己不持有目标库凭据，要等它经手过
+   * 一次目标端检查或一次开跑才知道；#257 之前的 agent 则永远报不出来。
+   */
+  mysql_version: string | null;
+  /** 同上，utf8mb4 的默认字符序——生成建表语句时那一段 `COLLATE` 取的就是它。 */
+  mysql_collation: string | null;
 }
 
 export interface AgentInput {
@@ -173,7 +250,12 @@ export interface TargetColumn {
   ordinal: number;
   /** 无默认值时是 `null`。它与 `extra` 是 ADR-0038 §5 第 3 分支的判据。 */
   default_value: string | null;
-  /** `auto_increment` / `DEFAULT_GENERATED` 之类，没有就是空串。 */
+  /**
+   * `information_schema.COLUMNS.EXTRA`，例如 `auto_increment`；没有就是空串。
+   *
+   * 取值随目标端 MySQL 版本而变：`DEFAULT_GENERATED` 只有 8.0 会给，5.7 同一根列是空串。
+   * 判自增只能按「小写之后包含 `auto_increment`」，不能与某个版本独有的取值做等值比较（#262）。
+   */
   extra: string;
 }
 
@@ -275,6 +357,12 @@ export interface RunEvidence {
     target_table: string;
     columns: ColumnMapping[];
     primary_key: string[];
+    /**
+     * 开跑那一刻的写入模式快照（#264）。缺席的老历史行按 `APPEND` 读——本字段之前
+     * 产品只有追加写这一档。运行详情说「这一次做了什么」时读的是这一份和上面那份
+     * `primary_key`，不是任务此刻的定义。
+     */
+    write_mode?: WriteMode;
     source_sql: string;
   } | null;
 }
@@ -283,6 +371,19 @@ export interface RunHistory {
   run_record_id: string;
   run_id: string | null;
   task_id: string;
+  /**
+   * 开跑那一刻的任务名称快照。任务名只是展示标签，随时可以改；认领一次运行靠的是
+   * `task_id`。名字每次都回头去任务上现取的话，改一次名会把过去所有运行记录上的
+   * 名字一起改写。空串表示这条记录早于本字段，展示层这时才回退到当前名称。
+   */
+  task_name: string;
+  /**
+   * 这一次是谁发起的（#266）：`MANUAL` 人按的，`SCHEDULED` 到点了调度器发的。
+   *
+   * 缺席只有一种解释——**前端比服务端新**：服务端把老历史行一律迁成了 `MANUAL`。
+   * 所以缺席时什么都不显示，不拿「手动」去糊一个自己不知道的事实。
+   */
+  trigger?: "MANUAL" | "SCHEDULED" | (string & {});
   /**
    * 当次**实际执行**的源端 SQL 快照：它回答「当时执行了什么」，规格之后怎么改都不动它。
    * 过滤条件就在这条语句里，没有另一半取值需要对照着读。
@@ -293,7 +394,20 @@ export interface RunHistory {
   started_at: string;
   finished_at: string | null;
   outcome: "SUCCEEDED" | "FAILED" | null;
-  target_table_effect: "SWAPPED" | "DISCARDED" | "UNKNOWN" | null;
+  /**
+   * 目标表最后被怎么了。`SWAPPED`「按主键合并进目标表」、`REPLACED`「整表被替换」
+   * （先清空再导入，#264）、`DISCARDED`「没被触碰」，外加 `UNKNOWN`「说不清」。
+   *
+   * `string` 那一支不是偷懒：服务端这一列原样搬运它不认识的拼写，前端也不能吞掉
+   * ——「后端比前端新」正是最该被看见的时候。
+   */
+  target_table_effect:
+    | "SWAPPED"
+    | "REPLACED"
+    | "DISCARDED"
+    | "UNKNOWN"
+    | (string & {})
+    | null;
   stage: string | null;
   source_rows: number | null;
   staged_rows: number | null;
@@ -336,13 +450,15 @@ export interface RunHistory {
   ms: number;
   last_ts: string | null;
   mapping_issues: MappingIssue[];
-  cleanup_status?: "pending" | "available" | "cleaned" | null;
-  cleaned_rows?: number | null;
 }
 
 export interface LiveRunDetail {
   run_record_id: string;
   run_id: string | null;
+  /** 与 {@link RunHistory.task_name} 同一份快照。 */
+  task_name: string;
+  /** 与 {@link RunHistory.trigger} 同一列：在飞的时候就要分得开手动与调度（#266）。 */
+  trigger?: "MANUAL" | "SCHEDULED" | (string & {});
   source_sql: string;
   evidence?: RunEvidence;
   staging_table: string | null;
@@ -471,9 +587,43 @@ export function emptySpec(): TaskSpec {
     table: "",
     target_table: "",
     columns: [],
+    write_mode: "APPEND",
+    schedule_enabled: false,
     primary_key: [],
     where_clause: "",
   };
+}
+
+/**
+ * 「这条 cron 下一次什么时候响」——问服务端，因为**时区是服务端的**。
+ *
+ * 浏览器自己也能算，但它算出来的是**浏览器所在时区**的两点。真正到点发起运行的是跑
+ * `source` 的那台机器，所以那台机器的本地时区才是唯一有意义的答案，而它必须被显示出来。
+ *
+ * 表达式不合法时这里抛错，错误文本就是服务端解析器那句原话——与保存被拒时一字不差。
+ */
+export async function fetchSchedulePreview(
+  cron: string | null,
+): Promise<SchedulePreview> {
+  const response = await fetch("/api/builder/schedule", {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ cron }),
+  });
+  return await readJson<SchedulePreview>(response, "推算下次触发时刻失败");
+}
+
+/**
+ * 调度器此刻的状态。**只读**：写它的是服务端那条调度线程。
+ *
+ * 读不到就当成「没有人在排队」——这一格是给现有清单加一枚徽标的，
+ * 它自己出问题不该让整屏任务列表跟着空掉。
+ */
+export async function fetchScheduleState(): Promise<ScheduleState> {
+  const response = await fetch("/api/schedule", {
+    headers: { Accept: "application/json" },
+  });
+  return await readJson<ScheduleState>(response, "读取调度状态失败");
 }
 
 export function taskInputFrom(
@@ -690,6 +840,37 @@ export async function fetchRun(runRecordId: string): Promise<RunDetail> {
   return readJson<RunDetail>(response, "读取运行详情失败");
 }
 
+/**
+ * 一页原始日志行（#258 的 `GET /api/runs/{}/logs?after=<seq>`）。
+ *
+ * `line` 是子进程写出来的**原文**，服务端不解析也不美化——翻成人话是
+ * `runLogLine.ts` 的活。`next_after` 是下一次该带的游标；`has_more` 说的是
+ * 「这一页取满了，立刻再来一次，别等下一个轮询周期」；`live` 说的是还该不该接着轮询。
+ */
+export interface RunLogPage {
+  run_record_id: string;
+  after: number;
+  next_after: number;
+  has_more: boolean;
+  live: boolean;
+  lines: { seq: number; line: string }[];
+}
+
+/**
+ * 取一页日志。**带游标的增量轮询，不是 SSE、不是长连接**：source 是同步阻塞栈、
+ * 没有异步运行时，一条挂着不放的连接会整根占死一个工作线程。
+ */
+export async function fetchRunLogs(
+  runRecordId: string,
+  after = 0,
+): Promise<RunLogPage> {
+  const response = await fetch(
+    `/api/runs/${encodeURIComponent(runRecordId)}/logs?after=${after}`,
+    { headers: { Accept: "application/json" } },
+  );
+  return readJson<RunLogPage>(response, "读取运行日志失败");
+}
+
 export async function cancelRun(
   runRecordId: string,
 ): Promise<{ message: string }> {
@@ -697,16 +878,6 @@ export async function cancelRun(
     `/api/runs/${encodeURIComponent(runRecordId)}/cancel`,
     {},
     "取消运行失败",
-  );
-}
-
-export async function cleanupRun(
-  runRecordId: string,
-): Promise<{ deleted_rows: number }> {
-  return postJson<{ deleted_rows: number }>(
-    `/api/runs/${encodeURIComponent(runRecordId)}/cleanup`,
-    {},
-    "清理运行写入的数据失败",
   );
 }
 

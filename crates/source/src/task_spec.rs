@@ -11,7 +11,10 @@
 
 use std::collections::BTreeSet;
 
+use db_qbs_shared::{WriteMode, WriteStatement};
 use serde::{Deserialize, Serialize};
+
+use crate::cron::CronSchedule;
 
 /// 一列的映射：源列名 → 目标列名。
 ///
@@ -48,9 +51,37 @@ pub struct TaskSpec {
     /// 落盘，值排在表之后会直接序列化失败。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub where_clause: Option<String>,
-    /// upsert 去重用的主键列，必选。存的是**目标列名**——与 [`ColumnMapping::target`]、
-    /// 过线报文、sink 侧比对同一个名字空间。
-    /// 目标端是否真有对应约束由 sink 侧预检核对——这里只记用户选了什么。
+    /// 写入模式（#261/#264）：「追加写」与「先清空再导入」两档，定义在
+    /// [`db_qbs_shared::WriteMode`]。**不给默认值**——任务定义里必须写明白这一次要怎么写。
+    ///
+    /// 它是标量，和 [`Self::where_clause`] 一样**必须排在 `columns` 之前**。
+    pub write_mode: WriteMode,
+    /// 调度用的**五字段 cron 表达式**（#265），按**服务器本地时区**解读。
+    ///
+    /// `None` 或空白 = 这个任务没有周期，只能手动发起。语法与语义只有一份定义，
+    /// [`crate::CronSchedule`]；这里存的是**原文**，不是解析结果——人写的那一行是真相源，
+    /// 存下解析结果等于让任务定义里多一份会和原文漂开的派生物。
+    ///
+    /// 它是标量，和 [`Self::where_clause`] 一样**必须排在 `columns` 之前**。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_cron: Option<String>,
+    /// 调度的启停开关（#265）。
+    ///
+    /// 它和 [`Self::schedule_cron`] 是两件事，因此是两个字段：把表达式清空来「暂停」，
+    /// 等于让人为了停一次而丢掉自己写好的那一行。开着但没有表达式是自相矛盾的，
+    /// [`Self::validate`] 拒绝它。
+    ///
+    /// 它是标量，同样**必须排在 `columns` 之前**。
+    pub schedule_enabled: bool,
+    /// 去重用的主键列，**可以为空**（#261）。存的是**目标列名**——与
+    /// [`ColumnMapping::target`]、过线报文、sink 侧比对同一个名字空间。
+    ///
+    /// 这个字段同时是**任务定义记下的写入语义**：非空 = 目标表有主键，按主键 upsert；
+    /// 空 = 目标表没有可合并的唯一约束，本任务是纯追加写，重跑会产生重复数据。
+    /// 派生只有一处，[`db_qbs_shared::WriteStatement::for_primary_key`]，两端读同一份。
+    ///
+    /// 目标端**现在**是否真是这个样子由 sink 侧预检核对——两边不符就拒跑，
+    /// 写法绝不静默切换。这里只记当时解析出来的那一份。
     pub primary_key: Vec<String>,
     // 下面这个是 TOML 里的 array-of-tables，**必须排在所有标量之后**。
     /// 选中的列及其目标字段。
@@ -64,6 +95,11 @@ impl TaskSpec {
             .as_deref()
             .map(str::trim)
             .filter(|clause| !clause.is_empty())
+    }
+
+    /// 本任务写的是哪一种语句。见 [`Self::primary_key`]。
+    pub fn write_statement(&self) -> WriteStatement {
+        WriteStatement::for_primary_key(&self.primary_key)
     }
 
     /// 源端 SQL。没有 WHERE 片段时就是整表取数——量级风险归台架去证，不在这里挡。
@@ -164,9 +200,10 @@ impl TaskSpec {
                 return Err(format!("目标字段 {} 重复", mapping.target));
             }
         }
-        if self.primary_key.is_empty() {
-            return Err("主键必选：至少要勾一列作为 upsert 的去重键".to_owned());
-        }
+        // 主键不再必选（#261）。空的主键不是「还没填」，它是一个**有含义的值**：
+        // 目标表没有可合并的唯一约束，这个任务写纯 `INSERT ... SELECT`。
+        // 因此这里没有可判的东西——「目标表到底有没有主键」不是源端能回答的问题，
+        // 它归 sink 侧的映射预检，那里仍是唯一的拦截点、仍是硬门。
         let mut key_columns = BTreeSet::new();
         for column in &self.primary_key {
             validate_identifier(column, "primary_key")?;
@@ -181,7 +218,34 @@ impl TaskSpec {
                 return Err(format!("主键列 {column} 不在选中的列里"));
             }
         }
+        // 调度（#265）。语法由 `CronSchedule::parse` 说了算，它的 `Err` 就是给人看的那句话，
+        // 原样带出去——在这里另写一句「cron 表达式不合法」会把真正的原因盖掉。
+        // 拒绝发生在**保存**这一刻，不是等到该跑的那一刻：一个永远不会响的闹钟不该被存下来。
+        if let Some(expression) = self.schedule_expression() {
+            CronSchedule::parse(expression)?;
+        } else if self.schedule_enabled {
+            return Err("启用了周期调度就必须写一条 cron 表达式".to_owned());
+        }
         Ok(())
+    }
+
+    /// 去掉首尾空白之后的 cron 表达式；空白等同于没配。与 [`Self::where_fragment`] 同一套口径。
+    pub fn schedule_expression(&self) -> Option<&str> {
+        self.schedule_cron
+            .as_deref()
+            .map(str::trim)
+            .filter(|expression| !expression.is_empty())
+    }
+
+    /// 解析好的周期，只在**开关开着且表达式配了**的时候才有。
+    ///
+    /// 这是「这个任务此刻会不会被自动发起」唯一的判据——#266 的调度器读它，界面上的
+    /// 「下次触发」也读它。开关与表达式各判各的会让两边在「开着但没表达式」上分叉。
+    pub fn active_schedule(&self) -> Option<CronSchedule> {
+        if !self.schedule_enabled {
+            return None;
+        }
+        CronSchedule::parse(self.schedule_expression()?).ok()
     }
 }
 

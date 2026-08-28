@@ -18,17 +18,24 @@ import {
   fetchBuilderDblinks,
   fetchBuilderSqlColumns,
   fetchBuilderTables,
+  fetchSchedulePreview,
   fetchTargetColumns,
   fetchTargetTables,
   generateBuilderSql,
   previewBuilderRows,
   previewErrorMessage,
 } from "./api";
-import type { BuilderColumn, BuilderSql, BuilderTable, PreviewResult } from "./api";
+import type {
+  BuilderColumn,
+  BuilderSql,
+  BuilderTable,
+  PreviewResult,
+  SchedulePreview,
+} from "./api";
 import { overlayOwnsKeyboard } from "./dialogFocus";
 import { messageFrom } from "./errors";
 import type { DatasourceOption } from "./entry";
-import { ICON, UpsertNote, UPSERT_NOTE_AHEAD } from "./components/DesignSystem";
+import { ICON, UpsertNote } from "./components/DesignSystem";
 import { HighlightedSql, HighlightedSqlInput, SqlEditor } from "./SqlEditor";
 import { Modal } from "./ui";
 import {
@@ -38,12 +45,23 @@ import {
   foldedSteps,
   leaving,
   leavingConfirmation,
+  saveGate,
   selectionBlocker,
   taskName,
   toSpec,
   view,
 } from "./wizard";
-import type { Change, ConfirmTargetCheck, Draft, Loss, RailEntry, Step } from "./wizard";
+import type {
+  Change,
+  ConfirmTargetCheck,
+  Draft,
+  Loss,
+  RailEntry,
+  Step,
+  WriteView,
+} from "./wizard";
+import { ScheduleCard } from "./ScheduleCard";
+import { WRITE_MODES } from "./writeMode";
 
 export interface TaskWizardScreenProps {
   initial: Draft;
@@ -160,8 +178,8 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
     ? "下一步：选列"
     : `回到第 ${displayStep(draft.step)} 步：${model.rail.find((entry) => entry.step === draft.step)?.label ?? ""}`;
   /** 最后一步为什么提交不了，或者 `null`。 */
-  const submitRefusal =
-    busy === "submit" ? "正在提交" : canAdvance(draft, 4)[0]?.message ?? null;
+  const save = saveGate(draft);
+  const submitRefusal = busy === "submit" ? "正在提交" : save.refusal;
   const sqlIdentity = JSON.stringify(toSpec(draft));
 
   function commit(next: Draft) {
@@ -1003,11 +1021,22 @@ export const TaskWizardScreen = forwardRef<TaskWizardScreenHandle, TaskWizardScr
                 </button>
               )}</Refusable>
             ) : draft.step < 4 ? (
-              <Refusable reason={advanceBlocked ? "请先处理当前步骤中的问题" : null}>{(describedBy) => (
-                <button className="button is-primary" type="submit" disabled={advanceBlocked} aria-describedby={describedBy}>
-                  {draft.step === 3 ? "查看确认页" : "下一步"}
-                </button>
-              )}</Refusable>
+              <>
+                {/* 编辑模式下「保存」每一步都在（`saveGate`）：往下走的门不该顺手
+                    当成保存的门，不然目标表一漂，连改个名字都做不到（story 29）。 */}
+                {save.offered && (
+                  <Refusable reason={submitRefusal}>{(describedBy) => (
+                    <button className="button" type="button" disabled={submitRefusal !== null} aria-describedby={describedBy} onClick={() => void submit("save-only")}>
+                      {busy === "submit" ? <LoaderCircle className="is-spinning" size={ICON.sm} /> : null}保存
+                    </button>
+                  )}</Refusable>
+                )}
+                <Refusable reason={advanceBlocked ? "请先处理当前步骤中的问题" : null}>{(describedBy) => (
+                  <button className="button is-primary" type="submit" disabled={advanceBlocked} aria-describedby={describedBy}>
+                    {draft.step === 3 ? "查看确认页" : "下一步"}
+                  </button>
+                )}</Refusable>
+              </>
             ) : draft.mode === "edit" ? (
               <Refusable reason={submitRefusal}>{(describedBy) => (
                 <button className="button is-primary" type="submit" disabled={submitRefusal !== null} aria-describedby={describedBy}>
@@ -1249,6 +1278,10 @@ function StepBody({
   if (model.step === 1) {
     return <section className="wizard-step">
       <header>{/* tabIndex={-1}：能用脚本聚焦，但不进 Tab 序（#239）。 */}<h1 ref={headingRef} tabIndex={-1}>选列与字段映射</h1></header>
+      {/* 任务名摆在第一步，不在最后一屏（story 29 / 见 `wizard.ts` 的 `saveGate`）：
+          它不依赖这份草稿里的任何东西，排在最后只会被前面每一道门连坐——目标表一漂，
+          第 3 步就过不去，改个名字都成了做不到的事。 */}
+      <label className="wizard-name">任务名<input value={taskName(draft)} onChange={(event) => change({ type: "task-name", name: event.target.value })} /></label>
       {draft.fetchMode === "sql" && (
         /* SQL 正文归第 1 步（#245）。这里只留一小块只读回显——同一份 SQL 两处都能改，
            人会搞不清哪个算数。要改就回第 1 步改，草稿一个字都不丢。 */
@@ -1260,7 +1293,17 @@ function StepBody({
           <pre className="ddl-output"><HighlightedSql sql={sqlEcho(draft.spec.source_sql ?? "")} /></pre>
         </section>
       )}
+      {/* 写入模式就在这里，紧挨着下面那张表的「主键」一列（#261）。
+          规格原话是「放在挑目标表与定主键的那一步」，而**向导里没有这样一步**：
+          目标表在进四步之前的选择屏上挑，主键在第 1 步这张映射表里勾。两个决定
+          里更该并排做的是「写入模式」与「主键」——它们一起决定了写出去的是哪条语句。
+          目标表那一屏离它有一整个步骤的距离，把模式摆到那里，人会在还没有列清单、
+          因而还看不见主键的时候先选写法。 */}
+      <WriteModeCard write={model.write} change={change} />
       {model.rows.length === 0 ? <p className="wizard-empty">{draft.fetchMode === "sql" ? "尚未识别结果列" : "未选择源表"}</p> : (
+        /* 主键任何时候都归人做，包括先清空再导入那一档：那一档确实不靠主键去重，
+           但主键仍决定写入语句是 upsert 还是纯 INSERT，而那是一个人有权改的决定。
+           勾错了不会静默通过——第 3 步的目标表检查会当面说「主键定义对不上」。 */
         <div className="table-wrap"><table className="data-grid wizard-mapping"><thead><tr><th>同步</th><th>源列</th><th>目标列</th><th>主键</th><th><span className="visually-hidden">操作</span></th></tr></thead><tbody>
           {model.rows.map((row) => <tr className={row.problem ? "is-problem" : ""} key={row.source}>
             <td><input type="checkbox" aria-label={`同步 ${row.source}`} checked={row.selected} onChange={() => change({ type: "toggle-column", source: row.source })} /></td>
@@ -1271,10 +1314,10 @@ function StepBody({
               : row.control === "new" ? <span className="new-target-field"><input aria-label={`${row.source} 的目标列名`} aria-invalid={row.problem ? true : undefined} value={row.target} spellCheck={false} onChange={(event) => change({ type: "rename-target", source: row.source, target: event.target.value })} /><small className="new-mark">将新建</small></span>
               : <select aria-label={`${row.source} 的目标列`} aria-invalid={row.problem ? true : undefined} value={row.target} onChange={(event) => change({ type: "rename-target", source: row.source, target: event.target.value })}><option value="">请选择</option>{draft.targetColumns.map((column) => <option key={column.name}>{column.name}</option>)}</select>
             }{row.problem && <small>{row.problem}</small>}</>}</td>
-            {/* 主键锁定的那句话本来就是可见的，另外两句却只在 `title` 里——而这颗勾选框
-                三种情况下都是 `disabled`，`title` 谁都看不到（#238）。三句合到同一条路上。 */}
-            <td><Refusable reason={!row.selected ? "先勾选这一列" : row.target === "" ? "先选择目标列" : row.primaryKeyLock}>{(describedBy) => (
-              <input type="checkbox" aria-label={`${row.source} 设为主键`} disabled={!row.selected || row.target === "" || row.primaryKeyLock !== null} aria-describedby={describedBy} checked={row.primaryKey} onChange={() => change({ type: "toggle-primary-key", target: row.target })} />
+            {/* 按不动只剩两种情况，两句话都是**正文**不是 `title`——只能悬停看到的
+                解释，键盘用户拿不到（#238）。 */}
+            <td><Refusable reason={!row.selected ? "先勾选这一列" : row.target === "" ? "先选择目标列" : null}>{(describedBy) => (
+              <input type="checkbox" aria-label={`${row.source} 设为主键`} disabled={!row.selected || row.target === ""} aria-describedby={describedBy} checked={row.primaryKey} onChange={() => change({ type: "toggle-primary-key", target: row.target })} />
             )}</Refusable></td>
             <td><button className="icon-button is-danger" type="button" title={`删除列 ${row.source}`} aria-label={`删除列 ${row.source}`} onClick={() => change({ type: "remove-column", source: row.source })}><Trash2 size={ICON.sm} /></button></td>
           </tr>)}
@@ -1322,6 +1365,8 @@ function StepBody({
       {checkError !== null && <div className="form-error" role="alert">{checkError}</div>}
       {model.check.state === "stale" && <div className="form-error" role="alert">映射或主键已变化，请重新检查目标表。</div>}
       {model.check.state === "none" && busy !== "check" && checkError === null && <p className="wizard-empty">等待目标表元数据与字段映射就绪。</p>}
+      {/* 预检结论：不是 finding，检查是**通过**的（#261）。通过之后还有一句话必须被读到。 */}
+      {(result?.notes ?? []).map((note) => <UpsertNote key={note} text={note} />)}
       {missing && <p className="wizard-placeholder"><strong>{draft.spec.target_table} 在目标库里还没有</strong>用下面这条语句建好它，再点「重新检查」。</p>}
       {result !== null && !result.ok && <>
         {!missing && <div className="target-check-findings">
@@ -1345,14 +1390,22 @@ function StepBody({
   const dropped = draft.sourceColumns.filter((column) => !carried.has(column.name));
   return <section className="wizard-step">
     <header><h1 ref={headingRef} tabIndex={-1}>确认并运行</h1></header>
-    <label className="wizard-name">任务名<input value={taskName(draft)} onChange={(event) => change({ type: "task-name", name: event.target.value })} /></label>
+    <ScheduleCard
+      cron={draft.spec.schedule_cron ?? ""}
+      enabled={draft.spec.schedule_enabled}
+      onCron={(cron) => change({ type: "schedule-cron", cron })}
+      onEnabled={(enabled) => change({ type: "schedule-enabled", enabled })}
+    />
     <dl className="wizard-confirm-grid">
+      {/* 任务名在第 1 步改（见 `saveGate`）。这里只回显——同一个值两处都能改，人会
+          搞不清哪个算数，第 1 步那块 SQL 回显是同一条道理。 */}
+      <div><dt>任务名</dt><dd>{confirmView.name}</dd></div>
       <div><dt>源端</dt><dd>{confirmView.sourceLabel}</dd></div>
       <div><dt>目标表</dt><dd>{confirmView.targetTable}</dd></div>
       <div><dt>WHERE</dt><dd>{confirmView.where}</dd></div>
       <div><dt>主键</dt><dd>{confirmView.primaryKey.join(", ")}</dd></div>
       <div className="is-wide"><dt>字段映射</dt><dd>{confirmView.mappings.map((mapping) => <span className="mapping-chip" key={mapping.source}>{mapping.source} → {mapping.target}</span>)}</dd></div>
-      <div><dt>写入方式</dt><dd>按主键 upsert</dd></div>
+      <div><dt>写入方式</dt><dd>{WRITE_MODES.find((entry) => entry.mode === confirmView.write.mode)?.label ?? confirmView.write.mode}（{confirmView.write.statementLabel}）</dd></div>
       {/* agent 离线原来要等点了「开始导入」才知道——那是最贵的一次发现。 */}
       <div><dt>目标端 Agent</dt><dd><span className={draft.targetAgentOnline ? "confirm-check is-passed" : "confirm-check is-warn"}>{draft.targetAgentOnline ? "在线" : "离线"}</span></dd></div>
       <div className="is-wide"><dt>不搬的列</dt><dd>{dropped.length === 0 ? <span className="confirm-none">源表所有列都会搬</span> : dropped.map((column) => <span className="mapping-chip is-dropped" key={column.name}>{column.name}</span>)}</dd></div>
@@ -1360,12 +1413,30 @@ function StepBody({
     </dl>
     <Blockers blockers={model.blockers} />
     {/* 写入语义的常驻交底（2026-08 UX 评审 P0-1）：这一步是「开始导入」前的最后一屏，
-        而这个产品**只增量合并、不删**。不写清楚的话，第一次用的人会按「全量同步」去理解
-        自己刚配好的这张目标表。它不是告警，所以不着 --crit / --warn。 */}
-    <UpsertNote text={UPSERT_NOTE_AHEAD} />
+        而这个产品**从不删行**。不写清楚的话，第一次用的人会按「全量同步」去理解
+        自己刚配好的这张目标表。它不是告警，所以不着 --crit / --warn。
+        文本按写法分叉（#261）：无主键那条路上「按主键 upsert」是句假话。 */}
+    <UpsertNote text={confirmView.write.note} />
   </section>;
 }
 
+/**
+ * 周期调度那一格（#265），摆在最后一屏确认信息的上面。
+ *
+ * 三样东西必须同时在屏幕上，少一样这一格就骗人：
+ *
+ * 1. **表达式**——人写的那一行，原文存进任务定义；
+ * 2. **开关**——和表达式分开。用清空表达式来「暂停」等于逼人丢掉自己写好的那一行；
+ * 3. **时区与下次触发**——「凌晨两点」到底是哪个两点，只有这一行能回答。
+ *
+ * 第三样是**问服务端算的**，不在浏览器里重算。跑 `source` 的那台机器才是将来真正到点
+ * 发起运行的地方，浏览器算出来的是另一个时区的两点；而一门语言有两份解析器，它们迟早
+ * 会在某个带步长的写法上说出两个答案。所以「下次触发」既是给人看的读数，也是解析器的
+ * **端到端验证**——它是同一份代码在保存时用来拒绝的那一份。
+ *
+ * 表达式不合法时这里当场把理由摆出来，和保存被拒时是同一句话；但**不拦人**——
+ * 拦截点在服务端的 `TaskSpec::validate`，这里再判一遍就是第二份判据。
+ */
 /**
  * 最后一屏上「目标表检查」那一格（2026-08 UX 评审 P0-3）。
  *
@@ -1376,6 +1447,60 @@ function StepBody({
  * 没检查过时把原因摆出来，并给一颗**当场就能检查**的按钮——原因写在这里而补救要退回
  * 第 3 步，等于把人赶去找路。
  */
+/**
+ * 写入那一格（#261），摆在第 1 步映射表的正上方——也就是「主键」那一列旁边。
+ *
+ * 两行，**上面一行可选、下面一行推导**：
+ *
+ * - 「写入模式」是任务定义里的一个字段，照 `WRITE_MODES` 渲染成一组单选按钮：加一档
+ *   就多一项，这里一个字都不用改。（#261 落地时只有一档，也是这么渲染的——只读文字
+ *   要变成控件，改的是人对这一格的理解；#264 把第二档接进来时果然什么都没动。）
+ * - 「写入语句」**不是选出来的**，人也改不了它：目标表有主键就 upsert，没有就纯
+ *   追加。做成禁用的下拉框会让人以为它本来能选、只是此刻不让选。
+ *
+ * 下面那句 `note` 永远在，两种写法各说各的：需求方明确不要为无主键加勾选框，
+ * 那这句话就是「重跑会产生重复数据」唯一的出口。
+ */
+function WriteModeCard({
+  write,
+  change,
+}: {
+  write: WriteView;
+  change: (intent: Change) => void;
+}) {
+  return (
+    <section className="write-mode-card">
+      <header><div><strong>写入模式</strong><span>决定这次运行往目标表写什么</span></div></header>
+      <div className="write-mode-body">
+        <fieldset className="write-mode-choices">
+          <legend className="visually-hidden">写入模式</legend>
+          {write.modes.map((entry) => (
+            <label key={entry.mode}>
+              <input
+                type="radio"
+                name="write-mode"
+                value={entry.mode}
+                checked={write.mode === entry.mode}
+                onChange={() => change({ type: "write-mode", mode: entry.mode })}
+              />
+              <span>{entry.label}</span>
+              <small>{entry.hint}</small>
+            </label>
+          ))}
+        </fieldset>
+        <dl className="write-mode-statement">
+          <dt>写入语句</dt>
+          <dd>
+            {write.statementLabel}
+            <small>由目标表有没有主键决定，不由这里选</small>
+          </dd>
+        </dl>
+      </div>
+      <UpsertNote text={write.note} />
+    </section>
+  );
+}
+
 function ConfirmTargetCheckCell({
   check,
   busy,

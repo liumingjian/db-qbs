@@ -32,7 +32,9 @@ Three binaries:
 | `db-qbs-source-run` | source | One-shot process running a single import (spawned by `db-qbs-source`, also runnable alone) |
 
 Prerequisites: the source machine has the **Oracle Instant Client 19c Basic** bundle installed
-(`oracle_client_lib_dir` points at it) and the target has **MySQL 8.0**. The build machine needs Rust
+(`oracle_client_lib_dir` points at it) and the target has **MySQL 5.7 or 8.0** (on 5.7,
+`max_allowed_packet` must be raised to at least 64 MiB — its stock 4 MiB fails the Connection
+Ritual). The build machine needs Rust
 1.85+ and Node.js 22+ (`zeroize` in `Cargo.lock` requires edition2024, which Cargo below 1.85 cannot
 resolve; Node 16 cannot build `npm run build`).
 

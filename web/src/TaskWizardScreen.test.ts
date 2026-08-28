@@ -39,6 +39,39 @@ function targetColumn(name: string, ordinal: number): TargetColumn {
   };
 }
 
+/**
+ * 三列的映射草稿：一行照旧自动匹配、一行取消勾选、一行目标字段留空。
+ *
+ * 要的是「同一屏上既有已定妥的行，又有被拒的控件，而且这一步确实过不去」。
+ * #261 之前这三件事靠「一列主键都没勾」一句话就凑齐了；现在没勾主键是合法的，
+ * 拦路的事得由映射本身提供，于是需要第三列。
+ */
+function refusalDraft(): Draft {
+  let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t_customer" }));
+  draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
+  draft = done(apply(draft, {
+    type: "source-columns-arrived",
+    columns: [sourceColumn("ID"), sourceColumn("C_NAME"), sourceColumn("C_CITY")],
+  }));
+  draft = done(apply(draft, {
+    type: "target-columns-arrived",
+    columns: [targetColumn("ID", 1), targetColumn("C_NAME", 2), targetColumn("C_CITY", 3)],
+    keys: [],
+  }));
+  draft = done(apply(draft, { type: "toggle-column", source: "C_NAME" }));
+  return done(apply(draft, { type: "rename-target", source: "C_CITY", target: "" }));
+}
+
+/**
+ * 一份**第 1 步真的过不去**的草稿。
+ *
+ * 原来这个位置用的是「一列主键都没勾」，而 #261 之后那不再是问题——它是一个合法的
+ * 选择（纯追加写）。改用「目标字段留空」：那是这一步真正还没做完的事。
+ */
+function blockedMappingDraft(): Draft {
+  return done(apply(mappingDraft(), { type: "rename-target", source: "ID", target: "" }));
+}
+
 function mappingDraft(): Draft {
   let draft = done(apply(openNew(SOURCE, TARGET), { type: "target-table", table: "t_customer" }));
   draft = done(apply(draft, { type: "source-table", owner: "APP", table: "T_CUSTOMER" }));
@@ -144,6 +177,25 @@ describe("the mapping step UI", () => {
     expect(html).toContain(">保存</button>");
     expect(html).not.toContain("只保存");
     expect(html).not.toMatch(/>开始导入<\/button>/);
+  });
+
+  it("puts the schedule, its switch and the timezone read-out on the last screen", () => {
+    const html = renderWizard({
+      ...mappingDraft(),
+      step: 4,
+      spec: { ...mappingDraft().spec, schedule_cron: "0 2 * * *", schedule_enabled: true },
+      sourceColumns: [],
+      targetColumns: [],
+      targetKeys: [],
+    });
+    expect(html).toContain("周期调度");
+    expect(html).toContain("cron 表达式");
+    expect(html).toContain('value="0 2 * * *"');
+    expect(html).toContain(">已启用<");
+    // 时区那一行永远在——它是这一格里唯一一句不依赖输入的话。静态渲染下读数还没回来，
+    // 所以这里能证明的是「格子在」，读数本身由 `api.test.ts` 与服务端那侧钉。
+    expect(html).toContain("时区");
+    expect(html).toContain("下次触发");
   });
 
   it("offers described datasource changes only while editing", () => {
@@ -256,7 +308,7 @@ describe("the mapping step UI", () => {
   });
 
   it("distinguishes settled rows, exposes deletion, and explains disabled controls", () => {
-    const html = renderWizard(done(apply(mappingDraft(), { type: "toggle-column", source: "C_NAME" })));
+    const html = renderWizard(refusalDraft());
     expect(html).toContain("自动匹配");
     expect(html).toContain('aria-label="删除列 ID"');
     // 拒绝理由是**正文**，不是 title：只能悬停看到的解释，键盘用户拿不到（#238）。
@@ -267,12 +319,27 @@ describe("the mapping step UI", () => {
   });
 
   it("hangs each refusal on the control it blocks as that control's description", () => {
-    const html = renderWizard(done(apply(mappingDraft(), { type: "toggle-column", source: "C_NAME" })));
+    const html = renderWizard(refusalDraft());
     for (const reason of ["先勾选这一列", "请先处理当前步骤中的问题"]) {
       const note = new RegExp(`<small class="refusal-reason" id="([^"]+)">${reason}</small>`).exec(html);
       expect(note).not.toBeNull();
       expect(html).toContain(`aria-describedby="${note?.[1]}"`);
     }
+  });
+
+  // 主键任何时候都归人做：目标表已经有主键时也只是**预填**，不是锁死。
+  it("leaves the primary-key ticks live even when the target table has one", () => {
+    const draft = done(apply(mappingDraft(), {
+      type: "target-columns-arrived",
+      columns: [targetColumn("ID", 1), targetColumn("C_NAME", 2)],
+      keys: [{ name: "PRIMARY", columns: ["ID"] }],
+    }));
+    const html = renderWizard(draft);
+
+    expect(html).not.toContain("按它锁定");
+    expect(html).not.toContain("不依赖主键去重");
+    expect(html).toContain('aria-label="ID 设为主键"');
+    expect(html).not.toContain('aria-label="ID 设为主键" disabled=""');
   });
 
   it("shows the SQL fetch refusal beside its own disabled button", () => {
@@ -306,12 +373,27 @@ describe("the mapping step UI", () => {
     expect(canAdvance(draft, 1).length).toBeGreaterThan(0);
   });
 
-  it("puts the missing-key reason beside the mapping controls and disables next", () => {
-    const html = renderWizard(mappingDraft());
-    expect(html).toContain('class="wizard-mapping-problems"');
-    expect(html).toContain("映射与主键");
-    expect(html).toContain("主键必选：至少要勾一列作为 upsert 的去重键");
+  it("puts an unfinished mapping beside the controls it belongs to and disables next", () => {
+    // #261 之后「没勾主键」不再是一条 blocker——那是纯追加写，一个合法的选择。
+    // 这一步真正过不去的是「这一列还没映射到目标字段」，理由挂在那一行上。
+    const html = renderWizard(blockedMappingDraft());
+    const step = view(blockedMappingDraft()).step;
+    if (step.step !== 1) throw new Error("expected mapping step");
+    expect(step.blockers).toContainEqual({
+      step: 1,
+      kind: "todo",
+      column: "ID",
+      message: "还没映射到目标字段",
+    });
+    expect(html).toContain("还没映射到目标字段");
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>下一步<\/button>/);
+  });
+
+  it("lets a fully mapped step through even with no primary key at all", () => {
+    // 同一条判定的另一半：勾不勾主键都不挡路，挡路的是没填完的映射。
+    const html = renderWizard(mappingDraft());
+    expect(canAdvance(mappingDraft(), 1)).toEqual([]);
+    expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>下一步<\/button>/);
   });
 
   it("makes the step body a form whose submit action is the primary advance", () => {
@@ -500,5 +582,44 @@ describe("leaving the wizard", () => {
     expect(html).not.toContain('title="正在刷新"');
     expect(html).not.toContain('title="正在刷新结果列"');
     expect(html).toContain('title="刷新目标表清单"');
+  });
+});
+
+describe("写入模式那一格（#261）", () => {
+  it("摆在第 1 步，且排在映射表之前——也就是紧挨着「主键」那一列", () => {
+    // 规格原话是「放在挑目标表与定主键的那一步」，而向导里没有这样一步：目标表在
+    // 进四步之前的选择屏上挑。两个决定里更该并排做的是写入模式与主键——它们一起
+    // 决定了写出去的是哪条语句。这条断言量的就是那个相邻关系。
+    const html = renderWizard(mappingDraft());
+
+    const card = html.indexOf("写入模式");
+    const table = html.indexOf("wizard-mapping");
+    expect(card).toBeGreaterThan(-1);
+    expect(table).toBeGreaterThan(-1);
+    expect(card).toBeLessThan(table);
+  });
+
+  it("语句那一行是推导出来的，界面上说清楚它不由这里选", () => {
+    const html = renderWizard(mappingDraft());
+
+    expect(html).toContain("纯追加写");
+    expect(html).toContain("由目标表有没有主键决定，不由这里选");
+    expect(html).toContain("重跑会产生重复数据");
+  });
+
+  it("勾上主键之后，同一格改口说 upsert", () => {
+    const html = renderWizard(
+      done(apply(mappingDraft(), { type: "toggle-primary-key", target: "ID" })),
+    );
+
+    expect(html).toContain("按主键 upsert");
+    expect(html).not.toContain("重跑会产生重复数据");
+  });
+
+  it("模式本身是一组单选按钮，不是一行只读文字——多一档时这里什么都不用改", () => {
+    const html = renderWizard(mappingDraft());
+
+    expect(html).toContain('name="write-mode"');
+    expect(html).toContain("追加写");
   });
 });

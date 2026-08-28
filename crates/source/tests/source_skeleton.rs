@@ -69,6 +69,86 @@ fn agent_stub_url() -> &'static str {
     .as_str()
 }
 
+/// 一台**连得上、永不回话**的 agent 桩：TCP 握得上手，读那一头一直空着，
+/// 于是 `fetch_agent_info` 会一路撑到它 5 秒的读超时（`agent.rs`）。
+///
+/// 它是本文件里唯一一处「能把一条请求按住好几秒」的手段，而这正是
+/// 多线程 accept（#255）那条哨兵需要的东西。
+static BLACK_HOLE_ACCEPTED: AtomicU64 = AtomicU64::new(0);
+
+fn black_hole_agent_url() -> &'static str {
+    static STUB: OnceLock<String> = OnceLock::new();
+    STUB.get_or_init(|| {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        thread::spawn(move || {
+            // 攥着不放：不读、不写、不关。一关连接对端就立刻拿到 EOF，按不住了。
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                BLACK_HOLE_ACCEPTED.fetch_add(1, Ordering::SeqCst);
+                held.push(stream);
+            }
+        });
+        url
+    })
+    .as_str()
+}
+
+/// **accept 循环是多线程的**（#255）：一个客户端卡在 5 秒的 agent 探测里，
+/// 另一个客户端拉任务列表照样秒回。
+///
+/// 这条哨兵只有真进程才成立——`tests/api.rs` 那边直调 `Api::handle`，
+/// 证得了「锁不跨越阻塞 IO」，证不了「监听器后面站着几条线程」。
+/// 改回单线程 accept 会让它在「列表等了 5 秒」上失败，而不是悄悄退化。
+#[test]
+fn a_client_stuck_on_an_unresponsive_agent_does_not_freeze_another_client() {
+    let directory = temp_directory();
+    let black_hole = black_hole_agent_url().to_owned();
+    let (port, _config, source, _ready) = start_source_ready(|port| {
+        write_config_with_oracle(
+            &directory,
+            &format!("127.0.0.1:{port}"),
+            &black_hole,
+            "/opt/oracle",
+        )
+    });
+    // 迁移出来的那台 agent 指着黑洞；迁移本身不探测，所以启动没被它拖住。
+    let agent_id = migrated_agent_id(port);
+
+    let before = BLACK_HOLE_ACCEPTED.load(Ordering::SeqCst);
+    let probing = thread::spawn(move || {
+        let started = Instant::now();
+        let response = post(port, &format!("/api/agents/{agent_id}/probe"), "").unwrap();
+        (response.status, started.elapsed())
+    });
+    // 等探测那一发真的落到黑洞上再计时，否则量到的只是线程还没起来。
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while BLACK_HOLE_ACCEPTED.load(Ordering::SeqCst) == before {
+        assert!(Instant::now() < deadline, "探测请求一直没发出去");
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let started = Instant::now();
+    let listed = get(port, "/api/tasks").unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(listed.status, 200, "{}", listed.body);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "探测把任务列表一起冻住了：列表等了 {elapsed:?}"
+    );
+
+    let (status, probe_elapsed) = probing.join().unwrap();
+    assert_eq!(status, 200);
+    assert!(
+        probe_elapsed >= Duration::from_secs(4),
+        "探测根本没被按住（{probe_elapsed:?}），这条哨兵没在证它该证的事"
+    );
+
+    assert_success(&terminate(source));
+    let _ = fs::remove_dir_all(directory);
+}
+
 /// 注册表里那台由 `sink_base_url` 迁移出来的 agent（ADR-0044 §5）。
 /// 本文件的 `source.toml` 都带着那个字段，所以首启之后它一定在。
 fn migrated_agent_id(port: u16) -> String {
@@ -114,7 +194,7 @@ fn seed_datasources(port: u16) -> (String, String) {
 fn task_json(name: &str, target_table: &str, datasources: &(String, String)) -> String {
     let (source_datasource_id, target_datasource_id) = datasources;
     format!(
-        r#"{{"name":"{name}","source_datasource_id":"{source_datasource_id}","target_datasource_id":"{target_datasource_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"{target_table}","columns":[{{"source":"ID","target":"ID"}},{{"source":"D_BIZ","target":"D_BIZ"}}],"primary_key":["ID"],"where_clause":"D_BIZ = DATE '2026-08-14'"}}}}"#
+        r#"{{"name":"{name}","source_datasource_id":"{source_datasource_id}","target_datasource_id":"{target_datasource_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"{target_table}","columns":[{{"source":"ID","target":"ID"}},{{"source":"D_BIZ","target":"D_BIZ"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"],"where_clause":"D_BIZ = DATE '2026-08-14'"}}}}"#
     )
 }
 

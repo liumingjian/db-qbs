@@ -49,34 +49,49 @@ export function PhaseLine({ current }: { current: RunPhase | null }) {
 }
 
 /**
- * 轴二说的**不是「整表换过」**（2026-08 UX 评审 P0-1）。
+ * 轴二有三个词，而**只有一个是「整表换过」**（2026-08 UX 评审 P0-1、#264）。
  *
  * `SWAPPED` 是目标端的协议词，本义只是「这次写入被目标端认下了」；实际打的是
- * `INSERT ... ON DUPLICATE KEY UPDATE`——**按主键合并**。原话「目标表已切换」把它读成了
+ * `INSERT ... ON DUPLICATE KEY UPDATE`（无主键时是纯 `INSERT`，见 `writeMode.ts`）
+ * ——**按主键合并**。原话「目标表已切换」把它读成了
  * 一次整表替换，于是目标表会被当成源端的全量快照拿去用，而**源端删掉的行还留在里面**
- * （CONTEXT.md 记的那笔刻意欠债）。标签本身照旧是一个词，长话在 `UpsertNote` 里。
+ * （CONTEXT.md 记的那笔刻意欠债）。
+ *
+ * `REPLACED` 才是整表换过：先清空再导入那一档（#264），跑完之后目标表精确等于本次
+ * 查询的结果。它和 `SWAPPED` **不能共用一句话**——那正是这一栏存在的意义，
+ * 而共用会让一半的运行历史读起来是假的。
  *
  * `DISCARDED` 一个字不动：那半边本来就是准的——目标表确实没被碰过。
+ *
+ * 标签本身照旧是一个词，长话在 `UpsertNote` 里。
  */
-export function TerminalBlock({ effect }: { effect: "SWAPPED" | "DISCARDED" }) {
+const TERMINAL_COPY: Readonly<Record<string, string>> = {
+  SWAPPED: "已按主键合并写入",
+  REPLACED: "目标表已整表替换",
+  DISCARDED: "目标表未被触碰",
+  UNKNOWN: "目标表效果未知",
+};
+
+/**
+ * 轴二。`effect` 是**服务端给的原字符串**，不是筛过的枚举（见 `history.ts`）。
+ *
+ * 认得的词配一句人话；不认得的词照样摆出来，只是没有那句人话可配——产品不认识它，
+ * 也就没有资格替它说是什么意思。吞掉它才是最坏的一种：那意味着跑数的那一端比这块
+ * 屏幕新，而这件事只会在这一格里露头。
+ */
+export function TerminalBlock({ effect }: { effect: string }) {
+  const copy = TERMINAL_COPY[effect] ?? null;
   return (
-    <span className={`terminal-block is-${effect.toLowerCase()}`}>
+    <span className={`terminal-block is-${copy === null ? "unrecognised" : effect.toLowerCase()}`}>
       <span>{effect}</span>
-      <span className="terminal-copy">
-        {effect === "SWAPPED" ? "已按主键合并写入" : "目标表未被触碰"}
-      </span>
+      {copy !== null && <span className="terminal-copy">{copy}</span>}
     </span>
   );
 }
 
-/** 已经跑完时的说法：陈述这次写入到底做了什么。 */
-export const UPSERT_NOTE_DONE =
-  "按主键 upsert：新增和变更已写入；源端删除的行仍保留在目标表。";
-
-/** 还没跑时的说法（向导第 4 步）：同一件事的将来时。 */
-export const UPSERT_NOTE_AHEAD =
-  "按主键 upsert：新增和变更会写进目标表；源端删除的行不会跟着消失。";
-
+// 这两句话原来是常量，现在是 `writeMode.ts` 里的两个函数（#261）：目标表无主键时
+// 「按主键 upsert」是句假话，而恰恰是那条路最需要这行字。留下的只有渲染壳
+// `UpsertNote`，文本由调用方按写法算出来给它。
 /**
  * 跟在轴二后面的那一行长话——**语义常驻，不是错误也不是告警**。
  *

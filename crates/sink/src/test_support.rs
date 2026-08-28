@@ -24,11 +24,11 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use db_qbs_shared::RowCounts;
+use db_qbs_shared::{MysqlServerInfo, RowCounts, WriteStatement};
 
 use crate::{
-    AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, CleanupRunError, CreateStagingError,
-    Destination, DropStagingError, TargetColumn, TargetKey, WriteBatchError,
+    AtomicSwapError, AtomicSwapRequest, AtomicSwapResult, CreateStagingError, Destination,
+    DropStagingError, TargetColumn, TargetKey, WriteBatchError,
 };
 
 /// One `write_batch` call, recorded whole so batching tests can assert on the
@@ -66,12 +66,18 @@ pub struct InMemoryDestination {
     /// What `write_batch` reports back, when the test needs it to disagree with
     /// the number of rows it was handed.
     pub affected_rows: Mutex<Option<u64>>,
-    /// Always 0 in production (ADR-0035 §4). Settable here so a test can prove
-    /// the number is carried through rather than invented on the way out.
+    /// Always 0 on the append path (ADR-0035 §4). Settable here so a test can
+    /// prove the number is carried through rather than invented on the way out.
+    /// On the clear-then-import path (#264) this knob is ignored: the fake
+    /// reports how many target rows it actually deleted.
     pub purged_rows: Mutex<u64>,
     pub count_ms: Mutex<u64>,
     pub target_rows: Mutex<HashMap<(String, String), Vec<Option<String>>>>,
-    pub write_ledger: Mutex<Vec<(String, String, String, bool)>>,
+    /// What this destination claims its MySQL is (#257). `None` is the resting
+    /// state — the fake is not connected to anything, so "never observed" is the
+    /// honest default, and it is also the state the info endpoint must report as
+    /// unknown rather than as 8.0.
+    pub server: Mutex<Option<MysqlServerInfo>>,
 }
 
 impl Default for InMemoryDestination {
@@ -96,12 +102,20 @@ impl Default for InMemoryDestination {
             purged_rows: Mutex::new(0),
             count_ms: Mutex::new(0),
             target_rows: Mutex::new(HashMap::new()),
-            write_ledger: Mutex::new(Vec::new()),
+            server: Mutex::new(None),
         }
     }
 }
 
 impl InMemoryDestination {
+    /// Arm what this destination reports as its MySQL version and collation.
+    pub fn report_mysql(&self, version: &str, utf8mb4_collation: &str) {
+        *self.server.lock().expect("server mutex poisoned") = Some(MysqlServerInfo {
+            version: version.to_owned(),
+            utf8mb4_collation: utf8mb4_collation.to_owned(),
+        });
+    }
+
     /// Every row that reached staging, across every staging table. The tests
     /// drive one run at a time, so this reads as "what is in the staging table".
     pub fn staged_row_values(&self) -> Vec<Vec<Option<String>>> {
@@ -151,6 +165,10 @@ impl InMemoryDestination {
 }
 
 impl Destination for InMemoryDestination {
+    fn server_info(&self) -> Option<MysqlServerInfo> {
+        self.server.lock().expect("server mutex poisoned").clone()
+    }
+
     fn target_columns(&self, _target_table: &str) -> Result<Vec<TargetColumn>, String> {
         Ok(self.columns.clone())
     }
@@ -257,31 +275,59 @@ impl Destination for InMemoryDestination {
             })
             .collect::<Vec<_>>();
         let rows = self.staging.lock().unwrap()[&request.staging_table].clone();
+        let statement = WriteStatement::for_primary_key(&request.primary_key);
         let mut target_rows = self.target_rows.lock().unwrap();
-        let mut ledger = self.write_ledger.lock().unwrap();
+        // Clear-then-import (#264). The order is the point of this fake: the
+        // clear happens **after** the row-count gate and **before** the insert,
+        // and nothing here can commit half of it — a test that arms
+        // `swap_error` must find the target table still holding its old rows.
+        let purged_rows = if request.write_mode.clears_target() {
+            let doomed = target_rows
+                .keys()
+                .filter(|(table, _)| table == &request.target_table)
+                .cloned()
+                .collect::<Vec<_>>();
+            let purged = doomed.len() as u64;
+            for key in doomed {
+                target_rows.remove(&key);
+            }
+            purged
+        } else {
+            *self.purged_rows.lock().unwrap()
+        };
         for row in rows {
-            let key = serde_json::to_string(
-                &key_indices
-                    .iter()
-                    .map(|index| &row[*index])
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap();
-            target_rows.insert((request.target_table.clone(), key.clone()), row);
-            ledger.push((
-                request.run_id.clone(),
-                request.target_table.clone(),
-                key,
-                false,
-            ));
+            let key = match statement {
+                // Merge on the recorded key: a second run with the same keys
+                // overwrites, which is what makes the run idempotent.
+                WriteStatement::Upsert => serde_json::to_string(
+                    &key_indices
+                        .iter()
+                        .map(|index| &row[*index])
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap(),
+                // Nothing to merge on, so every row lands as a new row — including
+                // one identical to a row already there. Re-running doubles the
+                // table, and a test that asserts that has to be able to see it,
+                // so the fake's key here is a counter, not the row's values.
+                WriteStatement::Insert => {
+                    let ordinal = target_rows
+                        .keys()
+                        .filter(|(table, _)| table == &request.target_table)
+                        .count();
+                    format!("#{ordinal}")
+                }
+            };
+            target_rows.insert((request.target_table.clone(), key), row);
         }
 
         Ok(AtomicSwapResult {
             staged_rows,
-            purged_rows: *self.purged_rows.lock().unwrap(),
-            // No upsert here, so nothing can be counted twice: the interval
-            // `swap_rows_in_range` allows for is a MySQL `affected_rows` fact,
-            // not something a test double should invent.
+            purged_rows,
+            // No real upsert here, so nothing can be counted twice: the interval
+            // `swap_rows_consistent` allows on the upsert path is a MySQL
+            // `affected_rows` fact, not something a test double should invent.
+            // Strict equality is also exactly what the plain-INSERT path demands.
             swapped_rows: staged_rows,
             count_ms,
         })
@@ -294,44 +340,6 @@ impl Destination for InMemoryDestination {
         self.staging.lock().unwrap().remove(staging_table);
         self.dropped.lock().unwrap().push(staging_table.to_owned());
         Ok(())
-    }
-
-    fn cleanup_run(
-        &self,
-        run_id: &str,
-        target_table: &str,
-        _primary_key: &[String],
-    ) -> Result<u64, CleanupRunError> {
-        let mut ledger = self.write_ledger.lock().unwrap();
-        let removable = ledger
-            .iter()
-            .enumerate()
-            .filter(|(_, (writer, table, _, cleaned))| {
-                writer == run_id && table == target_table && !cleaned
-            })
-            .filter(|(index, (_, table, key, _))| {
-                !ledger
-                    .iter()
-                    .skip(index + 1)
-                    .any(|(_, later_table, later_key, _)| later_table == table && later_key == key)
-            })
-            .map(|(_, (_, _, key, _))| key.clone())
-            .collect::<Vec<_>>();
-        let mut target_rows = self.target_rows.lock().unwrap();
-        let deleted = removable
-            .iter()
-            .filter(|key| {
-                target_rows
-                    .remove(&(target_table.to_owned(), (*key).clone()))
-                    .is_some()
-            })
-            .count() as u64;
-        for (writer, table, _, cleaned) in ledger.iter_mut() {
-            if writer == run_id && table == target_table {
-                *cleaned = true;
-            }
-        }
-        Ok(deleted)
     }
 }
 

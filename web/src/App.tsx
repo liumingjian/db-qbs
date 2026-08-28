@@ -22,7 +22,6 @@ import {
   logout,
   onSessionLost,
   startRun,
-  taskInputFrom,
   updateTask,
 } from "./api";
 import type {
@@ -31,13 +30,12 @@ import type {
   SessionState,
   Task,
   Datasource,
-  TaskInput,
 } from "./api";
 import { messageFrom } from "./errors";
 import { AgentScreen } from "./AgentScreen";
 import { JobCenterScreen } from "./JobCenterScreen";
 import { latestRunByTask, runStatus } from "./listing";
-import { runHash, runRecordFromHash } from "./routes";
+import { runHash, runLogsRequestedFromHash, runRecordFromHash } from "./routes";
 import { RunScreen } from "./RunScreen";
 import { ChangePasswordDialog } from "./ChangePasswordDialog";
 import { DatasourceScreen } from "./DatasourceScreen";
@@ -48,14 +46,13 @@ import type { DatasourceOption, EntryFix, EntryGuard } from "./entry";
 import { TaskEntryDialog } from "./TaskEntryDialog";
 import { TaskWizardScreen } from "./TaskWizardScreen";
 import type { TaskWizardScreenHandle } from "./TaskWizardScreen";
-import { FormField, Modal, ModalFooter } from "./ui";
+import { Modal } from "./ui";
 import { openExisting, openNew, taskName, toSpec } from "./wizard";
 import type { Draft, Step } from "./wizard";
 
 type DialogState =
   | { kind: "entry" }
   | { kind: "edit"; task: Task; requestedStep: Step }
-  | { kind: "rename"; task: Task }
   | { kind: "delete"; task: Task }
   | null;
 
@@ -279,6 +276,8 @@ function Workbench({
   } | null>(null);
   /** 地址里点名、但还没解析成 `activeRun` 的那次运行。 */
   const [requestedRun, setRequestedRun] = useState<string | null>(null);
+  /** 地址点名的是那次运行的**日志**（`#runs/<id>/logs`，任务列表的「查看日志」）。 */
+  const [requestedLogs, setRequestedLogs] = useState(false);
   /**
    * 发起失败的那句话。发起不再有对话框可以把错误挂在里面，所以它挂在屏顶——
    * 「同一任务已有一次运行进行中」这类 409 就是从这里读到的。
@@ -430,6 +429,7 @@ function Workbench({
       setPage(requested);
       // 地址里点名的那一次运行。任务与历史都还在路上时先记下来，等它们到齐再解析。
       setRequestedRun(runRecordFromHash(window.location.hash));
+      setRequestedLogs(runLogsRequestedFromHash(window.location.hash));
     }
     handleHashChange();
     window.addEventListener("hashchange", handleHashChange);
@@ -589,6 +589,7 @@ function Workbench({
   function commitNavigation(nextPage: Page) {
     setActiveRun(null);
     setRequestedRun(null);
+    setRequestedLogs(false);
     if (nextPage !== "wizard") {
       setWizardDraft(null);
       // 草稿不跟着走：它留在 sessionStorage 里，作业中心上摆一条回去的路。
@@ -639,16 +640,6 @@ function Workbench({
     setFocusTaskId(created.task_id);
     commitNavigation("jobs");
     void loadList();
-  }
-
-  async function handleUpdate(task: Task, input: TaskInput) {
-    const updated = await updateTask(task.task_id, input);
-    setTasks(
-      (currentTasks) =>
-        currentTasks?.map((currentTask) =>
-          currentTask.task_id === updated.task_id ? updated : currentTask,
-        ) ?? [updated],
-    );
   }
 
   /**
@@ -910,6 +901,7 @@ function Workbench({
             <RunScreen
               task={activeRun.task}
               runRecordId={activeRun.runRecordId}
+              focusLogs={requestedLogs}
               onBack={() => {
                 commitNavigation("jobs");
                 void loadList();
@@ -930,7 +922,6 @@ function Workbench({
               onRefresh={() => void loadList()}
               onCreate={openCreateDialog}
               onEdit={(task) => setDialog({ kind: "edit", task, requestedStep: 1 })}
-              onRename={(task) => setDialog({ kind: "rename", task })}
               onDelete={(task) => setDialog({ kind: "delete", task })}
               startingTaskId={startingTaskId}
               onStart={(task) => void handleStart(task)}
@@ -1017,13 +1008,6 @@ function Workbench({
             }}
           />
         )}
-        {page === "jobs" && dialog?.kind === "rename" && (
-          <RenameDialog
-            task={dialog.task}
-            onClose={closeDialog}
-            onSubmit={(input) => handleUpdate(dialog.task, input)}
-          />
-        )}
         {page === "jobs" && dialog?.kind === "delete" && (
           <DeleteDialog
             task={dialog.task}
@@ -1093,61 +1077,6 @@ function TaskEditGuardDialog({
           {fix === "agents" ? "前往目标端 Agent" : "前往数据源"}
         </button>
       </footer>
-    </Modal>
-  );
-}
-
-function RenameDialog({
-  task,
-  onClose,
-  onSubmit,
-}: {
-  task: Task;
-  onClose: () => void;
-  onSubmit: (input: TaskInput) => Promise<void>;
-}) {
-  const [name, setName] = useState(task.name);
-  const [error, setError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-
-  async function handleSubmit(event: FormEvent) {
-    event.preventDefault();
-    setSubmitting(true);
-    setError(null);
-    try {
-      await onSubmit(taskInputFrom(task, { name }));
-      onClose();
-    } catch (submitError) {
-      setError(messageFrom(submitError));
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <Modal title="任务改名" onClose={onClose} busy={submitting} narrow>
-      <form onSubmit={(event) => void handleSubmit(event)}>
-        <div className="modal-body form-stack">
-          <FormField label="任务名称">
-            <input
-              autoFocus
-              required
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-            />
-          </FormField>
-          {error !== null && (
-            <div className="form-error" role="alert">
-              {error}
-            </div>
-          )}
-        </div>
-        <ModalFooter
-          onClose={onClose}
-          busy={submitting}
-          submitLabel="保存名称"
-        />
-      </form>
     </Modal>
   );
 }

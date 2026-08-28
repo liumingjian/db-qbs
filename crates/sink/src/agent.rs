@@ -42,6 +42,11 @@ pub fn load_or_create(id_file: &Path, configured_name: Option<&str>) -> Result<A
         agent_id,
         name: resolve_name(configured_name),
         version: env!("CARGO_PKG_VERSION").to_owned(),
+        // 身份在监听之前就载入，那时候一条 MySQL 连接都还没有（ADR-0037 §2）。
+        // 版本由 `Api::agent_info` 在应答时补上，见 #257。
+        mysql: None,
+        // 额度同理：它在 `sink.toml` 里，由 `Api::agent_info` 应答时补上（#266）。
+        max_concurrent_runs: None,
     })
 }
 

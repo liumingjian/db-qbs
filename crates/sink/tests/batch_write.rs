@@ -4,6 +4,7 @@ use db_qbs_shared::BatchPayload;
 use db_qbs_sink::test_support::InMemoryDestination;
 use db_qbs_sink::{
     OpenRunRequest, SinkService, SourceColumn, TargetColumn, TargetConnection, WriteBatchError,
+    WriteMode,
 };
 
 const RUN_ID: &str = "20260814091530_a3f19c";
@@ -92,6 +93,20 @@ fn error_1153_points_to_environment_configuration_not_data() {
     assert!(error.message.contains("环境配置"), "{}", error.message);
     assert!(
         error.message.contains("不要排查业务数据"),
+        "{}",
+        error.message
+    );
+    // #262：运行期撞上 1153 与开连接仪式撞上它，是同一件事的两个时刻，
+    // 所以给的补救办法必须是同一份，不能一处照做即可、另一处只说「请恢复到 64 MiB」。
+    assert!(
+        error
+            .message
+            .contains("SET GLOBAL max_allowed_packet = 67108864;"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains("my.cnf") && error.message.contains("max_allowed_packet = 64M"),
         "{}",
         error.message
     );
@@ -262,6 +277,7 @@ fn open_request(source_columns: Vec<SourceColumn>) -> OpenRunRequest {
             password: "change-me".to_owned(),
             database: "qbs".to_owned(),
         },
+        write_mode: WriteMode::Append,
         primary_key: vec!["D_BIZ".to_owned()],
         source_columns,
         range_check_results: None,

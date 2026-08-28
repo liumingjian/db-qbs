@@ -1,11 +1,8 @@
-import { Play, Trash2, X } from "lucide-react";
-import { useRef, useState } from "react";
+import { Play, X } from "lucide-react";
+import { useRef } from "react";
 
-import { cleanupRun } from "./api";
-import type { Datasource, RunHistory, Task } from "./api";
-import { qualifiedTargetTable } from "./datasource";
+import type { RunHistory, Task } from "./api";
 import { useDialogFocus } from "./dialogFocus";
-import { messageFrom } from "./errors";
 import { FailureEvidence } from "./FailureEvidence";
 import {
   ErrorCodeTag,
@@ -14,14 +11,24 @@ import {
   TerminalBlock,
   UnknownConclusion,
   UpsertNote,
-  UPSERT_NOTE_DONE,
 } from "./components/DesignSystem";
-import { formatTimestamp, historyPresentation, runIdPresentation } from "./history";
+import {
+  runWriteSemantics,
+  writeStatementLabel,
+  writeStatementOf,
+} from "./writeMode";
+import {
+  formatTimestamp,
+  historyPresentation,
+  knownTerminalEffect,
+  runIdPresentation,
+  runTriggerLabel,
+} from "./history";
 import { PrecheckReports } from "./PrecheckReports";
+import { RunLogPanel } from "./RunLogPanel";
 import { HighlightedSql } from "./SqlEditor";
 import { rerunAction } from "./rerun";
 import { sourceSummary, whereSummary } from "./spec";
-import { Modal } from "./ui";
 import type { Step } from "./wizard";
 
 /**
@@ -44,47 +51,26 @@ export function RunDrawer({
   task,
   run,
   tasks,
-  datasources,
   onClose,
   onRerun,
   onEditTask,
-  onCleaned,
 }: {
   task: Task;
   run: RunHistory;
   /** 传给 `rerunAction` 判「任务还在不在」；`null` = 任务清单没读到。 */
   tasks: Task[] | null;
-  /** 只为把清理确认框里那张目标表写成全限定的 `库.表`。 */
-  datasources: Datasource[];
   onClose: () => void;
   onRerun: (task: Task) => void;
   onEditTask: (task: Task, step: Step) => void;
-  onCleaned: () => void;
 }) {
-  const [cleaning, setCleaning] = useState(false);
-  const [cleanupConfirm, setCleanupConfirm] = useState(false);
-  const [cleanupError, setCleanupError] = useState<string | null>(null);
   const dialog = useRef<HTMLElement | null>(null);
   // 焦点陷阱、初始焦点与关闭后的焦点归位，与对话框共用同一份实现（UX 评审 P0-5）。
-  // 清理确认框叠在这层上面时，按键归最上面那一层管——`useDialogFocus` 自己排的队。
-  useDialogFocus(dialog, { onEscape: onClose, escapable: !cleaning });
+  useDialogFocus(dialog, { onEscape: onClose });
 
   const presentation = historyPresentation(run);
+  /** 判断走认得的那一份，显示走原样那一份（见 `history.ts`）。 */
+  const knownEffect = knownTerminalEffect(presentation.terminalEffect);
   const rerun = rerunAction(run, tasks);
-
-  async function cleanWrittenRows() {
-    setCleaning(true);
-    setCleanupError(null);
-    try {
-      await cleanupRun(run.run_record_id);
-      onCleaned();
-    } catch (error) {
-      setCleanupError(messageFrom(error));
-      setCleanupConfirm(false);
-    } finally {
-      setCleaning(false);
-    }
-  }
 
   return (
     <>
@@ -125,19 +111,12 @@ export function RunDrawer({
                   <span className="outcome-label">
                     运行结果 <strong>{run.outcome ?? "进行中"}</strong>
                   </span>
+                  {/* 认得的、不认得的，都由 `TerminalBlock` 一个人摆出来（#264）：
+                      原来这里是三条分支，认得的走轴二、`UNKNOWN` 走一句、别的走另一句，
+                      而整屏详情那边一条都没有，于是同一个词两屏长得不一样。 */}
                   {presentation.terminalEffect !== null && (
                     <TerminalBlock effect={presentation.terminalEffect} />
                   )}
-                  {run.target_table_effect === "UNKNOWN" && (
-                    <span className="unknown-effect">UNKNOWN　目标表效果未知</span>
-                  )}
-                  {presentation.terminalEffect === null &&
-                    run.target_table_effect !== null &&
-                    run.target_table_effect !== "UNKNOWN" && (
-                      <span className="effect-text">
-                        目标表 <strong>{run.target_table_effect}</strong>
-                      </span>
-                    )}
                   {run.source_code !== null && (
                     <span className="source-code">
                       源端 <strong>{run.source_code}</strong>
@@ -157,8 +136,12 @@ export function RunDrawer({
                 {presentation.kind === "succeeded" && (
                   <div className="success-conclusion">{presentation.conclusion}</div>
                 )}
-                {presentation.terminalEffect === "SWAPPED" && (
-                  <UpsertNote text={UPSERT_NOTE_DONE} />
+                {/* 说法跟着写法与模式一起走（#261/#264），读的是当次快照。挂不挂问
+                    `knownTerminalEffect`：`DISCARDED` 不挂（目标表没被碰过），产品
+                    不认识的那个词也不挂——原样透出是一回事，据它断言写入做了什么
+                    是另一回事，后者这里没有资格做。 */}
+                {(knownEffect === "SWAPPED" || knownEffect === "REPLACED") && (
+                  <UpsertNote text={runWriteSemantics(run.evidence, task.spec)} />
                 )}
                 {presentation.kind === "live" && (
                   <div className="drawer-note">{presentation.conclusion}</div>
@@ -224,6 +207,10 @@ export function RunDrawer({
                 label="主键"
                 value={task.spec.primary_key.join(", ") || "—"}
               />
+              <Value
+                label="写入方式"
+                value={writeStatementLabel(writeStatementOf(task.spec.primary_key))}
+              />
               <Value label="条件" value={whereSummary(task.spec)} />
             </div>
           </section>
@@ -234,6 +221,10 @@ export function RunDrawer({
               <Value label="运行记录" value={run.run_record_id} />
               {/* V15：没有 `run_id` 时写一句话，不是空白也不是横杠；两个 id 谁也不替代谁。 */}
               <Value label="目标端运行号" value={runIdPresentation(run)} />
+              {/* 谁发起的（#266）。缺席 = 前端比服务端新，那就不渲染这一行。 */}
+              {runTriggerLabel(run.trigger) !== null && (
+                <Value label="发起方式" value={runTriggerLabel(run.trigger)!} />
+              )}
               <Value label="发起于" value={formatTimestamp(run.started_at, true)} />
               <Value label="结束于" value={formatTimestamp(run.finished_at, true)} />
               <Value label="暂存表" value={run.staging_table ?? "—"} />
@@ -252,6 +243,12 @@ export function RunDrawer({
                 value={run.value ?? undefined}
               />
             )}
+
+          {/* 日志是运行详情的一段，抽屉里也一样（#263）：这个抽屉就是「运行详情」
+              那颗按钮打开的东西，而出事时唯一想看的正是「它卡在哪一步、上一句说了
+              什么」——把日志只放在整屏详情里，等于让人先猜到还有另一个地方。
+              渲染的是同一个组件，只换外壳。 */}
+          <RunLogPanel runRecordId={run.run_record_id} embedded />
         </div>
 
         <footer className="drawer-footer">
@@ -259,23 +256,6 @@ export function RunDrawer({
             这一条已是最近一次运行；同一个任务的多次历史本版不展示。
           </span>
           <span className="spacer" />
-          {cleanupError !== null && <span className="form-error">{cleanupError}</span>}
-          {run.cleanup_status === "available" && (
-            // 入口只是**打开确认框**，此刻一行都还没删——所以它是最轻的那一档，
-            // 落锤那颗在 `CleanupDialog` 里（2026-08 UX 评审 P0-2）。
-            <button
-              className="button is-danger is-ghost"
-              type="button"
-              disabled={cleaning}
-              onClick={() => setCleanupConfirm(true)}
-            >
-              <Trash2 size={ICON.sm} aria-hidden="true" />
-              {cleaning ? "正在清理" : "清理本次写入"}
-            </button>
-          )}
-          {run.cleanup_status === "cleaned" && (
-            <span className="drawer-note">已清理 {run.cleaned_rows ?? 0} 行</span>
-          )}
           <button className="button is-ghost" type="button" onClick={onClose}>
             关闭
           </button>
@@ -307,89 +287,7 @@ export function RunDrawer({
           )}
         </footer>
       </aside>
-
-      {cleanupConfirm && (
-        <CleanupDialog
-          targetTable={qualifiedTargetTable(
-            datasources.find(
-              (datasource) => datasource.datasource_id === task.target_datasource_id,
-            ),
-            task.spec.target_table,
-          )}
-          rows={run.sink_reported_rows ?? run.staged_rows}
-          busy={cleaning}
-          onClose={() => setCleanupConfirm(false)}
-          onConfirm={() => void cleanWrittenRows()}
-        />
-      )}
     </>
-  );
-}
-
-/**
- * 「清理本次写入」的二次确认（2026-08 UX 评审 P0-2）。
- *
- * 原来这里是一句 `window.confirm`。那是这个界面上**唯一一处直接删生产数据**的动作，
- * 而系统弹框给不出它必须给出的三样东西：删的是哪张表、大概多少行、以及删完是什么状态。
- *
- * 「清理是删除，不是还原」这句要单独立着：`cleanup` 打的是 `DELETE`
- * （`crates/sink/src/mysql_destination.rs` 的 `build_cleanup_delete_statement`）。
- * 这次 upsert 覆盖掉的那些**本来就存在的行**，清理会把它们整行删掉，
- * **不会**把它们恢复成运行前的样子——「清理」这个词天生读着像撤销，所以得当面否掉。
- *
- * 行数是**上界**：后来的运行又写过的那些键会被跳过（写入台账 `write_seq` 判的）。
- */
-function CleanupDialog({
-  targetTable,
-  rows,
-  busy,
-  onClose,
-  onConfirm,
-}: {
-  targetTable: string;
-  /** 本次写入的行数；`null` = 两端都没回报，那就不摆一个假的数。 */
-  rows: number | null;
-  busy: boolean;
-  onClose: () => void;
-  onConfirm: () => void;
-}) {
-  return (
-    <Modal title="清理本次写入" onClose={onClose} busy={busy} narrow>
-      <div className="modal-body delete-copy">
-        <p>
-          将从 <span className="mono">{targetTable}</span> 删除这一次运行写进去的行
-          {rows === null ? "" : `，最多 ${countFormatter.format(rows)} 行`}
-          ；已被后来的运行覆盖过的键会跳过。
-        </p>
-        <p className="cleanup-warning">
-          <strong>清理是删除，不是还原。</strong>
-          这次写入覆盖掉的那些原有的行会被整行删掉，不会恢复成运行前的样子。
-        </p>
-      </div>
-      <footer className="modal-footer">
-        <button
-          className="button is-ghost"
-          type="button"
-          onClick={onClose}
-          disabled={busy}
-        >
-          取消
-        </button>
-        <button
-          className="button is-danger is-solid"
-          type="button"
-          onClick={onConfirm}
-          disabled={busy}
-        >
-          <Trash2 size={ICON.sm} aria-hidden="true" />
-          {busy
-            ? "正在清理"
-            : rows === null
-              ? "删除本次写入的行"
-              : `删除这 ${countFormatter.format(rows)} 行`}
-        </button>
-      </footer>
-    </Modal>
   );
 }
 

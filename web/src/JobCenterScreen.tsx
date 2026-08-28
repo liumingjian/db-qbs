@@ -1,21 +1,19 @@
 import {
   Ban,
-  Check,
+  CalendarClock,
   Clock3,
-  Copy,
   Database,
   Pencil,
   Play,
   Plus,
   RefreshCw,
-  Tag,
   Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ICON } from "./components/DesignSystem";
 
-import { copyTaskCurl, deleteTask, startRun } from "./api";
-import type { Datasource, RunHistory, Task } from "./api";
+import { deleteTask, fetchScheduleState, startRun, taskInputFrom, updateTask } from "./api";
+import type { Datasource, QueuedOccurrence, RunHistory, Task } from "./api";
 import { messageFrom } from "./errors";
 import { qualifiedTargetTable } from "./datasource";
 import { formatTimestamp, historyPresentation } from "./history";
@@ -34,10 +32,11 @@ import type { LatestRunStatus, TaskFilters } from "./listing";
 import { progressOf } from "./progress";
 import { runHash } from "./routes";
 import { RunDrawer } from "./RunDrawer";
+import { ScheduleCard } from "./ScheduleCard";
 import { sourceSummary } from "./spec";
 import { rowRunAction } from "./troubleshooting";
 import type { Step } from "./wizard";
-import { ActionButton, Modal, Pagination } from "./ui";
+import { ActionButton, Modal, ModalFooter, Pagination } from "./ui";
 
 /**
  * 作业中心——**任务列表与运行历史合成的那一屏**（ADR-0043 §2）。
@@ -66,7 +65,6 @@ export interface JobCenterProps {
   onRefresh: () => void;
   onCreate: () => void;
   onEdit: (task: Task) => void;
-  onRename: (task: Task) => void;
   onDelete: (task: Task) => void;
   /** 正在发起的那个任务的 id——**只有它那一行**的发起键在这段时间里按不动。 */
   startingTaskId: string | null;
@@ -89,7 +87,6 @@ export function JobCenterScreen({
   onRefresh,
   onCreate,
   onEdit,
-  onRename,
   onDelete,
   startingTaskId,
   onStart,
@@ -115,11 +112,10 @@ export function JobCenterScreen({
   const [bulkConfirm, setBulkConfirm] = useState<"start" | "delete" | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkSummary, setBulkSummary] = useState<BulkSummary | null>(null);
-  const [copyStatus, setCopyStatus] = useState<{
-    taskId: string;
-    error: string | null;
-  } | null>(null);
+  /** 正在改调度的那个任务，`null` 是没开对话框。 */
+  const [schedulingTaskId, setSchedulingTaskId] = useState<string | null>(null);
   const focusedRow = useRef<HTMLTableRowElement | null>(null);
+  const queued = useQueuedOccurrences();
 
   useEffect(() => {
     if (focusTaskId === null || !(tasks ?? []).some((task) => task.task_id === focusTaskId)) {
@@ -158,6 +154,10 @@ export function JobCenterScreen({
       ? undefined
       : (tasks ?? []).find((task) => task.task_id === openTaskId);
   const openRun = openTaskId === null ? undefined : latestRuns.get(openTaskId);
+  const schedulingTask =
+    schedulingTaskId === null
+      ? undefined
+      : (tasks ?? []).find((task) => task.task_id === schedulingTaskId);
 
   /** 「查询」/「重置」共用一条路：生效的那一组换掉，页码回第 1 页。 */
   function applyFilters(next: TaskFilters) {
@@ -246,15 +246,6 @@ export function JobCenterScreen({
     setSelected(new Set());
     setBulkSummary({ verb: "删除", total: selectedTasks.length, ok, failures });
     onChanged();
-  }
-
-  async function copyCurl(task: Task) {
-    try {
-      await copyTaskCurl(task.task_id);
-      setCopyStatus({ taskId: task.task_id, error: null });
-    } catch (error) {
-      setCopyStatus({ taskId: task.task_id, error: messageFrom(error) });
-    }
   }
 
   const hasTasks = tasks !== null && tasks.length > 0;
@@ -387,19 +378,6 @@ export function JobCenterScreen({
         </div>
       )}
 
-      {copyStatus !== null && copyStatus.error !== null && (
-        <div className="bulk-summary is-failed" role="alert">
-          <span>复制 cURL 失败：{copyStatus.error}</span>
-          <button
-            className="text-button"
-            type="button"
-            onClick={() => setCopyStatus(null)}
-          >
-            知道了
-          </button>
-        </div>
-      )}
-
       <section className="card table-card" id="jobs" aria-labelledby="jobs-title">
         {/* 与数据源屏、Agent 屏**同一个卡头**（UX 评审 P2）：这里原来是另一套
             （`.table-title-row` + `.table-count`），两套只在结构上不同，长得却几乎一样——
@@ -458,6 +436,7 @@ export function JobCenterScreen({
         </header>
 
         <JobResults
+          queued={queued}
           tasks={tasks}
           filtered={filtered}
           rows={slice.rows}
@@ -470,15 +449,13 @@ export function JobCenterScreen({
           onTogglePage={togglePage}
           onCreate={onCreate}
           onEdit={onEdit}
-          onRename={onRename}
+          onSchedule={(task) => setSchedulingTaskId(task.task_id)}
           onDelete={onDelete}
           startingTaskId={startingTaskId}
           onStart={onStart}
           onStop={onStop}
           onOpen={setOpenTaskId}
           onClearFilters={() => applyFilters(EMPTY_TASK_FILTERS)}
-          copiedTaskId={copyStatus?.error === null ? copyStatus.taskId : null}
-          onCopyCurl={(task) => void copyCurl(task)}
           focusTaskId={focusTaskId}
           focusedRow={focusedRow}
         />
@@ -506,7 +483,6 @@ export function JobCenterScreen({
           task={openTask}
           run={openRun}
           tasks={tasks}
-          datasources={datasources}
           onClose={() => setOpenTaskId(null)}
           onRerun={(task) => {
             setOpenTaskId(null);
@@ -516,8 +492,15 @@ export function JobCenterScreen({
             setOpenTaskId(null);
             onEditFailure(task, step);
           }}
-          onCleaned={() => {
-            setOpenTaskId(null);
+        />
+      )}
+
+      {schedulingTask !== undefined && (
+        <ScheduleDialog
+          task={schedulingTask}
+          onClose={() => setSchedulingTaskId(null)}
+          onSaved={() => {
+            setSchedulingTaskId(null);
             onChanged();
           }}
         />
@@ -542,6 +525,85 @@ export function JobCenterScreen({
         />
       )}
     </>
+  );
+}
+
+/**
+ * 那颗定时任务按钮上写什么。
+ *
+ * **三档，不是两档**：没配表达式、配了但停用、配了且在跑。中间那一档是这个产品
+ * 刻意留的一档（`schedule_enabled` 与 `schedule_cron` 是两个字段：暂停不该逼人删掉
+ * 自己写好的那一行），按钮上把它和「压根没配」混成同一句话，等于把那个设计抹掉。
+ */
+function scheduleLabel(task: Task): string {
+  const cron = (task.spec.schedule_cron ?? "").trim();
+  if (cron === "") {
+    return "定时任务：未配置";
+  }
+  return task.spec.schedule_enabled ? `定时任务：${cron}` : `定时任务：已停用（${cron}）`;
+}
+
+/**
+ * 在清单上直接改这条任务的调度（#265）。
+ *
+ * 为什么不让人走编辑向导：向导是**整份任务定义**的编辑器，四步走完才谈得上保存，
+ * 而目标表一漂第 3 步就过不去——「今晚先把这个定时停掉」于是变成一件做不到的事。
+ * 调度是这一屏上人会反复动的开关，它该有自己的那一颗按钮。
+ *
+ * 保存送的是任务当前的定义 + 改动过的这两个字段，别的一个字不动。
+ */
+function ScheduleDialog({
+  task,
+  onClose,
+  onSaved,
+}: {
+  task: Task;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [cron, setCron] = useState(task.spec.schedule_cron ?? "");
+  const [enabled, setEnabled] = useState(task.spec.schedule_enabled);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      // 原文照送（前端不重写一遍解析器），非法表达式由服务端当面拒，
+      // 那句话与向导里看到的是同一句。
+      await updateTask(
+        task.task_id,
+        taskInputFrom(task, {
+          spec: { ...task.spec, schedule_cron: cron.trim(), schedule_enabled: enabled },
+        }),
+      );
+      onSaved();
+    } catch (failure) {
+      setError(messageFrom(failure));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title={`定时任务 · ${task.name}`} onClose={onClose} busy={busy} narrow>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          void save();
+        }}
+      >
+        <div className="modal-body">
+          <ScheduleCard cron={cron} enabled={enabled} onCron={setCron} onEnabled={setEnabled} />
+          {error !== null && (
+            <p className="form-error" role="alert">
+              {error}
+            </p>
+          )}
+        </div>
+        <ModalFooter onClose={onClose} busy={busy} submitLabel="保存" />
+      </form>
+    </Modal>
   );
 }
 
@@ -600,6 +662,7 @@ function JobResults({
   rows,
   datasources,
   latestRuns,
+  queued,
   refreshing,
   selected,
   allOnPageSelected,
@@ -607,15 +670,13 @@ function JobResults({
   onTogglePage,
   onCreate,
   onEdit,
-  onRename,
+  onSchedule,
   onDelete,
   startingTaskId,
   onStart,
   onStop,
   onOpen,
   onClearFilters,
-  copiedTaskId,
-  onCopyCurl,
   focusTaskId,
   focusedRow,
 }: {
@@ -624,6 +685,7 @@ function JobResults({
   rows: Task[];
   datasources: Datasource[];
   latestRuns: ReadonlyMap<string, RunHistory>;
+  queued: ReadonlyMap<string, QueuedOccurrence>;
   refreshing: boolean;
   selected: ReadonlySet<string>;
   allOnPageSelected: boolean;
@@ -631,15 +693,13 @@ function JobResults({
   onTogglePage: (checked: boolean) => void;
   onCreate: () => void;
   onEdit: (task: Task) => void;
-  onRename: (task: Task) => void;
+  onSchedule: (task: Task) => void;
   onDelete: (task: Task) => void;
   startingTaskId: string | null;
   onStart: (task: Task) => void;
   onStop: (runRecordId: string) => void;
   onOpen: (taskId: string) => void;
   onClearFilters: () => void;
-  copiedTaskId: string | null;
-  onCopyCurl: (task: Task) => void;
   focusTaskId: string | null;
   focusedRow: React.RefObject<HTMLTableRowElement | null>;
 }) {
@@ -749,6 +809,22 @@ function JobResults({
                   <span className="task-name" title={`任务 ID ${task.task_id}`}>
                     {task.name}
                   </span>
+                  {/* 写入方式那两枚标记（「纯追加写」/「先清空再导入」）撤了：它们是
+                      任务**属性**，一天看一次就够，却在每一行的任务名后面各占一块，
+                      清单最该一眼扫过的那一列因此再没法一眼扫过。两句话都还在——
+                      编辑向导第 1 步那格写入方式、运行详情里那句「这一次做了什么」，
+                      都是在人正要做决定或正在追责的那一刻说的。 */}
+                  {/* 到点了但还没派出去的那些（#266）。它是一个**状态**不是一项属性，
+                      所以标记里带上那一刻，`title` 上写清楚它在等什么——队列活在
+                      服务端一条后台线程里，不显示出来，屏幕上就只剩「什么都没发生」。 */}
+                  {queued.has(task.task_id) && (
+                    <span
+                      className="write-mark is-queued"
+                      title={queuedTitle(queued.get(task.task_id)!)}
+                    >
+                      排队中
+                    </span>
+                  )}
                 </td>
                 <td>
                   {/* 状态是**一条链接**（UX 评审 P1-6）：运行详情整屏现在有地址了，
@@ -843,38 +919,30 @@ function JobResults({
                         onClick={() => onStop(runAction.runRecordId)}
                       />
                     )}
+                    {/* 「复制 cURL」那颗撤了，位子给定时任务：调度是这一屏上人会反复
+                        动的开关（今天停一下、明天换个点），而 cURL 一个任务一辈子复制
+                        一次。按钮上写着这条任务此刻的调度状态，不必点开才知道。 */}
                     <ActionButton
-                      label={copiedTaskId === task.task_id ? "cURL 已复制" : "复制 cURL"}
-                      icon={
-                        copiedTaskId === task.task_id ? (
-                          <Check size={ICON.md} />
-                        ) : (
-                          <Copy size={ICON.md} />
-                        )
-                      }
-                      onClick={() => onCopyCurl(task)}
+                      label={scheduleLabel(task)}
+                      icon={<CalendarClock size={ICON.md} />}
+                      onClick={() => onSchedule(task)}
                     />
                     <span className="divider" />
-                    {/* 位子占住不撤（2026-08 UX 评审 P2-15）：从没跑过的任务原来这一颗
-                        直接消失，于是同一列动作在相邻两行里落在不同的横坐标上，
-                        照着肌肉记忆点下去点到的是隔壁那颗。按不动并说明为什么，
-                        比凭空少一颗好。 */}
-                    <ActionButton
-                      label="运行详情"
-                      icon={<Clock3 size={ICON.md} />}
-                      disabled={run === undefined}
-                      title={run === undefined ? "这个任务还没有跑过" : "运行详情"}
-                      onClick={() => onOpen(task.task_id)}
-                    />
                     <ActionButton
                       label="编辑任务定义"
                       icon={<Pencil size={ICON.md} />}
                       onClick={() => onEdit(task)}
                     />
+                    {/* 运行日志不再单独占一颗：它本来就是运行详情的一段（`RunScreen`
+                        里那个 `RunLogPanel`），给它第二个入口只是把同一个地方说成
+                        两件事。位子占住不撤（UX 评审 P2-15）——从没跑过的任务这一颗
+                        按不动并说明为什么，比凭空少一颗、让整列动作横向错位好。 */}
                     <ActionButton
-                      label="改名"
-                      icon={<Tag size={ICON.md} />}
-                      onClick={() => onRename(task)}
+                      label="查看详情"
+                      icon={<Clock3 size={ICON.md} />}
+                      disabled={run === undefined}
+                      title={run === undefined ? "这个任务还没有跑过" : "运行详情与日志"}
+                      onClick={() => onOpen(task.task_id)}
                     />
                     <span className="divider" />
                     <ActionButton
@@ -1058,4 +1126,46 @@ function BulkDeleteDialog({
       </footer>
     </Modal>
   );
+}
+
+/**
+ * 调度队列（#266）：到点了、但还没派出去的那些任务。
+ *
+ * 单独轮询而不是搭在整屏刷新上，理由是**它自己坏掉不该带走任务清单**：这一格是给
+ * 现有列表加一枚徽标的，读不到就当成没有人在排队，任务列表照旧。5 秒一次，与服务端
+ * 调度器自己的评估间隔同一个数——再快也不会有新答案。
+ */
+function useQueuedOccurrences(): ReadonlyMap<string, QueuedOccurrence> {
+  const [queued, setQueued] = useState<ReadonlyMap<string, QueuedOccurrence>>(
+    new Map(),
+  );
+  useEffect(() => {
+    let alive = true;
+    async function poll() {
+      try {
+        const state = await fetchScheduleState();
+        if (alive) {
+          setQueued(new Map(state.queued.map((row) => [row.task_id, row])));
+        }
+      } catch {
+        // 读不到就维持上一份：闪成空再闪回来比多等 5 秒更难读。
+      }
+    }
+    void poll();
+    const timer = window.setInterval(() => void poll(), 5000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+  return queued;
+}
+
+/** 排队徽标的悬停说明：本该什么时候跑、此刻在等什么。 */
+export function queuedTitle(occurrence: QueuedOccurrence): string {
+  const reason =
+    occurrence.waiting_reason.trim() === ""
+      ? "已到触发时刻，等待派发"
+      : occurrence.waiting_reason;
+  return `本该于 ${occurrence.due_at} 触发；${reason}`;
 }

@@ -7,6 +7,7 @@ const baseHistory: RunHistory = {
   run_record_id: "record-1",
   run_id: "run-1",
   task_id: "task-1",
+  task_name: "订单日增量",
   source_sql: "SELECT a.ID AS ID\n  FROM APP.ORDERS a",
   staging_table: "STG_1",
   started_at: "2026-08-15T10:00:00.000Z",
@@ -52,6 +53,8 @@ function spec(): TaskSpec {
     table: "T_ORDERS",
     target_table: "ORDERS",
     columns: [{ source: "ID", target: "ID" }],
+    write_mode: "APPEND",
+    schedule_enabled: false,
     primary_key: ["ID"],
     where_clause: "STATUS = 'OK'",
   };

@@ -1,10 +1,40 @@
 import type { RunHistory } from "./api";
 import { stageLabel } from "./runStage";
 
+/**
+ * 目标表最后被怎么了，**界面认得的那几个**（#264）。
+ *
+ * 三件事，三个词，一个都不能合并：`SWAPPED` 是「按主键合并进目标表」，`REPLACED`
+ * 是「整表被替换」（先清空再导入），`DISCARDED` 是「一根手指头都没碰」。
+ *
+ * 认得的只有这三个，但**展示层搬运的是服务端给的原字符串**：那一列在服务端就是
+ * 「日志的尽力投影」，不认识的拼写原样落库（`run_history.rs`）。前端再把它筛一遍、
+ * 认不出就渲染成空白，等于把「跑数的子进程比界面新」这件事从屏幕上抹掉——而那正是
+ * 最该被看见的时候。所以 `HistoryPresentation.terminalEffect` 是 `string`：原样透出，
+ * 但**不据此做任何判断**，要判断的地方问 `knownTerminalEffect`。
+ */
+export type TerminalEffect = "SWAPPED" | "REPLACED" | "DISCARDED";
+
+const TERMINAL_EFFECTS: readonly TerminalEffect[] = [
+  "SWAPPED",
+  "REPLACED",
+  "DISCARDED",
+];
+
+/**
+ * 认得就给那个词，认不得就给 `null`——**判断走这一份，显示不走**。
+ *
+ * 与 `RunStage::parse` 同一条分工：原样搬运负责说实话，解析负责做决定。
+ */
+export function knownTerminalEffect(effect: string | null): TerminalEffect | null {
+  return TERMINAL_EFFECTS.find((known) => known === effect) ?? null;
+}
+
 export interface HistoryPresentation {
   kind: "live" | "succeeded" | "failed" | "unknown";
   conclusion: string;
-  terminalEffect: "SWAPPED" | "DISCARDED" | null;
+  /** 服务端给的原字符串（见 `TerminalEffect` 的注释），不是筛过的枚举。 */
+  terminalEffect: string | null;
   error: { code: string; httpStatus: number | null } | null;
 }
 
@@ -53,6 +83,9 @@ const FAILURE_KIND_LABELS: Readonly<Record<string, string>> = {
   VERIFY_FAILED: "校验门禁",
   DEFECT: "程序缺陷",
   UNKNOWN: "结局未知",
+  // #266：唯一一个**什么都没做**的类目——到点了，但上一次还没结束，本次没发起。
+  // 它不是一次故障，是一个触发时刻的答案。
+  SKIPPED: "本次跳过",
 };
 
 export function failureKindLabel(kind: string | null): string | null {
@@ -78,6 +111,41 @@ const UNKNOWN_CONCLUSIONS: Readonly<
  */
 export function runIdPresentation(history: { run_id: string | null }): string {
   return history.run_id ?? "未发起，目标端不知道这次运行";
+}
+
+/**
+ * 一条运行记录顶上该写哪个名字（#259）。
+ *
+ * 任务名是展示标签，在向导里随时可以改。运行记录认领任务靠 `task_id`，名字则在开跑那一刻
+ * 快照进这一行——否则改一次名，屏幕上**过去每一次**运行都会跟着改名，而那些运行当时叫的
+ * 是别的名字。快照优先；只有空串（早于这个字段的老记录）才回退到任务当前的名字，
+ * 因为那时确实没有别的可说，用当前名总好过一片空白。
+ */
+/**
+ * 这一次是**谁发起的**（#266）。
+ *
+ * 夜里两点那次是自动跑的，还是有人手动补的一次，事后只有这一格答得出来——所以它在
+ * 运行详情上必须有一行，而不是只有排障时去翻日志。
+ *
+ * 服务端老记录迁移出来一律是 `MANUAL`（本字段之前一次运行只可能是人按的），所以
+ * **缺席只有一种解释：前端比服务端新**。那时候返回 `null`、什么都不渲染，别拿
+ * 「手动」去糊一个自己不知道的事实。认不出的拼写原样显示，同理。
+ */
+export function runTriggerLabel(trigger: string | null | undefined): string | null {
+  if (trigger === null || trigger === undefined || trigger === "") {
+    return null;
+  }
+  return RUN_TRIGGER_LABELS[trigger] ?? trigger;
+}
+
+const RUN_TRIGGER_LABELS: Readonly<Record<string, string>> = {
+  MANUAL: "手动发起",
+  SCHEDULED: "调度发起",
+};
+
+export function runTaskName(run: { task_name?: string }, currentName: string): string {
+  const snapshot = (run.task_name ?? "").trim();
+  return snapshot === "" ? currentName : run.task_name!;
 }
 
 export function historyPresentation(history: RunHistory): HistoryPresentation {
@@ -153,9 +221,10 @@ function failureConclusion(history: RunHistory): string {
  * source 回的 `message` 是英文原文（`run completed successfully`，属于 API 语义，不动），
  * 直接拿来当结论条会让同一个位置一半中文一半英文——映射预检失败那条是中文。
  * 这里照那条的句式在 web 侧成文，只说已核实的事：推了多少行、目标端认没认这次写入。
- * 目标端没报出 `SWAPPED` 时什么都不多说，别替它下结论。
+ * 目标端没报出结局时什么都不多说，别替它下结论。
  *
- * **`SWAPPED` 不是「整表换过」**（2026-08 UX 评审 P0-1）。sink 打的是
+ * **`SWAPPED` 不是「整表换过」**（2026-08 UX 评审 P0-1）——整表换过是 `REPLACED`，
+ * 那是先清空再导入这一档才会有的结局（#264）。`SWAPPED` 这边 sink 打的是
  * `INSERT ... ON DUPLICATE KEY UPDATE`（`crates/sink/src/mysql_destination.rs`），
  * 按主键合并：新增和变更进目标表，**源端删掉的行不会跟着消失**（CONTEXT.md「刻意欠的债」）。
  * 原话「暂存表已切换为目标表」描述的是一次没发生过的切换——照字面读会以为目标表此刻
@@ -167,14 +236,24 @@ function succeededConclusion(
 ): string {
   const rows =
     history.sink_reported_rows ?? history.staged_rows ?? history.rows_pushed;
+  // 三种结局三句话（#264）：整表替换与按主键合并是两件事，共用一句就有一句是假的。
   const merged =
-    terminalEffect === "SWAPPED" ? "，已按主键合并进目标表" : "";
+    terminalEffect === "SWAPPED"
+      ? "，已按主键合并进目标表"
+      : terminalEffect === "REPLACED"
+        ? "，目标表已整表替换为本次查询结果"
+        : "";
   return `目标端：运行成功：已推送 ${countFormatter.format(rows)} 行${merged}。`;
 }
 
-function sinkTerminalEffect(
-  history: RunHistory,
-): HistoryPresentation["terminalEffect"] {
+/**
+ * 这一行该不该谈论目标表效果，以及服务端为它写下的那个词。
+ *
+ * `null` 只有一种含义：**这次运行根本没走到目标端**（没有 run_id、没有暂存表、
+ * 或者预检就被挡下了），谈论目标表效果本身就不成立。它不再兼职表示「有一个词但
+ * 我不认识」——那个词照样返回，由展示层原样摆出来。
+ */
+function sinkTerminalEffect(history: RunHistory): string | null {
   if (
     history.run_id === null ||
     history.staging_table === null ||
@@ -183,11 +262,7 @@ function sinkTerminalEffect(
     return null;
   }
 
-  const effect = history.target_table_effect;
-  if (effect === "SWAPPED" || effect === "DISCARDED") {
-    return effect;
-  }
-  return null;
+  return history.target_table_effect;
 }
 
 /**

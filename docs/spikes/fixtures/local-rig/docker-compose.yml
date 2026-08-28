@@ -49,6 +49,45 @@ services:
       timeout: 5s
       retries: 30
 
+  # ---- MySQL 5.7（#262）：支持矩阵的**新增**一档，不是替换 8.0 ----
+  # 现场大量库还没升到 8.0，所以真实往返测试要能指向两个版本各跑一遍。
+  #
+  # `platform: linux/amd64`：mysql:5.7 没有官方 arm64 镜像，Apple Silicon 上只能走模拟层，
+  # 与本文件顶上的 oracle 同理。**因此这个服务的性能数字同样作废**，它只回答对错。
+  #
+  # `--collation-server`：5.7 没有 utf8mb4_0900_ai_ci，只能给 utf8mb4_general_ci。
+  # 这正是 #257 要「查出来而不是按版本号推」的那个值。
+  #
+  # `--max-allowed-packet`：5.7 的默认值是 4 MiB，而开连接仪式的硬门是 64 MiB，
+  # 不调这一项则连接都开不起来、整套测试无从跑起。门不放宽（#262），所以台架照客户
+  # 该做的那样把它调够；「没调够时报文说了什么」由测试自己临时 `SET GLOBAL` 压下去再验。
+  #
+  # `profiles`：默认的 up.sh 不起它——它在模拟层上，起停都慢，只有跑 5.7 那一趟才需要。
+  mysql57:
+    image: mysql:5.7
+    platform: linux/amd64
+    container_name: qbs-mysql57
+    profiles: ["mysql57"]
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+      - --max-allowed-packet=67108864
+    environment:
+      MYSQL_ROOT_PASSWORD: spike123
+      MYSQL_DATABASE: qbs
+      MYSQL_USER: spike
+      MYSQL_PASSWORD: spike123
+    ports:
+      # 3306 让给 8.0：两个版本要能同时在台上，才谈得上「同一套测试各跑一遍」。
+      - "3307:3306"
+    volumes:
+      - ./mysql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pspike123"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
   client:
     build:
       context: .

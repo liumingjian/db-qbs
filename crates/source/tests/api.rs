@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 use db_qbs_source::http::{routes, Access, Api, Method, Request, Response, RunState};
 use db_qbs_source::{
     AgentStore, AuthStore, DatasourceStore, HistoryStore, OracleAccess, OracleRowSource,
-    SourceColumn, SourceConfig, SourceReadError, TaskSpec, TaskStore, SESSION_COOKIE,
+    RunLogStore, ScheduleState, SourceColumn, SourceConfig, SourceReadError, TaskSpec, TaskStore,
+    SESSION_COOKIE,
 };
 use serde_json::Value;
 
@@ -44,7 +45,7 @@ fn agent_stub_url() -> &'static str {
                     .to_owned();
                 let info = request_line.contains("/v1/agent/info");
                 let body = if info {
-                    r#"{"agent_id":"stub-agent","name":"桩 agent","version":"0.0.0-test"}"#
+                    r#"{"agent_id":"stub-agent","name":"桩 agent","version":"0.0.0-test","max_concurrent_runs":1}"#
                 } else {
                     r#"{"error":{"code":"BAD_REQUEST","message":"桩只认 /v1/agent/info","run_id":null,"details":{}}}"#
                 };
@@ -85,7 +86,9 @@ struct Rig {
     datasources: DatasourceStore,
     agents: Arc<Mutex<AgentStore>>,
     history: HistoryStore,
+    run_logs: RunLogStore,
     runs: Arc<Mutex<RunState>>,
+    schedule: db_qbs_source::ScheduleRegistry,
     auth: AuthStore,
     /// 这台 rig 的会话票据。**每条请求默认都带着它**——`/api/*` 现在整片要求登录，
     /// 不带就是 401，而这个文件里的用例问的几乎都不是「没登录会怎样」。
@@ -125,7 +128,9 @@ impl Rig {
             datasources: DatasourceStore::open(&directory).unwrap(),
             agents: Arc::new(Mutex::new(AgentStore::open(&directory).unwrap())),
             history: HistoryStore::open(&directory).unwrap(),
+            run_logs: RunLogStore::open(&directory).unwrap(),
             runs: Arc::new(Mutex::new(RunState::default())),
+            schedule: Arc::new(Mutex::new(ScheduleState::default())),
             auth,
             session,
             config,
@@ -151,7 +156,9 @@ impl Rig {
             datasources: &self.datasources,
             agents: &self.agents,
             history: &self.history,
+            run_logs: &self.run_logs,
             runs: &self.runs,
+            schedule: &self.schedule,
             auth: &self.auth,
             describe_source,
         }
@@ -274,7 +281,7 @@ fn mysql_datasource_json(name: &str, agent_id: &str) -> String {
 fn task_json(name: &str, target_table: &str, datasources: &(String, String)) -> String {
     let (source_datasource_id, target_datasource_id) = datasources;
     format!(
-        r#"{{"name":"{name}","source_datasource_id":"{source_datasource_id}","target_datasource_id":"{target_datasource_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"{target_table}","columns":[{{"source":"ID","target":"ID"}},{{"source":"D_BIZ","target":"D_BIZ"}}],"primary_key":["ID"],"where_clause":"D_BIZ = DATE '2026-08-14'"}}}}"#
+        r#"{{"name":"{name}","source_datasource_id":"{source_datasource_id}","target_datasource_id":"{target_datasource_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"{target_table}","columns":[{{"source":"ID","target":"ID"}},{{"source":"D_BIZ","target":"D_BIZ"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"],"where_clause":"D_BIZ = DATE '2026-08-14'"}}}}"#
     )
 }
 
@@ -407,6 +414,20 @@ fn every_route_reaches_its_handler() {
             r#"{"source_datasource_id":"missing","spec":{},"limit":10}"#.into(),
             400,
         ),
+        (
+            Method::Post,
+            "/api/builder/schedule",
+            "/api/builder/schedule".into(),
+            r#"{"cron":"0 2 * * *"}"#.into(),
+            200,
+        ),
+        (
+            Method::Get,
+            "/api/schedule",
+            "/api/schedule".into(),
+            String::new(),
+            200,
+        ),
         (Method::Get, "/api/agents", "/api/agents".into(), String::new(), 200),
         (Method::Post, "/api/agents", "/api/agents".into(), "{}".into(), 400),
         (
@@ -485,7 +506,7 @@ fn every_route_reaches_its_handler() {
             Method::Post,
             "/api/target/check",
             "/api/target/check".into(),
-            format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"primary_key":["ID"]}}}}"#),
+            format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"]}}}}"#),
             502,
         ),
         (
@@ -502,18 +523,18 @@ fn every_route_reaches_its_handler() {
             String::new(),
             409,
         ),
-        (
-            Method::Post,
-            "/api/runs/{}/cleanup",
-            format!("/api/runs/{run_record_id}/cleanup"),
-            String::new(),
-            409,
-        ),
         (Method::Get, "/api/runs", "/api/runs".into(), String::new(), 200),
         (
             Method::Get,
             "/api/runs/{}",
             format!("/api/runs/{run_record_id}"),
+            String::new(),
+            200,
+        ),
+        (
+            Method::Get,
+            "/api/runs/{}/logs",
+            format!("/api/runs/{run_record_id}/logs"),
             String::new(),
             200,
         ),
@@ -839,28 +860,28 @@ fn builder_preview_validates_spec_and_limit_before_reaching_oracle() {
     let rig = Rig::new();
     let incomplete = rig.post(
         "/api/builder/preview",
-        r#"{"source_datasource_id":"missing","spec":{"owner":"","table":"","target_table":"","primary_key":[],"columns":[]},"limit":10}"#,
+        r#"{"source_datasource_id":"missing","spec":{"owner":"","table":"","target_table":"","write_mode":"APPEND","schedule_enabled":false,"primary_key":[],"columns":[]},"limit":10}"#,
     );
     assert_eq!(incomplete.status, 400);
     assert!(incomplete.body_text().contains("owner"));
 
     let invalid_sql = rig.post(
         "/api/builder/preview",
-        r#"{"source_datasource_id":"missing","spec":{"source_sql":"DELETE FROM APP.T","owner":"","table":"","target_table":"T","primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":10}"#,
+        r#"{"source_datasource_id":"missing","spec":{"source_sql":"DELETE FROM APP.T","owner":"","table":"","target_table":"T","write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":10}"#,
     );
     assert_eq!(invalid_sql.status, 400);
     assert!(invalid_sql.body_text().contains("SELECT"));
 
     let zero = rig.post(
         "/api/builder/preview",
-        r#"{"source_datasource_id":"missing","spec":{"source_sql":"SELECT ID FROM APP.T","owner":"","table":"","target_table":"T","primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":0}"#,
+        r#"{"source_datasource_id":"missing","spec":{"source_sql":"SELECT ID FROM APP.T","owner":"","table":"","target_table":"T","write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":0}"#,
     );
     assert_eq!(zero.status, 400);
     assert!(zero.body_text().contains("limit 必须大于 0"));
 
     let custom_sql = rig.post(
         "/api/builder/preview",
-        r#"{"source_datasource_id":"missing","spec":{"source_sql":"SELECT ID FROM APP.T","owner":"","table":"","target_table":"T","primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":1000}"#,
+        r#"{"source_datasource_id":"missing","spec":{"source_sql":"SELECT ID FROM APP.T","owner":"","table":"","target_table":"T","write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"],"columns":[{"source":"ID","target":"ID"}]},"limit":1000}"#,
     );
     assert_eq!(custom_sql.status, 400);
     assert!(custom_sql.body_text().contains("数据源 missing 不存在"));
@@ -886,6 +907,41 @@ fn oversized_request_bodies_are_refused() {
 /// 任务定义的 CRUD：线上恰好三样，口令一个字节都不出现。
 ///
 /// （「重启之后还在」那一半留在 `source_skeleton.rs` 的哨兵里——那要一个真进程。）
+/// 改名不追写历史：运行记录上的名字是开跑那一刻的快照（#259）。
+///
+/// 任务名只是展示标签，向导里随时可以改；一次运行认领的是 `task_id`。名字若在展示时
+/// 回头到任务上现取，改一次名就会把**过去每一次**运行都改成新名字，而那些运行当时
+/// 并不叫这个名字——历史于是不再是历史。
+#[test]
+fn renaming_a_task_leaves_earlier_runs_carrying_the_old_name() {
+    let rig = Rig::new();
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let datasources = (source_id, target_id);
+    let task_id = rig.create_task("持仓明细", "HOLDINGS", &datasources);
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let detail = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(detail["task_name"], "持仓明细");
+
+    let renamed = rig.put(
+        &format!("/api/tasks/{task_id}"),
+        &task_json("持仓明细（日更）", "HOLDINGS", &datasources),
+    );
+    assert_eq!(renamed.status, 200, "{}", renamed.body_text());
+    assert_eq!(rig.json(&renamed)["name"], "持仓明细（日更）");
+
+    let listed = rig.json(&rig.get(&format!("/api/runs?task_id={task_id}")));
+    assert_eq!(listed[0]["task_id"], task_id);
+    assert_eq!(listed[0]["task_name"], "持仓明细");
+    let detail = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(detail["task_name"], "持仓明细");
+}
+
 #[test]
 fn task_crud_persists_stable_identity_without_exposing_credentials() {
     let rig = Rig::new();
@@ -949,10 +1005,89 @@ fn task_writes_reject_client_identity_and_incomplete_definitions() {
 
     let missing_name = rig.post(
         "/api/tasks",
-        r#"{"spec":{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{"source":"ID","target":"ID"}],"primary_key":["ID"]}}"#,
+        r#"{"spec":{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{"source":"ID","target":"ID"}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"]}}"#,
     );
     assert_eq!(missing_name.status, 400, "{}", missing_name.body_text());
     assert_eq!(rig.json(&rig.get("/api/tasks")), serde_json::json!([]));
+}
+
+/// 调度这一半（#265）：两个字段存得下读得回，无效表达式在**保存时**被拒且理由能读，
+/// 「下次触发」读数拿的是服务器本地时区。
+#[test]
+fn scheduling_fields_round_trip_and_a_bad_cron_is_refused_at_save_time() {
+    let rig = Rig::new();
+    let (_agent_id, source_id, target_id) = rig.seed();
+
+    let body = |cron: &str, enabled: bool| {
+        format!(
+            r#"{{"name":"每日两点","source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","schedule_cron":"{cron}","schedule_enabled":{enabled},"primary_key":["ID"]}}}}"#
+        )
+    };
+
+    // 无效的表达式在保存这一刻就被拒，理由是解析器那句原话——不是「参数错误」四个字。
+    let refused = rig.post("/api/tasks", &body("0 25 * * *", true));
+    assert_eq!(refused.status, 400, "{}", refused.body_text());
+    assert_eq!(
+        rig.json(&refused)["error"]["message"],
+        "小时字段的 25 超出取值范围 0-23"
+    );
+    assert_eq!(rig.json(&rig.get("/api/tasks")), serde_json::json!([]));
+
+    // 开着开关却没有表达式，同样在保存时被拒。
+    let contradiction = rig.post(
+        "/api/tasks",
+        &format!(
+            r#"{{"name":"没写表达式","source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","schedule_enabled":true,"primary_key":["ID"]}}}}"#
+        ),
+    );
+    assert_eq!(contradiction.status, 400, "{}", contradiction.body_text());
+    assert_eq!(
+        rig.json(&contradiction)["error"]["message"],
+        "启用了周期调度就必须写一条 cron 表达式"
+    );
+
+    // 合法的存得下，读回来是**原文**。
+    let created = rig.post("/api/tasks", &body("0 2 * * *", true));
+    assert_eq!(created.status, 201, "{}", created.body_text());
+    let task_id = rig.json(&created)["task_id"].as_str().unwrap().to_owned();
+    let read_back = rig.json(&rig.get(&format!("/api/tasks/{task_id}")));
+    assert_eq!(read_back["spec"]["schedule_cron"], "0 2 * * *");
+    assert_eq!(read_back["spec"]["schedule_enabled"], true);
+}
+
+/// 「下次触发」读数（#265）：时区是**服务器本地时区**并且明写出来，触发时刻按它算。
+///
+/// 这个端点是解析器的端到端出口——界面上那句「下次 2026-08-29 02:00」就是它答的。
+#[test]
+fn the_schedule_preview_states_the_server_timezone_and_the_next_fire_times() {
+    let rig = Rig::new();
+
+    let answer = rig.json(&rig.post("/api/builder/schedule", r#"{"cron":"*/15 * * * *"}"#));
+    let times = answer["next_fire_times"].as_array().unwrap();
+    assert_eq!(times.len(), 5, "{answer}");
+    for time in times {
+        let text = time.as_str().unwrap();
+        assert_eq!(text.len(), 16, "呈现格式是 YYYY-MM-DD HH:MM：{text}");
+        let minute: u32 = text[14..].parse().unwrap();
+        assert_eq!(minute % 15, 0, "*/15 只落在四个一刻钟上：{text}");
+    }
+    // 时区不是可选的装饰：不写出来，「凌晨两点」就没人能对账。
+    let local = chrono::Local::now();
+    assert_eq!(answer["utc_offset"], local.format("%:z").to_string());
+    assert_eq!(answer["timezone"], local.format("%Z").to_string());
+
+    // 还没写表达式也要答得出时区——界面刚打开的那一刻正是最需要它的时候。
+    let empty = rig.json(&rig.post("/api/builder/schedule", r#"{"cron":null}"#));
+    assert_eq!(empty["next_fire_times"], serde_json::json!([]));
+    assert_eq!(empty["utc_offset"], local.format("%:z").to_string());
+
+    // 表达式不合法就是 400，理由与保存被拒时一字不差。
+    let refused = rig.post("/api/builder/schedule", r#"{"cron":"5/10 * * * *"}"#);
+    assert_eq!(refused.status, 400, "{}", refused.body_text());
+    assert_eq!(
+        rig.json(&refused)["error"]["message"],
+        "分钟字段的步长只能跟在 * 或 a-b 后面：5/10"
+    );
 }
 
 /// 发起一次运行：临时任务文件、子进程参数、活投影、终态历史，一条链走到底。
@@ -1011,6 +1146,9 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
         serde_json::json!({
             "run_record_id": run_record_id,
             "run_id": "run-7",
+            // 开跑那一刻的任务名快照，跟着 live 投影一起出来（#259）。
+            "task_name": "holdings",
+            "trigger": "MANUAL",
             "source_sql": EXPECTED_SOURCE_SQL,
             "staging_table": "STG_7",
             "stage": "STREAMING",
@@ -1042,7 +1180,15 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
         0o600
     );
     let task_toml = fs::read_to_string(&task_files[0]).unwrap();
-    for field in ["owner", "table", "columns", "primary_key", "where_clause"] {
+    for field in [
+        "owner",
+        "table",
+        "columns",
+        "write_mode",
+        "schedule_enabled",
+        "primary_key",
+        "where_clause",
+    ] {
         assert!(task_toml.contains(field), "{task_toml}");
     }
     // SQL 不落进任务文件：子进程从同一份规格现算。
@@ -1549,7 +1695,7 @@ fn column_fetch_rejects_an_invalid_spec_before_reaching_oracle() {
           "datasource_id":"unused-the-spec-gate-runs-first",
           "spec":{
             "owner":"APP","table":"ORDERS","target_table":"ORDERS",
-            "columns":[{"source":"ID","target":"ID"}],"primary_key":["MISSING"]
+            "columns":[{"source":"ID","target":"ID"}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["MISSING"]
           }
         }"#,
     );
@@ -1579,7 +1725,7 @@ fn builder_sql_is_derived_from_the_spec_and_never_travels_back() {
           "table":"T_R_FR_ASTSTAT",
           "target_table":"T_POSITION",
           "columns":[{"source":"N_VA_PRICE","target":"N_VA_PRICE"},{"source":"D_BIZ","target":"D_BIZ"}],
-          "primary_key":["D_BIZ"],
+          "write_mode":"APPEND","schedule_enabled":false,"primary_key":["D_BIZ"],
           "where_clause":"D_BIZ >= DATE '2026-08-01' AND STATUS IN ('OK','WARN')"
         }"#,
     );
@@ -1652,7 +1798,7 @@ fn column_fetch_oracle_failure_does_not_create_a_run_touch_sink_or_write_storage
           "datasource_id":"{source_datasource_id}",
           "spec":{{
             "owner":"APP","table":"MISSING_ORDERS","target_table":"ORDERS",
-            "columns":[{{"source":"ID","target":"ID"}},{{"source":"BIZ_DAY","target":"BIZ_DAY"}}],"primary_key":["ID"]
+            "columns":[{{"source":"ID","target":"ID"}},{{"source":"BIZ_DAY","target":"BIZ_DAY"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"]
           }}
         }}"#
         ),
@@ -1761,7 +1907,7 @@ fn target_check_proxies_every_typed_kind_and_attaches_ddl_only_when_failed() {
         .unwrap()
         .to_owned();
     let target_id = rig.create_mysql_datasource("目标库", &agent_id);
-    let request = format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"primary_key":["ID"]}}}}"#);
+    let request = format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"]}}}}"#);
 
     let response = rig.post_with_describer("/api/target/check", &request, described_id);
     assert_eq!(response.status, 200, "{}", response.body_text());
@@ -1808,7 +1954,7 @@ fn target_check_maps_request_datasource_agent_and_sink_failures_at_their_boundar
     assert_eq!(rig.post("/api/target/check", "{}").status, 400);
 
     let source_id = rig.create_oracle_datasource("源库");
-    let check_body = |target_id: &str| format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"primary_key":["ID"]}}}}"#);
+    let check_body = |target_id: &str| format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"]}}}}"#);
     let invalid_target = check_body(&source_id);
     let wrong_kind = rig.post_with_describer("/api/target/check", &invalid_target, described_id);
     assert_eq!(wrong_kind.status, 400, "{}", wrong_kind.body_text());
@@ -2298,4 +2444,516 @@ fn resetting_the_password_returns_to_the_factory_default_and_burns_every_session
             .unwrap(),
         "重置之后旧会话还认——而跑这条命令的人正是进不去的那个"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 并发（#255）
+//
+// source 的 accept 循环已经是多条工作线程共用一个监听器，所以下面这几条问的是
+// **同一份 `Api` 被几条线程同时使唤时会怎样**。它们仍然走 `Api::handle` 这一个入口，
+// 不开新的验证面：并发是这一层的性质，不是一台新机器。
+// ---------------------------------------------------------------------------
+
+/// 多线程 accept 的编译期前提：`Api` 和它借着的每一份状态都得是 `Sync`。
+///
+/// 这条看着像废话，但它是**唯一**会在有人把裸 `rusqlite::Connection`
+/// （`Send` 而非 `Sync`）放回 store 里时当场喊停的地方——否则下一个发现的人
+/// 是 `server.rs` 里那段 `thread::scope`，报错位置离肇事处十万八千里。
+#[test]
+fn every_piece_of_shared_state_is_shareable_across_threads() {
+    fn assert_sync<T: Sync>() {}
+    assert_sync::<Api<'static>>();
+    assert_sync::<TaskStore>();
+    assert_sync::<DatasourceStore>();
+    assert_sync::<AuthStore>();
+    assert_sync::<HistoryStore>();
+    assert_sync::<Arc<Mutex<AgentStore>>>();
+    assert_sync::<Arc<Mutex<RunState>>>();
+}
+
+/// 一条线程正卡在慢 Oracle 取数里，另一条线程拉任务列表**不等它**。
+///
+/// 这是这一票交付的那句话本身。判据是时间：取数固定睡 2 秒，列表那一发必须在
+/// 它睡醒之前就回来了。慢的那一头走 `/api/target/check`，因为它**先摸数据源库、
+/// 再做阻塞取数**——数据源那把锁若跨过了取数，这条会当场超时。
+#[test]
+fn a_slow_oracle_fetch_does_not_block_another_client_listing_tasks() {
+    static DESCRIBING: AtomicU64 = AtomicU64::new(0);
+    const SLOW_DESCRIBE: Duration = Duration::from_secs(2);
+
+    fn slow_describe(
+        access: &OracleAccess,
+        spec: &TaskSpec,
+    ) -> Result<Vec<SourceColumn>, SourceReadError> {
+        DESCRIBING.fetch_add(1, Ordering::SeqCst);
+        thread::sleep(SLOW_DESCRIBE);
+        described_id(access, spec)
+    }
+
+    let rig = Rig::new();
+    // 作用域线程只借，不搬：`Rig` 得活到 `thread::scope` 之外（`Drop` 要清临时目录）。
+    let rig = &rig;
+    let (_agent_id, source_id, target_id) = rig.seed();
+    rig.create_task("holdings", "HOLDINGS", &(source_id.clone(), target_id.clone()));
+    let check = format!(
+        r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"]}}}}"#
+    );
+
+    thread::scope(|scope| {
+        let slow = scope.spawn(|| rig.post_with_describer("/api/target/check", &check, slow_describe));
+
+        // 等它真的进到取数里，再计时——否则量到的可能只是线程还没起来。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while DESCRIBING.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "慢取数一直没开始");
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let started = Instant::now();
+        let listed = rig.get("/api/tasks");
+        let elapsed = started.elapsed();
+        assert_eq!(listed.status, 200, "{}", listed.body_text());
+        assert_eq!(rig.json(&listed).as_array().unwrap().len(), 1);
+        assert!(
+            elapsed < SLOW_DESCRIBE / 2,
+            "取数把任务列表一起冻住了：列表等了 {elapsed:?}"
+        );
+
+        // 慢的那一头照旧要走完；它撞在桩 agent 的 503 上，那不是这条测试问的事。
+        let _ = slow.join().unwrap();
+    });
+}
+
+/// 几条线程同时读写任务表：不丢写、不重 id、不死锁。
+///
+/// 每条写线程建 5 条，读线程全程不停地拉列表。判据有两条——
+/// 末了库里不多不少 40 条且 id 两两不同（写没丢、也没互相盖掉），
+/// 读线程每一发都是 200（读没被写打断成半张表）。
+#[test]
+fn concurrent_task_writes_and_reads_neither_lose_a_write_nor_deadlock() {
+    const WRITERS: usize = 8;
+    const PER_WRITER: usize = 5;
+    const READERS: usize = 4;
+
+    let rig = Rig::new();
+    let rig = &rig;
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let datasources = (source_id, target_id);
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let created: Vec<String> = thread::scope(|scope| {
+        let readers: Vec<_> = (0..READERS)
+            .map(|_| {
+                let done = Arc::clone(&done);
+                scope.spawn(move || {
+                    let mut rounds = 0_usize;
+                    while !done.load(Ordering::SeqCst) {
+                        let listed = rig.get("/api/tasks");
+                        assert_eq!(listed.status, 200, "{}", listed.body_text());
+                        assert!(rig.json(&listed).is_array());
+                        rounds += 1;
+                    }
+                    rounds
+                })
+            })
+            .collect();
+        let writers: Vec<_> = (0..WRITERS)
+            .map(|writer| {
+                let datasources = datasources.clone();
+                scope.spawn(move || {
+                    (0..PER_WRITER)
+                        .map(|index| {
+                            rig.create_task(
+                                &format!("并发任务-{writer}-{index}"),
+                                "HOLDINGS",
+                                &datasources,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+
+        let created: Vec<String> = writers
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap())
+            .collect();
+        done.store(true, Ordering::SeqCst);
+        for reader in readers {
+            assert!(reader.join().unwrap() > 0, "读线程一发都没跑成");
+        }
+        created
+    });
+
+    assert_eq!(created.len(), WRITERS * PER_WRITER);
+    let unique: std::collections::HashSet<&String> = created.iter().collect();
+    assert_eq!(unique.len(), created.len(), "并发建任务撞出了重复 task_id");
+
+    let listed = rig.json(&rig.get("/api/tasks"));
+    let stored: std::collections::HashSet<String> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|task| task["task_id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(stored.len(), created.len(), "并发写丢了任务");
+    for task_id in &created {
+        assert!(stored.contains(task_id), "{task_id} 没落库");
+    }
+}
+
+/// 同一条任务被几条线程同时发起：**恰好一个** 202，其余全是 409。
+///
+/// 「一条任务同时只跑一次」这条互斥原来只有一条 accept 线程护着，它是不是真的互斥
+/// 从来没被问过。现在问了。
+#[test]
+fn concurrent_starts_of_one_task_elect_exactly_one_winner() {
+    const STARTERS: usize = 8;
+
+    let directory = temp_directory();
+    let release = directory.join("release-children");
+    let rig = Rig::with_child(&format!(
+        "while [ ! -f '{}' ]; do sleep 0.02; done\nexit 0\n",
+        release.display()
+    ));
+    let rig = &rig;
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+    let body = format!(r#"{{"task_id":"{task_id}"}}"#);
+
+    let statuses: Vec<u16> = thread::scope(|scope| {
+        let handles: Vec<_> = (0..STARTERS)
+            .map(|_| {
+                let body = body.clone();
+                scope.spawn(move || rig.post("/api/runs", &body))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap().status)
+            .collect()
+    });
+
+    let accepted = statuses.iter().filter(|status| **status == 202).count();
+    let rejected = statuses.iter().filter(|status| **status == 409).count();
+    assert_eq!(accepted, 1, "同一条任务并发发起被放进去 {accepted} 次：{statuses:?}");
+    assert_eq!(rejected, STARTERS - 1, "{statuses:?}");
+
+    fs::write(&release, "").unwrap();
+    let running = rig.json(&rig.get("/api/runs"));
+    let run_record_id = running.as_array().unwrap()[0]["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    wait_for_json(rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["live"] == false
+    });
+    wait_for_empty_directory(&rig.directory.join("run-tasks"));
+    let _ = fs::remove_dir_all(directory);
+}
+
+/// 并发登录 / 认票据：会话表在多线程下不串号、也不把请求卡住。
+///
+/// `authenticate()` 落在**每一个** `/api/*` 上，是多线程之后最热的一处竞争。
+#[test]
+fn concurrent_sessions_are_issued_and_authenticated_without_crossing_wires() {
+    const CLIENTS: usize = 8;
+
+    let rig = Rig::new();
+    let rig = &rig;
+    let tokens: Vec<String> = thread::scope(|scope| {
+        let handles: Vec<_> = (0..CLIENTS)
+            .map(|_| {
+                scope.spawn(|| {
+                    let response = rig.send_anonymous(
+                        Method::Post,
+                        "/api/session",
+                        r#"{"username":"admin","password":"admin"}"#,
+                    );
+                    assert_eq!(response.status, 200, "{}", response.body_text());
+                    let cookie = response
+                        .headers
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case("Set-Cookie"))
+                        .map(|(_, value)| value.clone())
+                        .expect("登录没有下发 cookie");
+                    cookie
+                        .split(';')
+                        .next()
+                        .unwrap()
+                        .trim_start_matches(&format!("{SESSION_COOKIE}="))
+                        .to_owned()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    let unique: std::collections::HashSet<&String> = tokens.iter().collect();
+    assert_eq!(unique.len(), CLIENTS, "并发登录发出了重复票据");
+    thread::scope(|scope| {
+        for token in &tokens {
+            scope.spawn(move || {
+                let response = rig.api().handle(
+                    &Request::new(Method::Get, "/api/tasks", Vec::new())
+                        .with_header("Cookie", format!("{SESSION_COOKIE}={token}")),
+                );
+                assert_eq!(response.status, 200, "{}", response.body_text());
+            });
+        }
+    });
+}
+
+/// 运行**进行中**与**已结束**两种情况下，游标接口都得答得出来。
+#[test]
+fn run_logs_are_served_incrementally_while_the_run_is_live_and_after_it_ends() {
+    let directory = temp_directory();
+    let release = directory.join("release-child");
+    let long_value = "值".repeat(200);
+    let rig = Rig::with_child(&format!(
+        r#"printf '%s\n' '{{"ts":"2026-08-15T10:00:00.000Z","level":"info","event":"source_started","run_id":null,"task":null,"message":"started"}}'
+printf '%s\n' '{{"ts":"2026-08-15T10:00:01.000Z","level":"info","event":"stage_changed","run_id":"run-9","task":null,"stage":"STREAMING","message":"streaming"}}'
+printf '%s\n' '这一行不是 JSON'
+while [ ! -f '{}' ]; do sleep 0.02; done
+printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"error","event":"run_finished","run_id":"run-9","task":null,"terminal":"FAILED","stage":"FAILED","message":"目标端拒绝","failure_kind":"TARGET_REJECTED","source_code":null,"sink_code":"WRITE_FAILED","column":"AMOUNT","value":"{}","source_rows":1,"source_batches":1,"staged_rows":0,"received_batches":1,"sink_reported_rows":0,"purged_rows":0,"fetch_ms":1,"push_ms":1,"commit_ms":0,"count_ms":0,"cursor_ms":0}}'
+"#,
+        release.display(),
+        long_value,
+    ));
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // 运行还活着的时候就能一段一段取。
+    let live = wait_for_json(&rig, &format!("/api/runs/{run_record_id}/logs"), |body| {
+        body["lines"].as_array().unwrap().len() >= 3
+    });
+    assert_eq!(live["live"], true);
+    assert_eq!(live["after"], 0);
+    assert_eq!(live["next_after"], 3);
+    assert_eq!(live["has_more"], false);
+    let lines = live["lines"].as_array().unwrap();
+    assert_eq!(lines[0]["seq"], 1);
+    let first: Value = serde_json::from_str(lines[0]["line"].as_str().unwrap()).unwrap();
+    // 原文照存：进程间那份 JSON Lines 契约一个字都没改。
+    assert_eq!(first["event"], "source_started");
+    // 解析不出 JSON 的那一行也照存——来什么显什么，不吞。
+    assert_eq!(lines[2]["line"], "这一行不是 JSON");
+
+    // 带上游标只拿新的那一段。
+    let after_two = rig.json(&rig.get(&format!("/api/runs/{run_record_id}/logs?after=2")));
+    let tail = after_two["lines"].as_array().unwrap();
+    assert_eq!(tail.len(), 1);
+    assert_eq!(tail[0]["seq"], 3);
+    // 游标停在末尾就是空段，不是错。
+    let caught_up = rig.json(&rig.get(&format!("/api/runs/{run_record_id}/logs?after=3")));
+    assert_eq!(caught_up["lines"].as_array().unwrap().len(), 0);
+    assert_eq!(caught_up["next_after"], 3);
+
+    fs::write(release, "").unwrap();
+    wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["live"] == false
+    });
+
+    // 结束之后同一条路照旧走得通，终态那一行也在里面。
+    let finished = wait_for_json(&rig, &format!("/api/runs/{run_record_id}/logs?after=3"), |body| {
+        !body["lines"].as_array().unwrap().is_empty()
+    });
+    assert_eq!(finished["live"], false);
+    let terminal: Value =
+        serde_json::from_str(finished["lines"][0]["line"].as_str().unwrap()).unwrap();
+    assert_eq!(terminal["event"], "run_finished");
+    assert_eq!(terminal["column"], "AMOUNT");
+    // 业务值落库前截到 64 个字符：够判断是哪一列坏了，不够当数据副本。
+    assert_eq!(terminal["value"].as_str().unwrap().chars().count(), 64);
+    assert_eq!(terminal["value_truncated"], true);
+    // 折叠出来的那一行运行历史照旧成立，格式没变过。
+    let history = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(history["outcome"], "FAILED");
+    assert_eq!(history["column"], "AMOUNT");
+}
+
+#[test]
+fn run_logs_refuse_an_unknown_run_and_a_nonsense_cursor() {
+    let rig = Rig::new();
+    assert_eq!(rig.get("/api/runs/no-such-run/logs").status, 404);
+
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for bad in ["abc", "-1", ""] {
+        let response = rig.get(&format!("/api/runs/{run_record_id}/logs?after={bad}"));
+        assert_eq!(response.status, 400, "after={bad} 本该被拒");
+    }
+}
+
+// ------------------------------------------------------------------ 调度派活
+//
+// 「不补跑」「开关关着不触发」这两条是 `ScheduleState::observe` 的纯函数性质，
+// 用例在 `scheduler.rs` 里。这里守的是另外三条**必须有 store 和子进程才成立**的：
+// 到点真的发得出去、上一次没结束时留下的那行历史长什么样、额度满时排在哪儿。
+//
+// 时钟是参数（`run_scheduler_pass` 的 `now`），所以这三条一秒都不用等。
+
+/// 调度器的一轮，时钟由用例给。
+fn scheduler_pass(rig: &Rig, now: &str) {
+    let terminated = std::sync::atomic::AtomicBool::new(false);
+    db_qbs_source::run_scheduler_pass(
+        &rig.api(),
+        &rig.schedule,
+        chrono::NaiveDateTime::parse_from_str(now, "%Y-%m-%d %H:%M").unwrap(),
+        &terminated,
+    );
+}
+
+fn scheduled_task_json(
+    name: &str,
+    target_table: &str,
+    datasources: &(String, String),
+    cron: &str,
+) -> String {
+    let (source_datasource_id, target_datasource_id) = datasources;
+    format!(
+        r#"{{"name":"{name}","source_datasource_id":"{source_datasource_id}","target_datasource_id":"{target_datasource_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"{target_table}","columns":[{{"source":"ID","target":"ID"}},{{"source":"D_BIZ","target":"D_BIZ"}}],"write_mode":"APPEND","schedule_cron":"{cron}","schedule_enabled":true,"primary_key":["ID"],"where_clause":"D_BIZ = DATE '2026-08-14'"}}}}"#
+    )
+}
+
+fn create_scheduled_task(
+    rig: &Rig,
+    name: &str,
+    target_table: &str,
+    datasources: &(String, String),
+    cron: &str,
+) -> String {
+    let response = rig.post(
+        "/api/tasks",
+        &scheduled_task_json(name, target_table, datasources, cron),
+    );
+    assert_eq!(response.status, 201, "{}", response.body_text());
+    rig.json(&response)["task_id"].as_str().unwrap().to_owned()
+}
+
+/// 到点了就自己跑起来，而且历史上认得出这是**调度发起的**，不是有人按的。
+///
+/// 起服务那一刻不算触发（不补跑）：第一轮只把下一个时刻算出来，一次运行都不该发出去。
+#[test]
+fn the_cron_instant_starts_a_run_that_history_marks_as_scheduled() {
+    let rig = Rig::new();
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let datasources = (source_id, target_id);
+    let task_id = create_scheduled_task(&rig, "每分钟", "HOLDINGS", &datasources, "* * * * *");
+
+    scheduler_pass(&rig, "2026-08-28 03:10");
+    let quiet = rig.json(&rig.get(&format!("/api/runs?task_id={task_id}")));
+    assert!(
+        quiet.as_array().unwrap().is_empty(),
+        "刚看到这个任务的那一轮不该触发任何运行：{quiet}"
+    );
+
+    scheduler_pass(&rig, "2026-08-28 03:11");
+    let listed = rig.json(&rig.get(&format!("/api/runs?task_id={task_id}")));
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(listed[0]["trigger"], "SCHEDULED");
+    assert_eq!(listed[0]["task_name"], "每分钟");
+    // 真发出去了：有运行标识那一半由子进程补，但临时任务文件此刻已经在磁盘上。
+    assert!(listed[0]["run_record_id"].as_str().is_some_and(|id| !id.is_empty()));
+
+    // 同一分钟内再评估一次不会再触发一回（`next_after` 是严格之后）。
+    scheduler_pass(&rig, "2026-08-28 03:11");
+    let again = rig.json(&rig.get(&format!("/api/runs?task_id={task_id}")));
+    assert_eq!(again.as_array().unwrap().len(), 1, "{again}");
+}
+
+/// 上一次还没结束，本次跳过——**但那个触发时刻在历史里留了一行**。
+///
+/// 这行与「预检拒绝、从未到达代理」同构：`run_id` 是空的，目标表一个字节都没动过。
+/// 它存在的唯一理由是「月末那次到底跑没跑」得有答案。
+#[test]
+fn an_occurrence_that_collides_with_a_live_run_is_recorded_without_a_run_id() {
+    let rig = Rig::new();
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let datasources = (source_id, target_id);
+    let task_id = create_scheduled_task(&rig, "每分钟", "HOLDINGS", &datasources, "* * * * *");
+
+    // 有人手动跑了一次，而假子进程睡着不动——到点时它还在飞。
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let manual_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    scheduler_pass(&rig, "2026-08-28 03:10");
+    scheduler_pass(&rig, "2026-08-28 03:11");
+
+    let listed = rig.json(&rig.get(&format!("/api/runs?task_id={task_id}")));
+    let rows = listed.as_array().unwrap();
+    assert_eq!(rows.len(), 2, "被跳过的那一次也要留一行：{listed}");
+    let skipped = rows
+        .iter()
+        .find(|row| row["run_record_id"] != manual_id.as_str())
+        .unwrap();
+    assert_eq!(skipped["run_id"], Value::Null, "跳过的那一次没有运行标识");
+    assert_eq!(skipped["trigger"], "SCHEDULED");
+    assert_eq!(skipped["failure_kind"], "SKIPPED");
+    assert_eq!(skipped["message"], "上次尚未结束，本次跳过");
+    assert_eq!(skipped["outcome"], "FAILED");
+    assert_eq!(skipped["target_table_effect"], "DISCARDED");
+    assert_eq!(skipped["task_name"], "每分钟");
+    assert_eq!(skipped["live"], false);
+}
+
+/// 额度满时**在 source 侧排队**，不推给代理去吃 `RUN_QUOTA_EXCEEDED`——
+/// 而且排着的那一条在界面上看得见它在等什么（`GET /api/schedule`）。
+#[test]
+fn an_occurrence_over_the_agent_quota_waits_in_a_queue_the_interface_can_see() {
+    let rig = Rig::new();
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let datasources = (source_id, target_id);
+    // 桩 agent 自报的额度是 1，所以第一个任务一开跑，第二个就只能等。
+    let busy = rig.create_task("占额度的", "BUSY", &datasources);
+    let waiting = create_scheduled_task(&rig, "排队的", "HOLDINGS", &datasources, "* * * * *");
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{busy}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+
+    scheduler_pass(&rig, "2026-08-28 03:10");
+    scheduler_pass(&rig, "2026-08-28 03:11");
+
+    // 没被推给代理：这个任务一条运行历史都没有。
+    let listed = rig.json(&rig.get(&format!("/api/runs?task_id={waiting}")));
+    assert!(
+        listed.as_array().unwrap().is_empty(),
+        "额度满时不该发出去，也不该记成一次失败：{listed}"
+    );
+
+    let schedule = rig.json(&rig.get("/api/schedule"));
+    let queued = schedule["queued"].as_array().unwrap();
+    assert_eq!(queued.len(), 1, "{schedule}");
+    assert_eq!(queued[0]["task_id"], waiting);
+    assert_eq!(queued[0]["task_name"], "排队的");
+    assert_eq!(queued[0]["due_at"], "2026-08-28 03:11");
+    assert!(
+        queued[0]["waiting_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("并发额度已满")),
+        "排队的那一条要说得出它在等什么：{schedule}"
+    );
+    // 时区写出来，与「下次触发」预览同一份口径。
+    assert!(schedule["utc_offset"].as_str().is_some());
+    assert!(schedule["next_fire_times"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["task_id"] == waiting.as_str()));
 }

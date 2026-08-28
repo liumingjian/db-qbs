@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
-use db_qbs_shared::{write_log_line_with_fields, CleanupRunRequest, LogEvent, LogLevel, RunStage};
+use chrono::{Local, Utc};
+use db_qbs_shared::{write_log_line_with_fields, LogEvent, LogLevel, RunStage};
 use rand::RngCore;
 use signal_hook::consts::SIGTERM;
 use serde::de::DeserializeOwned;
@@ -29,19 +29,24 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use url::Url;
 
+use crate::scheduler::SCHEDULE_TIME_FORMAT;
 use crate::{
     cleared_cookie_header, embedded_web_asset, fetch_agent_info, generate_target_ddl,
+    CronSchedule,
     session_cookie_header, session_token_from_cookie_header, validate_builder_dblink,
     validate_source_sql, Agent, AgentEndpoint, AgentEvidence, AgentInput, AgentStore, AuthStore,
     ColumnPrecision, DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess,
-    OracleRowSource, RowSource, RunEvidence, RunHistory, RunParametersEvidence, SourceColumn,
-    SourceConfig, SourceEvidence, SourceReadError, TargetCheckRequest, TargetCheckResult,
-    TargetConnection, TargetEvidence, Task, TaskConfig, TaskInput, TaskSpec, TaskStore, UnknownReason,
-    SESSION_IDLE_SECONDS, USERNAME,
+    OracleRowSource, RowSource, RunEvidence, RunHistory, RunLogStore, RunLogWriter,
+    RunParametersEvidence, RunTrigger, ScheduleRegistry,
+    SourceColumn, SourceConfig, SourceEvidence, SourceReadError, TargetCheckRequest,
+    TargetCheckResult, TargetConnection, TargetEvidence, Task, TaskConfig, TaskInput, TaskSpec,
+    TaskStore, UnknownReason, RUN_LOG_PAGE_LIMIT, SESSION_IDLE_SECONDS, USERNAME,
 };
 
 const MAX_REQUEST_BODY_BYTES: u64 = 1024 * 1024;
 const DEFAULT_PREVIEW_LIMIT: usize = 10;
+/// 「下次触发」一次给几个。给一个说不清 `*/n` 的取整，给一串就一目了然。
+const SCHEDULE_PREVIEW_COUNT: usize = 5;
 const MAX_PREVIEW_LIMIT: usize = 100;
 const PREVIEW_CALL_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const RUN_TASKS_DIRECTORY: &str = "run-tasks";
@@ -54,10 +59,32 @@ pub struct RunState {
     active_runs: HashMap<String, ActiveRun>,
 }
 
+impl RunState {
+    /// 这个任务此刻有没有一次运行在飞。互斥键就是任务本身，见 [`ActiveRun::task_id`]。
+    pub fn has_active_run(&self, task_id: &str) -> bool {
+        self.active_runs.values().any(|run| run.task_id == task_id)
+    }
+
+    /// 这台 agent 上此刻有几次**由本进程发起**的运行在飞（#266）。
+    ///
+    /// 它是并发额度那笔账的分子。分母（额度）由 agent 自报；分子在这里数，
+    /// 因为目标库只经 agent 访问、而每一次访问都是本进程拉起来的——
+    /// 除了它自己开的这些 run，source 侧没有第二个来源。
+    pub fn in_flight_for_agent(&self, agent_id: &str) -> usize {
+        self.active_runs
+            .values()
+            .filter(|run| run.agent_id == agent_id)
+            .count()
+    }
+}
+
 pub struct ActiveRun {
     /// 互斥键的**全部**：一个任务同时只许有一次运行在飞。
     /// 运行参数链退役之后，「同任务 + 同参数集」这个复合键退化成了任务本身。
     task_id: String,
+    /// 这次运行发往哪台 agent。**它不是互斥键**，只用来数并发额度那笔账（#266）：
+    /// 额度是**每台 agent** 的，所以分子也必须按 agent 分开数。
+    agent_id: String,
     child_pid: Option<u32>,
     /// 判定用的那一份，**是枚举不是字符串**：能不能取消这次运行由它一个人说了算
     /// （`RunStage::abort_allowed`）。子进程报来一个认不出的拼写时它是 `None`，
@@ -69,6 +96,17 @@ pub struct ActiveRun {
 enum StartRunError {
     AlreadyRunning,
     Internal(String),
+}
+
+/// 一次**调度派发**的三种结局（#266）。
+///
+/// 三分而不是二分，是因为「这次没发出去」有两种性质完全不同的原因：额度满了是**等**，
+/// 等一会儿就好；数据源解不开、agent 不在线、这个任务又被人手动跑起来了是**不发**，
+/// 再等也不会自己变好。前者留在队里（界面上看得见排队原因），后者落一行历史说清楚。
+pub(crate) enum DispatchOutcome {
+    Started(String),
+    Waiting(String),
+    Refused(String),
 }
 /// agent 注册表被后台探测线程与请求线程共用，所以它是 `Arc<Mutex<...>>`——
 /// 底下是一条 SQLite 连接，`rusqlite::Connection` 不是 `Sync`。
@@ -111,6 +149,17 @@ struct BuilderPreviewInput {
     source_datasource_id: String,
     spec: TaskSpec,
     limit: Option<usize>,
+}
+
+/// 「下次触发」读数的请求体（#265）。
+///
+/// `cron` 缺席或为空是**合法的一次提问**——界面刚打开、还没人写表达式时就是这样，
+/// 而那一刻正是它最需要知道「服务器现在是哪个时区」的时候。
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SchedulePreviewInput {
+    #[serde(default)]
+    cron: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -176,6 +225,11 @@ struct ColumnFetchInput {
     spec: TaskSpec,
     #[serde(default)]
     column_precision: Option<ColumnPrecision>,
+    /// 目标端数据源。**可选**：这个端点只描述源端的列，取列本身不需要目标端。
+    /// 给了就顺带把建表语句的字符序按那台 agent 上报的值生成（#257）；
+    /// 不给就不写 `COLLATE`，与本票之前一个字不差。
+    #[serde(default)]
+    target_datasource_id: Option<String>,
 }
 
 /// 一次请求能碰到的**全部**进程状态。`Api::handle` 是这个 crate 对外的唯一 HTTP 入口。
@@ -189,7 +243,14 @@ pub struct Api<'a> {
     pub datasources: &'a DatasourceStore,
     pub agents: &'a AgentRegistry,
     pub history: &'a HistoryStore,
+    /// 子进程吐出的**原始**日志行。运行历史是它折叠之后的结果，两者同库不同表：
+    /// 折叠会丢掉认不出来的事件，而排障要的恰恰是折叠之前的那份原文。
+    pub run_logs: &'a RunLogStore,
     pub runs: &'a RunRegistry,
+    /// 调度器此刻的状态（#266）。HTTP 面**只读**它——写它的是那条调度线程。
+    /// 它在这里的唯一理由是「排队中的任务在界面上看得见」：队列活在一条后台线程的
+    /// 内存里，不摆到 `Api` 上就没有任何一个请求答得出「它在等什么」。
+    pub schedule: &'a ScheduleRegistry,
     /// 登录、会话与口令。**只护得到这个进程的 HTTP 面**——sink 那半边仍然没有鉴权。
     pub auth: &'a AuthStore,
     pub describe_source: fn(&OracleAccess, &TaskSpec) -> Result<Vec<SourceColumn>, SourceReadError>,
@@ -396,6 +457,15 @@ pub fn routes() -> &'static [Route] {
             Route::new(Post, "/api/builder/preview", |state, request, _id| {
                 handle_builder_preview(request, state)
             }),
+            // 「这条 cron 下一次什么时候响」——纯算，不碰任何存储，因此 `_state`。
+            // 归在 `builder/` 下面是因为它服务的是**草稿**：任务还没保存，人已经想知道
+            // 自己写的那一行是不是他以为的那个意思。
+            Route::new(Post, "/api/builder/schedule", |_state, request, _id| {
+                handle_schedule_preview(request)
+            }),
+            Route::new(Get, "/api/schedule", |state, _request, _id| {
+                handle_schedule_state(state)
+            }),
             Route::new(Get, "/api/agents", |state, _request, _id| {
                 handle_list_agents(state)
             }),
@@ -449,14 +519,16 @@ pub fn routes() -> &'static [Route] {
             Route::new(Post, "/api/runs/{}/cancel", |state, _request, id| {
                 handle_cancel_run(state.runs, id)
             }),
-            Route::new(Post, "/api/runs/{}/cleanup", |state, _request, id| {
-                handle_cleanup_run(state, id)
-            }),
             Route::new(Get, "/api/runs", |state, request, _id| {
                 handle_list_history(state.runs, state.history, request.query())
             }),
             Route::new(Get, "/api/runs/{}", |state, _request, id| {
                 handle_get_run(state.runs, state.history, id)
+            }),
+            // 原始日志行的**游标增量**取用。放在 `/api/runs/{}` 之后不承重：
+            // 两条的段数不同（4 段 vs 3 段），匹配上互不干扰。
+            Route::new(Get, "/api/runs/{}/logs", |state, request, id| {
+                handle_run_logs(state, id, request.query())
             }),
             Route::new(Get, "/api/tasks", |state, _request, _id| {
                 handle_list_tasks(state.tasks)
@@ -697,7 +769,9 @@ fn handle_start_run(request: &Request, state: &Api<'_>) -> HttpResponse {
         target,
         agent_endpoint(&agent),
         state.history,
+        state.run_logs,
         state.runs,
+        RunTrigger::Manual,
     ) {
         Ok(run_record_id) => json_response(202, &json!({ "run_record_id": run_record_id })),
         Err(StartRunError::AlreadyRunning) => json_response(
@@ -709,11 +783,17 @@ fn handle_start_run(request: &Request, state: &Api<'_>) -> HttpResponse {
 }
 
 fn handle_cancel_run(runs: &RunRegistry, run_record_id: &str) -> HttpResponse {
-    let runs = match runs.lock() {
-        Ok(runs) => runs,
+    // 锁只用来**抄一份**这条 run 此刻的阶段与 PID，随即松手（#255）。判阶段、发信号、
+    // 拼回话都在锁外做：`kill(2)` 本身不阻塞，但攥着这把锁的每一微秒，
+    // 别的线程的 `/api/runs` 与运行详情都在排队。
+    let snapshot = match runs.lock() {
+        Ok(registry) => registry
+            .active_runs
+            .get(run_record_id)
+            .map(|run| (run.stage, run.child_pid)),
         Err(_) => return internal_error("run 控制锁已损坏".to_owned()),
     };
-    let Some(run) = runs.active_runs.get(run_record_id) else {
+    let Some((run_stage, child_pid)) = snapshot else {
         return not_found();
     };
     let refused = |message: &str| json_response(409, &json!({ "error": { "message": message } }));
@@ -721,7 +801,7 @@ fn handle_cancel_run(runs: &RunRegistry, run_record_id: &str) -> HttpResponse {
     // 那条封口点不变量。**理由**另说：拒绝的原因分三种，所以按变体挑话，
     // 而不是对 `abort_allowed` 取反。这里不写通配分支，于是将来往闭集里加一格
     // 会在这儿变成编译错误，而不是悄悄落进「说不清为什么」的那一句。
-    let Some(stage) = run.stage else {
+    let Some(stage) = run_stage else {
         return refused("run 尚未进入可取消阶段");
     };
     if !stage.abort_allowed() {
@@ -734,7 +814,7 @@ fn handle_cancel_run(runs: &RunRegistry, run_record_id: &str) -> HttpResponse {
             RunStage::Preparing | RunStage::Streaming => "run 尚未进入可取消阶段",
         });
     }
-    let Some(pid) = run.child_pid else {
+    let Some(pid) = child_pid else {
         return internal_error("run 子进程尚未登记".to_owned());
     };
     match send_sigterm(pid) {
@@ -771,6 +851,10 @@ fn handle_get_run(
             &json!({
                 "run_record_id": run_record_id,
                 "run_id": record.run_id,
+                "task_name": record.task_name,
+                // 手动还是调度，**在飞的时候就要分得开**（#266）：一次半夜自己跑起来的
+                // 运行，最该问「这谁发起的」的时刻正是它还在跑的时候。
+                "trigger": record.trigger,
                 "source_sql": record.source_sql,
                 "evidence": record.evidence,
                 "staging_table": record.staging_table,
@@ -791,13 +875,71 @@ fn handle_get_run(
         );
     }
     match history_store.get(run_record_id) {
-        Ok(Some(history)) => history_response(
-            &history,
-            history_store.cleanup(run_record_id).ok().flatten(),
-        ),
+        Ok(Some(history)) => history_response(&history),
         Ok(None) => not_found(),
         Err(error) => internal_error(error),
     }
+}
+
+/// `GET /api/runs/{}/logs?after=<序号>` —— 原始日志行的增量取用。
+///
+/// **游标增量轮询，不是 SSE、不是长连接**：这套后端是同步阻塞栈，没有异步运行时，
+/// 一条挂着不放的连接会整根占死一个工作线程；而运行日志的自然节奏（界面每秒问一次）
+/// 用游标就够了。`after` 是上一次拿到的最后一个 `seq`，不给就是从头开始。
+///
+/// 运行进行中与已结束走的是**同一条路**：这里只读表，不问那条运行是不是还活着。
+/// `live` 只是顺带告诉调用方还该不该接着轮询，它不改变返回哪些行。
+fn handle_run_logs(state: &Api<'_>, run_record_id: &str, query: Option<&str>) -> HttpResponse {
+    let mut after: i64 = 0;
+    for (key, value) in url::form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
+        if key.as_ref() != "after" {
+            continue;
+        }
+        match value.parse::<i64>() {
+            Ok(parsed) if parsed >= 0 => after = parsed,
+            _ => return bad_request("查询参数 after 必须是非负整数".to_owned()),
+        }
+    }
+    // 认不认得这条运行由**运行历史**说了算，不由日志表说了算：日志的保留期（7 天）
+    // 比历史（默认 90 天）短得多，一条老运行的原文早已清掉，但它本身还在——
+    // 那种情况的正确答案是「200，一行都没有」，不是 404。
+    //
+    // 两个问题（认不认得、还在不在跑）**一把锁读完**：分两次拿锁的话，中间隔着一次
+    // 状态变化，答出来的会是两个时刻的组合——「不认得，但正在跑」这种自相矛盾的回答
+    // 就是这么来的。
+    let (known, live) = match state.runs.lock() {
+        Ok(registry) => (
+            registry.live_histories.contains_key(run_record_id),
+            registry.active_runs.contains_key(run_record_id),
+        ),
+        Err(_) => return internal_error("run 投影锁已损坏".to_owned()),
+    };
+    if !known {
+        match state.history.get(run_record_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => return not_found(),
+            Err(error) => return internal_error(error),
+        }
+    }
+    let lines = match state.run_logs.lines_after(run_record_id, after) {
+        Ok(lines) => lines,
+        Err(error) => return internal_error(error),
+    };
+    // 一页取完了并不代表没有更多：`has_more` 让调用方立刻带着新游标再来一次，
+    // 而不必等到下一个轮询周期才把积压的行取完。
+    let has_more = lines.len() >= RUN_LOG_PAGE_LIMIT;
+    let next_after = lines.last().map_or(after, |line| line.seq);
+    json_response(
+        200,
+        &json!({
+            "run_record_id": run_record_id,
+            "after": after,
+            "next_after": next_after,
+            "has_more": has_more,
+            "live": live,
+            "lines": lines,
+        }),
+    )
 }
 
 fn handle_list_history(
@@ -814,15 +956,7 @@ fn handle_list_history(
     match history_store.list(task_id.as_deref()) {
         Ok(history) => match merge_live_history(runs, history, task_id.as_deref()) {
             Ok(merged) => {
-                let values = merged
-                    .iter()
-                    .map(|history| {
-                        history_value(
-                            history,
-                            history_store.cleanup(&history.run_record_id).ok().flatten(),
-                        )
-                    })
-                    .collect::<Vec<_>>();
+                let values = merged.iter().map(history_value).collect::<Vec<_>>();
                 json_response(200, &values)
             }
             Err(error) => internal_error(error),
@@ -862,99 +996,18 @@ fn merge_live_history(
     Ok(history)
 }
 
-fn history_response(history: &RunHistory, cleanup: Option<crate::RunCleanup>) -> HttpResponse {
-    json_response(200, &history_value(history, cleanup))
+fn history_response(history: &RunHistory) -> HttpResponse {
+    json_response(200, &history_value(history))
 }
 
-fn history_value(history: &RunHistory, cleanup: Option<crate::RunCleanup>) -> Value {
+fn history_value(history: &RunHistory) -> Value {
     let mut value =
         serde_json::to_value(history).expect("serializing a run history response must succeed");
     let object = value
         .as_object_mut()
         .expect("run history serializes as an object");
     object.insert("live".to_owned(), Value::Bool(false));
-    object.insert(
-        "cleanup_status".to_owned(),
-        cleanup.as_ref().map_or(Value::Null, |item| {
-            let status = if item.status == "pending"
-                && history.outcome.as_deref() == Some("SUCCEEDED")
-            {
-                "available"
-            } else {
-                &item.status
-            };
-            Value::String(status.to_owned())
-        }),
-    );
-    object.insert(
-        "cleaned_rows".to_owned(),
-        cleanup
-            .and_then(|item| item.deleted_rows)
-            .map_or(Value::Null, |rows| json!(rows)),
-    );
     value
-}
-
-fn handle_cleanup_run(state: &Api<'_>, run_record_id: &str) -> HttpResponse {
-    let history = match state.history.get(run_record_id) {
-        Ok(Some(history)) => history,
-        Ok(None) => return not_found(),
-        Err(error) => return internal_error(error),
-    };
-    let cleanup = match state.history.cleanup(run_record_id) {
-        Ok(Some(cleanup)) => cleanup,
-        Ok(None) => {
-            return json_response(
-                409,
-                &json!({ "error": { "message": "这次运行没有可用的写入账本" } }),
-            )
-        }
-        Err(error) => return internal_error(error),
-    };
-    let cleanup_available = cleanup.status == "available"
-        || (cleanup.status == "pending" && history.outcome.as_deref() == Some("SUCCEEDED"));
-    if !cleanup_available {
-        return json_response(
-            409,
-            &json!({ "error": { "message": "这次运行已清理或尚未成功完成" } }),
-        );
-    }
-    let Some(run_id) = history.run_id else {
-        return json_response(
-            409,
-            &json!({ "error": { "message": "这次运行没有目标端运行号" } }),
-        );
-    };
-    let target = match state
-        .datasources
-        .target_connection(&cleanup.target_datasource_id)
-    {
-        Ok(target) => target,
-        Err(error) => return bad_request(error),
-    };
-    let agent = match resolve_target_agent(state, &cleanup.target_datasource_id) {
-        Ok(agent) => agent,
-        Err(error) => return agent_failure(error),
-    };
-    let client = match crate::HttpSinkClient::new(&agent.base_url) {
-        Ok(client) => client,
-        Err(error) => return internal_error(error),
-    };
-    match client.cleanup(&CleanupRunRequest {
-        run_id,
-        target_table: cleanup.target_table,
-        target,
-        primary_key: cleanup.primary_key,
-    }) {
-        Ok(response) => match state
-            .history
-            .mark_cleaned(run_record_id, response.deleted_rows)
-        {
-            Ok(()) => json_response(200, &json!({ "deleted_rows": response.deleted_rows })),
-            Err(error) => internal_error(error),
-        },
-        Err(error) => sink_failure(error.message),
-    }
 }
 
 /// 把注册表里那条记录压成子进程要用的端点（ADR-0044 §4）。
@@ -969,6 +1022,67 @@ fn agent_endpoint(agent: &Agent) -> AgentEndpoint {
     }
 }
 
+/// 调度器派一次活（#266）。**与「立即运行」那颗按钮走同一条路**——解两端连接、
+/// 当场核对 agent、再 `start_run`——只在两处不同：结局是三分的
+/// [`DispatchOutcome`]（要能表达「排队等着」），以及运行历史上记的是
+/// [`RunTrigger::Scheduled`]。
+///
+/// 额度那一关**开在这里，不在 agent 那一头**：额度满时不发请求、留在队里，
+/// 而不是推过去吃一个 `RUN_QUOTA_EXCEEDED`。分母是 agent 自报的那份额度，
+/// 没自报（旧 agent）就按**一次一个**——那是唯一一个绝不会被拒的取值。
+pub(crate) fn dispatch_scheduled_run(state: &Api<'_>, task: &Task) -> DispatchOutcome {
+    let access = match oracle_access(state, &task.source_datasource_id) {
+        Ok(access) => access,
+        Err(error) => return DispatchOutcome::Refused(error),
+    };
+    let target = match state
+        .datasources
+        .target_connection(&task.target_datasource_id)
+    {
+        Ok(target) => target,
+        Err(error) => return DispatchOutcome::Refused(error),
+    };
+    let agent = match resolve_target_agent(state, &task.target_datasource_id) {
+        Ok(agent) => agent,
+        Err(error) => return DispatchOutcome::Refused(error),
+    };
+    // 没自报额度的 agent 按**一次一个**算，而这 1 不是保守的猜测，是那台 agent 的实情：
+    // #260 之前的 sink 是 `for request in server.incoming_requests()`，一个请求一个请求地
+    // 处理，同一时刻只跑得动一个 run。不带 `max_concurrent_runs` 字段的 agent 恰恰就是那批。
+    // 所以这里既不该改成 4（sink.toml 的默认值——那是**配了新版本的人**选的数，不是这台老
+    // agent 的能力），也不该改成任何别的数：1 是唯一一个既不撞 `RUN_QUOTA_EXCEEDED`、
+    // 又没有白白空着额度的取值。
+    let quota = agent.max_concurrent_runs.unwrap_or(1) as usize;
+    let in_flight = match state.runs.lock() {
+        Ok(runs) => runs.in_flight_for_agent(&agent.agent_id),
+        Err(_) => return DispatchOutcome::Refused("run 控制锁已损坏".to_owned()),
+    };
+    if in_flight >= quota {
+        return DispatchOutcome::Waiting(format!(
+            "目标端 agent「{}」的并发额度已满（在飞 {in_flight}，上限 {quota}），排队等待",
+            agent.name
+        ));
+    }
+    match start_run(
+        state.config,
+        state.config_path,
+        task,
+        access,
+        target,
+        agent_endpoint(&agent),
+        state.history,
+        state.run_logs,
+        state.runs,
+        RunTrigger::Scheduled,
+    ) {
+        Ok(run_record_id) => DispatchOutcome::Started(run_record_id),
+        Err(StartRunError::AlreadyRunning) => {
+            DispatchOutcome::Refused("上次尚未结束，本次跳过".to_owned())
+        }
+        Err(StartRunError::Internal(error)) => DispatchOutcome::Refused(error),
+    }
+}
+
 fn start_run(
     config: &SourceConfig,
     config_path: &Path,
@@ -977,7 +1091,9 @@ fn start_run(
     target: TargetConnection,
     agent: AgentEndpoint,
     history_store: &HistoryStore,
+    run_log_store: &RunLogStore,
     runs: &RunRegistry,
+    trigger: RunTrigger,
 ) -> Result<String, StartRunError> {
     let run_record_id = generate_run_record_id();
     // 历史里钉的是**当次实际执行**的语句文本：规格以后改了它也不跟着变。
@@ -987,6 +1103,13 @@ fn start_run(
         &task.spec.source_sql(),
         Utc::now(),
     );
+    // 名字也钉在这一行上：它是展示标签，改名随时可能发生，而这条记录说的是
+    // 「当时那次运行」。回头去任务表现取，改一次名就会把过去所有运行记录的名字
+    // 一起改写（#259）。
+    history.task_name = task.name.clone();
+    // 谁发起的也钉在这一行上（#266）：夜里那次是自动跑的还是有人手动补的，
+    // 事后只有这一列答得出来。
+    history.trigger = trigger.as_str().to_owned();
     history.evidence = RunEvidence {
         source: Some(SourceEvidence {
             datasource_id: task.source_datasource_id.clone(),
@@ -1011,22 +1134,12 @@ fn start_run(
             target_table: task.spec.target_table.clone(),
             columns: task.spec.columns.clone(),
             primary_key: task.spec.primary_key.clone(),
+            write_mode: task.spec.write_mode,
             source_sql: task.spec.source_sql(),
         }),
     };
-    register_active_run(runs, &run_record_id, &task.task_id)?;
+    register_active_run(runs, &run_record_id, &task.task_id, &agent.agent_id)?;
     if let Err(error) = history_store.insert(&history, Utc::now(), config.history_retention_days) {
-        remove_active_run(runs, &run_record_id);
-        return Err(StartRunError::Internal(error));
-    }
-    if let Err(error) = history_store.register_cleanup(
-        &run_record_id,
-        &task.target_datasource_id,
-        &task.spec.target_table,
-        &task.spec.primary_key,
-    ) {
-        history.mark_parent_failure(error.clone(), Utc::now());
-        let _ = history_store.save(&history, Utc::now(), config.history_retention_days);
         remove_active_run(runs, &run_record_id);
         return Err(StartRunError::Internal(error));
     }
@@ -1079,6 +1192,12 @@ fn start_run(
     let worker_runs = Arc::clone(runs);
     let worker_record_id = run_record_id.clone();
     let worker_history_store = history_store.clone();
+    let run_log_writer = RunLogWriter::new(
+        run_log_store.clone(),
+        run_record_id.clone(),
+        task.task_id.clone(),
+        history.started_at_ms(),
+    );
     let retention_days = config.history_retention_days;
     thread::spawn(move || {
         supervise_run(
@@ -1087,6 +1206,7 @@ fn start_run(
             task_path,
             worker_record_id,
             worker_history_store,
+            run_log_writer,
             retention_days,
             worker_runs,
         )
@@ -1143,6 +1263,7 @@ fn supervise_run(
     task_path: PathBuf,
     run_record_id: String,
     history_store: HistoryStore,
+    mut run_log: RunLogWriter,
     retention_days: u64,
     runs: RunRegistry,
 ) {
@@ -1156,6 +1277,9 @@ fn supervise_run(
             let mut writer = stdout.lock();
             let _ = writeln!(writer, "{line}");
         }
+        // 落库在解析**之前**：解析不出 JSON 的行也照存。运行历史那边可以忽略它，
+        // 排障那边不行——「来什么显什么，不吞」。
+        run_log.write(&line);
         let Ok(log) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -1171,9 +1295,6 @@ fn supervise_run(
                 .is_err()
         {
             continue;
-        }
-        if is_terminal && history.outcome.as_deref() == Some("SUCCEEDED") {
-            let _ = history_store.mark_cleanup_available(&run_record_id);
         }
         if is_terminal {
             remove_live_history(&runs, &run_record_id);
@@ -1219,6 +1340,7 @@ fn register_active_run(
     runs: &RunRegistry,
     run_record_id: &str,
     task_id: &str,
+    agent_id: &str,
 ) -> Result<(), StartRunError> {
     let mut runs = runs
         .lock()
@@ -1230,6 +1352,7 @@ fn register_active_run(
         run_record_id.to_owned(),
         ActiveRun {
             task_id: task_id.to_owned(),
+            agent_id: agent_id.to_owned(),
             child_pid: None,
             stage: None,
         },
@@ -1249,7 +1372,7 @@ fn remove_live_history(runs: &RunRegistry, run_record_id: &str) {
     }
 }
 
-fn generate_run_record_id() -> String {
+pub(crate) fn generate_run_record_id() -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut bytes = [0_u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
@@ -1273,6 +1396,12 @@ fn handle_create_task(request: &Request, store: &TaskStore) -> HttpResponse {
         Ok(input) => input,
         Err(error) => return bad_request(error),
     };
+    // 校验先判一次，好让它落在 400 上。`store.create` 里还会再判一次——那一次是存储层
+    // 自己的门，不依赖任何调用方记得先问；这一次只为把「你写错了」和「服务端坏了」
+    // 分成两个状态码。500 会让人去看服务端日志找一个根本不在那里的故障。
+    if let Err(error) = input.validate() {
+        return bad_request(error);
+    }
     match store.create(input) {
         Ok(task) => json_response(201, &task),
         Err(error) => internal_error(error),
@@ -1342,6 +1471,9 @@ fn handle_update_task(request: &Request, store: &TaskStore, task_id: &str) -> Ht
         Ok(input) => input,
         Err(error) => return bad_request(error),
     };
+    if let Err(error) = input.validate() {
+        return bad_request(error);
+    }
     match store.update(task_id, input) {
         Ok(Some(task)) => json_response(200, &task),
         Ok(None) => not_found(),
@@ -1849,11 +1981,14 @@ fn handle_target_check(request: &Request, state: &Api<'_>) -> HttpResponse {
     result.suggested_ddl = if result.ok {
         None
     } else {
+        // 字符序取这台 agent 上报的那一份（#257）：source 不连 MySQL，这是唯一的信息源。
+        // 旧版本 agent 报不出来就是 `None`，生成的语句照旧不写 `COLLATE`。
         generate_target_ddl(
             &source_columns,
             &input.target_table,
             &input.spec.primary_key,
             None,
+            agent.mysql_collation.as_deref(),
         )
         .ok()
     };
@@ -2118,6 +2253,79 @@ fn handle_builder_sql(request: &Request) -> HttpResponse {
     json_response(200, &json!({ "source_sql": spec.source_sql() }))
 }
 
+/// 把一条 cron 表达式翻译成人话：**服务器本地时区**是哪个，接下来几次什么时候触发。
+///
+/// 时区在这里被钉死，而且**必须显示出来**：任务定义里存的是一行没有时区的文本，
+/// 「凌晨两点」到底是哪个两点全靠这一层回答。答案是运行 `source` 的那台机器的本地时区，
+/// 不是浏览器的、也不是 UTC——那台机器才是将来真正到点发起运行的地方。
+/// 界面上不写出来的话，跨时区办公的人会拿自己的表去对一个别人的两点。
+///
+/// 表达式不合法就是 400，理由原样来自 [`CronSchedule::parse`]：这条路径与保存时的那道
+/// 校验读的是同一份解析器，所以界面上先看到的那句话，和保存被拒时的那句话一字不差。
+fn handle_schedule_preview(request: &Request) -> HttpResponse {
+    let input: SchedulePreviewInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    let now = Local::now();
+    let expression = input
+        .cron
+        .as_deref()
+        .map(str::trim)
+        .filter(|expression| !expression.is_empty());
+    // 没给表达式不是错，只是没有可算的东西：时区照答，触发时刻是空的一串。
+    let upcoming = match expression {
+        Some(expression) => match CronSchedule::parse(expression) {
+            Ok(schedule) => schedule.upcoming(now.naive_local(), SCHEDULE_PREVIEW_COUNT),
+            Err(error) => return bad_request(error),
+        },
+        None => Vec::new(),
+    };
+    json_response(
+        200,
+        &json!({
+            "timezone": now.format("%Z").to_string(),
+            "utc_offset": now.format("%:z").to_string(),
+            "now": now.format(SCHEDULE_TIME_FORMAT).to_string(),
+            "next_fire_times": upcoming
+                .iter()
+                .map(|fire| fire.format(SCHEDULE_TIME_FORMAT).to_string())
+                .collect::<Vec<_>>(),
+        }),
+    )
+}
+
+/// 调度器此刻在干什么（#266）：每个任务的下一次触发时刻，以及**排队中的那些**。
+///
+/// 排队这一段是本票的验收项之一——额度满时任务在 source 侧等着，如果只活在后台线程的
+/// 内存里，界面上就只剩「什么都没发生」。`waiting_reason` 是给人看的一句话，
+/// 直接来自上一次派发尝试。
+///
+/// 时区与「下次触发」预览同一份口径：`source` 那台机器的本地时区，而且写出来。
+fn handle_schedule_state(state: &Api<'_>) -> HttpResponse {
+    let now = Local::now();
+    let (queued, next_fires) = match state.schedule.lock() {
+        Ok(schedule) => (schedule.queue_view(), schedule.next_fires()),
+        Err(_) => return internal_error("调度器状态锁已损坏".to_owned()),
+    };
+    json_response(
+        200,
+        &json!({
+            "timezone": now.format("%Z").to_string(),
+            "utc_offset": now.format("%:z").to_string(),
+            "now": now.format(SCHEDULE_TIME_FORMAT).to_string(),
+            "queued": queued,
+            "next_fire_times": next_fires
+                .into_iter()
+                .map(|(task_id, next_fire_time)| json!({
+                    "task_id": task_id,
+                    "next_fire_time": next_fire_time,
+                }))
+                .collect::<Vec<_>>(),
+        }),
+    )
+}
+
 fn handle_builder_preview(request: &Request, state: &Api<'_>) -> HttpResponse {
     let input: BuilderPreviewInput = match read_json_body(request) {
         Ok(input) => input,
@@ -2225,11 +2433,19 @@ fn handle_column_fetch(request: &Request, state: &Api<'_>) -> HttpResponse {
         Ok(columns) => columns,
         Err(error) => return oracle_failure(error),
     };
+    // 目标端可给可不给（见 `ColumnFetchInput`）。给了但那台 agent 不在线，也不该让取列
+    // 失败——取列问的是源端，目标端只影响建表语句里那一段字符序。
+    let target_collation = input
+        .target_datasource_id
+        .as_deref()
+        .and_then(|datasource_id| resolve_target_agent(state, datasource_id).ok())
+        .and_then(|agent| agent.mysql_collation);
     match generate_target_ddl(
         &columns,
         &input.spec.target_table,
         &input.spec.primary_key,
         input.column_precision.as_ref(),
+        target_collation.as_deref(),
     ) {
         Ok(target_ddl) => json_response(
             200,
@@ -2322,7 +2538,7 @@ mod bridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ColumnMapping, FailureKind, SourceColumn};
+    use crate::{ColumnMapping, FailureKind, SourceColumn, WriteMode};
 
     struct FakeSource {
         columns: Vec<SourceColumn>,
@@ -2365,6 +2581,9 @@ mod tests {
             table: if source_sql.is_some() { "" } else { "ORDERS" }.to_owned(),
             target_table: "orders".to_owned(),
             where_clause: Some(where_clause.to_owned()),
+            write_mode: WriteMode::Append,
+            schedule_cron: None,
+            schedule_enabled: false,
             primary_key: vec!["BIZ_ID".to_owned()],
             columns: vec![ColumnMapping {
                 source: "ID".to_owned(),

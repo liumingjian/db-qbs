@@ -14,6 +14,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::WriteMode;
+
 /// 一批行数据。`rows` 的每一行按 `source_columns` 的顺序给值，`None` 表示 NULL。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -131,6 +133,14 @@ pub struct TargetCheckResult {
     pub ok: bool,
     pub findings: Vec<TargetCheckFinding>,
     pub suggested_ddl: Option<String>,
+    /// 预检的**结论**，与 `findings` 分开：不阻塞，但必须被读到（#261）。
+    ///
+    /// `findings` 是「这里不对，去改」的清单，`ok` 就是它空不空。结论说的是另一件事：
+    /// 检查通过了，而这次通过意味着什么。目前唯一一条是「目标表无主键 → 本任务为纯追加写，
+    /// 重跑会产生重复数据」——把它塞进 `findings` 会让一次合法的配置显示成未通过，
+    /// 而不说等于让人第二次跑完才发现数据翻倍。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// 目标端 MySQL 的连接信息。**由 source 侧的数据源库读出、随请求过线**（ADR-0037 §1）——
@@ -172,10 +182,20 @@ pub struct OpenRunRequest {
     /// 本次运行的目标端连接（ADR-0037 §1/§2）。`sink.toml` 的 `mysql_dsn` / `database` 已退役，
     /// 库名也随本字段过来——暂存表 DDL 的库名限定按它取。
     pub target: TargetConnection,
-    /// upsert 的去重键（ADR-0035 §2）。用户在构建器里勾，sink 侧预检去目标表核对
-    /// 「约束确有、列在选中列里、列 NOT NULL」三条——缺约束时
-    /// `ON DUPLICATE KEY UPDATE` 会**静默退化成纯 INSERT**，重跑就出重复行。
-    /// 撤掉 DELETE 之后，那条预检是唯一挡住静默重复的东西。
+    /// 任务定义里的写入模式（#261/#264）。追加写只写不删；清空后导入会在切换事务里
+    /// 先对目标表整表 `DELETE` 再导入。**它不改变写入语句的选择**——那一件事只由
+    /// [`crate::WriteStatement::for_primary_key`] 决定。
+    #[serde(default)]
+    pub write_mode: WriteMode,
+    /// upsert 的去重键（ADR-0035 §2），**可以为空**（#261）。
+    ///
+    /// 非空：用户在构建器里勾了主键，sink 侧预检去目标表核对「约束确有、列在选中列里、
+    /// 列 NOT NULL」三条——缺约束时 `ON DUPLICATE KEY UPDATE` 会**静默退化成纯 INSERT**，
+    /// 重跑就出重复行。
+    ///
+    /// 为空：任务定义记下的是「目标表没有可合并的唯一约束」，本次运行写纯
+    /// `INSERT ... SELECT`（[`crate::WriteStatement::for_primary_key`]）。sink 侧仍要核对
+    /// 目标表**现在**确实没有唯一约束——不符就拒跑，写法绝不静默切换。
     pub primary_key: Vec<String>,
     pub source_columns: Vec<SourceColumn>,
     /// 3.5 步：source 回发的值域校核结果。永久可选（#106 裁定 Q14/Q15）。
@@ -220,27 +240,11 @@ pub struct CommitRequest {
 pub struct CommitResponse {
     pub source_rows: u64,
     pub staged_rows: u64,
-    /// 新写入模型下**恒为 0**，字段保留（ADR-0035 §4）。这句话是真的：确实没删任何行。
+    /// 追加写下**恒为 0**（ADR-0035 §4）：那句话是真的，确实没删任何行。
+    /// 清空后导入（#264）下它是切换事务里那条整表 `DELETE` 真的删掉的行数。
     pub purged_rows: u64,
     pub swapped_rows: u64,
     pub count_ms: u64,
-}
-
-/// Delete the target rows whose latest successful writer is this run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CleanupRunRequest {
-    pub run_id: String,
-    pub target_table: String,
-    pub target: TargetConnection,
-    pub primary_key: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CleanupRunResponse {
-    pub run_id: String,
-    pub deleted_rows: u64,
 }
 
 /// `POST /v1/runs/{run_id}/abort` 的响应体。请求体是空对象 `{}`。
@@ -251,11 +255,21 @@ pub struct AbortResponse {
     pub staging_dropped: bool,
 }
 
-/// run 的终态（ADR-0012）。
+/// run 的终态（ADR-0012）。**它同时是「目标表最后被怎么了」的词表**，
+/// 所以三个值必须各说各的事，不能合并同类项（#264）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Terminal {
+    /// **按主键合并进目标表**——`INSERT ... ON DUPLICATE KEY UPDATE`（无主键时是纯
+    /// `INSERT`）。目标表原有的行一行没删，源端删掉的行仍留在目标表里。
+    ///
+    /// #264 之前这个词兼职表示「目标端认下了这次写入」，清空后导入接进来之后它
+    /// **收窄**成上面这一句：整表被替换是另一件事，共用一个词会让历史记录读起来是假的。
     Swapped,
+    /// **整表被替换**——清空后导入（`WriteMode::ClearThenImport`）：同一个事务里
+    /// 先整表 `DELETE` 再导入，跑完之后目标表精确等于本次查询的结果。
+    /// 原有数据已经没了，且**不可撤销**。
+    Replaced,
     Discarded,
 }
 
@@ -263,6 +277,7 @@ impl Terminal {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Swapped => "SWAPPED",
+            Self::Replaced => "REPLACED",
             Self::Discarded => "DISCARDED",
         }
     }
@@ -315,11 +330,54 @@ pub struct ErrorBody {
 /// - `name`：给人看的名字，agent 自报（默认取主机名）。**不作判据**，只进界面。
 /// - `version`：agent 的构建版本，排障时用来判「两端是不是同一批二进制」。
 ///
+/// - `mysql`：这台 agent **实际连到的那台 MySQL** 的自述，见 [`MysqlServerInfo`]。
+///   与上面三个不同，它**是 `Option`**：agent 启动时并不连 MySQL（ADR-0037 §2，凭据随
+///   每个 run 过线），所以进程刚起来时它就是 `None`——那是「还没观察到」，不是「8.0」。
+///   一次目标端检查或一次开跑之后它才有值，之后一直报最近一次观察到的那一份。
+///
 /// **没有凭据字段，也永远不许加**：这个端点是未鉴权面（ADR-0024），任何进得来的人都读得到。
+/// `mysql` 里的两项都是服务端自述的公开信息（`@@version` 与字符序），不是凭据。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentInfo {
     pub agent_id: String,
     pub name: String,
     pub version: String,
+    /// 见上。**旧版本 agent 不带这个字段**，所以是 `default` + `skip_serializing_if`：
+    /// 新 source 读旧 agent 得到 `None`，与「新 agent 还没观察过」同一档处理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mysql: Option<MysqlServerInfo>,
+    /// 这台 agent 同时允许在飞的 run 数上限（`sink.toml` 的 `max_concurrent_runs`，#260）。
+    ///
+    /// **它由 agent 自报，因为额度是 agent 的东西**：判额度满不满、拒不拒（`RUN_QUOTA_EXCEEDED`）
+    /// 的是 sink 自己。source 侧的调度器要在**派发之前**就守住这条线（#266），否则配成
+    /// 「每天两点全跑」的那一刻并发峰值等于任务总数，大半会吃到拒绝。让 source 侧另配一份
+    /// 数值就是让同一条限额有两个真相源：配大了照旧被拒，配小了白白空着额度。
+    ///
+    /// **旧版本 agent 不带这个字段**，所以是 `default` + `skip_serializing_if`；读到 `None`
+    /// 的一方按「这台 agent 没说」处理，不许拿 4 顶上——见 `source` 侧调度器的取值规则。
+    ///
+    /// `u32` 而不是 `usize`：同一个概念在线上、在 source 的注册表里只有一种类型，
+    /// 而 `usize` 的宽度按机器变，不该出现在两端之间的报文里。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_runs: Option<u32>,
+}
+
+/// 目标端 MySQL 的自述：版本，以及生成建表语句要用的那一项字符序。
+///
+/// **两项都是从服务器上读回来的，不是推出来的。** 支持矩阵里 MySQL 8.0 与 5.7 的
+/// utf8mb4 默认字符序不同（`utf8mb4_0900_ai_ci` / `utf8mb4_general_ci`），而生成建表语句的
+/// 那一端（source）**一条 MySQL 连接都不建**，除 agent 上报之外没有第二个信息源。
+///
+/// 既然要上报，就顺手把字符序本身读回来，而不是在 source 侧按版本号做一次
+/// 「5.7 就用 general_ci」的映射：那等于把 MySQL 的默认值抄一份进我们的代码，
+/// 抄错、或者部署方把 `collation-server` 改过，都只会在建完表之后才暴露。
+/// 版本号照样上报——它是给人看的排障信息，界面上那一列读的就是它。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MysqlServerInfo {
+    /// `@@version` 原样，例如 `8.0.36` / `5.7.44-log`。
+    pub version: String,
+    /// `information_schema.CHARACTER_SETS` 里 utf8mb4 的 `DEFAULT_COLLATE_NAME`。
+    pub utf8mb4_collation: String,
 }

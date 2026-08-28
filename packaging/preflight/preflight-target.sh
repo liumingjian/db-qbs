@@ -272,7 +272,7 @@ ritual_report D5 "会话字符集三项都是 utf8mb4" 1 'character_set|utf8mb4'
 ritual_report D6 "sql_mode 设得成 STRICT_ALL_TABLES" 2 'sql_mode' \
   "会话设 sql_mode 被拒或被改写：检查 MySQL 的 init_connect、代理层（ProxySQL 之类）有没有在改会话变量"
 ritual_report D7 "max_allowed_packet ≥ 64 MiB" 3 'max_allowed_packet' \
-  "把 my.cnf 的 max_allowed_packet 调到至少 ${MIN_PACKET} 字节（64M）后重启 MySQL；这是环境配置，不是业务数据问题"
+  "MySQL 5.7 的默认值是 4 MiB，未调参的 5.7 一定红在这里；8.0 的默认值刚好够。两条都做：在库上执行 \`SET GLOBAL max_allowed_packet = ${MIN_PACKET};\`（当场生效，之后新建的连接才拿得到），再把 my.cnf 的 [mysqld] 段写上 \`max_allowed_packet = 64M\` 让它在重启后仍然成立。这是环境配置，不是业务数据问题"
 
 # ---------------------------------------------------------------- D8–D9 stunnel 服务端
 echo "==> D8–D9 stunnel 服务端（公网上露出来的只有这一个口）"

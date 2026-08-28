@@ -5,6 +5,7 @@ use chrono::{TimeDelta, TimeZone, Utc};
 use db_qbs_source::{
     expired_history_indices, fold_history_lines, AgentEvidence, ColumnMapping, HistoryStore,
     RunEvidence, RunHistory, RunParametersEvidence, SourceEvidence, TargetEvidence, UnknownReason,
+    WriteMode,
 };
 
 const SOURCE_SQL: &str = "SELECT a.ID AS ID\n  FROM APP.ORDERS a\n WHERE D_BIZ = DATE '2026-08-14'";
@@ -39,6 +40,7 @@ fn evidence() -> RunEvidence {
                 target: "ID".to_owned(),
             }],
             primary_key: vec!["ID".to_owned()],
+            write_mode: WriteMode::Append,
             source_sql: SOURCE_SQL.to_owned(),
         }),
     }
@@ -229,41 +231,6 @@ fn sqlite_writes_lazily_remove_expired_rows_and_startup_seals_incomplete_rows() 
 }
 
 #[test]
-fn cleanup_metadata_persists_the_run_target_and_becomes_single_use() {
-    let suffix = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-    let directory = std::env::temp_dir().join(format!(
-        "db-qbs-run-cleanup-test-{}-{suffix}",
-        std::process::id()
-    ));
-    fs::create_dir(&directory).unwrap();
-    let store = HistoryStore::open(&directory).unwrap();
-
-    store
-        .register_cleanup(
-            "record-1",
-            "target-ds",
-            "ORDERS",
-            &["ID".to_owned(), "TENANT".to_owned()],
-        )
-        .unwrap();
-    let pending = store.cleanup("record-1").unwrap().unwrap();
-    assert_eq!(pending.status, "pending");
-    assert_eq!(pending.primary_key, vec!["ID", "TENANT"]);
-
-    store.mark_cleanup_available("record-1").unwrap();
-    assert_eq!(
-        store.cleanup("record-1").unwrap().unwrap().status,
-        "available"
-    );
-    store.mark_cleaned("record-1", 7).unwrap();
-    let cleaned = store.cleanup("record-1").unwrap().unwrap();
-    assert_eq!(cleaned.status, "cleaned");
-    assert_eq!(cleaned.deleted_rows, Some(7));
-
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
 fn evidence_round_trips_and_save_preserves_the_original_snapshot_without_passwords() {
     let suffix = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
     let directory = std::env::temp_dir().join(format!(
@@ -329,4 +296,120 @@ fn opening_an_old_history_schema_adds_empty_evidence_without_inventing_facts() {
         RunEvidence::default()
     );
     fs::remove_dir_all(directory).unwrap();
+}
+
+/// 名字快照原样存回原样读出，`save` 也不许把它改掉（#259）。
+#[test]
+fn the_task_name_snapshot_round_trips_and_save_leaves_it_alone() {
+    let suffix = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "db-qbs-run-task-name-test-{}-{suffix}",
+        std::process::id()
+    ));
+    fs::create_dir(&directory).unwrap();
+    let store = HistoryStore::open(&directory).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 25, 12, 0, 0).unwrap();
+    let mut history = RunHistory::accepted("record-name", "task-1", SOURCE_SQL, now);
+    history.task_name = "持仓明细".to_owned();
+    store.insert(&history, now, 90).unwrap();
+
+    let mut stored = store.get("record-name").unwrap().unwrap();
+    assert_eq!(stored.task_name, "持仓明细");
+    // 后续的落盘走的是同一条 UPDATE：它写别的字段，不该顺手动这一份快照。
+    stored.message = Some("later failure".to_owned());
+    store.save(&stored, now, 90).unwrap();
+    assert_eq!(store.get("record-name").unwrap().unwrap().task_name, "持仓明细");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+/// 老库里没有这一列：迁出来是空串，不是拿当前任务名补写的假快照（#259）。
+#[test]
+fn opening_an_old_history_schema_leaves_the_task_name_empty() {
+    let suffix = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "db-qbs-run-task-name-migration-test-{}-{suffix}",
+        std::process::id()
+    ));
+    fs::create_dir(&directory).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 25, 12, 0, 0).unwrap();
+    let store = HistoryStore::open(&directory).unwrap();
+    let mut history = RunHistory::accepted("old-record", "task-1", SOURCE_SQL, now);
+    history.task_name = "持仓明细".to_owned();
+    store.insert(&history, now, 90).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(directory.join("db-qbs.sqlite3")).unwrap();
+    connection
+        .execute("ALTER TABLE run_history DROP COLUMN task_name", [])
+        .unwrap();
+    drop(connection);
+
+    let reopened = HistoryStore::open(&directory).unwrap();
+    assert_eq!(reopened.get("old-record").unwrap().unwrap().task_name, "");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+/// #264：跑成功的一次清空后导入，历史上记的是 `REPLACED`，不是 `SWAPPED`。
+///
+/// 这一格从前是父进程折出来的：`SUCCEEDED` 一律折成 `SWAPPED`。可「目标表遭遇了什么」
+/// 取决于本次运行的写入模式，而只有跑数的子进程知道那件事——所以终态日志现在直说，
+/// 父进程照抄。两个词不能合并：`SWAPPED` 的意思是「按主键合并进目标表」。
+#[test]
+fn a_successful_clear_then_import_is_recorded_as_replaced() {
+    let accepted_at = Utc.with_ymd_and_hms(2026, 8, 15, 9, 59, 59).unwrap();
+    let lines = [
+        r#"{"ts":"2026-08-15T10:00:01.000Z","event":"stage_changed","run_id":"run-9","stage":"PREPARING"}"#,
+        r#"{"ts":"2026-08-15T10:00:02.000Z","event":"run_opened","run_id":"run-9","staging_table":"STG_9"}"#,
+        r#"{"ts":"2026-08-15T10:00:07.000Z","event":"run_finished","run_id":"run-9","terminal":"SUCCEEDED","stage":"SUCCEEDED","target_table_effect":"REPLACED","message":"run completed successfully","source_rows":3,"staged_rows":3,"purged_rows":11}"#,
+    ];
+
+    let history =
+        fold_history_lines("record-9", "task-1", SOURCE_SQL, accepted_at, &lines).unwrap();
+
+    assert_eq!(history.outcome.as_deref(), Some("SUCCEEDED"));
+    assert_eq!(history.target_table_effect.as_deref(), Some("REPLACED"));
+    assert_eq!(history.purged_rows, Some(11));
+}
+
+/// 同一条路上的对照：追加写照旧是 `SWAPPED`，而**老日志里没有这个字段**时，
+/// 父进程仍按原来那套折算（`SUCCEEDED` ⇒ `SWAPPED`）。加一个值不能让旧记录改口径。
+#[test]
+fn a_run_finished_line_without_the_new_field_still_folds_the_old_way() {
+    let accepted_at = Utc.with_ymd_and_hms(2026, 8, 15, 9, 59, 59).unwrap();
+    let lines = [
+        r#"{"ts":"2026-08-15T10:00:02.000Z","event":"run_opened","run_id":"run-8","staging_table":"STG_8"}"#,
+        r#"{"ts":"2026-08-15T10:00:07.000Z","event":"run_finished","run_id":"run-8","terminal":"SUCCEEDED","stage":"SUCCEEDED","message":"run completed successfully"}"#,
+    ];
+
+    let history =
+        fold_history_lines("record-8", "task-1", SOURCE_SQL, accepted_at, &lines).unwrap();
+
+    assert_eq!(history.target_table_effect.as_deref(), Some("SWAPPED"));
+}
+
+/// #264：不认识的终态**原样搬运**，不折成 `UNKNOWN`。
+///
+/// 和 `stage` 那一列同一个规矩。子进程比父进程新、多报了一个词，正是最该被看见的时候；
+/// 从前这里的 `match` 会把它吞掉，屏幕上就只剩「说不清」。真正的说不清只有一种：
+/// 子进程自己就没能判定，`terminal` 是 `null`。
+#[test]
+fn an_unrecognised_terminal_is_carried_through_rather_than_collapsed() {
+    let accepted_at = Utc.with_ymd_and_hms(2026, 8, 15, 9, 59, 59).unwrap();
+    let carried = [
+        r#"{"ts":"2026-08-15T10:00:02.000Z","event":"run_opened","run_id":"run-x","staging_table":"STG_X"}"#,
+        r#"{"ts":"2026-08-15T10:00:06.000Z","event":"commit_diagnosed","run_id":"run-x","terminal":"SOMETHING_NEW","message":"a newer child said so"}"#,
+        r#"{"ts":"2026-08-15T10:00:07.000Z","event":"run_finished","run_id":"run-x","terminal":"FAILED","stage":"COMMITTING","message":"commit failed"}"#,
+    ];
+    let history =
+        fold_history_lines("record-x", "task-1", SOURCE_SQL, accepted_at, &carried).unwrap();
+    assert_eq!(history.target_table_effect.as_deref(), Some("SOMETHING_NEW"));
+
+    // 子进程说不出来的时候（`terminal` 是 null），那才是 UNKNOWN。
+    let undetermined = [
+        r#"{"ts":"2026-08-15T10:00:02.000Z","event":"run_opened","run_id":"run-y","staging_table":"STG_Y"}"#,
+        r#"{"ts":"2026-08-15T10:00:06.000Z","event":"commit_diagnosed","run_id":"run-y","terminal":null,"message":"无法确定目标表是否已被切换"}"#,
+        r#"{"ts":"2026-08-15T10:00:07.000Z","event":"run_finished","run_id":"run-y","terminal":"FAILED","stage":"COMMITTING","message":"commit failed"}"#,
+    ];
+    let history =
+        fold_history_lines("record-y", "task-1", SOURCE_SQL, accepted_at, &undetermined).unwrap();
+    assert_eq!(history.target_table_effect.as_deref(), Some("UNKNOWN"));
 }

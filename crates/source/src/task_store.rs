@@ -1,6 +1,8 @@
 use std::fs::{self, OpenOptions, Permissions};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use rand::RngCore;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -34,7 +36,10 @@ pub struct TaskInput {
 }
 
 impl TaskInput {
-    fn validate(&self) -> Result<(), String> {
+    /// 任务定义能不能被存下来。**理由是给人看的一句话**，因此它必须能走到 400 上去——
+    /// 存储层把它和「SQLite 写不动了」混成同一个 `Err(String)`，HTTP 那边就只能一律 500，
+    /// 而 500 说的是「服务端坏了」，不是「你写的这条 cron 不合法」（#265）。
+    pub fn validate(&self) -> Result<(), String> {
         if self.source_datasource_id.trim().is_empty() {
             return Err("必须选一个源端数据源".to_owned());
         }
@@ -45,8 +50,15 @@ impl TaskInput {
     }
 }
 
+/// 任务表的门。
+///
+/// 连接进了 `Mutex`：`rusqlite::Connection` 是 `Send` 而**不是** `Sync`，
+/// 多线程 accept 循环（#255）要求 `Api` 整体 `Sync`，一个裸连接直接编译不过。
+/// 两条路里选了它，没选运行历史那种「每次调用重开一个连接」：
+/// 任务表的每次访问都是一条毫秒级的本地语句，重开连接的开销反而更大；
+/// 而**锁只在一条 SQL 的时长内攥着**，Oracle 那些十几秒的阻塞取数一律在锁外。
 pub struct TaskStore {
-    connection: Connection,
+    connection: Mutex<Connection>,
 }
 
 impl TaskStore {
@@ -80,7 +92,23 @@ impl TaskStore {
             )
             .map_err(|error| format!("初始化 SQLite 任务表失败：{error}"))?;
 
-        Ok(Self { connection })
+        // 同一个库文件此刻被四个连接（任务、数据源、鉴权、运行历史）分头打开，
+        // 多线程之后它们会真的撞上。忙等待跟运行历史取同一个 5 秒。
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(|error| format!("配置 SQLite 忙等待失败：{error}"))?;
+
+        Ok(Self {
+            connection: Mutex::new(connection),
+        })
+    }
+
+    /// 攥住连接。锁中毒（持锁线程 panic）只可能出在这几条 SQL 里，
+    /// 那时库的状态已经不可信，报错比 `into_inner()` 硬闯诚实。
+    fn connection(&self) -> Result<MutexGuard<'_, Connection>, String> {
+        self.connection
+            .lock()
+            .map_err(|_| "SQLite 任务库的锁已损坏".to_owned())
     }
 
     pub fn create(&self, input: TaskInput) -> Result<Task, String> {
@@ -92,7 +120,7 @@ impl TaskStore {
             target_datasource_id: input.target_datasource_id,
             spec: input.spec,
         };
-        self.connection
+        self.connection()?
             .execute(
                 "INSERT INTO tasks (task_id, name, source_datasource_id, target_datasource_id, spec)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -109,8 +137,8 @@ impl TaskStore {
     }
 
     pub fn list(&self) -> Result<Vec<Task>, String> {
-        let mut statement = self
-            .connection
+        let connection = self.connection()?;
+        let mut statement = connection
             .prepare(
                 "SELECT task_id, name, source_datasource_id, target_datasource_id, spec
                    FROM tasks ORDER BY rowid",
@@ -125,7 +153,7 @@ impl TaskStore {
     }
 
     pub fn get(&self, task_id: &str) -> Result<Option<Task>, String> {
-        self.connection
+        self.connection()?
             .query_row(
                 "SELECT task_id, name, source_datasource_id, target_datasource_id, spec
                    FROM tasks WHERE task_id = ?1",
@@ -139,7 +167,7 @@ impl TaskStore {
     pub fn update(&self, task_id: &str, input: TaskInput) -> Result<Option<Task>, String> {
         input.validate()?;
         let updated_rows = self
-            .connection
+            .connection()?
             .execute(
                 "UPDATE tasks
                     SET name = ?2, source_datasource_id = ?3, target_datasource_id = ?4, spec = ?5
@@ -163,7 +191,7 @@ impl TaskStore {
         let Some(task) = self.get(task_id)? else {
             return Ok(None);
         };
-        self.connection
+        self.connection()?
             .execute("DELETE FROM tasks WHERE task_id = ?1", [task_id])
             .map_err(|error| format!("删除 SQLite 任务失败：{error}"))?;
         Ok(Some(task))
@@ -174,8 +202,8 @@ impl TaskStore {
 /// 悬空引用会把失败推迟到发起运行那一刻才炸，那时用户手上只有一条「连不上」。
 impl TaskStore {
     pub fn names_referencing(&self, datasource_id: &str) -> Result<Vec<String>, String> {
-        let mut statement = self
-            .connection
+        let connection = self.connection()?;
+        let mut statement = connection
             .prepare(
                 "SELECT name FROM tasks
                   WHERE source_datasource_id = ?1 OR target_datasource_id = ?1
@@ -301,6 +329,7 @@ mod tests {
 
     use super::*;
     use crate::task_spec::ColumnMapping;
+    use db_qbs_shared::WriteMode;
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -317,6 +346,9 @@ mod tests {
             dblink: Some("FA".to_owned()),
             owner: "HTBR45".to_owned(),
             table: "T_R_FR_ASTSTAT".to_owned(),
+            write_mode: WriteMode::Append,
+            schedule_cron: None,
+            schedule_enabled: false,
             columns: vec![mapping("ID"), mapping("D_BIZ")],
             primary_key: vec!["ID".to_owned()],
             where_clause: Some("D_BIZ = DATE '2026-08-14'".to_owned()),
@@ -425,6 +457,131 @@ mod tests {
         // 报错就说明没丢干净：那既不是「丢弃」，也没有从界面上恢复的办法。
         assert!(store.list().unwrap().is_empty());
         assert_eq!(store.get("stale").unwrap(), None);
+
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// #261 给任务定义加了 `write_mode`，而它是**必填**——老规格上没有这个键，
+    /// 反序列化不出来，于是走同一条路：整表丢弃。
+    ///
+    /// 这一票明知会把现有测试任务全部清掉，POC 阶段已确认可接受、不做迁移。把它钉在
+    /// 这里是为了让「代价是什么」有一处白纸黑字，而不是靠改这个字段的人自己记得。
+    /// 想不丢，唯一的办法是给字段一个 `#[serde(default)]`——那等于让「这条老任务
+    /// 到底是不是追加写」由默认值替用户回答，而这一票的全部内容就是不许静默替人回答。
+    #[test]
+    fn a_task_row_that_predates_the_write_mode_field_is_dropped_whole() {
+        let directory = temp_directory();
+        let database = directory.join(DATABASE_FILE);
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE tasks (
+                    task_id              TEXT PRIMARY KEY NOT NULL,
+                    name                 TEXT NOT NULL,
+                    source_datasource_id TEXT NOT NULL,
+                    target_datasource_id TEXT NOT NULL,
+                    spec                 TEXT NOT NULL
+                );
+                INSERT INTO tasks VALUES (
+                    'pre-write-mode', 'pre write mode task', 'src1', 'tgt1',
+                    '{\"owner\":\"HTBR45\",\"table\":\"T\",\"target_table\":\"M\",\"columns\":[{\"source\":\"ID\",\"target\":\"ID\"}],\"primary_key\":[\"ID\"]}'
+                );",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = TaskStore::open(&directory).unwrap();
+        assert!(store.list().unwrap().is_empty());
+        assert_eq!(store.get("pre-write-mode").unwrap(), None);
+
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// #265 又给任务定义加了两个标量，其中 `schedule_enabled` 同样是**必填**——于是
+    /// 刚经历过 #261 那次丢弃的任务行，在这一票落地时再一次反序列化不出来，整表再丢一次。
+    ///
+    /// 两票的形状改动是刻意排在一起落的（#265 的票面写着这件事）：一次部署里合并进来，
+    /// 用户只会看见一次「任务没了」，而不是两次。这条测试钉的是代价本身，
+    /// 不是丢弃的次数——次数由合并节奏决定，代价由这里说清。
+    #[test]
+    fn a_task_row_that_predates_the_schedule_fields_is_dropped_whole() {
+        let directory = temp_directory();
+        let database = directory.join(DATABASE_FILE);
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE tasks (
+                    task_id              TEXT PRIMARY KEY NOT NULL,
+                    name                 TEXT NOT NULL,
+                    source_datasource_id TEXT NOT NULL,
+                    target_datasource_id TEXT NOT NULL,
+                    spec                 TEXT NOT NULL
+                );
+                INSERT INTO tasks VALUES (
+                    'pre-schedule', 'pre schedule task', 'src1', 'tgt1',
+                    '{\"owner\":\"HTBR45\",\"table\":\"T\",\"target_table\":\"M\",\"write_mode\":\"APPEND\",\"columns\":[{\"source\":\"ID\",\"target\":\"ID\"}],\"primary_key\":[\"ID\"]}'
+                );",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = TaskStore::open(&directory).unwrap();
+        assert!(store.list().unwrap().is_empty());
+        assert_eq!(store.get("pre-schedule").unwrap(), None);
+
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// 调度两个字段存得下、读得回，而且**存的是原文**：`0 2 * * *` 读回来还是
+    /// `0 2 * * *`，不是某个解析后的等价物。人写的那一行才是真相源。
+    #[test]
+    fn the_schedule_fields_round_trip_as_written() {
+        let directory = temp_directory();
+        let store = TaskStore::open(&directory).unwrap();
+        let created = store
+            .create(TaskInput {
+                name: "nightly".to_owned(),
+                source_datasource_id: "src1".to_owned(),
+                target_datasource_id: "tgt1".to_owned(),
+                spec: TaskSpec {
+                    schedule_cron: Some("0 2 * * *".to_owned()),
+                    schedule_enabled: true,
+                    ..sample_spec()
+                },
+            })
+            .unwrap();
+
+        let read_back = store.get(&created.task_id).unwrap().unwrap();
+        assert_eq!(read_back.spec.schedule_cron.as_deref(), Some("0 2 * * *"));
+        assert!(read_back.spec.schedule_enabled);
+
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// 无主键的任务定义能存能读：`primary_key` 是空数组，不是「还没填」。
+    #[test]
+    fn a_spec_with_no_primary_key_round_trips_because_empty_is_a_value() {
+        let directory = temp_directory();
+        let store = TaskStore::open(&directory).unwrap();
+        let created = store
+            .create(TaskInput {
+                name: "append only".to_owned(),
+                source_datasource_id: "src1".to_owned(),
+                target_datasource_id: "tgt1".to_owned(),
+                spec: TaskSpec {
+                    primary_key: Vec::new(),
+                    ..sample_spec()
+                },
+            })
+            .unwrap();
+
+        let read_back = store.get(&created.task_id).unwrap().unwrap();
+        assert!(read_back.spec.primary_key.is_empty());
+        assert_eq!(read_back.spec.write_mode, WriteMode::Append);
 
         drop(store);
         std::fs::remove_dir_all(directory).unwrap();

@@ -6,12 +6,15 @@
 //! `SinkService` 接缝后面进程内直调了，只有路由这一层还够不着（#200，跟着 #198 走）。
 //!
 //! 路由表是**数据**（`routes()`），不是一串 `if`。匹配分两趟：字面量样式先走一趟，
-//! 带占位的样式后走一趟，所以 `/v1/runs/cleanup` 不可能被 `/v1/runs/{}` 吃掉，
-//! **无论表里怎么排**——声明顺序不承重。
+//! 带占位的样式后走一趟，所以像 `/v1/runs/commit` 这样的字面量路由不可能被
+//! `/v1/runs/{}` 吃掉，**无论表里怎么排**——声明顺序不承重。
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 
-use db_qbs_shared::{write_log_line_with_fields, AgentInfo, CleanupRunRequest, LogEvent, LogLevel};
+use db_qbs_shared::{write_log_line_with_fields, AgentInfo, LogEvent, LogLevel};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -162,18 +165,15 @@ fn match_pattern<'a>(pattern: &str, path: &'a str) -> Option<&'a str> {
 /// 全部 v1 路由。**表里的先后不承重**——`Api::handle` 分两趟走，字面量永远压过占位。
 ///
 /// 表按 `F` 现造：handler 是 `fn(&Api<'_, F>, ..)`，泛型函数里放不下一份
-/// `static`。十一条路由的一次 `Vec`，与它后面那次 MySQL 往返比可以忽略。
+/// `static`。十条路由的一次 `Vec`，与它后面那次 MySQL 往返比可以忽略。
 pub fn routes<F: DestinationFactory>() -> Vec<Route<F>> {
     use Method::{Get, Post};
     vec![
         Route::new(Get, "/v1/agent/info", |api, _request, _run_id| {
-            json_response(200, api.agent)
+            json_response(200, &api.agent_info())
         }),
         Route::new(Post, "/v1/runs", |api, request, _run_id| {
             handle_open(request, api.service)
-        }),
-        Route::new(Post, "/v1/runs/cleanup", |api, request, _run_id| {
-            handle_cleanup(request, api.service)
         }),
         Route::new(
             Post,
@@ -205,10 +205,29 @@ pub fn routes<F: DestinationFactory>() -> Vec<Route<F>> {
 }
 
 impl<F: DestinationFactory> Api<'_, F> {
+    /// 这台 agent 的身份自述 + 它最近一次观察到的 MySQL（#257）。
+    ///
+    /// 身份那三个字段在进程起来之前就定了（`load_agent_identity` 先于监听），
+    /// 而 MySQL 那一份**要等到手上有凭据的请求来过一次才有**——sink 自己不持有目标端
+    /// 凭据（ADR-0037 §2）。所以这一份是每次现拼的：静态身份 + 服务里的那份缓存。
+    /// 没观察过就不带 `mysql` 字段，读的一方按「未知」处理，不许当成 8.0。
+    pub fn agent_info(&self) -> AgentInfo {
+        AgentInfo {
+            mysql: self.service.observed_mysql(),
+            // 并发额度也在这里补：它是 `sink.toml` 的值，而 source 侧的调度器要靠它
+            // 在派发之前就守住这条线（#266）。身份那三个字段之外，这是第二样
+            // 「进程起来之后才知道」的东西。
+            // 报文里那一项是 `u32`（同一个概念只有一种类型，见 `AgentInfo`）；
+            // 本地那一份是 `usize`，因为它要和在飞的条数直接比。
+            max_concurrent_runs: u32::try_from(self.service.max_concurrent_runs()).ok(),
+            ..self.agent.clone()
+        }
+    }
+
     /// 这个 crate 的 HTTP 面**唯一**的入口。
     ///
     /// 两趟匹配：先字面量样式，再带占位的样式。这就是「顺序不承重」的全部机制——
-    /// 从前 `/v1/runs/cleanup` 要靠写在按 run id 分发的那一支之前才不被吃掉，
+    /// 从前 `/v1/runs/` 下的字面量路由要靠写在按 run id 分发的那一支之前才不被吃掉，
     /// 现在即便把表倒过来写，结果也一个字节不变。
     pub fn handle(&self, request: &Request) -> Response {
         let routes = routes::<F>();
@@ -286,7 +305,8 @@ pub fn serve(config: SinkConfig) -> Result<(), String> {
         );
     }
     // sink 启动**不再连 MySQL**：连接按 run 建，连不上的失败点在 POST /v1/runs。
-    let service = SinkService::with_factory(MysqlFactory);
+    let service = SinkService::with_factory(MysqlFactory)
+        .with_max_concurrent_runs(config.max_concurrent_runs);
     let server = Server::http(&config.listen)
         .map_err(|error| format!("监听 {} 失败：{error}", config.listen))?;
 
@@ -294,8 +314,65 @@ pub fn serve(config: SinkConfig) -> Result<(), String> {
         service: &service,
         agent: &agent,
     };
-    for request in server.incoming_requests() {
-        handle_request(request, &api);
+    // 多线程 accept：HTTP_WORKER_THREADS 条工作线程**共用同一个监听器**（#260）。
+    //
+    // 在这之前只有一条线程，一个请求全程处理完才回头取下一个——而这台服务上每个请求
+    // 都是一次同步的 MySQL 往返：建暂存表、写批次、切换。一次切换（整表 upsert，
+    // 分钟级）期间，**所有**其他任务的批次推送都堵在门外，「同一时刻只有一个任务在跑」
+    // 因此是进程结构决定的，跟任务那层的互斥键没关系。
+    //
+    // 用 `thread::scope` 而不是 `thread::spawn`：`Api` 借着栈上的 `service` 与 `agent`，
+    // 作用域线程让借用照旧成立，不必把这两份状态搬进 `Arc`。
+    //
+    // 线程数取固定值，不按核数算：这里等的是**阻塞 IO**，不是 CPU。它也**不是**并发额度——
+    // 同时能有几个 run 在飞由 `max_concurrent_runs` 说了算，工作线程只决定同一瞬间
+    // 能有几个 HTTP 请求在处理。线程比额度多几条是故意的：额度满时那句拒绝、
+    // 以及 `GET /v1/runs/{}` 这类只读接口，得能在几个慢写入在飞的时候照样答得出来。
+    let terminated = AtomicBool::new(false);
+    let workers: Vec<_> = thread::scope(|scope| {
+        let handles: Vec<_> = (0..HTTP_WORKER_THREADS)
+            .map(|_| scope.spawn(|| accept_loop(&server, &api, &terminated)))
+            .collect();
+        handles
+            .into_iter()
+            // 一条工作线程 panic 了，剩下几条照常服务——但退出时得说出来，
+            // 否则「服务半死不活」会以退出码 0 收场。
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err("HTTP 工作线程 panic 退出".to_owned()))
+            })
+            .collect()
+    });
+    for outcome in workers {
+        outcome?;
+    }
+    Ok(())
+}
+
+/// 共用监听器的工作线程数。见 `serve` 里那段说明。
+const HTTP_WORKER_THREADS: usize = 8;
+
+/// 一条工作线程的一辈子：取一个请求、处理完、回头再取。
+///
+/// `recv_timeout` 在多条线程上同时调是 tiny_http 支持的（`Server: Send + Sync`，
+/// 内部自带队列）。用带超时的轮询而不是无限阻塞的 `recv()`，是为了让**任何一条线程
+/// 取请求失败时，其余几条也走得掉**：否则 `serve` 会卡在 `join` 上，进程既不服务
+/// 也不退出。sink 没有 SIGTERM 处理，收到信号按默认语义直接结束进程。
+fn accept_loop<F: DestinationFactory>(
+    server: &Server,
+    api: &Api<'_, F>,
+    terminated: &AtomicBool,
+) -> Result<(), String> {
+    while !terminated.load(Ordering::Relaxed) {
+        match server.recv_timeout(Duration::from_millis(100)) {
+            Ok(Some(request)) => handle_request(request, api),
+            Ok(None) => {}
+            Err(error) => {
+                terminated.store(true, Ordering::Relaxed);
+                return Err(format!("接收 HTTP 请求失败：{error}"));
+            }
+        }
     }
     Ok(())
 }
@@ -345,20 +422,6 @@ fn handle_open(request: &Request, service: &SinkService<impl DestinationFactory>
     match service.open(request) {
         // 两种 outcome 都是 200，区别写在报文里——那份暗号由 `OpenOutcome` 一处编码。
         Ok(outcome) => json_response(200, &outcome.into_response()),
-        Err(error) => error_response(error),
-    }
-}
-
-fn handle_cleanup(request: &Request, service: &SinkService<impl DestinationFactory>) -> Response {
-    if !has_json_content_type(request) {
-        return error_response(unsupported_media_type(None));
-    }
-    let request: CleanupRunRequest = match read_json(request) {
-        Ok(request) => request,
-        Err(error) => return error_response(error),
-    };
-    match service.cleanup(request) {
-        Ok(response) => json_response(200, &response),
         Err(error) => error_response(error),
     }
 }

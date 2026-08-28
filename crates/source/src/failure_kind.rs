@@ -37,7 +37,9 @@ pub enum FailureKind {
     DataRejected,
     /// 目标端环境配置错（`max_allowed_packet` 一类），不是数据问题。
     SinkEnvironment,
-    /// 目标表正被另一个 run 的切换事务占着（`SWAP_TARGET_BUSY`）。
+    /// 目标端此刻腾不出手：目标表正被另一个 run 的切换事务占着（`SWAP_TARGET_BUSY`），
+    /// 或目标表已被另一次运行占住、或 agent 的并发额度满了（`TARGET_TABLE_BUSY` /
+    /// `RUN_QUOTA_EXCEEDED`，#260）。三者的处置是同一条：**等一等重跑**，不必查数据。
     TargetBusy,
     /// 校验门禁未通过（`VERIFY_FAILED`）。**只由目标端判**：门禁开在切换事务里，
     /// 那是唯一能把「数的那份」和「切的那份」钉成同一个快照的地方。
@@ -50,6 +52,11 @@ pub enum FailureKind {
     Defect,
     /// 结局未知：进程消失、服务重启、commit 断连后仍判不出。
     Unknown,
+    /// 到点了但没发起：上一次还没结束，本次跳过（#266）。
+    ///
+    /// 它是本闭集里唯一一个**什么都没做**的值：没连过库、没到过代理、目标表未被改动。
+    /// 落成一行历史是为了让那个触发时刻有答案，不是为了报告一次故障。
+    Skipped,
 }
 
 impl FailureKind {
@@ -71,6 +78,7 @@ impl FailureKind {
             Self::VerifyFailed => "VERIFY_FAILED",
             Self::Defect => "DEFECT",
             Self::Unknown => "UNKNOWN",
+            Self::Skipped => "SKIPPED",
         }
     }
 
@@ -81,7 +89,7 @@ impl FailureKind {
         match code {
             "PRECHECK_FAILED" => Self::MappingPrecheck,
             "VERIFY_FAILED" => Self::VerifyFailed,
-            "SWAP_TARGET_BUSY" => Self::TargetBusy,
+            "SWAP_TARGET_BUSY" | "TARGET_TABLE_BUSY" | "RUN_QUOTA_EXCEEDED" => Self::TargetBusy,
             "DATA_REJECTED" => Self::DataRejected,
             "SINK_ENVIRONMENT" => Self::SinkEnvironment,
             "STAGING_CREATE_FAILED" | "BATCH_WRITE_FAILED" | "SWAP_FAILED" => Self::SinkWrite,
