@@ -2299,3 +2299,261 @@ fn resetting_the_password_returns_to_the_factory_default_and_burns_every_session
         "重置之后旧会话还认——而跑这条命令的人正是进不去的那个"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 并发（#255）
+//
+// source 的 accept 循环已经是多条工作线程共用一个监听器，所以下面这几条问的是
+// **同一份 `Api` 被几条线程同时使唤时会怎样**。它们仍然走 `Api::handle` 这一个入口，
+// 不开新的验证面：并发是这一层的性质，不是一台新机器。
+// ---------------------------------------------------------------------------
+
+/// 多线程 accept 的编译期前提：`Api` 和它借着的每一份状态都得是 `Sync`。
+///
+/// 这条看着像废话，但它是**唯一**会在有人把裸 `rusqlite::Connection`
+/// （`Send` 而非 `Sync`）放回 store 里时当场喊停的地方——否则下一个发现的人
+/// 是 `server.rs` 里那段 `thread::scope`，报错位置离肇事处十万八千里。
+#[test]
+fn every_piece_of_shared_state_is_shareable_across_threads() {
+    fn assert_sync<T: Sync>() {}
+    assert_sync::<Api<'static>>();
+    assert_sync::<TaskStore>();
+    assert_sync::<DatasourceStore>();
+    assert_sync::<AuthStore>();
+    assert_sync::<HistoryStore>();
+    assert_sync::<Arc<Mutex<AgentStore>>>();
+    assert_sync::<Arc<Mutex<RunState>>>();
+}
+
+/// 一条线程正卡在慢 Oracle 取数里，另一条线程拉任务列表**不等它**。
+///
+/// 这是这一票交付的那句话本身。判据是时间：取数固定睡 2 秒，列表那一发必须在
+/// 它睡醒之前就回来了。慢的那一头走 `/api/target/check`，因为它**先摸数据源库、
+/// 再做阻塞取数**——数据源那把锁若跨过了取数，这条会当场超时。
+#[test]
+fn a_slow_oracle_fetch_does_not_block_another_client_listing_tasks() {
+    static DESCRIBING: AtomicU64 = AtomicU64::new(0);
+    const SLOW_DESCRIBE: Duration = Duration::from_secs(2);
+
+    fn slow_describe(
+        access: &OracleAccess,
+        spec: &TaskSpec,
+    ) -> Result<Vec<SourceColumn>, SourceReadError> {
+        DESCRIBING.fetch_add(1, Ordering::SeqCst);
+        thread::sleep(SLOW_DESCRIBE);
+        described_id(access, spec)
+    }
+
+    let rig = Rig::new();
+    // 作用域线程只借，不搬：`Rig` 得活到 `thread::scope` 之外（`Drop` 要清临时目录）。
+    let rig = &rig;
+    let (_agent_id, source_id, target_id) = rig.seed();
+    rig.create_task("holdings", "HOLDINGS", &(source_id.clone(), target_id.clone()));
+    let check = format!(
+        r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"primary_key":["ID"]}}}}"#
+    );
+
+    thread::scope(|scope| {
+        let slow = scope.spawn(|| rig.post_with_describer("/api/target/check", &check, slow_describe));
+
+        // 等它真的进到取数里，再计时——否则量到的可能只是线程还没起来。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while DESCRIBING.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "慢取数一直没开始");
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let started = Instant::now();
+        let listed = rig.get("/api/tasks");
+        let elapsed = started.elapsed();
+        assert_eq!(listed.status, 200, "{}", listed.body_text());
+        assert_eq!(rig.json(&listed).as_array().unwrap().len(), 1);
+        assert!(
+            elapsed < SLOW_DESCRIBE / 2,
+            "取数把任务列表一起冻住了：列表等了 {elapsed:?}"
+        );
+
+        // 慢的那一头照旧要走完；它撞在桩 agent 的 503 上，那不是这条测试问的事。
+        let _ = slow.join().unwrap();
+    });
+}
+
+/// 几条线程同时读写任务表：不丢写、不重 id、不死锁。
+///
+/// 每条写线程建 5 条，读线程全程不停地拉列表。判据有两条——
+/// 末了库里不多不少 40 条且 id 两两不同（写没丢、也没互相盖掉），
+/// 读线程每一发都是 200（读没被写打断成半张表）。
+#[test]
+fn concurrent_task_writes_and_reads_neither_lose_a_write_nor_deadlock() {
+    const WRITERS: usize = 8;
+    const PER_WRITER: usize = 5;
+    const READERS: usize = 4;
+
+    let rig = Rig::new();
+    let rig = &rig;
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let datasources = (source_id, target_id);
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let created: Vec<String> = thread::scope(|scope| {
+        let readers: Vec<_> = (0..READERS)
+            .map(|_| {
+                let done = Arc::clone(&done);
+                scope.spawn(move || {
+                    let mut rounds = 0_usize;
+                    while !done.load(Ordering::SeqCst) {
+                        let listed = rig.get("/api/tasks");
+                        assert_eq!(listed.status, 200, "{}", listed.body_text());
+                        assert!(rig.json(&listed).is_array());
+                        rounds += 1;
+                    }
+                    rounds
+                })
+            })
+            .collect();
+        let writers: Vec<_> = (0..WRITERS)
+            .map(|writer| {
+                let datasources = datasources.clone();
+                scope.spawn(move || {
+                    (0..PER_WRITER)
+                        .map(|index| {
+                            rig.create_task(
+                                &format!("并发任务-{writer}-{index}"),
+                                "HOLDINGS",
+                                &datasources,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+
+        let created: Vec<String> = writers
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap())
+            .collect();
+        done.store(true, Ordering::SeqCst);
+        for reader in readers {
+            assert!(reader.join().unwrap() > 0, "读线程一发都没跑成");
+        }
+        created
+    });
+
+    assert_eq!(created.len(), WRITERS * PER_WRITER);
+    let unique: std::collections::HashSet<&String> = created.iter().collect();
+    assert_eq!(unique.len(), created.len(), "并发建任务撞出了重复 task_id");
+
+    let listed = rig.json(&rig.get("/api/tasks"));
+    let stored: std::collections::HashSet<String> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|task| task["task_id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(stored.len(), created.len(), "并发写丢了任务");
+    for task_id in &created {
+        assert!(stored.contains(task_id), "{task_id} 没落库");
+    }
+}
+
+/// 同一条任务被几条线程同时发起：**恰好一个** 202，其余全是 409。
+///
+/// 「一条任务同时只跑一次」这条互斥原来只有一条 accept 线程护着，它是不是真的互斥
+/// 从来没被问过。现在问了。
+#[test]
+fn concurrent_starts_of_one_task_elect_exactly_one_winner() {
+    const STARTERS: usize = 8;
+
+    let directory = temp_directory();
+    let release = directory.join("release-children");
+    let rig = Rig::with_child(&format!(
+        "while [ ! -f '{}' ]; do sleep 0.02; done\nexit 0\n",
+        release.display()
+    ));
+    let rig = &rig;
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+    let body = format!(r#"{{"task_id":"{task_id}"}}"#);
+
+    let statuses: Vec<u16> = thread::scope(|scope| {
+        let handles: Vec<_> = (0..STARTERS)
+            .map(|_| {
+                let body = body.clone();
+                scope.spawn(move || rig.post("/api/runs", &body))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap().status)
+            .collect()
+    });
+
+    let accepted = statuses.iter().filter(|status| **status == 202).count();
+    let rejected = statuses.iter().filter(|status| **status == 409).count();
+    assert_eq!(accepted, 1, "同一条任务并发发起被放进去 {accepted} 次：{statuses:?}");
+    assert_eq!(rejected, STARTERS - 1, "{statuses:?}");
+
+    fs::write(&release, "").unwrap();
+    let running = rig.json(&rig.get("/api/runs"));
+    let run_record_id = running.as_array().unwrap()[0]["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    wait_for_json(rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["live"] == false
+    });
+    wait_for_empty_directory(&rig.directory.join("run-tasks"));
+    let _ = fs::remove_dir_all(directory);
+}
+
+/// 并发登录 / 认票据：会话表在多线程下不串号、也不把请求卡住。
+///
+/// `authenticate()` 落在**每一个** `/api/*` 上，是多线程之后最热的一处竞争。
+#[test]
+fn concurrent_sessions_are_issued_and_authenticated_without_crossing_wires() {
+    const CLIENTS: usize = 8;
+
+    let rig = Rig::new();
+    let rig = &rig;
+    let tokens: Vec<String> = thread::scope(|scope| {
+        let handles: Vec<_> = (0..CLIENTS)
+            .map(|_| {
+                scope.spawn(|| {
+                    let response = rig.send_anonymous(
+                        Method::Post,
+                        "/api/session",
+                        r#"{"username":"admin","password":"admin"}"#,
+                    );
+                    assert_eq!(response.status, 200, "{}", response.body_text());
+                    let cookie = response
+                        .headers
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case("Set-Cookie"))
+                        .map(|(_, value)| value.clone())
+                        .expect("登录没有下发 cookie");
+                    cookie
+                        .split(';')
+                        .next()
+                        .unwrap()
+                        .trim_start_matches(&format!("{SESSION_COOKIE}="))
+                        .to_owned()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    let unique: std::collections::HashSet<&String> = tokens.iter().collect();
+    assert_eq!(unique.len(), CLIENTS, "并发登录发出了重复票据");
+    thread::scope(|scope| {
+        for token in &tokens {
+            scope.spawn(move || {
+                let response = rig.api().handle(
+                    &Request::new(Method::Get, "/api/tasks", Vec::new())
+                        .with_header("Cookie", format!("{SESSION_COOKIE}={token}")),
+                );
+                assert_eq!(response.status, 200, "{}", response.body_text());
+            });
+        }
+    });
+}
