@@ -123,6 +123,10 @@ interface SpecShape {
   table: string;
   target_table: string;
   write_mode: "APPEND" | "CLEAR_THEN_IMPORT";
+  /** 五字段 cron（#265）。没配就是不参与调度。 */
+  schedule_cron?: string;
+  /** 开关（#265）：关着的任务一次都不会被自动触发（#266）。 */
+  schedule_enabled?: boolean;
   primary_key: string[];
   columns: { source: string; target: string }[];
   where_clause?: string;
@@ -147,6 +151,9 @@ let tasks: TaskRow[] = [
       table: "CUSTOMER",
       target_table: "dim_customer",
       write_mode: "APPEND",
+      // 配了周期的那一个：mock 上「排队中」与「下次触发」都靠它才看得见。
+      schedule_cron: "0 2 * * *",
+      schedule_enabled: true,
       primary_key: ["customer_id"],
       columns: [
         { source: "CUSTOMER_ID", target: "customer_id" },
@@ -240,6 +247,8 @@ function finishedRow(
     task_id: task.task_id,
     // 开跑那一刻的名字快照：改名不回改历史（#259）。
     task_name: String(task.name ?? ""),
+    // 谁发起的（#266）。默认手动——mock 里绝大多数行都是人按出来的。
+    trigger: "MANUAL",
     source_sql: generateSql(task.spec),
     evidence: evidenceFor(task),
     staging_table: `${task.spec.target_table}__stg_${overrides.run_id ?? "20260826010101_a1b2c3"}`,
@@ -285,6 +294,36 @@ function seedRuns() {
   const t2 = tasks[1];
   const hourAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
   runs = [
+    // 到点了但没发起的那一次（#266）：**没有运行标识**，目标表一个字节都没动过。
+    // 它在 mock 里留一行，是因为界面上「本次跳过」这一档只有真有这样一行才看得见。
+    finishedRow(t1, {
+      run_record_id: "rr-1000",
+      run_id: null,
+      trigger: "SCHEDULED",
+      started_at: hourAgo(50),
+      staging_table: null,
+      outcome: "FAILED",
+      target_table_effect: "DISCARDED",
+      stage: null,
+      source_rows: null,
+      staged_rows: null,
+      sink_reported_rows: null,
+      source_batches: null,
+      received_batches: null,
+      total_rows: null,
+      precount_ms: null,
+      fetch_ms: null,
+      push_ms: null,
+      commit_ms: null,
+      count_ms: null,
+      cursor_ms: null,
+      message: "上次尚未结束，本次跳过",
+      failure_kind: "SKIPPED",
+      seq: 0,
+      rows_pushed: 0,
+      bytes: 0,
+      ms: 0,
+    }),
     finishedRow(t1, {
       run_record_id: "rr-1001",
       run_id: "20260825081500_a3f19c",
@@ -909,6 +948,44 @@ const ROUTES: Route[] = [
       if (row === undefined) return fail(404, "任务不存在");
       tasks = tasks.filter((t) => t.task_id !== id);
       return ok(row);
+    },
+  },
+
+  // ---- 调度（#266）
+  {
+    method: "GET",
+    pattern: "/api/schedule",
+    handler: () => {
+      const now = new Date();
+      const stamp = (date: Date) =>
+        `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-` +
+        `${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:` +
+        `${String(date.getMinutes()).padStart(2, "0")}`;
+      // 排一条在队里，好让「排队中」那枚徽标在 mock 上真的看得见。
+      const queuedTask = tasks.find((task) => task.spec.schedule_enabled === true);
+      return ok({
+        timezone: "CST",
+        utc_offset: "+08:00",
+        now: stamp(now),
+        queued:
+          queuedTask === undefined
+            ? []
+            : [
+                {
+                  task_id: queuedTask.task_id,
+                  task_name: String(queuedTask.name ?? ""),
+                  due_at: stamp(now),
+                  waiting_reason:
+                    "目标端 agent「上交测试环境」的并发额度已满（在飞 4，上限 4），排队等待",
+                },
+              ],
+        next_fire_times: tasks
+          .filter((task) => task.spec.schedule_enabled === true)
+          .map((task) => ({
+            task_id: task.task_id,
+            next_fire_time: stamp(new Date(now.getTime() + 3_600_000)),
+          })),
+      });
     },
   },
 

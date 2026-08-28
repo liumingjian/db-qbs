@@ -17,7 +17,12 @@ import {
   writeStatementLabel,
   writeStatementOf,
 } from "./writeMode";
-import { formatTimestamp, historyPresentation, runIdPresentation } from "./history";
+import {
+  formatTimestamp,
+  historyPresentation,
+  runIdPresentation,
+  runTriggerLabel,
+} from "./history";
 import { PrecheckReports } from "./PrecheckReports";
 import { HighlightedSql } from "./SqlEditor";
 import { rerunAction } from "./rerun";
@@ -222,6 +227,10 @@ export function RunDrawer({
               <Value label="运行记录" value={run.run_record_id} />
               {/* V15：没有 `run_id` 时写一句话，不是空白也不是横杠；两个 id 谁也不替代谁。 */}
               <Value label="目标端运行号" value={runIdPresentation(run)} />
+              {/* 谁发起的（#266）。缺席 = 前端比服务端新，那就不渲染这一行。 */}
+              {runTriggerLabel(run.trigger) !== null && (
+                <Value label="发起方式" value={runTriggerLabel(run.trigger)!} />
+              )}
               <Value label="发起于" value={formatTimestamp(run.started_at, true)} />
               <Value label="结束于" value={formatTimestamp(run.finished_at, true)} />
               <Value label="暂存表" value={run.staging_table ?? "—"} />

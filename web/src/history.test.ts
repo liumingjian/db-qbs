@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import type { RunHistory } from "./api";
-import { historyPresentation, runIdPresentation, runTaskName } from "./history";
+import {
+  failureKindLabel,
+  historyPresentation,
+  runIdPresentation,
+  runTaskName,
+  runTriggerLabel,
+} from "./history";
 
 const baseHistory: RunHistory = {
   run_record_id: "record-1",
@@ -292,5 +298,63 @@ describe("the task name a run record carries", () => {
     expect(runTaskName(history({ task_name: "" }), "订单日增量")).toBe("订单日增量");
     expect(runTaskName(history({ task_name: "   " }), "订单日增量")).toBe("订单日增量");
     expect(runTaskName({}, "订单日增量")).toBe("订单日增量");
+  });
+});
+
+describe("runTriggerLabel", () => {
+  // 夜里两点那次是自动跑的、还是有人手动补的一次，事后只有这一格答得出来（#266）。
+  it("tells a scheduled run apart from one a person pressed", () => {
+    expect(runTriggerLabel("MANUAL")).toBe("手动发起");
+    expect(runTriggerLabel("SCHEDULED")).toBe("调度发起");
+  });
+
+  // 服务端把老历史行一律迁成了 MANUAL，所以缺席只有一种解释：前端比服务端新。
+  // 那时候什么都不显示，不拿「手动」去糊一个自己不知道的事实。
+  it("shows nothing at all rather than guessing when the column is absent", () => {
+    expect(runTriggerLabel(undefined)).toBeNull();
+    expect(runTriggerLabel(null)).toBeNull();
+    expect(runTriggerLabel("")).toBeNull();
+  });
+
+  it("passes a spelling it does not know straight through", () => {
+    expect(runTriggerLabel("REPLAYED")).toBe("REPLAYED");
+  });
+});
+
+describe("failureKindLabel", () => {
+  // 「本次跳过」是闭集里唯一一个什么都没做的类目：到点了，上一次还没结束，
+  // 于是这一次没发起。它不是一次故障，是那个触发时刻的答案（#266）。
+  it("names the occurrence that was skipped rather than failed", () => {
+    expect(failureKindLabel("SKIPPED")).toBe("本次跳过");
+  });
+
+  it("passes an unknown kind through, because that means source got ahead of web", () => {
+    expect(failureKindLabel("BRAND_NEW_KIND")).toBe("BRAND_NEW_KIND");
+    expect(failureKindLabel(null)).toBeNull();
+  });
+});
+
+describe("historyPresentation on a skipped occurrence", () => {
+  it("reads as a classified failure with no run id and an untouched target table", () => {
+    const skipped: RunHistory = {
+      ...baseHistory,
+      run_id: null,
+      trigger: "SCHEDULED",
+      staging_table: null,
+      outcome: "FAILED",
+      target_table_effect: "DISCARDED",
+      stage: null,
+      sink_code: null,
+      message: "上次尚未结束，本次跳过",
+      failure_kind: "SKIPPED",
+    };
+
+    const presentation = historyPresentation(skipped);
+
+    expect(presentation.kind).toBe("failed");
+    expect(presentation.conclusion).toBe("[本次跳过] 上次尚未结束，本次跳过");
+    // 目标表效果那一格是空的：没有 `run_id`，目标端对这一次一无所知。
+    expect(presentation.terminalEffect).toBeNull();
+    expect(runIdPresentation(skipped)).toBe("未发起，目标端不知道这次运行");
   });
 });

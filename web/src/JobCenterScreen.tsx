@@ -14,8 +14,8 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ICON } from "./components/DesignSystem";
 
-import { copyTaskCurl, deleteTask, startRun } from "./api";
-import type { Datasource, RunHistory, Task } from "./api";
+import { copyTaskCurl, deleteTask, fetchScheduleState, startRun } from "./api";
+import type { Datasource, QueuedOccurrence, RunHistory, Task } from "./api";
 import { messageFrom } from "./errors";
 import { qualifiedTargetTable } from "./datasource";
 import { formatTimestamp, historyPresentation } from "./history";
@@ -132,6 +132,7 @@ export function JobCenterScreen({
     error: string | null;
   } | null>(null);
   const focusedRow = useRef<HTMLTableRowElement | null>(null);
+  const queued = useQueuedOccurrences();
 
   useEffect(() => {
     if (focusTaskId === null || !(tasks ?? []).some((task) => task.task_id === focusTaskId)) {
@@ -470,6 +471,7 @@ export function JobCenterScreen({
         </header>
 
         <JobResults
+          queued={queued}
           tasks={tasks}
           filtered={filtered}
           rows={slice.rows}
@@ -607,6 +609,7 @@ function JobResults({
   rows,
   datasources,
   latestRuns,
+  queued,
   refreshing,
   selected,
   allOnPageSelected,
@@ -631,6 +634,7 @@ function JobResults({
   rows: Task[];
   datasources: Datasource[];
   latestRuns: ReadonlyMap<string, RunHistory>;
+  queued: ReadonlyMap<string, QueuedOccurrence>;
   refreshing: boolean;
   selected: ReadonlySet<string>;
   allOnPageSelected: boolean;
@@ -773,6 +777,17 @@ function JobResults({
                       title="每次运行都会先清空目标表，原有数据不可恢复"
                     >
                       先清空再导入
+                    </span>
+                  )}
+                  {/* 到点了但还没派出去的那些（#266）。它是一个**状态**不是一项属性，
+                      所以标记里带上那一刻，`title` 上写清楚它在等什么——队列活在
+                      服务端一条后台线程里，不显示出来，屏幕上就只剩「什么都没发生」。 */}
+                  {queued.has(task.task_id) && (
+                    <span
+                      className="write-mark is-queued"
+                      title={queuedTitle(queued.get(task.task_id)!)}
+                    >
+                      排队中
                     </span>
                   )}
                 </td>
@@ -1093,4 +1108,46 @@ function BulkDeleteDialog({
       </footer>
     </Modal>
   );
+}
+
+/**
+ * 调度队列（#266）：到点了、但还没派出去的那些任务。
+ *
+ * 单独轮询而不是搭在整屏刷新上，理由是**它自己坏掉不该带走任务清单**：这一格是给
+ * 现有列表加一枚徽标的，读不到就当成没有人在排队，任务列表照旧。5 秒一次，与服务端
+ * 调度器自己的评估间隔同一个数——再快也不会有新答案。
+ */
+function useQueuedOccurrences(): ReadonlyMap<string, QueuedOccurrence> {
+  const [queued, setQueued] = useState<ReadonlyMap<string, QueuedOccurrence>>(
+    new Map(),
+  );
+  useEffect(() => {
+    let alive = true;
+    async function poll() {
+      try {
+        const state = await fetchScheduleState();
+        if (alive) {
+          setQueued(new Map(state.queued.map((row) => [row.task_id, row])));
+        }
+      } catch {
+        // 读不到就维持上一份：闪成空再闪回来比多等 5 秒更难读。
+      }
+    }
+    void poll();
+    const timer = window.setInterval(() => void poll(), 5000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+  return queued;
+}
+
+/** 排队徽标的悬停说明：本该什么时候跑、此刻在等什么。 */
+export function queuedTitle(occurrence: QueuedOccurrence): string {
+  const reason =
+    occurrence.waiting_reason.trim() === ""
+      ? "已到触发时刻，等待派发"
+      : occurrence.waiting_reason;
+  return `本该于 ${occurrence.due_at} 触发；${reason}`;
 }

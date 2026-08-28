@@ -567,6 +567,9 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 /* 任务列表上的纯追加写标记。它不是告警，所以不着 --crit / --warn——
    这是一种合法的写法，只是它的代价必须在清单上就看得见。 */
 .write-mark { display: inline-block; margin-top: 2px; margin-right: 4px; padding: 0 6px; border: 1px solid var(--line-strong); border-radius: var(--radius); color: var(--dim); font-size: var(--size-meta); line-height: 18px; }
+/* 排队中是一个**会自己变**的状态，不是任务的一项属性——所以它比旁边那两枚
+   写入模式标记显眼一档，用品牌色而不是灰线（#266）。 */
+.write-mark.is-queued { border-color: var(--brand); background: var(--brand-dim); color: var(--brand); }
 .sql-editor-tools { flex: none; display: flex; align-items: center; gap: 6px; }
 .sql-editor-tools .button { height: 28px; padding: 0 10px; font-size: var(--size-meta); }
 /* 开着的开关要看得出是开着的：`aria-pressed` 只说给辅助技术听。 */

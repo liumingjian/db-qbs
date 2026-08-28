@@ -69,6 +69,9 @@ const FAILURE_KIND_LABELS: Readonly<Record<string, string>> = {
   VERIFY_FAILED: "校验门禁",
   DEFECT: "程序缺陷",
   UNKNOWN: "结局未知",
+  // #266：唯一一个**什么都没做**的类目——到点了，但上一次还没结束，本次没发起。
+  // 它不是一次故障，是一个触发时刻的答案。
+  SKIPPED: "本次跳过",
 };
 
 export function failureKindLabel(kind: string | null): string | null {
@@ -104,6 +107,28 @@ export function runIdPresentation(history: { run_id: string | null }): string {
  * 是别的名字。快照优先；只有空串（早于这个字段的老记录）才回退到任务当前的名字，
  * 因为那时确实没有别的可说，用当前名总好过一片空白。
  */
+/**
+ * 这一次是**谁发起的**（#266）。
+ *
+ * 夜里两点那次是自动跑的，还是有人手动补的一次，事后只有这一格答得出来——所以它在
+ * 运行详情上必须有一行，而不是只有排障时去翻日志。
+ *
+ * 服务端老记录迁移出来一律是 `MANUAL`（本字段之前一次运行只可能是人按的），所以
+ * **缺席只有一种解释：前端比服务端新**。那时候返回 `null`、什么都不渲染，别拿
+ * 「手动」去糊一个自己不知道的事实。认不出的拼写原样显示，同理。
+ */
+export function runTriggerLabel(trigger: string | null | undefined): string | null {
+  if (trigger === null || trigger === undefined || trigger === "") {
+    return null;
+  }
+  return RUN_TRIGGER_LABELS[trigger] ?? trigger;
+}
+
+const RUN_TRIGGER_LABELS: Readonly<Record<string, string>> = {
+  MANUAL: "手动发起",
+  SCHEDULED: "调度发起",
+};
+
 export function runTaskName(run: { task_name?: string }, currentName: string): string {
   const snapshot = (run.task_name ?? "").trim();
   return snapshot === "" ? currentName : run.task_name!;

@@ -19,7 +19,7 @@ import {
 } from "./writeMode";
 import { messageFrom } from "./errors";
 import { FailureEvidence } from "./FailureEvidence";
-import { runIdPresentation, runTaskName } from "./history";
+import { runIdPresentation, runTaskName, runTriggerLabel } from "./history";
 import { PrecheckReports } from "./PrecheckReports";
 import { RunLogPanel } from "./RunLogPanel";
 import { progressOfLiveRun } from "./progress";
@@ -240,6 +240,11 @@ function RunIdentity({ task, detail }: { task: Task; detail: RunDetail }) {
         value={runIdPresentation(detail)}
       />
       <DetailValue label="所属任务" value={task.task_id} />
+      {/* 谁发起的（#266）：夜里那次是自动跑的还是有人手动补的，只有这一格答得出来。
+          服务端没给这一列（前端比它新）就整行不渲染，不猜。 */}
+      {runTriggerLabel(detail.trigger) !== null && (
+        <DetailValue label="发起方式" value={runTriggerLabel(detail.trigger)!} />
+      )}
       {/* 写入方式在运行详情上必须看得见（#261）：一条跑完的记录，光看行数看不出
           这次是「合并」还是「又追加了一份」。 */}
       <DetailValue
