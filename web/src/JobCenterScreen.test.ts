@@ -70,7 +70,6 @@ const BASE_PROPS = {
   onRefresh: () => undefined,
   onCreate: () => undefined,
   onEdit: () => undefined,
-  onViewLogs: () => undefined,
   onDelete: () => undefined,
   startingTaskId: null,
   onStart: () => undefined,
@@ -95,7 +94,6 @@ describe("job row actions", () => {
       onRefresh: () => undefined,
       onCreate: () => undefined,
       onEdit: () => undefined,
-      onViewLogs: () => undefined,
       onDelete: () => undefined,
       startingTaskId: null,
       onStart: () => undefined,
@@ -108,74 +106,87 @@ describe("job row actions", () => {
     }));
 
     expect(html).toContain("发起运行");
-    expect(html).toContain("运行详情");
+    expect(html).toContain("查看详情");
     expect(html).toContain('title="这个任务还没有跑过"');
-    expect(html).toContain('aria-label="运行详情" disabled=""');
+    expect(html).toContain('aria-label="查看详情" disabled=""');
   });
 
-  // 改名并进了编辑向导（#259），空出来的位子给「查看日志」（#263）。
-  it("puts 查看日志 where 改名 used to be", () => {
-    const html = renderToStaticMarkup(createElement(JobCenterScreen, {
-      ...BASE_PROPS,
-      tasks: [NEVER_RUN_TASK],
-    }));
-
-    expect(html).not.toContain("改名");
-    expect(html).toContain("查看日志");
-    // 没跑过的任务这颗按不动，但位子占住不撤（P2-15）。
-    expect(html).toContain('aria-label="查看日志" disabled=""');
-  });
-
-  it("lights 查看日志 up for a task that has run", () => {
+  // 操作列只留五颗：启停、定时任务、编辑、查看详情、删除。日志不再单独占一颗——
+  // 它本来就是运行详情的一段，第二个入口只是把同一个地方说成两件事。
+  it("keeps the action column to five buttons", () => {
     const html = renderToStaticMarkup(createElement(JobCenterScreen, {
       ...BASE_PROPS,
       tasks: [NEVER_RUN_TASK],
       latestRuns: new Map([["task-1", LATEST_RUN]]),
     }));
 
-    expect(html).toContain('aria-label="查看日志"');
-    expect(html).not.toContain('aria-label="查看日志" disabled=""');
+    expect(html).not.toContain("查看日志");
+    expect(html).not.toContain("复制 cURL");
+    expect(html).not.toContain("改名");
+    // 终局的运行给的是「发起运行」，进行中才换成「停止运行」——同一颗按钮的两副面孔。
+    for (const label of ["发起运行", "定时任务", "编辑任务定义", "查看详情", "删除"]) {
+      expect(html).toContain(label);
+    }
+  });
+
+  it("lights 查看详情 up for a task that has run", () => {
+    const html = renderToStaticMarkup(createElement(JobCenterScreen, {
+      ...BASE_PROPS,
+      tasks: [NEVER_RUN_TASK],
+      latestRuns: new Map([["task-1", LATEST_RUN]]),
+    }));
+
+    expect(html).toContain('aria-label="查看详情"');
+    expect(html).not.toContain('aria-label="查看详情" disabled=""');
+  });
+
+  // 那颗按钮上写着这条任务此刻的调度状态，三档各说各的（#265 的两个字段）。
+  it("says on the schedule button what this task's schedule is", () => {
+    const off = renderToStaticMarkup(createElement(JobCenterScreen, { ...BASE_PROPS }));
+    expect(off).toContain("定时任务：未配置");
+
+    const running = renderToStaticMarkup(createElement(JobCenterScreen, {
+      ...BASE_PROPS,
+      tasks: [{
+        ...NEVER_RUN_TASK,
+        spec: { ...NEVER_RUN_TASK.spec, schedule_cron: "0 2 * * *", schedule_enabled: true },
+      }],
+    }));
+    expect(running).toContain("定时任务：0 2 * * *");
+
+    // 停用不等于没配：表达式还在，人只是把它按停了。
+    const paused = renderToStaticMarkup(createElement(JobCenterScreen, {
+      ...BASE_PROPS,
+      tasks: [{
+        ...NEVER_RUN_TASK,
+        spec: { ...NEVER_RUN_TASK.spec, schedule_cron: "0 2 * * *", schedule_enabled: false },
+      }],
+    }));
+    expect(paused).toContain("定时任务：已停用（0 2 * * *）");
   });
 });
 
-describe("纯追加写的可见标记（#261）", () => {
+describe("清单上不再复述写入方式（主界面从简）", () => {
+  // 「纯追加写」/「先清空再导入」两枚标记撤了：它们是任务**属性**，一天看一次就够，
+  // 却在每一行的任务名后面各占一块。两句话都还在——编辑向导第 1 步那格写入方式，
+  // 以及运行详情里那句「这一次做了什么」，都在人正要做决定或正在追责的那一刻说。
   function render(task: Task): string {
-    return renderToStaticMarkup(createElement(JobCenterScreen, {
-      tasks: [task],
-      datasources: [],
-      latestRuns: new Map(),
-      refreshing: false,
-      onRefresh: () => undefined,
-      onCreate: () => undefined,
-      onEdit: () => undefined,
-      onViewLogs: () => undefined,
-      onDelete: () => undefined,
-      startingTaskId: null,
-      onStart: () => undefined,
-      onStop: () => undefined,
-      onRerun: () => undefined,
-      onEditFailure: () => undefined,
-      onChanged: () => undefined,
-      focusTaskId: null,
-      onFocusConsumed: () => undefined,
-    }));
+    return renderToStaticMarkup(createElement(JobCenterScreen, { ...BASE_PROPS, tasks: [task] }));
   }
 
-  it("marks a task whose target table has no primary key", () => {
-    // 「这个任务重跑会翻倍」必须在**看清单的时候**就知道，不能只在点进去之后才说。
-    const html = render({
+  it("says nothing extra beside the name for either write mode", () => {
+    const appendOnly = render({
       ...NEVER_RUN_TASK,
       spec: { ...NEVER_RUN_TASK.spec, primary_key: [] },
     });
+    expect(appendOnly).not.toContain("纯追加写");
+    expect(appendOnly).not.toContain("重跑会产生重复数据");
 
-    expect(html).toContain("纯追加写");
-    expect(html).toContain("重跑会产生重复数据");
-  });
-
-  it("says nothing extra about a task that upserts, because that is today's behaviour", () => {
-    const html = render(NEVER_RUN_TASK);
-
-    expect(html).not.toContain("纯追加写");
+    const clearing = render({
+      ...NEVER_RUN_TASK,
+      spec: { ...NEVER_RUN_TASK.spec, write_mode: "CLEAR_THEN_IMPORT" },
+    });
+    expect(clearing).not.toContain("先清空再导入");
   });
 });
 

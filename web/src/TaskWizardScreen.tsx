@@ -60,10 +60,8 @@ import type {
   Step,
   WriteView,
 } from "./wizard";
+import { ScheduleCard } from "./ScheduleCard";
 import { WRITE_MODES } from "./writeMode";
-
-/** 停手多久之后才去问一次「下次触发」。边敲边问只会让红字在打字时一直闪。 */
-const SCHEDULE_PREVIEW_DEBOUNCE_MS = 300;
 
 export interface TaskWizardScreenProps {
   initial: Draft;
@@ -1400,7 +1398,8 @@ function StepBody({
     <ScheduleCard
       cron={draft.spec.schedule_cron ?? ""}
       enabled={draft.spec.schedule_enabled}
-      change={change}
+      onCron={(cron) => change({ type: "schedule-cron", cron })}
+      onEnabled={(enabled) => change({ type: "schedule-enabled", enabled })}
     />
     <dl className="wizard-confirm-grid">
       {/* 任务名在第 1 步改（见 `saveGate`）。这里只回显——同一个值两处都能改，人会
@@ -1443,108 +1442,6 @@ function StepBody({
  * 表达式不合法时这里当场把理由摆出来，和保存被拒时是同一句话；但**不拦人**——
  * 拦截点在服务端的 `TaskSpec::validate`，这里再判一遍就是第二份判据。
  */
-function ScheduleCard({
-  cron,
-  enabled,
-  change,
-}: {
-  cron: string;
-  enabled: boolean;
-  change: (intent: Change) => void;
-}) {
-  const [preview, setPreview] = useState<SchedulePreview | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const cronInputId = useId();
-
-  useEffect(() => {
-    let abandoned = false;
-    // 边敲边问会把每一个中间态都发出去，而中间态几乎全是非法的——那会让红字在人打字时
-    // 一直闪。停手之后再问。
-    const timer = window.setTimeout(() => {
-      void (async () => {
-        try {
-          const answer = await fetchSchedulePreview(cron.trim() === "" ? null : cron);
-          if (!abandoned) {
-            setPreview(answer);
-            setError(null);
-          }
-        } catch (failure) {
-          if (!abandoned) {
-            setError(messageFrom(failure));
-          }
-        }
-      })();
-    }, SCHEDULE_PREVIEW_DEBOUNCE_MS);
-    return () => {
-      abandoned = true;
-      window.clearTimeout(timer);
-    };
-  }, [cron]);
-
-  const configured = cron.trim() !== "";
-  return (
-    <section className="schedule-card">
-      <header>
-        <div>
-          <strong>周期调度</strong>
-          <span>到点自动发起这个任务</span>
-        </div>
-        <label className="schedule-switch">
-          <input
-            type="checkbox"
-            checked={enabled}
-            onChange={(event) =>
-              change({ type: "schedule-enabled", enabled: event.target.checked })
-            }
-          />
-          <span>{enabled ? "已启用" : "已停用"}</span>
-        </label>
-      </header>
-      <label className="schedule-expression" htmlFor={cronInputId}>
-        cron 表达式
-        <input
-          id={cronInputId}
-          value={cron}
-          placeholder="0 2 * * *（分 时 日 月 周）"
-          spellCheck={false}
-          onChange={(event) => change({ type: "schedule-cron", cron: event.target.value })}
-        />
-      </label>
-      {/* 时区永远在，哪怕还没写表达式——它是这一格里唯一一句不依赖输入的话。 */}
-      <dl className="schedule-readout">
-        <div>
-          <dt>时区</dt>
-          <dd>
-            {preview === null
-              ? "读取中…"
-              : `服务器本地时区 ${preview.timezone}（UTC${preview.utc_offset}），此刻 ${preview.now}`}
-          </dd>
-        </div>
-        <div>
-          <dt>下次触发</dt>
-          <dd>
-            {error !== null ? (
-              <span className="schedule-error">{error}</span>
-            ) : !configured ? (
-              <span className="schedule-none">没配周期，只能手动发起</span>
-            ) : preview === null ? (
-              "读取中…"
-            ) : preview.next_fire_times.length === 0 ? (
-              <span className="schedule-error">这条表达式永远不会触发</span>
-            ) : (
-              preview.next_fire_times.map((fire) => (
-                <span className="schedule-fire" key={fire}>
-                  {fire}
-                </span>
-              ))
-            )}
-          </dd>
-        </div>
-      </dl>
-    </section>
-  );
-}
-
 /**
  * 最后一屏上「目标表检查」那一格（2026-08 UX 评审 P0-3）。
  *

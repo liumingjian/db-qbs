@@ -35,7 +35,7 @@ import { messageFrom } from "./errors";
 import { AgentScreen } from "./AgentScreen";
 import { JobCenterScreen } from "./JobCenterScreen";
 import { latestRunByTask, runStatus } from "./listing";
-import { runHash, runLogsHash, runLogsRequestedFromHash, runRecordFromHash } from "./routes";
+import { runHash, runLogsRequestedFromHash, runRecordFromHash } from "./routes";
 import { RunScreen } from "./RunScreen";
 import { ChangePasswordDialog } from "./ChangePasswordDialog";
 import { DatasourceScreen } from "./DatasourceScreen";
@@ -922,11 +922,6 @@ function Workbench({
               onRefresh={() => void loadList()}
               onCreate={openCreateDialog}
               onEdit={(task) => setDialog({ kind: "edit", task, requestedStep: 1 })}
-              /* 「查看日志」直接落到那条运行的日志那一段（#263）：改名已经在编辑向导里
-                 （#259），这个位子换成一步能看到运行过程的入口。 */
-              onViewLogs={(runRecordId) => {
-                window.location.hash = runLogsHash(runRecordId);
-              }}
               onDelete={(task) => setDialog({ kind: "delete", task })}
               startingTaskId={startingTaskId}
               onStart={(task) => void handleStart(task)}
