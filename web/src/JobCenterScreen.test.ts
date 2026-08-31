@@ -96,7 +96,7 @@ describe("job row actions", () => {
             outcome: null,
             finished_at: null,
             stage: "STREAMING",
-            target_hold: "RELEASING",
+            target_hold: "RELEASING" as const,
           } as RunHistory,
         ],
       ]),
@@ -117,9 +117,9 @@ describe("job row actions", () => {
           {
             ...LATEST_RUN,
             outcome: "FAILED",
-            unknown_reason: "STOPPED_BY_USER",
+            unknown_reason: "STOPPED_BY_USER" as const,
             message: "已由用户停止",
-            target_hold: "HELD",
+            target_hold: "HELD" as const,
             target_hold_message: "暂存表 drop 不掉",
           } as RunHistory,
         ],
@@ -134,7 +134,7 @@ describe("job row actions", () => {
     const html = renderToStaticMarkup(createElement(JobCenterScreen, {
       ...BASE_PROPS,
       latestRuns: new Map([
-        ["task-1", { ...LATEST_RUN, target_hold: "HELD" } as RunHistory],
+        ["task-1", { ...LATEST_RUN, target_hold: "HELD" as const } as RunHistory],
       ]),
     }));
 
