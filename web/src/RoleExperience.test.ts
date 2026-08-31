@@ -5,8 +5,8 @@ import { describe, expect, it } from "vitest";
 import { AgentScreen } from "./AgentScreen";
 import { navigationItemsFor } from "./App";
 import { DatasourceScreen } from "./DatasourceScreen";
-import { EmailAlertSettingsView, OperatorAccountView, SystemSettingsScreen } from "./SystemSettingsScreen";
-import type { Agent, Datasource, EmailAlertSettings, OperatorAccount } from "./api";
+import { EmailAlertSettingsView, EmailDeliveryHistoryView, OperatorAccountView, SystemSettingsScreen } from "./SystemSettingsScreen";
+import type { Agent, Datasource, EmailAlertSettings, EmailDeliveryHistory, OperatorAccount } from "./api";
 
 const AGENT: Agent = {
   agent_id: "agent-1",
@@ -170,5 +170,37 @@ describe("role-specific rendering", () => {
     expect(failedTest).toContain("最新测试结果");
     expect(failedTest).toContain("发送失败");
     expect(failedTest).toContain("SMTP 连接或响应超时");
+  });
+
+  it("shows recipient diagnostics and manual retry only for FAILED deliveries", () => {
+    const delivery = (state: EmailDeliveryHistory["state"], recipient: string): EmailDeliveryHistory => ({
+      delivery_id: `delivery-${state}`,
+      alert_id: "alert-record-1",
+      run_record_id: "record-1",
+      task_id: "task-1",
+      task_name: "持仓同步",
+      failed_at: "2026-08-31T10:00:00+00:00",
+      recipient,
+      state,
+      attempt_count: state === "FAILED" ? 5 : 1,
+      first_attempt_at: "2026-08-31T10:00:00+00:00",
+      last_attempt_at: "2026-08-31T10:15:00+00:00",
+      next_attempt_at: state === "PENDING" ? "2026-08-31T10:31:00+00:00" : null,
+      retry_window_started_at: "2026-08-31T10:00:00+00:00",
+      retry_deadline_at: "2026-08-31T11:00:00+00:00",
+      last_error: state === "FAILED" ? "SMTP 服务器暂时拒绝请求" : null,
+    });
+    const markup = renderToStaticMarkup(createElement(EmailDeliveryHistoryView, {
+      deliveries: [delivery("FAILED", "failed@example.com"), delivery("SENT", "sent@example.com")],
+      busy: false,
+      onRetry: () => undefined,
+    }));
+
+    expect(markup).toContain("投递历史");
+    expect(markup).toContain("failed@example.com");
+    expect(markup).toContain("SMTP 服务器暂时拒绝请求");
+    expect(markup).toContain("重新发送给 failed@example.com");
+    expect(markup).not.toContain("重新发送给 sent@example.com");
+    expect(markup).toContain("alert-record-1");
   });
 });

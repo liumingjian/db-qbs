@@ -471,7 +471,13 @@ export interface RunHistory {
   /** Aggregate alert state only. Recipient addresses and SMTP diagnostics are administrator data. */
   alert?: {
     alert_id: string;
-    delivery_state: "PENDING" | "SENT";
+    delivery_state:
+      | "PENDING"
+      | "SENT"
+      | "PARTIALLY_FAILED"
+      | "FAILED"
+      | "NOT_SENT"
+      | "SUPPRESSED";
   } | null;
   /** `HELD` 时没能释放掉的原因，目标端原话。其余情况是 `null`。 */
   target_hold_message?: string | null;
@@ -575,6 +581,24 @@ export interface EmailAlertSettings {
 export type EmailAlertSettingsInput = Omit<EmailAlertSettings, "has_smtp_secret" | "latest_test_result"> & {
   smtp_secret: string;
 };
+
+export interface EmailDeliveryHistory {
+  delivery_id: string;
+  alert_id: string;
+  run_record_id: string;
+  task_id: string;
+  task_name: string;
+  failed_at: string;
+  recipient: string;
+  state: "PENDING" | "SENT" | "FAILED" | "NOT_SENT" | "SUPPRESSED";
+  attempt_count: number;
+  first_attempt_at: string | null;
+  last_attempt_at: string | null;
+  next_attempt_at: string | null;
+  retry_window_started_at: string;
+  retry_deadline_at: string;
+  last_error: string | null;
+}
 
 type SessionLostListener = () => void;
 
@@ -693,6 +717,28 @@ export async function sendTestEmail(): Promise<EmailTestResult> {
     headers: { Accept: "application/json" },
   });
   return readJson<EmailTestResult>(response, "发送测试邮件失败");
+}
+
+export async function fetchEmailDeliveries(
+  runRecordId?: string,
+): Promise<EmailDeliveryHistory[]> {
+  const query = runRecordId === undefined
+    ? ""
+    : `?run_record_id=${encodeURIComponent(runRecordId)}`;
+  const response = await fetch(`/api/email-deliveries${query}`, {
+    headers: { Accept: "application/json" },
+  });
+  return readJson<EmailDeliveryHistory[]>(response, "读取邮件投递历史失败");
+}
+
+export async function retryEmailDelivery(
+  deliveryId: string,
+): Promise<EmailDeliveryHistory> {
+  const response = await fetch(`/api/email-deliveries/${encodeURIComponent(deliveryId)}/retry`, {
+    method: "POST",
+    headers: { Accept: "application/json" },
+  });
+  return readJson<EmailDeliveryHistory>(response, "重新发送邮件失败");
 }
 
 export function emptySpec(): TaskSpec {
