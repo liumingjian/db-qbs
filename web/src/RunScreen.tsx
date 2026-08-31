@@ -29,12 +29,12 @@ import {
 } from "./history";
 import { PrecheckReports } from "./PrecheckReports";
 import { RunLogPanel } from "./RunLogPanel";
+import { RunPreSqlPanel } from "./RunPreSqlPanel";
 import { progressOfLiveRun } from "./progress";
 import { runPresentation } from "./run";
 import type { RunPresentation } from "./run";
 import { abortRefusal } from "./runStage";
 import type { Step } from "./wizard";
-import { HighlightedSql } from "./SqlEditor";
 
 const RUN_POLL_INTERVAL_MS = 1000;
 const countFormatter = new Intl.NumberFormat("zh-CN");
@@ -250,12 +250,7 @@ export function RunScreen({
       ) : (
         <div className="run-content">
           <RunIdentity task={task} detail={detail} />
-          {(detail.evidence?.parameters?.pre_sql ?? "").trim() !== "" && (
-            <section className="panel">
-              <h3>当次执行的 preSQL</h3>
-              <pre className="drawer-sql"><HighlightedSql sql={detail.evidence!.parameters!.pre_sql!} /></pre>
-            </section>
-          )}
+          <RunPreSqlPanel evidence={detail.evidence} />
           {detail.live ? (
             <LiveRun detail={detail} presentation={presentation} now={now} />
           ) : (

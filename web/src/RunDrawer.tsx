@@ -27,6 +27,7 @@ import {
 } from "./history";
 import { PrecheckReports } from "./PrecheckReports";
 import { RunLogPanel } from "./RunLogPanel";
+import { RunPreSqlPanel } from "./RunPreSqlPanel";
 import { HighlightedSql } from "./SqlEditor";
 import { rerunAction } from "./rerun";
 import { sourceSummary, whereSummary } from "./spec";
@@ -237,12 +238,7 @@ export function RunDrawer({
             <pre className="drawer-sql"><HighlightedSql sql={run.source_sql} /></pre>
           </section>
 
-          {(run.evidence?.parameters?.pre_sql ?? "").trim() !== "" && (
-            <section className="panel">
-              <h3>当次执行的 preSQL</h3>
-              <pre className="drawer-sql"><HighlightedSql sql={run.evidence!.parameters!.pre_sql!} /></pre>
-            </section>
-          )}
+          <RunPreSqlPanel evidence={run.evidence} />
 
           {(run.column !== null || run.value !== null) &&
             presentation.kind !== "unknown" && (
