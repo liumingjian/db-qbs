@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -295,6 +296,63 @@ fn every_actual_failure_category_alerts_for_manual_and_scheduled_runs() {
 }
 
 #[test]
+fn restart_unknown_alerts_explain_only_the_sanitized_operational_cause() {
+    let directory = temp_directory();
+    let now = Utc.with_ymd_and_hms(2026, 9, 1, 10, 0, 0).unwrap();
+    let email = EmailAlertStore::open(&directory).unwrap();
+    email.update(settings(vec!["ops@example.com"])).unwrap();
+    let histories = [
+        (
+            "service-restarted",
+            UnknownReason::ServiceRestarted,
+            "服务重启期间运行未留下终态",
+        ),
+        (
+            "process-disappeared",
+            UnknownReason::ProcessDisappeared,
+            "运行进程消失且未留下终态",
+        ),
+    ];
+    let history_store = HistoryStore::open(&directory).unwrap();
+    for (id, reason, _) in histories {
+        let mut history = RunHistory::accepted(
+            id,
+            "restart-task",
+            "SELECT SQL-secret-marker FROM payroll",
+            now,
+        );
+        history.task_name = "Restart recovery".to_owned();
+        history.value = Some("sample-value-marker".to_owned());
+        history.mark_unknown(reason, now);
+        history_store.finalize(&history, now, 90).unwrap();
+    }
+
+    let transport = RecordingTransport::default();
+    assert_eq!(
+        AlertOutboxStore::open(&directory)
+            .unwrap()
+            .run_due_attempts(&email, &transport, &FixedClock(now))
+            .unwrap(),
+        2
+    );
+    let decoded = transport
+        .sent
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|mail| decoded_mime_bodies(&String::from_utf8_lossy(&mail.message)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for (_, _, explanation) in histories {
+        assert!(decoded.contains(explanation), "{decoded}");
+    }
+    for forbidden in ["SQL-secret-marker", "sample-value-marker"] {
+        assert!(!decoded.contains(forbidden), "message leaked {forbidden}");
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn a_failed_first_attempt_stays_durable_without_reopening_or_resending_the_run() {
     let directory = temp_directory();
     let now = Utc.with_ymd_and_hms(2026, 8, 31, 10, 0, 0).unwrap();
@@ -412,6 +470,68 @@ fn retries_use_persisted_exponential_due_times_and_survive_reopen() {
     assert_eq!(sent.state, db_qbs_source::EmailDeliveryState::Sent);
     assert_eq!(sent.attempt_count, 3);
     assert!(sent.next_attempt_at.is_none());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn crash_after_transport_acceptance_retries_the_same_alert_id() {
+    #[derive(Default)]
+    struct CrashAfterAcceptance {
+        accepted: Mutex<Vec<OutgoingMail>>,
+    }
+
+    impl MailTransport for CrashAfterAcceptance {
+        fn send(
+            &self,
+            _settings: &db_qbs_source::EmailDeliverySettings,
+            mail: &OutgoingMail,
+        ) -> Result<(), MailTransportError> {
+            self.accepted.lock().unwrap().push(mail.clone());
+            panic!("simulated process crash after SMTP acceptance");
+        }
+    }
+
+    let directory = temp_directory();
+    let now = Utc.with_ymd_and_hms(2026, 9, 1, 10, 0, 0).unwrap();
+    let clock = FixedClock(now);
+    let email = EmailAlertStore::open(&directory).unwrap();
+    email.update(settings(vec!["ops@example.com"])).unwrap();
+    HistoryStore::open(&directory)
+        .unwrap()
+        .finalize(
+            &failure("crash-window", "NETWORK", RunTrigger::Manual, now),
+            now,
+            90,
+        )
+        .unwrap();
+    let outbox = AlertOutboxStore::open(&directory).unwrap();
+    let crashing = CrashAfterAcceptance::default();
+
+    assert!(catch_unwind(AssertUnwindSafe(|| {
+        outbox.run_due_attempts(&email, &crashing, &clock)
+    }))
+    .is_err());
+    let pending = outbox.delivery_history(None).unwrap().remove(0);
+    assert_eq!(pending.alert_id, "alert-crash-window");
+    assert_eq!(pending.recipient, "ops@example.com");
+    assert_eq!(pending.attempt_count, 0);
+    assert_eq!(pending.state, db_qbs_source::EmailDeliveryState::Pending);
+
+    let retry = RecordingTransport::default();
+    assert_eq!(outbox.run_due_attempts(&email, &retry, &clock).unwrap(), 1);
+    let first = crashing.accepted.lock().unwrap()[0].clone();
+    let second = retry.sent.lock().unwrap()[0].clone();
+    assert_eq!(first.envelope_to, second.envelope_to);
+    for message in [&first.message, &second.message] {
+        let raw = String::from_utf8_lossy(message);
+        let decoded = decoded_mime_bodies(&raw);
+        assert!(decoded.contains("alert-crash-window"), "{decoded}");
+    }
+    let sent = outbox.delivery_history(None).unwrap().remove(0);
+    assert_eq!(sent.alert_id, "alert-crash-window");
+    assert_eq!(sent.attempt_count, 1);
+    assert_eq!(sent.state, db_qbs_source::EmailDeliveryState::Sent);
+
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -726,9 +846,14 @@ fn busy_schedule_skips_keep_alert_evidence_but_suppress_delivery_for_one_hour() 
         let summary = outbox.summary_for_run(id).unwrap().unwrap();
         assert_eq!(summary.delivery_state, AlertDeliveryState::Suppressed);
         let delivery = outbox.delivery_history(Some(id)).unwrap().remove(0);
-        assert_eq!(delivery.state, db_qbs_source::EmailDeliveryState::Suppressed);
+        assert_eq!(
+            delivery.state,
+            db_qbs_source::EmailDeliveryState::Suppressed
+        );
         assert!(matches!(
-            outbox.manual_retry(&delivery.delivery_id, first_at, 24).unwrap(),
+            outbox
+                .manual_retry(&delivery.delivery_id, first_at, 24)
+                .unwrap(),
             db_qbs_source::ManualRetryOutcome::Ineligible
         ));
     }
@@ -750,7 +875,13 @@ fn busy_schedule_skips_keep_alert_evidence_but_suppress_delivery_for_one_hour() 
     );
     let alert_ids = ["busy-first", "busy-inside", "busy-boundary", "busy-outside"]
         .map(|id| outbox.summary_for_run(id).unwrap().unwrap().alert_id);
-    assert_eq!(alert_ids.iter().collect::<std::collections::HashSet<_>>().len(), 4);
+    assert_eq!(
+        alert_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        4
+    );
 
     // Task and stable reason are both part of the key; display wording is not.
     record(
@@ -767,11 +898,7 @@ fn busy_schedule_skips_keep_alert_evidence_but_suppress_delivery_for_one_hour() 
     );
     for id in ["other-task", "other-reason"] {
         assert_eq!(
-            outbox
-                .summary_for_run(id)
-                .unwrap()
-                .unwrap()
-                .delivery_state,
+            outbox.summary_for_run(id).unwrap().unwrap().delivery_state,
             AlertDeliveryState::Pending
         );
     }

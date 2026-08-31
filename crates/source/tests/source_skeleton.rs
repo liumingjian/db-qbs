@@ -19,6 +19,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use db_qbs_source::{
+    AlertOutboxStore, EmailAlertSettingsInput, EmailAlertStore, EmailDeliveryState,
+    EmailProviderPreset, HistoryStore, RunHistory, RunTrigger, SmtpSecurity,
+};
+
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 /// 一台**真的在应答**的目标端 agent 桩（ADR-0044）。
@@ -93,6 +98,30 @@ fn black_hole_agent_url() -> &'static str {
         url
     })
     .as_str()
+}
+
+fn black_hole_smtp() -> (TcpListener, u16) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    (listener, port)
+}
+
+fn wait_for_smtp_connection(listener: &TcpListener) -> TcpStream {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => return stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    Instant::now() < deadline,
+                    "outbox worker did not connect to SMTP"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => panic!("accepting SMTP connection failed: {error}"),
+        }
+    }
 }
 
 /// **accept 循环是多线程的**（#255）：一个客户端卡在 5 秒的 agent 探测里，
@@ -211,6 +240,13 @@ sleep 2
     let (port, config, source, _ready) =
         start_source_ready(|port| write_run_config(&directory, port, &fake_child));
     let task_id = create_task(port);
+    let settings = email_alert_settings(false, 1, "restart-alerts@example.com");
+    assert_eq!(
+        put(port, "/api/email-alert-settings", &settings)
+            .unwrap()
+            .status,
+        200
+    );
 
     let graceful_record_id = start_run(port, &task_id);
     wait_for_json(port, &format!("/api/runs/{graceful_record_id}"), |body| {
@@ -225,6 +261,21 @@ sleep 2
     assert_eq!(graceful["message"], "服务重启，结局未知");
     assert_eq!(graceful["source_code"], Value::Null);
     assert_eq!(graceful["target_table_effect"], Value::Null);
+    assert_eq!(
+        graceful["alert"]["alert_id"],
+        format!("alert-{graceful_record_id}")
+    );
+    assert_eq!(graceful["alert"]["delivery_state"], "NOT_SENT");
+    let graceful_deliveries = AlertOutboxStore::open(&directory)
+        .unwrap()
+        .delivery_history(Some(&graceful_record_id))
+        .unwrap();
+    assert_eq!(graceful_deliveries.len(), 1);
+    assert_eq!(
+        graceful_deliveries[0].recipient,
+        "restart-alerts@example.com"
+    );
+    assert_eq!(graceful_deliveries[0].state, EmailDeliveryState::NotSent);
 
     let disappeared_record_id = start_run(port, &task_id);
     wait_for_json(
@@ -242,9 +293,93 @@ sleep 2
     assert_eq!(disappeared["message"], "进程消失，无终态日志");
     assert_eq!(disappeared["sink_code"], Value::Null);
     assert_eq!(disappeared["target_table_effect"], Value::Null);
+    assert_eq!(
+        disappeared["alert"]["alert_id"],
+        format!("alert-{disappeared_record_id}")
+    );
+    assert_eq!(disappeared["alert"]["delivery_state"], "NOT_SENT");
+    let disappeared_deliveries = AlertOutboxStore::open(&directory)
+        .unwrap()
+        .delivery_history(Some(&disappeared_record_id))
+        .unwrap();
+    assert_eq!(disappeared_deliveries.len(), 1);
+    assert_eq!(
+        disappeared_deliveries[0].recipient,
+        "restart-alerts@example.com"
+    );
+    assert_eq!(disappeared_deliveries[0].state, EmailDeliveryState::NotSent);
     wait_for_empty_directory(&directory.join("run-tasks"));
 
     assert_success(&terminate(after_kill));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn pending_delivery_resumes_after_process_restart_and_blocked_smtp_does_not_delay_sigterm() {
+    let directory = temp_directory();
+    let (smtp_listener, smtp_port) = black_hole_smtp();
+    EmailAlertStore::open(&directory)
+        .unwrap()
+        .update(email_alert_settings_input(
+            true,
+            smtp_port,
+            "snapshotted@example.com",
+        ))
+        .unwrap();
+    let accepted_at = chrono::Utc::now();
+    let mut failed = RunHistory::accepted(
+        "persisted-delivery",
+        "restart-task",
+        "SELECT sensitive_marker FROM payroll",
+        accepted_at,
+    );
+    failed.task_name = "Restart recovery".to_owned();
+    failed.trigger = RunTrigger::Manual.as_str().to_owned();
+    failed.outcome = Some("FAILED".to_owned());
+    failed.finished_at = Some(accepted_at.to_rfc3339());
+    failed.failure_kind = Some("NETWORK".to_owned());
+    HistoryStore::open(&directory)
+        .unwrap()
+        .finalize(&failed, accepted_at, 90)
+        .unwrap();
+
+    let (port, config, first, _ready) =
+        start_source_ready(|port| write_config(&directory, &format!("127.0.0.1:{port}")));
+    let first_connection = wait_for_smtp_connection(&smtp_listener);
+    let first_recipient = AlertOutboxStore::open(&directory)
+        .unwrap()
+        .delivery_history(Some("persisted-delivery"))
+        .unwrap()
+        .remove(0);
+    assert_eq!(first_recipient.alert_id, "alert-persisted-delivery");
+    assert_eq!(first_recipient.recipient, "snapshotted@example.com");
+    assert_eq!(first_recipient.state, EmailDeliveryState::Pending);
+
+    let killed = kill_source(first, "-KILL");
+    assert!(!killed.status.success(), "{}", output_text(&killed));
+    drop(first_connection);
+
+    let restarted = restart_source(&config, port);
+    let second_connection = wait_for_smtp_connection(&smtp_listener);
+    let resumed = AlertOutboxStore::open(&directory)
+        .unwrap()
+        .delivery_history(Some("persisted-delivery"))
+        .unwrap()
+        .remove(0);
+    assert_eq!(resumed.alert_id, "alert-persisted-delivery");
+    assert_eq!(resumed.recipient, "snapshotted@example.com");
+    assert_eq!(resumed.attempt_count, 0);
+
+    let started = Instant::now();
+    let output = terminate(restarted);
+    assert_success(&output);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "blocked SMTP delayed graceful shutdown for {:?}: {}",
+        started.elapsed(),
+        output_text(&output)
+    );
+    drop(second_connection);
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -380,7 +515,6 @@ fn non_loopback_listen_emits_the_required_warning() {
 
     fs::remove_dir_all(directory).unwrap();
 }
-
 
 fn start_source(config: &Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_db-qbs-source"))
@@ -553,10 +687,7 @@ fn session_cookie(port: u16) -> std::io::Result<String> {
         .and_then(|header| header.split(';').next())
         .ok_or_else(|| std::io::Error::other("登录成功却没有发回会话 cookie"))?
         .to_owned();
-    session_cache()
-        .lock()
-        .unwrap()
-        .insert(port, cookie.clone());
+    session_cache().lock().unwrap().insert(port, cookie.clone());
     Ok(cookie)
 }
 
@@ -606,6 +737,10 @@ fn post(port: u16, path: &str, body: &str) -> std::io::Result<HttpResponse> {
     request(port, "POST", path, Some(body))
 }
 
+fn put(port: u16, path: &str, body: &str) -> std::io::Result<HttpResponse> {
+    request(port, "PUT", path, Some(body))
+}
+
 fn read_response(stream: &mut TcpStream) -> std::io::Result<HttpResponse> {
     let mut raw = String::new();
     stream.read_to_string(&mut raw)?;
@@ -630,7 +765,6 @@ fn read_response(stream: &mut TcpStream) -> std::io::Result<HttpResponse> {
 fn json_body(response: &HttpResponse) -> Value {
     serde_json::from_str(&response.body).unwrap()
 }
-
 
 fn create_task(port: u16) -> String {
     let datasources = seed_datasources(port);
@@ -711,9 +845,49 @@ fn wait_for_empty_directory(path: &Path) {
     }
 }
 
-
 fn write_config(directory: &Path, listen: &str) -> PathBuf {
     write_config_with_oracle(directory, listen, agent_stub_url(), "/opt/oracle")
+}
+
+fn email_alert_settings(enabled: bool, smtp_port: u16, recipient: &str) -> String {
+    serde_json::json!({
+        "enabled": enabled,
+        "provider_preset": "GENERIC",
+        "smtp_host": "127.0.0.1",
+        "smtp_port": smtp_port,
+        "smtp_security": "IMPLICIT_TLS",
+        "smtp_username": "mailer",
+        "smtp_secret": "test-only-secret",
+        "sender_address": "alerts@example.com",
+        "sender_name": "db-qbs alerts",
+        "recipients": [recipient],
+        "max_retry_hours": 24,
+        "instance_name": "test",
+        "external_base_url": null,
+    })
+    .to_string()
+}
+
+fn email_alert_settings_input(
+    enabled: bool,
+    smtp_port: u16,
+    recipient: &str,
+) -> EmailAlertSettingsInput {
+    EmailAlertSettingsInput {
+        enabled,
+        provider_preset: EmailProviderPreset::Generic,
+        smtp_host: "127.0.0.1".to_owned(),
+        smtp_port,
+        smtp_security: SmtpSecurity::ImplicitTls,
+        smtp_username: "mailer".to_owned(),
+        smtp_secret: "test-only-secret".to_owned(),
+        sender_address: "alerts@example.com".to_owned(),
+        sender_name: "db-qbs alerts".to_owned(),
+        recipients: vec![recipient.to_owned()],
+        max_retry_hours: 24,
+        instance_name: "test".to_owned(),
+        external_base_url: None,
+    }
 }
 
 fn write_config_with_oracle(
@@ -739,7 +913,6 @@ fn write_config_with_oracle(
     .unwrap();
     path
 }
-
 
 fn unused_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
