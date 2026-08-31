@@ -562,7 +562,10 @@ pub(crate) fn insert_alert_in_transaction(
                 history.trigger,
                 failed_at,
                 history.failure_kind.as_deref().unwrap_or("UNKNOWN"),
-                safe_explanation(history.failure_kind.as_deref()),
+                safe_explanation(
+                    history.failure_kind.as_deref(),
+                    history.unknown_reason.as_deref(),
+                ),
                 alert_state,
             ],
         )
@@ -616,7 +619,19 @@ fn is_alertable(history: &RunHistory) -> bool {
         && history.failure_kind.as_deref() != Some("SKIPPED")
 }
 
-fn safe_explanation(kind: Option<&str>) -> &'static str {
+fn safe_explanation(kind: Option<&str>, unknown_reason: Option<&str>) -> &'static str {
+    match (kind, unknown_reason) {
+        (Some("UNKNOWN"), Some("SERVICE_RESTARTED")) => {
+            "服务重启期间运行未留下终态，结局无法确认，请在系统中查看运行详情。"
+        }
+        (Some("UNKNOWN"), Some("PROCESS_DISAPPEARED")) => {
+            "运行进程消失且未留下终态，结局无法确认，请在系统中查看运行详情。"
+        }
+        (kind, _) => safe_failure_explanation(kind),
+    }
+}
+
+fn safe_failure_explanation(kind: Option<&str>) -> &'static str {
     match kind {
         Some("CONFIG") => "运行配置未通过检查，请在系统中查看运行详情。",
         Some("ORCHESTRATOR") => "运行未能正常启动，请在系统中查看运行详情。",
