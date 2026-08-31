@@ -346,8 +346,9 @@ SELECT INDEX_NAME, COLUMN_NAME
                 // `information_schema`：重读等于给「预检说无主键、切换时又发现有」留一条
                 // 静默改写法的路，而那正是预检拒跑要挡的东西。
                 let statement = WriteStatement::for_primary_key(&request.primary_key);
-                // 清空后导入（#264）：整表 `DELETE` **就在这个事务里**，紧挨着下面那条
-                // 导入语句。两件事一起成、一起败——导入中途失败时事务回滚，目标表原样不动。
+                // 清空后导入（#264）与 APPEND preSQL（#273）的 `DELETE` **就在这个事务里**，
+                // 紧挨着下面那条导入语句。两件事一起成、一起败——导入或提交失败时事务
+                // 回滚，目标表原样不动。
                 //
                 // **绝不用 `TRUNCATE`**：它是 DDL、会隐式提交，放进这里等于制造
                 // 「清空成功、导入失败、目标表变空」这个最坏结果。大表上整表 DELETE 的

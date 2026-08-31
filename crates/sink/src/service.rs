@@ -558,12 +558,17 @@ impl<F: DestinationFactory> SinkService<F> {
             }
             Err(AtomicSwapError::TargetBusy { errno }) => {
                 self.finish_run(run_id, &run, Terminal::Discarded, 0, 0);
+                let rollback = if run.pre_sql.is_some() {
+                    "；事务已回滚，清理和导入的目标效果均已丢弃，未提交任何清理"
+                } else {
+                    ""
+                };
                 let mut error = ApiError {
                     status: 409,
                     code: "SWAP_TARGET_BUSY",
                     message: format!(
-                        "目标表 {} 当前被另一个切换事务占用，通常是同一张表上有另一个 run 正在切换；这不是数据错误，重跑即可",
-                        run.target_table
+                        "目标表 {} 当前被另一个切换事务占用，通常是同一张表上有另一个 run 正在切换；这不是数据错误{rollback}，重跑即可",
+                        run.target_table,
                     ),
                     run_id: Some(run_id.to_owned()),
                     details: json!({
@@ -576,12 +581,15 @@ impl<F: DestinationFactory> SinkService<F> {
             }
             Err(AtomicSwapError::Other(message)) => {
                 self.finish_run(run_id, &run, Terminal::Discarded, 0, 0);
+                let rollback = if run.pre_sql.is_some() {
+                    "清理和导入的目标效果均已丢弃，未提交任何清理，可直接重跑"
+                } else {
+                    "目标表未被触碰，可直接重跑"
+                };
                 let mut error = ApiError {
                     status: 500,
                     code: "SWAP_FAILED",
-                    message: format!(
-                        "切换目标表失败，事务已回滚：{message}。目标表未被触碰，可直接重跑"
-                    ),
+                    message: format!("切换目标表失败，事务已回滚：{message}。{rollback}"),
                     run_id: Some(run_id.to_owned()),
                     details: json!({}),
                 };
