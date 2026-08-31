@@ -318,13 +318,24 @@ branches on the version.
 
 **Abort**
    The cleanup action by which `source`, on hitting an error, tells `sink` to discard the staging
-   table. It is idempotent and **promises nothing about reliability** — a failed abort is logged and
-   not retried. Whether it is still permitted is a property of the **Run Stage**, with one
-   implementation both ends read. It exists to clear the most common leftover: "the process is
-   still alive, this run just failed." **It is only ever sent before commit**: once `COMMITTING`
-   is entered, the staging table's disposition has passed wholly to `sink` and source permanently
-   forfeits the right to abort.
+   table — which is also what releases `sink`'s hold on the target table. It is idempotent and
+   **promises nothing about reliability** — a failed abort is logged and not retried. Whether it is
+   still permitted is a property of the **Run Stage**, with one implementation both ends read. It
+   exists to clear the most common leftover: "the process is still alive, this run just failed."
+   **It is only ever sent before commit**: once `COMMITTING` is entered, the staging table's
+   disposition has passed wholly to `sink` and source permanently forfeits the right to abort.
    Abort is not a state; it is an action on the `FAILED` path.
+
+   **The resident parent sends it too, on behalf of a child that could not.** Stopping a run is a
+   SIGTERM, and the run child has no handler for it — the kernel takes it down before it can say
+   anything, and the same is true of an OOM kill or a crash. So whenever a child exits without
+   having reported a terminal, the parent, **after reaping it and never before**, sends the abort
+   itself: signal, confirmed exit, then abort, because the staging table must not be touched while
+   the process that writes into it is still alive. It is skipped when the run never reached `sink`
+   (no `run_id`) and when the stage says the point of no return has passed. A failed one is written
+   into that run's Run Log as an `abort_failed` line rather than swallowed; the hold then stays
+   until someone clears it by hand. **SIGKILL, a parent crash, and a power cut still leak** — there
+   is no timeout-based reclaim on the `sink` side.
 
 **Swap**
    Completed inside a single transaction on the target: an `INSERT ... SELECT` from the staging table
@@ -403,6 +414,10 @@ branches on the version.
    **It is a historical record, not a state store** — authoritative run state still lives only in the
    child's memory, and a history row is a **best-effort projection of the log**. Losing it costs no
    correctness, only traceability.
+   When the log carries no terminal at all, the row still says **why it cannot say** — the process
+   vanished, the service restarted, or **the user stopped it**. That last one is known only because
+   the stop was marked when the signal was sent; a run someone stopped on purpose and a run the OOM
+   killer took must not read the same on screen.
    Its identity is the **`run_record_id`** minted when the parent accepts the submission; `run_id` is
    a **nullable field** on the row, and `null` means the submission **never reached sink** (the
    precheck rejected it). Retention is by age, defaulting to 90 days.

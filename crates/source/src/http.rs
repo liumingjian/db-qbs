@@ -32,7 +32,7 @@ use url::Url;
 use crate::scheduler::SCHEDULE_TIME_FORMAT;
 use crate::{
     cleared_cookie_header, embedded_web_asset, fetch_agent_info, generate_target_ddl,
-    CronSchedule,
+    CronSchedule, HttpSinkClient, SinkClient,
     session_cookie_header, session_token_from_cookie_header, validate_builder_dblink,
     validate_source_sql, Agent, AgentEndpoint, AgentEvidence, AgentInput, AgentStore, AuthStore,
     ColumnPrecision, DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess,
@@ -91,6 +91,13 @@ pub struct ActiveRun {
     /// 与「还没报过」同待——两端版本对不上时，唯一安全的回答是「我不知道它在做什么」。
     /// 原样的文本另有去处：运行历史那一份仍是字符串，见 `RunHistory::stage`。
     stage: Option<RunStage>,
+    /// 有人按过「停止运行」，且 SIGTERM 确实发出去了（#269）。
+    ///
+    /// 标记打在**发信号那一刻**，不是事后推断的：子进程被信号带走时不会留下任何
+    /// 「我是被停的」的痕迹，父进程唯一知道这件事的时刻就是它自己按下扳机的时刻。
+    /// 终态兜底据此把这次运行记成「已由用户停止」而不是「进程消失」——
+    /// 主动停止与被 OOM 杀掉在历史里必须分得开。
+    stop_requested: bool,
 }
 
 enum StartRunError {
@@ -817,9 +824,27 @@ fn handle_cancel_run(runs: &RunRegistry, run_record_id: &str) -> HttpResponse {
     let Some(pid) = child_pid else {
         return internal_error("run 子进程尚未登记".to_owned());
     };
+    // 标记打在**发信号之前**（#269）。信号一旦发出，子进程可能下一微秒就没了，而监督线程
+    // 紧接着就要读这个标记来决定这次运行记成「已由用户停止」还是「进程消失」——
+    // 先 kill 后标记就是在跟一次进程死亡赛跑，输了的那次会被记成意外死亡。
+    // 加锁与发信号仍是**两趟**：`kill(2)` 留在锁外（见函数开头那段）。
+    mark_stop_requested(runs, run_record_id, true);
     match send_sigterm(pid) {
         Ok(()) => json_response(202, &json!({ "message": "已发送 SIGTERM" })),
-        Err(error) => internal_error(error),
+        Err(error) => {
+            // 信号没发出去，这次运行还在跑：标记得撤回去，否则它将来真的意外死掉时
+            // 会顶着一句「已由用户停止」，而那不是事实。
+            mark_stop_requested(runs, run_record_id, false);
+            internal_error(error)
+        }
+    }
+}
+
+fn mark_stop_requested(runs: &RunRegistry, run_record_id: &str, requested: bool) {
+    if let Ok(mut registry) = runs.lock() {
+        if let Some(run) = registry.active_runs.get_mut(run_record_id) {
+            run.stop_requested = requested;
+        }
     }
 }
 
@@ -1303,17 +1328,132 @@ fn supervise_run(
     let _ = child.wait();
     let _ = fs::remove_file(task_path);
     if !terminal_observed {
+        // 收尾要用的那几样东西**只住在这条在飞投影里**，而它下面就要被摘掉，所以先抄一份。
+        let wrapup = wrapup_snapshot(&runs, &run_record_id);
+        // 「进程消失」与「已由用户停止」是同一个事实的两种成因：子进程被信号带走时
+        // 什么都留不下，唯一知道这是不是我们自己要的，是发信号时打下的那个标记。
+        let reason = if wrapup.stop_requested {
+            UnknownReason::StoppedByUser
+        } else {
+            UnknownReason::ProcessDisappeared
+        };
         let history = runs.lock().ok().and_then(|mut registry| {
             let history = registry.live_histories.get_mut(&run_record_id)?;
-            history.mark_unknown(UnknownReason::ProcessDisappeared, Utc::now());
+            history.mark_unknown(reason, Utc::now());
             Some(history.clone())
         });
         if let Some(history) = history {
             let _ = history_store.save(&history, Utc::now(), retention_days);
         }
+        // 子进程没来得及说完的那句 abort，父进程替它说（#269）。**必须在 `child.wait()`
+        // 之后**：暂存表要等发起写入的那个进程死透了才动得。
+        abort_on_behalf_of_child(&wrapup, &mut run_log);
     }
     remove_live_history(&runs, &run_record_id);
     remove_active_run(&runs, &run_record_id);
+}
+
+/// 子进程退出后，父进程收尾要用到的全部事实。
+struct RunWrapup {
+    /// 这次死亡是不是我们自己要的（`handle_cancel_run` 发信号时打的标记）。
+    stop_requested: bool,
+    /// sink 侧那个 21 字符的 run id。`None` 表示子进程一行日志都没发出来就没了，
+    /// sink 从来不知道有过这次运行——没有占用可释放，也就不该发 abort。
+    run_id: Option<String>,
+    /// 目标端 agent 的地址，取自开跑那一刻的证据快照。agent 后来被改了地址也不影响：
+    /// 暂存表在**当时那台**上，abort 就得发到当时那台去。
+    agent_base_url: Option<String>,
+    /// 最后一次听说的阶段：abort 权限挂在它上面，且只有这一份实现。
+    stage: Option<RunStage>,
+}
+
+fn wrapup_snapshot(runs: &RunRegistry, run_record_id: &str) -> RunWrapup {
+    let Ok(registry) = runs.lock() else {
+        return RunWrapup {
+            stop_requested: false,
+            run_id: None,
+            agent_base_url: None,
+            stage: None,
+        };
+    };
+    let history = registry.live_histories.get(run_record_id);
+    RunWrapup {
+        stop_requested: registry
+            .active_runs
+            .get(run_record_id)
+            .is_some_and(|run| run.stop_requested),
+        run_id: history.and_then(|history| history.run_id.clone()),
+        agent_base_url: history
+            .and_then(|history| history.evidence.agent.as_ref())
+            .map(|agent| agent.base_url.clone()),
+        stage: registry
+            .active_runs
+            .get(run_record_id)
+            .and_then(|run| run.stage),
+    }
+}
+
+/// 替死掉的子进程向 sink 补发一次 abort：释放目标表占用，并把暂存表 drop 掉。
+///
+/// 为什么非得父进程来做：停止运行走的是 SIGTERM，而子进程没有信号处理，被内核直接
+/// 终止，来不及调用它自己那条 `abort_best_effort`。sink 那边的目标表占用是纯内存的，
+/// 只在提交或收到 abort 时删除——没人补这一刀，同一张目标表就再也开不了第二次运行
+/// （`TARGET_TABLE_BUSY`）。
+///
+/// 三种情况不发：
+/// * 子进程自己走完了终态（调用方已判）——那时 sink 侧要么已提交、要么子进程自己
+///   abort 过了，再发一次只会在 `sealed` 的 run 上换回一个 409，平白造出一条「失败」。
+/// * 没有 run_id 或没有 agent 地址：sink 根本不知道这次运行。
+/// * 阶段已过封口点：暂存表的处置权整个归 sink 了，source 永久放弃 abort 权。
+///
+/// 失败**不吞**：落成一行 `abort_failed` 运行日志，和子进程自己 abort 失败时写的那行
+/// 同一个形状。这里不重试——「abort 不承诺可靠性」那条没有变。
+fn abort_on_behalf_of_child(wrapup: &RunWrapup, run_log: &mut RunLogWriter) {
+    let Some(run_id) = wrapup.run_id.as_deref() else {
+        return;
+    };
+    // 认不出的阶段拼写（子进程比父进程新）按「可能还没封口」办：多发一次 abort 是幂等的，
+    // 少发一次却会把目标表永久锁住。
+    if wrapup.stage.is_some_and(|stage| !stage.abort_allowed()) {
+        return;
+    }
+    let Some(base_url) = wrapup.agent_base_url.as_deref() else {
+        log_abort_failed(run_log, run_id, "运行证据里没有目标端 agent 地址".to_owned());
+        return;
+    };
+    let mut sink = match HttpSinkClient::new(base_url) {
+        Ok(sink) => sink,
+        Err(error) => {
+            log_abort_failed(run_log, run_id, error);
+            return;
+        }
+    };
+    if let Err(error) = sink.abort(run_id) {
+        log_abort_failed(run_log, run_id, error.message);
+    }
+}
+
+fn log_abort_failed(run_log: &mut RunLogWriter, run_id: &str, message: String) {
+    let mut line = Vec::new();
+    if write_log_line_with_fields(
+        &mut line,
+        LogLevel::Warn,
+        LogEvent::AbortFailed,
+        Some(run_id),
+        None,
+        json!({ "message": message }),
+    )
+    .is_err()
+    {
+        return;
+    }
+    let line = String::from_utf8_lossy(&line).trim_end().to_owned();
+    {
+        let stdout = io::stdout();
+        let mut writer = stdout.lock();
+        let _ = writeln!(writer, "{line}");
+    }
+    run_log.write(&line);
 }
 
 fn apply_log_line(
@@ -1355,6 +1495,7 @@ fn register_active_run(
             agent_id: agent_id.to_owned(),
             child_pid: None,
             stage: None,
+            stop_requested: false,
         },
     );
     Ok(())

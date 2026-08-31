@@ -230,6 +230,37 @@ fn sqlite_writes_lazily_remove_expired_rows_and_startup_seals_incomplete_rows() 
     fs::remove_dir_all(directory).unwrap();
 }
 
+/// 「结局未知」的三个成因各有各的拼写与人话，一格都不许混（#269）。
+///
+/// 拼写是线上契约：前端按它查表，历史行按它落库。主动停止与意外死亡在这里分开，
+/// 是为了让运行历史答得出「昨晚那次是谁弄的」。
+#[test]
+fn every_unknown_reason_has_its_own_wire_spelling_and_sentence() {
+    let now = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
+    for (reason, spelling, sentence) in [
+        (
+            UnknownReason::ProcessDisappeared,
+            "PROCESS_DISAPPEARED",
+            "进程消失，无终态日志",
+        ),
+        (
+            UnknownReason::ServiceRestarted,
+            "SERVICE_RESTARTED",
+            "服务重启，结局未知",
+        ),
+        (UnknownReason::StoppedByUser, "STOPPED_BY_USER", "已由用户停止"),
+    ] {
+        let mut history = RunHistory::accepted("record-1", "task-1", SOURCE_SQL, now);
+        history.mark_unknown(reason, now);
+        assert_eq!(history.unknown_reason.as_deref(), Some(spelling));
+        assert_eq!(history.message.as_deref(), Some(sentence));
+        // 三格都是同一条 FAILED 路径上的「说不清」，分类不跟着分叉。
+        assert_eq!(history.outcome.as_deref(), Some("FAILED"));
+        assert_eq!(history.failure_kind.as_deref(), Some("UNKNOWN"));
+        assert_eq!(history.target_table_effect, None);
+    }
+}
+
 #[test]
 fn evidence_round_trips_and_save_preserves_the_original_snapshot_without_passwords() {
     let suffix = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);

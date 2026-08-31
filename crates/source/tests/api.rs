@@ -24,10 +24,13 @@ use serde_json::Value;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
-/// 一台**在应答**的目标端 agent 桩：只认 `/v1/agent/info`，别的一律 503。
+/// 一台**在应答**的目标端 agent 桩：认 `/v1/agent/info` 与 `/v1/runs/{id}/abort`，别的一律 503。
 ///
 /// 与 `source_skeleton.rs` 里那台同一个形状——注册 agent、探测、目标端元数据这几条
 /// 都得先过它，一台不在线的 agent 会让它们统统停在「agent 不在线」那一步。
+///
+/// abort 也得认：子进程一死，父进程就会替它补发一次（#269）。这台桩是**全局共享**的，
+/// 想对某一次 abort 下断言的用例请另起一台 [`abort_recording_agent`]。
 fn agent_stub_url() -> &'static str {
     static STUB: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     STUB.get_or_init(|| {
@@ -44,12 +47,19 @@ fn agent_stub_url() -> &'static str {
                     .unwrap_or_default()
                     .to_owned();
                 let info = request_line.contains("/v1/agent/info");
+                let aborted = aborted_run_id(&request_line);
                 let body = if info {
-                    r#"{"agent_id":"stub-agent","name":"桩 agent","version":"0.0.0-test","max_concurrent_runs":1}"#
+                    r#"{"agent_id":"stub-agent","name":"桩 agent","version":"0.0.0-test","max_concurrent_runs":1}"#.to_owned()
+                } else if let Some(run_id) = &aborted {
+                    format!(r#"{{"run_id":"{run_id}","staging_dropped":true}}"#)
                 } else {
-                    r#"{"error":{"code":"BAD_REQUEST","message":"桩只认 /v1/agent/info","run_id":null,"details":{}}}"#
+                    r#"{"error":{"code":"BAD_REQUEST","message":"桩只认 /v1/agent/info","run_id":null,"details":{}}}"#.to_owned()
                 };
-                let status = if info { "200 OK" } else { "503 Service Unavailable" };
+                let status = if info || aborted.is_some() {
+                    "200 OK"
+                } else {
+                    "503 Service Unavailable"
+                };
                 let _ = write!(
                     stream,
                     "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
@@ -62,6 +72,72 @@ fn agent_stub_url() -> &'static str {
         url
     })
     .as_str()
+}
+
+/// `POST /v1/runs/<run_id>/abort` 里的那个 run id，不是这条路就是 `None`。
+fn aborted_run_id(request_line: &str) -> Option<String> {
+    let path = request_line.split_whitespace().nth(1)?;
+    let rest = path.strip_prefix("/v1/runs/")?;
+    Some(rest.strip_suffix("/abort")?.to_owned())
+}
+
+/// 一台**只记 abort** 的目标端 agent 桩：`/v1/agent/info` 照常应答，
+/// `/v1/runs/{id}/abort` 按 `abort_succeeds` 成或败，并把见到的每一个 run id 记下来。
+///
+/// 它回答的是 #269 那两个问题：父进程到底替子进程发了没有，以及发去的是哪一次运行。
+fn abort_recording_agent(abort_succeeds: bool) -> (String, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let aborts = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&aborts);
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut head = [0_u8; 1024];
+            let read = stream.read(&mut head).unwrap_or(0);
+            let request_line = String::from_utf8_lossy(&head[..read])
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            let info = request_line.contains("/v1/agent/info");
+            let aborted = aborted_run_id(&request_line);
+            if let Some(run_id) = &aborted {
+                recorder.lock().unwrap().push(run_id.clone());
+            }
+            let (status, body) = if info {
+                (
+                    "200 OK",
+                    r#"{"agent_id":"stub-agent","name":"桩 agent","version":"0.0.0-test","max_concurrent_runs":1}"#.to_owned(),
+                )
+            } else if let Some(run_id) = &aborted {
+                if abort_succeeds {
+                    (
+                        "200 OK",
+                        format!(r#"{{"run_id":"{run_id}","staging_dropped":true}}"#),
+                    )
+                } else {
+                    (
+                        "500 Internal Server Error",
+                        r#"{"error":{"code":"SINK_ENVIRONMENT","message":"暂存表 drop 不掉","run_id":null,"details":{}}}"#.to_owned(),
+                    )
+                }
+            } else {
+                (
+                    "503 Service Unavailable",
+                    r#"{"error":{"code":"BAD_REQUEST","message":"桩只认 /v1/agent/info","run_id":null,"details":{}}}"#.to_owned(),
+                )
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.flush();
+        }
+    });
+    (url, aborts)
 }
 
 fn temp_directory() -> PathBuf {
@@ -220,12 +296,33 @@ impl Rig {
 
     /// 注册一台 agent，返回它的 id。
     fn register_agent(&self, name: &str) -> String {
+        self.register_agent_at(name, agent_stub_url())
+    }
+
+    /// 注册一台**指定地址**的 agent：要对这台桩收到了什么下断言的用例走这条。
+    fn register_agent_at(&self, name: &str, base_url: &str) -> String {
         let response = self.post(
             "/api/agents",
-            &format!(r#"{{"name":"{name}","base_url":"{}"}}"#, agent_stub_url()),
+            &format!(r#"{{"name":"{name}","base_url":"{base_url}"}}"#),
         );
         assert_eq!(response.status, 201, "{}", response.body_text());
         self.json(&response)["agent_id"].as_str().unwrap().to_owned()
+    }
+
+    /// 等到这个任务名下**再没有在飞的运行**。
+    ///
+    /// 「投影不再是活的」不等于「这个任务可以再跑了」：子进程死掉之后，父进程还要替它
+    /// 向目标端补发一次 abort（#269），那一小段里在飞登记仍然在——界面上就是「停止中…」。
+    /// 收尾之后紧接着再起一次的用例，等的必须是这一条，不是 `live == false`。
+    fn wait_until_idle(&self, task_id: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if !self.runs.lock().unwrap().has_active_run(task_id) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "等在飞运行释放超时");
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     fn create_oracle_datasource(&self, name: &str) -> String {
@@ -1426,6 +1523,7 @@ fn run_launch_rejects_a_second_run_of_the_same_task_until_child_reap() {
         });
     }
     wait_for_empty_directory(&rig.directory.join("run-tasks"));
+    rig.wait_until_idle(&first_task_id);
 
     let relaunched = start(&first_task_id);
     wait_for_json(&rig, &format!("/api/runs/{relaunched}"), |body| {
@@ -1487,6 +1585,8 @@ fi
         wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
             body["live"] == false
         });
+        // 收尾还要替子进程补发一次 abort，在飞登记要等那一步走完才摘（#269）。
+        rig.wait_until_idle(&task_id);
     }
 
     let committing = start(&task_id);
@@ -1510,6 +1610,164 @@ fi
     });
 
     let _ = fs::remove_dir_all(directory);
+}
+
+/// 停止运行的完整一趟（#269）：SIGTERM → 确认子进程退出 → 替它向目标端补发 abort。
+///
+/// 三件事一起证：顺序是硬的（子进程还活着时**一个字节都没发过去**）、abort 发的是
+/// 这一次运行的 run_id、以及占用释放之后同一个任务立刻能再跑。
+#[test]
+fn stopping_a_run_aborts_on_the_child_s_behalf_only_after_it_has_exited() {
+    let directory = temp_directory();
+    let stopped = directory.join("child-caught-term");
+    let release = directory.join("release-dying-child");
+    let rig = Rig::with_child(&format!(
+        r#"trap 'printf "%s\n" caught >> "{}"; while [ ! -f "{}" ]; do sleep 0.02; done; exit 0' TERM
+printf '%s\n' '{{"ts":"2026-08-15T14:00:00.000Z","level":"info","event":"stage_changed","run_id":"run-stopped","task":null,"stage":"STREAMING"}}'
+while :; do sleep 0.02; done
+"#,
+        stopped.display(),
+        release.display(),
+    ));
+    let (agent_url, aborts) = abort_recording_agent(true);
+    let agent_id = rig.register_agent_at("目标端", &agent_url);
+    let source_id = rig.create_oracle_datasource("源库");
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+
+    let start = || {
+        let response = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+        assert_eq!(response.status, 202, "{}", response.body_text());
+        rig.json(&response)["run_record_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    let run_record_id = start();
+    wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["stage"] == "STREAMING"
+    });
+    let canceled = rig.post(&format!("/api/runs/{run_record_id}/cancel"), "");
+    assert_eq!(canceled.status, 202, "{}", canceled.body_text());
+
+    // 信号到了，子进程**还没死**（它卡在 trap 里）：这一刻暂存表一动都不能动。
+    wait_for_file_text(&stopped, |text| text.contains("caught"));
+    thread::sleep(Duration::from_millis(100));
+    let too_early = aborts.lock().unwrap().clone();
+    assert!(too_early.is_empty(), "子进程还活着就发了 abort：{too_early:?}");
+
+    fs::write(&release, "").unwrap();
+    rig.wait_until_idle(&task_id);
+    assert_eq!(aborts.lock().unwrap().clone(), vec!["run-stopped"]);
+
+    // 主动停止在历史里说得出自己是主动停止的，不再和 OOM、崩溃混作一谈。
+    let history = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(history["live"], false);
+    assert_eq!(history["outcome"], "FAILED");
+    assert_eq!(history["unknown_reason"], "STOPPED_BY_USER");
+    assert_eq!(history["message"], "已由用户停止");
+    assert_eq!(history["target_table_effect"], Value::Null);
+
+    // 占用一还，同一张目标表马上能再跑一次。
+    let again = start();
+    wait_for_json(&rig, &format!("/api/runs/{again}"), |body| {
+        body["stage"] == "STREAMING"
+    });
+    assert_eq!(
+        rig.post(&format!("/api/runs/{again}/cancel"), "").status,
+        202
+    );
+    rig.wait_until_idle(&task_id);
+
+    let _ = fs::remove_dir_all(directory);
+}
+
+/// 补发的 abort 失败了**不吞**：失败事实落成一行 `abort_failed` 运行日志（#269）。
+///
+/// 目标表这时仍被占着，怎么把这件事摆到用户面前是后续票的事；这里守的是
+/// 「它至少被记下来了」。
+#[test]
+fn a_failed_abort_after_a_stop_is_written_into_the_run_log() {
+    let rig = Rig::with_child(
+        r#"trap 'exit 0' TERM
+printf '%s\n' '{"ts":"2026-08-15T14:10:00.000Z","level":"info","event":"stage_changed","run_id":"run-unabortable","task":null,"stage":"STREAMING"}'
+while :; do sleep 0.02; done
+"#,
+    );
+    let (agent_url, aborts) = abort_recording_agent(false);
+    let agent_id = rig.register_agent_at("目标端", &agent_url);
+    let source_id = rig.create_oracle_datasource("源库");
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["stage"] == "STREAMING"
+    });
+    assert_eq!(
+        rig.post(&format!("/api/runs/{run_record_id}/cancel"), "").status,
+        202
+    );
+    rig.wait_until_idle(&task_id);
+    assert_eq!(aborts.lock().unwrap().clone(), vec!["run-unabortable"]);
+
+    let logs = wait_for_json(&rig, &format!("/api/runs/{run_record_id}/logs"), |body| {
+        body["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|line| line["line"].as_str().unwrap().contains("abort_failed"))
+    });
+    let failed = logs["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|line| serde_json::from_str::<Value>(line["line"].as_str().unwrap()).ok())
+        .find(|line| line["event"] == "abort_failed")
+        .expect("abort 失败要留下一行日志");
+    assert_eq!(failed["level"], "warn");
+    assert_eq!(failed["run_id"], "run-unabortable");
+    assert_eq!(failed["message"], "暂存表 drop 不掉");
+    // 停止这件事本身照旧记成「已由用户停止」——abort 成没成功是另一件事。
+    let history = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(history["unknown_reason"], "STOPPED_BY_USER");
+}
+
+/// 子进程自己跑完了就**不补 abort**：那时暂存表要么已经换进目标表、要么它自己收拾过了，
+/// 再发一次只会在已封口的 run 上换回一个 409，平白造出一条「abort 失败」。
+#[test]
+fn a_run_that_reported_its_own_terminal_is_not_aborted_by_the_parent() {
+    let rig = Rig::with_child(
+        r#"printf '%s\n' '{"ts":"2026-08-15T14:20:00.000Z","level":"info","event":"stage_changed","run_id":"run-complete","task":null,"stage":"STREAMING"}'
+printf '%s\n' '{"ts":"2026-08-15T14:20:07.000Z","level":"info","event":"run_finished","run_id":"run-complete","task":null,"terminal":"SUCCEEDED","stage":"SUCCEEDED","message":"done","source_code":null,"sink_code":null,"column":null,"value":null,"source_rows":7,"source_batches":2,"staged_rows":7,"received_batches":2,"sink_reported_rows":7,"purged_rows":0,"fetch_ms":4,"push_ms":22,"commit_ms":6,"count_ms":2,"cursor_ms":1}'
+"#,
+    );
+    let (agent_url, aborts) = abort_recording_agent(true);
+    let agent_id = rig.register_agent_at("目标端", &agent_url);
+    let source_id = rig.create_oracle_datasource("源库");
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let history = wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["live"] == false
+    });
+    assert_eq!(history["outcome"], "SUCCEEDED");
+    rig.wait_until_idle(&task_id);
+    thread::sleep(Duration::from_millis(100));
+    let seen = aborts.lock().unwrap().clone();
+    assert!(seen.is_empty(), "跑完的运行不该被补一刀 abort：{seen:?}");
 }
 
 /// 一台**记账的** agent 桩：照常应答 `/v1/agent/info`，别的 503，

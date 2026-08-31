@@ -144,10 +144,21 @@ impl RunTrigger {
     }
 }
 
+/// 一次运行**没有留下终态日志**时，父进程替它写下的那句「为什么说不清」。
+///
+/// 三格闭集，且这三格只回答同一个问题的三种成因，不是运行阶段（[`RunStage`] 那五格
+/// 一格不动）。区分它们的价值全在事后：一次被人按停的运行和一次被 OOM 杀掉的运行，
+/// 在历史里长得一模一样的话，「昨晚那次到底是谁弄的」就永远没有答案。
+///
+/// [`RunStage`]: db_qbs_shared::RunStage
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnknownReason {
     ProcessDisappeared,
     ServiceRestarted,
+    /// 有人在任务中心按了「停止运行」，父进程发出的 SIGTERM 把子进程带走了（#269）。
+    /// 标记打在**发信号那一刻**，所以它说的是「这次死亡是我们要的」，
+    /// 而不是「事后猜的」。
+    StoppedByUser,
 }
 
 impl UnknownReason {
@@ -155,6 +166,7 @@ impl UnknownReason {
         match self {
             Self::ProcessDisappeared => "PROCESS_DISAPPEARED",
             Self::ServiceRestarted => "SERVICE_RESTARTED",
+            Self::StoppedByUser => "STOPPED_BY_USER",
         }
     }
 
@@ -162,6 +174,7 @@ impl UnknownReason {
         match self {
             Self::ProcessDisappeared => "进程消失，无终态日志",
             Self::ServiceRestarted => "服务重启，结局未知",
+            Self::StoppedByUser => "已由用户停止",
         }
     }
 }
