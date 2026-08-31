@@ -275,7 +275,13 @@ branches on the version.
    names the run and asks the user to stop it first — deletion is irreversible, so it never stops a
    run that may be writing data on the user's behalf. A run stays in flight until the parent has
    reaped the child **and** sent the abort on its behalf (see **Abort**), so for that short window
-   after a stop the task is still un-deletable and un-re-runnable — one key, one answer, both places.
+   after a stop the task is still un-deletable. Deletion is refused for a second reason too:
+   **a task whose run left an unreleased target-table hold cannot be deleted**, because the retry
+   that would release it is offered on that task's row and nowhere else. That is a different question
+   from **may this task run again**, which is refused per *target table* — so a task can be deletable
+   and still not runnable, when the table it writes is held by another task's run. Both refusals carry
+   a machine-readable reason beside the sentence, because "go stop the run" and "go retry the release"
+   are different instructions and the UI must not tell them apart by reading Chinese prose.
    **The state lives only in `source`, and only in process memory** — see **Run Stage**. `sink`
    holds no run state, only the resource lifetime of the staging table. When the source process dies,
    the run ceases to exist.
@@ -340,7 +346,8 @@ branches on the version.
    the process that writes into it is still alive. It is skipped when the run never reached `sink`
    (no `run_id`) and when the stage says the point of no return has passed. A failed one is written
    into that run's Run Log as an `abort_failed` line rather than swallowed, and the hold it failed to
-   release is remembered by name so it can be retried on demand. **SIGKILL, a parent crash, and a
+   release is remembered — which table it is on, and which run's abort to resend — so a person can
+   retry it on demand. **SIGKILL, a parent crash, and a
    power cut still leak** — there is no timeout-based reclaim on the `sink` side, and a source
    restart forgets the remembered holds along with everything else it keeps in memory.
 
@@ -350,13 +357,19 @@ branches on the version.
    is aborted. Because release is asynchronous and can fail, **`source` reports the hold's fate
    rather than the stop request's**: from the moment a stop is signalled until the abort has been
    sent and answered, the run says the hold is still being released; if the abort failed — the
-   child's own or the parent's — the run says the hold is still held, and names the reason. A run may not be started while a hold from its
-   task's previous run is unreleased — the refusal comes from `source`, before the request would
-   reach the agent that would refuse it anyway. **Nothing may present a task as re-runnable while
-   its target table is still held**, in the UI or in the API. The retry is manual and explicit
+   child's own or the parent's — the run says the hold is still held, and names the reason.
+   **A hold is a fact about a table, not about a task or a run**: its identity is the agent, the
+   database and the table name (compared case-insensitively) — the same key `sink` collides on — read
+   off the evidence pinned when the run started. So every run row writing that table reports the hold,
+   a neighbouring task's row included, and no run may be started while that table's hold is
+   unreleased. The refusal comes from `source`, before the request would reach the agent that would
+   refuse it anyway. **Nothing may present a task as re-runnable while its target table is still
+   held**, in the UI or in the API; the one residue is a task that has never run, which has no row to
+   report on and is stopped by the server instead. The retry is manual and explicit
    (`POST /api/runs/{run_record_id}/release`, the same abort as before, sent by a person instead of
-   by the parent); nothing retries on a timer, and this is the only remedy short of clearing the
-   hold on the agent by hand.
+   by the parent — the path says which row was clicked, what gets released is the hold on that row's
+   table); nothing retries on a timer, and this is the only remedy short of clearing the hold on the
+   agent by hand.
 
 **Swap**
    Completed inside a single transaction on the target: an `INSERT ... SELECT` from the staging table

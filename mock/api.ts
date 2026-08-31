@@ -981,7 +981,19 @@ const ROUTES: Route[] = [
         return fail(
           409,
           `任务还有运行没结束（${flying.join("、")}）；请先停止这次运行，等它收尾后再删除任务`,
-          { runs: flying },
+          { reason: "RUN_IN_FLIGHT", runs: flying },
+        );
+      }
+      // 占用还没还回来的也拒（#271）：重试释放那颗按钮就长在这个任务的行上，
+      // 删了它，占用还挂在目标端，而界面上再没有一处点得到它。
+      const holding = runs
+        .filter((r) => r.task_id === id && typeof r.target_hold === "string")
+        .map((r) => String(r.run_record_id));
+      if (holding.length > 0) {
+        return fail(
+          409,
+          `任务上一次运行的目标表占用还没释放（${holding.join("、")}）；请先在这一行点「锁未释放，点此重试」，释放成功后再删除任务`,
+          { reason: "TARGET_HELD", runs: holding },
         );
       }
       tasks = tasks.filter((t) => t.task_id !== id);
