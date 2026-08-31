@@ -468,6 +468,11 @@ export interface RunHistory {
    * **纯内存的事实**，不落库：服务端重启后一律读回 `null`。
    */
   target_hold?: "RELEASING" | "HELD" | null;
+  /** Aggregate alert state only. Recipient addresses and SMTP diagnostics are administrator data. */
+  alert?: {
+    alert_id: string;
+    delivery_state: "PENDING" | "SENT";
+  } | null;
   /** `HELD` 时没能释放掉的原因，目标端原话。其余情况是 `null`。 */
   target_hold_message?: string | null;
 }

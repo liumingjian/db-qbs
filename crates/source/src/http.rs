@@ -442,6 +442,7 @@ pub struct Api<'a> {
     /// 登录、会话与口令。**只护得到这个进程的 HTTP 面**——sink 那半边仍然没有鉴权。
     pub auth: &'a AuthStore,
     pub email_alerts: &'a crate::EmailAlertStore,
+    pub alert_outbox: &'a crate::AlertOutboxStore,
     pub clock: Arc<dyn Clock>,
     pub mail_transport: Arc<dyn MailTransport>,
     pub describe_source: fn(&OracleAccess, &TaskSpec) -> Result<Vec<SourceColumn>, SourceReadError>,
@@ -737,10 +738,10 @@ pub fn routes() -> &'static [Route] {
                 handle_release_target(state, id)
             }),
             Route::new(Get, "/api/runs", |state, request, _id| {
-                handle_list_history(state.runs, state.history, request.query())
+                handle_list_history(state.runs, state.history, state.alert_outbox, request.query())
             }),
             Route::new(Get, "/api/runs/{}", |state, _request, id| {
-                handle_get_run(state.runs, state.history, id)
+                handle_get_run(state.runs, state.history, state.alert_outbox, id)
             }),
             // 原始日志行的**游标增量**取用。放在 `/api/runs/{}` 之后不承重：
             // 两条的段数不同（4 段 vs 3 段），匹配上互不干扰。
@@ -1320,6 +1321,7 @@ fn send_sigterm(pid: u32) -> Result<(), String> {
 fn handle_get_run(
     runs: &RunRegistry,
     history_store: &HistoryStore,
+    alert_outbox: &crate::AlertOutboxStore,
     run_record_id: &str,
 ) -> HttpResponse {
     // 「在飞投影」与「占用处境」**一把锁读完**：分两次拿锁，答出来的会是两个时刻的
@@ -1377,7 +1379,11 @@ fn handle_get_run(
                 Ok(registry) => registry.target_hold(TargetTable::from_history(&history).as_ref()),
                 Err(_) => return internal_error("run 投影锁已损坏".to_owned()),
             };
-            history_response(&history, hold.as_ref())
+            let alert = match alert_outbox.summary_for_run(run_record_id) {
+                Ok(alert) => alert,
+                Err(error) => return internal_error(error),
+            };
+            history_response(&history, hold.as_ref(), alert)
         }
         Ok(None) => not_found(),
         Err(error) => internal_error(error),
@@ -1448,6 +1454,7 @@ fn handle_run_logs(state: &Api<'_>, run_record_id: &str, query: Option<&str>) ->
 fn handle_list_history(
     runs: &RunRegistry,
     history_store: &HistoryStore,
+    alert_outbox: &crate::AlertOutboxStore,
     query: Option<&str>,
 ) -> HttpResponse {
     let mut task_id = None;
@@ -1471,8 +1478,16 @@ fn handle_list_history(
                 let values = merged
                     .iter()
                     .zip(&holds)
-                    .map(|(history, hold)| history_value(history, hold.as_ref()))
-                    .collect::<Vec<_>>();
+                    .map(|(history, hold)| {
+                        alert_outbox
+                            .summary_for_run(&history.run_record_id)
+                            .map(|alert| history_value(history, hold.as_ref(), alert))
+                    })
+                    .collect::<Result<Vec<_>, _>>();
+                let values = match values {
+                    Ok(values) => values,
+                    Err(error) => return internal_error(error),
+                };
                 json_response(200, &values)
             }
             Err(error) => internal_error(error),
@@ -1512,14 +1527,22 @@ fn merge_live_history(
     Ok(history)
 }
 
-fn history_response(history: &RunHistory, hold: Option<&HoldReport>) -> HttpResponse {
-    json_response(200, &history_value(history, hold))
+fn history_response(
+    history: &RunHistory,
+    hold: Option<&HoldReport>,
+    alert: Option<crate::RunAlertSummary>,
+) -> HttpResponse {
+    json_response(200, &history_value(history, hold, alert))
 }
 
 /// 落库的那一行，加上**只有内存里才知道**的两件事：这条运行还活着没有，
 /// 以及它占的目标表还回来了没有（#271）。两者都不进 SQLite——
 /// 进程一死它们就不成立了，存下来只会在重启之后骗人。
-fn history_value(history: &RunHistory, hold: Option<&HoldReport>) -> Value {
+fn history_value(
+    history: &RunHistory,
+    hold: Option<&HoldReport>,
+    alert: Option<crate::RunAlertSummary>,
+) -> Value {
     let mut value =
         serde_json::to_value(history).expect("serializing a run history response must succeed");
     let object = value
@@ -1534,6 +1557,10 @@ fn history_value(history: &RunHistory, hold: Option<&HoldReport>) -> Value {
         "target_hold_message".to_owned(),
         hold.and_then(|report| report.message.clone())
             .map_or(Value::Null, Value::String),
+    );
+    object.insert(
+        "alert".to_owned(),
+        serde_json::to_value(alert).expect("serializing alert summary must succeed"),
     );
     value
 }
