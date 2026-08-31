@@ -15,6 +15,7 @@ import {
   createTask,
   cancelRun,
   deleteTask,
+  deleteTaskRefusalMessage,
   fetchSession,
   listAgents,
   listDatasources,
@@ -48,7 +49,7 @@ import type { DatasourceOption, EntryFix, EntryGuard } from "./entry";
 import { TaskEntryDialog } from "./TaskEntryDialog";
 import { TaskWizardScreen } from "./TaskWizardScreen";
 import type { TaskWizardScreenHandle } from "./TaskWizardScreen";
-import { Modal } from "./ui";
+import { DeleteRefusal, Modal } from "./ui";
 import { openExisting, openNew, taskName, toSpec } from "./wizard";
 import type { Draft, Step } from "./wizard";
 
@@ -1111,8 +1112,8 @@ function DeleteDialog({
   onDelete: () => Promise<void>;
 }) {
   const [error, setError] = useState<string | null>(null);
-  // 被拦下时服务端点名的那几次运行（#270）。红底那句话已经把该做什么说清楚了，
-  // 这份列表只是把 run_record_id 摆成可扫、可复制的形状——照删数据源那屏的样子。
+  // 被拦下时服务端点名的那几次运行（#270/#271）。红底那句话只说数量与该做什么，
+  // 点名交给这份列表——与删数据源那屏同一块 `DeleteRefusal`，不是照抄的第二份。
   const [blockedBy, setBlockedBy] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
@@ -1124,8 +1125,9 @@ function DeleteDialog({
       await onDelete();
       onClose();
     } catch (deleteError) {
-      setError(messageFrom(deleteError));
-      setBlockedBy(blockingRunsFrom(deleteError));
+      const runs = blockingRunsFrom(deleteError);
+      setError(deleteTaskRefusalMessage(deleteError, messageFrom(deleteError), runs));
+      setBlockedBy(runs);
     } finally {
       setSubmitting(false);
     }
@@ -1138,18 +1140,7 @@ function DeleteDialog({
           确认删除任务“<strong>{task.name}</strong>”？
         </p>
         <span className="task-id">{task.task_id}</span>
-        {error !== null && (
-          <div className="form-error" role="alert">
-            {error}
-          </div>
-        )}
-        {blockedBy.length > 0 && (
-          <ul>
-            {blockedBy.map((runRecordId) => (
-              <li key={runRecordId}>{runRecordId}</li>
-            ))}
-          </ul>
-        )}
+        <DeleteRefusal message={error} blockedBy={blockedBy} />
       </div>
       <footer className="modal-footer">
         <button

@@ -6,6 +6,7 @@ import {
   copyTaskCurl,
   createTask,
   deleteTask,
+  deleteTaskRefusalMessage,
   emptySpec,
   fetchBuilderColumns,
   fetchBuilderDblinks,
@@ -209,6 +210,37 @@ describe("task API", () => {
     expect((failure as ApiError).message).toBe(body.error.message);
     expect((failure as ApiError).status).toBe(409);
     expect(blockingRunsFrom(failure)).toEqual(["record-01"]);
+  });
+
+  // 红底那句话：名字只在列表里点一遍，句子里只说拦住的是什么、下一步做什么（#270/#271）。
+  // 分辨两种拦法靠报文里那一格 `reason`，不靠猜服务端那句中文。
+  it("says what to do next according to the refusal reason, not the sentence", () => {
+    const refusal = (reason: string) =>
+      new ApiError("服务端那句话", 409, {
+        error: { message: "服务端那句话", reason, runs: ["record-01"] },
+      });
+
+    expect(
+      deleteTaskRefusalMessage(refusal("RUN_IN_FLIGHT"), "服务端那句话", ["record-01"]),
+    ).toBe("任务还有 1 次运行没结束；请先停止它，等它收尾后再删除任务");
+    expect(
+      deleteTaskRefusalMessage(refusal("TARGET_HELD"), "服务端那句话", ["record-01"]),
+    ).toBe(
+      "任务上一次运行的目标表占用还没释放；请先在那一行点「锁未释放，点此重试」，释放成功后再删除任务",
+    );
+  });
+
+  it("falls back to the server's own sentence when it cannot tell them apart", () => {
+    // 认不出的 reason（旧服务端、以后新增的拦法）与拿不到点名列表，都退回原话——
+    // 一句啰嗦的实话胜过一句自己编的。
+    const unknown = new ApiError("原话", 409, {
+      error: { message: "原话", reason: "SOMETHING_NEW", runs: ["record-01"] },
+    });
+    expect(deleteTaskRefusalMessage(unknown, "原话", ["record-01"])).toBe("原话");
+    expect(deleteTaskRefusalMessage(unknown, "原话", [])).toBe("原话");
+    expect(deleteTaskRefusalMessage(new Error("网络断了"), "原话", ["record-01"])).toBe(
+      "原话",
+    );
   });
 
   it("only reads the run list out of a 409 shaped like the delete refusal", () => {

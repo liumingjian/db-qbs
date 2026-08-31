@@ -197,6 +197,45 @@ export function ActionButton({
 
 
 /**
+ * 删除被拒时那一块：红底一句话 + 点名到条目的列表（ADR-0039 §4 的形状）。
+ *
+ * 删数据源、删 agent、删任务被拒时长得一模一样，所以只有这一份实现。三条规则跟着它走：
+ *
+ * - **名字只在列表里出现一遍**。服务端那句 `message` 把名字连成一串写在句子里，
+ *   照原样显示就是同一批名字点名两遍，而长句在窄视口会折成一坨——所以红底那句话由
+ *   调用方先折成「数量 + 该做什么」（`deleteRefusalMessage` / `deleteTaskRefusalMessage`），
+ *   点名交给列表。
+ * - **拿不到列表时原样显示服务端那句话**：那时候一遍也没有比一遍都不点名强，
+ *   这一条由那两个折句子的函数各自兑现。
+ * - 没有被拒就什么都不出。
+ */
+export function DeleteRefusal({
+  message,
+  blockedBy,
+}: {
+  message: string | null;
+  blockedBy: string[];
+}) {
+  if (message === null) {
+    return null;
+  }
+  return (
+    <>
+      <div className="form-error" role="alert">
+        {message}
+      </div>
+      {blockedBy.length > 0 && (
+        <ul>
+          {blockedBy.map((name) => (
+            <li key={name}>{name}</li>
+          ))}
+        </ul>
+      )}
+    </>
+  );
+}
+
+/**
  * 列表底部的分页条。**纯客户端分页**：当前 API 没有 `limit/offset`，
  * 这里翻的是已经取回来的那一整份清单——**不装成服务端分页**（ADR-0042 §2 原样有效）。
  *

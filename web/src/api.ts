@@ -945,12 +945,50 @@ export async function updateTask(taskId: string, input: TaskInput): Promise<Task
 }
 
 /**
- * 删任务被拒（409）时，服务端点名的那几次还没结束的运行（#270）。
+ * 删任务被拒（409）时，服务端点名的那几次拦住了删除的运行（#270/#271）。
  *
  * 与 [`referencedTasksFrom`] 同一形态：拿不到就返回空数组——报文正文里本来就带着同一句话。
  */
 export function blockingRunsFrom(error: unknown): string[] {
   return namesFromConflict(error, "runs");
+}
+
+/**
+ * 删任务被拒时红底那句话该说什么（#270/#271）。
+ *
+ * 与 [`deleteRefusalMessage`](./datasource.ts) 同一条道理：服务端那句话把
+ * run_record_id 连在句子里，而同一批 id 紧接着又摆成列表，于是界面上点名两遍。
+ * 名字**只留列表**，这里只说拦住的是什么、下一步该做什么。
+ *
+ * 两种拦法要做的事完全不同（去停止运行 vs 去重试释放占用），分辨靠报文里那一格
+ * `reason`，**不靠猜服务端那句中文**。认不出的 `reason`（旧服务端、以后新增的拦法）
+ * 原样退回服务端那句话——那时候一句啰嗦的实话胜过一句自己编的。
+ */
+export function deleteTaskRefusalMessage(
+  error: unknown,
+  message: string,
+  blockedBy: string[],
+): string {
+  if (blockedBy.length === 0) {
+    return message;
+  }
+  switch (refusalReasonFrom(error)) {
+    case "RUN_IN_FLIGHT":
+      return `任务还有 ${blockedBy.length} 次运行没结束；请先停止它，等它收尾后再删除任务`;
+    case "TARGET_HELD":
+      return "任务上一次运行的目标表占用还没释放；请先在那一行点「锁未释放，点此重试」，释放成功后再删除任务";
+    default:
+      return message;
+  }
+}
+
+/** 409 报文里那一格给机器读的拒绝理由。没有就是 `null`。 */
+function refusalReasonFrom(error: unknown): string | null {
+  if (!(error instanceof ApiError) || error.status !== 409) {
+    return null;
+  }
+  const reason = errorDetail(error.body)?.reason;
+  return typeof reason === "string" ? reason : null;
 }
 
 export async function deleteTask(taskId: string): Promise<Task> {

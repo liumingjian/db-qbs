@@ -28,7 +28,7 @@ import {
   referenceCounts,
 } from "./datasource";
 import { messageFrom } from "./errors";
-import { ActionButton, FormField, Modal, ModalFooter } from "./ui";
+import { ActionButton, DeleteRefusal, FormField, Modal, ModalFooter } from "./ui";
 
 /**
  * 一行「测试连接」的三态。与对话框里那份同形，但**各存各的**：
@@ -681,18 +681,10 @@ function DatasourceDeleteDialog({
           确认删除数据源“<strong>{datasource.name}</strong>”？
         </p>
         <span className="task-id">{datasource.datasource_id}</span>
-        {error !== null && (
-          <div className="form-error" role="alert">
-            {deleteRefusalMessage(error, blockedBy)}
-          </div>
-        )}
-        {blockedBy.length > 0 && (
-          <ul>
-            {blockedBy.map((name) => (
-              <li key={name}>{name}</li>
-            ))}
-          </ul>
-        )}
+        <DeleteRefusal
+          message={error === null ? null : deleteRefusalMessage(error, blockedBy)}
+          blockedBy={blockedBy}
+        />
       </div>
       <footer className="modal-footer">
         <button
