@@ -1,5 +1,8 @@
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use chrono::{TimeDelta, TimeZone, Utc};
 use db_qbs_source::{
@@ -7,6 +10,7 @@ use db_qbs_source::{
     HistoryStore, RunEvidence, RunHistory, RunParametersEvidence, SourceEvidence, TargetEvidence,
     UnknownReason, WriteMode,
 };
+use rusqlite::{Connection, TransactionBehavior};
 
 const SOURCE_SQL: &str = "SELECT a.ID AS ID\n  FROM APP.ORDERS a\n WHERE D_BIZ = DATE '2026-08-14'";
 
@@ -49,6 +53,52 @@ fn terminal_finalization_inserts_or_updates_once_and_replay_preserves_the_first_
         FinalizeOutcome::Finalized
     );
     assert_eq!(store.list(None).unwrap().len(), 2);
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn terminal_finalization_waits_for_a_concurrent_sqlite_writer() {
+    let suffix = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "db-qbs-run-finalization-contention-test-{}-{suffix}",
+        std::process::id()
+    ));
+    fs::create_dir(&directory).unwrap();
+    let store = HistoryStore::open(&directory).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 31, 10, 0, 0).unwrap();
+    let mut history = RunHistory::accepted("accepted", "task-1", SOURCE_SQL, now);
+    store.insert(&history, now, 90).unwrap();
+    history.mark_parent_failure("terminal".to_owned(), now);
+
+    let database_path = directory.join("db-qbs.sqlite3");
+    let (locked_tx, locked_rx) = mpsc::channel();
+    let writer = thread::spawn(move || {
+        let mut connection = Connection::open(database_path).unwrap();
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        transaction
+            .execute(
+                "UPDATE run_history SET task_name = task_name WHERE run_record_id = 'accepted'",
+                [],
+            )
+            .unwrap();
+        locked_tx.send(()).unwrap();
+        thread::sleep(Duration::from_millis(200));
+        transaction.commit().unwrap();
+    });
+    locked_rx.recv().unwrap();
+
+    assert_eq!(
+        store.finalize(&history, now, 90).unwrap(),
+        FinalizeOutcome::Finalized
+    );
+    writer.join().unwrap();
+    assert_eq!(
+        store.get("accepted").unwrap().unwrap().outcome.as_deref(),
+        Some("FAILED")
+    );
 
     fs::remove_dir_all(directory).unwrap();
 }
