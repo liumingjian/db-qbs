@@ -436,6 +436,8 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .email-recipient-field { grid-column: 1 / -1; }
 .email-recipient-field textarea { min-height: 90px; }
 .settings-actions { display: flex; align-items: center; gap: 10px; padding-top: 18px; border-top: 1px solid var(--line); }
+.email-test-result { display: grid; gap: 10px; padding-top: 18px; border-top: 1px solid var(--line); }
+.email-test-result h3 { margin: 0; font-size: var(--size-body); letter-spacing: 0; }
 .delete-copy p { margin: 0 0 6px; }
 .delete-copy strong { font-weight: var(--weight-em); }
 /* 批量删除的二次确认把要删的任务名**逐条列全**，不是「确定删除 3 个任务？」（ADR-0043 §6）。 */

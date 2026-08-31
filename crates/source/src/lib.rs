@@ -21,6 +21,7 @@ mod runtime;
 mod scheduler;
 pub mod server;
 mod secret;
+mod smtp;
 mod sql_builder;
 mod target_ddl;
 mod task_spec;
@@ -52,8 +53,9 @@ pub use datasource::{
 };
 pub use email_alert::{
     EmailAlertSettings, EmailAlertSettingsInput, EmailAlertStore, EmailDeliverySettings,
-    EmailProviderPreset, SmtpSecurity,
+    EmailProviderPreset, EmailTestResult, EmailTestStatus, SmtpSecurity,
 };
+pub use smtp::{multipart_mail, SmtpMailTransport};
 pub use db_qbs_shared::{
     classify_column, column_support, derive_number_shape, is_business_date_column,
     is_supported_decimal_shape, ColumnShape, ShapeRejection, TargetShape,
@@ -79,7 +81,9 @@ pub use run_log_store::{
     truncate_business_values, RunLogLine, RunLogStore, RunLogWriter, BUSINESS_VALUE_MAX_CHARS,
     RUN_LOG_PAGE_LIMIT, RUN_LOG_RETENTION_DAYS, RUN_LOG_RETENTION_RUNS_PER_TASK,
 };
-pub use runtime::{Clock, MailTransport, OutgoingMail, SystemClock, UnconfiguredMailTransport};
+pub use runtime::{
+    Clock, MailTransport, MailTransportError, OutgoingMail, SystemClock, UnconfiguredMailTransport,
+};
 pub use sql_builder::{
     builder_column_query, builder_dblink_query, builder_table_query, validate_builder_dblink,
     BuilderColumn, BuilderTable,

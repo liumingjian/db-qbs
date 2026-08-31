@@ -43,6 +43,21 @@ pub struct EmailAlertSettings {
     pub max_retry_hours: u8,
     pub instance_name: String,
     pub external_base_url: Option<String>,
+    pub latest_test_result: Option<EmailTestResult>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum EmailTestStatus {
+    Success,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EmailTestResult {
+    pub status: EmailTestStatus,
+    pub tested_at: String,
+    pub error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -122,11 +137,18 @@ impl EmailAlertStore {
                     instance_name      TEXT NOT NULL,
                     external_base_url  TEXT
                 );
-                INSERT OR IGNORE INTO email_alert_settings VALUES
+                INSERT OR IGNORE INTO email_alert_settings (
+                    singleton_id, enabled, provider_preset, smtp_host, smtp_port, smtp_security,
+                    smtp_username, smtp_secret, sender_address, sender_name, recipients,
+                    max_retry_hours, instance_name, external_base_url
+                ) VALUES
                     (1, 0, 'TENCENT_EXMAIL', 'smtp.exmail.qq.com', 465, 'IMPLICIT_TLS',
                      '', '', '', '', '[]', 24, 'db-qbs', NULL);",
             )
             .map_err(|error| format!("初始化 SQLite 邮件告警设置失败：{error}"))?;
+        add_column_if_missing(&connection, "latest_test_status", "TEXT")?;
+        add_column_if_missing(&connection, "latest_test_at", "TEXT")?;
+        add_column_if_missing(&connection, "latest_test_error", "TEXT")?;
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|error| format!("配置 SQLite 忙等待失败：{error}"))?;
@@ -198,12 +220,42 @@ impl EmailAlertStore {
         }))
     }
 
+    pub fn test_delivery_settings(&self) -> Result<EmailDeliverySettings, String> {
+        let stored = self.stored()?;
+        validate_complete_view(&stored.view, !stored.sealed_secret.is_empty())?;
+        Ok(EmailDeliverySettings {
+            host: stored.view.smtp_host,
+            port: stored.view.smtp_port,
+            security: stored.view.smtp_security,
+            username: stored.view.smtp_username,
+            secret: self.secrets.open_secret(&stored.sealed_secret)?,
+            sender_address: stored.view.sender_address,
+            sender_name: stored.view.sender_name,
+        })
+    }
+
+    pub fn record_test_result(&self, result: &EmailTestResult) -> Result<(), String> {
+        self.connection()?
+            .execute(
+                "UPDATE email_alert_settings SET latest_test_status = ?1,
+                    latest_test_at = ?2, latest_test_error = ?3 WHERE singleton_id = 1",
+                params![
+                    test_status_name(result.status),
+                    result.tested_at,
+                    result.error,
+                ],
+            )
+            .map_err(|error| format!("保存 SQLite 测试邮件结果失败：{error}"))?;
+        Ok(())
+    }
+
     fn stored(&self) -> Result<StoredSettings, String> {
         self.connection()?
             .query_row(
                 "SELECT enabled, provider_preset, smtp_host, smtp_port, smtp_security,
                         smtp_username, smtp_secret, sender_address, sender_name, recipients,
-                        max_retry_hours, instance_name, external_base_url
+                        max_retry_hours, instance_name, external_base_url,
+                        latest_test_status, latest_test_at, latest_test_error
                  FROM email_alert_settings WHERE singleton_id = 1",
                 [],
                 |row| {
@@ -218,6 +270,17 @@ impl EmailAlertStore {
                     let preset: String = row.get(1)?;
                     let security: String = row.get(4)?;
                     let sealed_secret: String = row.get(6)?;
+                    let latest_status: Option<String> = row.get(13)?;
+                    let latest_at: Option<String> = row.get(14)?;
+                    let latest_error: Option<String> = row.get(15)?;
+                    let latest_test_result = match (latest_status, latest_at) {
+                        (Some(status), Some(tested_at)) => Some(EmailTestResult {
+                            status: parse_test_status(&status)?,
+                            tested_at,
+                            error: latest_error,
+                        }),
+                        _ => None,
+                    };
                     Ok(StoredSettings {
                         view: EmailAlertSettings {
                             enabled: row.get(0)?,
@@ -233,6 +296,7 @@ impl EmailAlertStore {
                             max_retry_hours: row.get(10)?,
                             instance_name: row.get(11)?,
                             external_base_url: row.get(12)?,
+                            latest_test_result,
                         },
                         sealed_secret,
                     })
@@ -248,6 +312,28 @@ impl EmailAlertStore {
             .lock()
             .map_err(|_| "SQLite 邮件告警设置库的锁已损坏".to_owned())
     }
+}
+
+fn add_column_if_missing(
+    connection: &Connection,
+    name: &str,
+    sql_type: &str,
+) -> Result<(), String> {
+    let columns = connection
+        .prepare("PRAGMA table_info(email_alert_settings)")
+        .and_then(|mut statement| {
+            let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(|error| format!("读取 SQLite 邮件告警设置结构失败：{error}"))?;
+    if !columns.iter().any(|column| column == name) {
+        connection
+            .execute_batch(&format!(
+                "ALTER TABLE email_alert_settings ADD COLUMN {name} {sql_type}"
+            ))
+            .map_err(|error| format!("迁移 SQLite 邮件告警设置失败：{error}"))?;
+    }
+    Ok(())
 }
 
 fn normalize_and_validate(input: &mut EmailAlertSettingsInput) -> Result<(), String> {
@@ -308,6 +394,19 @@ fn validate_complete(input: &EmailAlertSettingsInput, has_secret: bool) -> Resul
         || input.recipients.is_empty()
     {
         return Err("启用邮件告警前必须填写完整 SMTP、发件人设置和至少一个收件人".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_complete_view(input: &EmailAlertSettings, has_secret: bool) -> Result<(), String> {
+    if input.smtp_host.is_empty()
+        || input.smtp_username.is_empty()
+        || !has_secret
+        || input.sender_address.is_empty()
+        || input.sender_name.is_empty()
+        || input.recipients.is_empty()
+    {
+        return Err("发送测试邮件前必须保存完整 SMTP、发件人设置和至少一个收件人".to_owned());
     }
     Ok(())
 }
@@ -404,6 +503,21 @@ fn parse_security(value: &str) -> rusqlite::Result<SmtpSecurity> {
     match value {
         "IMPLICIT_TLS" => Ok(SmtpSecurity::ImplicitTls),
         "STARTTLS" => Ok(SmtpSecurity::Starttls),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+fn test_status_name(value: EmailTestStatus) -> &'static str {
+    match value {
+        EmailTestStatus::Success => "SUCCESS",
+        EmailTestStatus::Failed => "FAILED",
+    }
+}
+
+fn parse_test_status(value: &str) -> rusqlite::Result<EmailTestStatus> {
+    match value {
+        "SUCCESS" => Ok(EmailTestStatus::Success),
+        "FAILED" => Ok(EmailTestStatus::Failed),
         _ => Err(rusqlite::Error::InvalidQuery),
     }
 }

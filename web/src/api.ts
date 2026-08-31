@@ -542,6 +542,13 @@ export interface OperatorAccount {
 
 export type EmailProviderPreset = "TENCENT_EXMAIL" | "GENERIC";
 export type SmtpSecurity = "IMPLICIT_TLS" | "STARTTLS";
+export type EmailTestStatus = "SUCCESS" | "FAILED";
+
+export interface EmailTestResult {
+  status: EmailTestStatus;
+  tested_at: string;
+  error: string | null;
+}
 
 export interface EmailAlertSettings {
   enabled: boolean;
@@ -557,9 +564,10 @@ export interface EmailAlertSettings {
   max_retry_hours: number;
   instance_name: string;
   external_base_url: string | null;
+  latest_test_result: EmailTestResult | null;
 }
 
-export type EmailAlertSettingsInput = Omit<EmailAlertSettings, "has_smtp_secret"> & {
+export type EmailAlertSettingsInput = Omit<EmailAlertSettings, "has_smtp_secret" | "latest_test_result"> & {
   smtp_secret: string;
 };
 
@@ -672,6 +680,14 @@ export async function updateEmailAlertSettings(
     body: JSON.stringify(input),
   });
   return readJson<EmailAlertSettings>(response, "更新邮件告警设置失败");
+}
+
+export async function sendTestEmail(): Promise<EmailTestResult> {
+  const response = await fetch("/api/email-alert-settings/test", {
+    method: "POST",
+    headers: { Accept: "application/json" },
+  });
+  return readJson<EmailTestResult>(response, "发送测试邮件失败");
 }
 
 export function emptySpec(): TaskSpec {

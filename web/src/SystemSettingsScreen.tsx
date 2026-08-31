@@ -1,10 +1,11 @@
-import { KeyRound, Mail, Save, Settings, UserRoundCheck } from "lucide-react";
+import { KeyRound, Mail, Save, Send, Settings, UserRoundCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 
 import {
   fetchEmailAlertSettings,
   fetchOperatorAccount,
+  sendTestEmail,
   updateEmailAlertSettings,
   updateOperatorAccount,
 } from "./api";
@@ -69,13 +70,31 @@ function EmailAlertSettingsPane() {
     }
   }
 
+  async function testEmail() {
+    setBusy(true);
+    setError(null);
+    setSaved(null);
+    try {
+      const result = await sendTestEmail();
+      setSettings((current) => current === null ? current : {
+        ...current,
+        latest_test_result: result,
+      });
+      setSaved(result.status === "SUCCESS" ? "测试邮件已发送。" : "测试邮件发送失败，请查看最新结果。");
+    } catch (testError) {
+      setError(messageFrom(testError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (draft === null && error === null) {
     return <div className="loading-state" aria-live="polite">正在读取邮件告警设置...</div>;
   }
-  return <EmailAlertSettingsView settings={settings} draft={draft} busy={busy} error={error} saved={saved} onChange={setDraft} onSubmit={(event) => void submit(event)} />;
+  return <EmailAlertSettingsView settings={settings} draft={draft} busy={busy} error={error} saved={saved} onChange={setDraft} onSubmit={(event) => void submit(event)} onTest={() => void testEmail()} />;
 }
 
-export function EmailAlertSettingsView({ settings, draft, busy, error, saved, onChange, onSubmit }: {
+export function EmailAlertSettingsView({ settings, draft, busy, error, saved, onChange, onSubmit, onTest }: {
   settings: EmailAlertSettings | null;
   draft: EmailAlertSettingsInput | null;
   busy: boolean;
@@ -83,6 +102,7 @@ export function EmailAlertSettingsView({ settings, draft, busy, error, saved, on
   saved: string | null;
   onChange: (draft: EmailAlertSettingsInput) => void;
   onSubmit: (event: FormEvent) => void;
+  onTest: () => void;
 }) {
   const patch = (change: Partial<EmailAlertSettingsInput>) => {
     if (draft !== null) onChange({ ...draft, ...change });
@@ -152,16 +172,28 @@ export function EmailAlertSettingsView({ settings, draft, busy, error, saved, on
           </fieldset>
           <div className="settings-actions">
             <button className="button is-primary" type="submit" disabled={busy}><Save size={ICON.sm} aria-hidden="true" />保存设置</button>
+            <button className="button" type="button" disabled={busy} onClick={onTest}><Send size={ICON.sm} aria-hidden="true" />发送测试邮件</button>
             <span className="card-subtitle">保存只校验配置，不会连接 SMTP 服务器。</span>
           </div>
         </form>
+      )}
+      {settings?.latest_test_result !== null && settings?.latest_test_result !== undefined && (
+        <section className="email-test-result" aria-labelledby="email-test-result-title">
+          <div className="settings-pane-header">
+            <div><h3 id="email-test-result-title">最新测试结果</h3><p>{settings.latest_test_result.tested_at}</p></div>
+            <span className={`state ${settings.latest_test_result.status === "SUCCESS" ? "is-succeeded" : "is-failed"}`}>
+              {settings.latest_test_result.status === "SUCCESS" ? "发送成功" : "发送失败"}
+            </span>
+          </div>
+          {settings.latest_test_result.error !== null && <div className="form-error" role="status">{settings.latest_test_result.error}</div>}
+        </section>
       )}
     </div>
   );
 }
 
 function inputFrom(settings: EmailAlertSettings): EmailAlertSettingsInput {
-  const { has_smtp_secret: _hasSecret, ...input } = settings;
+  const { has_smtp_secret: _hasSecret, latest_test_result: _latestTest, ...input } = settings;
   return { ...input, smtp_secret: "" };
 }
 
