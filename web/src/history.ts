@@ -100,6 +100,7 @@ const UNKNOWN_CONCLUSIONS: Readonly<
 > = {
   PROCESS_DISAPPEARED: "进程消失，无终态日志",
   SERVICE_RESTARTED: "服务重启，结局未知",
+  STOPPED_BY_USER: "已由用户停止",
 };
 
 /**

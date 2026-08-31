@@ -80,7 +80,7 @@ describe("rerun eligibility", () => {
     });
   });
 
-  it.each(["PROCESS_DISAPPEARED", "SERVICE_RESTARTED"] as const)(
+  it.each(["PROCESS_DISAPPEARED", "SERVICE_RESTARTED", "STOPPED_BY_USER"] as const)(
     "offers a rerun on an unknown outcome (%s) — upsert 幂等，重跑是安全的",
     (unknownReason) => {
       const row = history({
@@ -92,6 +92,28 @@ describe("rerun eligibility", () => {
       expect(rerunAction(row, tasks)).toEqual({ kind: "enabled", task: tasks[0] });
     },
   );
+
+  // #271：占用还在目标端挂着的时候，「可以重跑」是一句假话——那一下只会撞回一个
+  // TARGET_TABLE_BUSY。入口照旧不消失，禁用并说清楚下一步。
+  it("refuses the rerun while the hold is still being released", () => {
+    const row = history({
+      unknown_reason: "STOPPED_BY_USER",
+      outcome: null,
+      target_table_effect: null,
+      sink_code: null,
+      target_hold: "RELEASING",
+    });
+    expect(rerunAction(row, tasks)).toEqual({
+      kind: "disabled",
+      reason: "已发出停止，目标表占用还没释放。等它释放后再重跑。",
+    });
+  });
+
+  it("refuses the rerun while the hold could not be released", () => {
+    const row = history({ target_hold: "HELD" });
+    expect(rerunAction(row, tasks)).toMatchObject({ kind: "disabled" });
+    expect(rerunAction(row, tasks)).not.toMatchObject({ kind: "enabled" });
+  });
 
   it("hides the rerun on a SUCCEEDED run", () => {
     expect(rerunAction(history({ outcome: "SUCCEEDED" }), tasks)).toEqual({

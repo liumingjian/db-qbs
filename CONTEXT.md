@@ -271,6 +271,17 @@ branches on the version.
    no input beyond the task's identity** — clicking start runs it; there is no dialog and there are no
    parameters. A re-run produces a new `run_id` and never reuses the old one. The mutual-exclusion key
    is the task: **one task may not have two runs in flight**, and the 409 says exactly that.
+   The same key guards deletion: **a task with a run in flight cannot be deleted**, and that 409
+   names the run and asks the user to stop it first — deletion is irreversible, so it never stops a
+   run that may be writing data on the user's behalf. A run stays in flight until the parent has
+   reaped the child **and** sent the abort on its behalf (see **Abort**), so for that short window
+   after a stop the task is still un-deletable. Deletion is refused for a second reason too:
+   **a task whose run left an unreleased target-table hold cannot be deleted**, because the retry
+   that would release it is offered on that task's row and nowhere else. That is a different question
+   from **may this task run again**, which is refused per *target table* — so a task can be deletable
+   and still not runnable, when the table it writes is held by another task's run. Both refusals carry
+   a machine-readable reason beside the sentence, because "go stop the run" and "go retry the release"
+   are different instructions and the UI must not tell them apart by reading Chinese prose.
    **The state lives only in `source`, and only in process memory** — see **Run Stage**. `sink`
    holds no run state, only the resource lifetime of the staging table. When the source process dies,
    the run ceases to exist.
@@ -318,13 +329,59 @@ branches on the version.
 
 **Abort**
    The cleanup action by which `source`, on hitting an error, tells `sink` to discard the staging
-   table. It is idempotent and **promises nothing about reliability** — a failed abort is logged and
-   not retried. Whether it is still permitted is a property of the **Run Stage**, with one
-   implementation both ends read. It exists to clear the most common leftover: "the process is
-   still alive, this run just failed." **It is only ever sent before commit**: once `COMMITTING`
-   is entered, the staging table's disposition has passed wholly to `sink` and source permanently
-   forfeits the right to abort.
+   table — which is also what releases `sink`'s hold on the target table. It is idempotent and
+   **promises nothing about reliability** — a failed abort is logged and never retried on its own;
+   retrying it is a person's decision, not a timer's. Whether it is
+   still permitted is a property of the **Run Stage**, with one implementation both ends read. It
+   exists to clear the most common leftover: "the process is still alive, this run just failed."
+   **It is only ever sent before commit**: once `COMMITTING` is entered, the staging table's
+   disposition has passed wholly to `sink` and source permanently forfeits the right to abort.
    Abort is not a state; it is an action on the `FAILED` path.
+
+   **The resident parent sends it too, on behalf of a child that could not.** Stopping a run is a
+   SIGTERM, and the run child has no handler for it — the kernel takes it down before it can say
+   anything, and the same is true of an OOM kill or a crash. So whenever a child exits without
+   having reported a terminal, the parent, **after reaping it and never before**, sends the abort
+   itself: signal, confirmed exit, then abort, because the staging table must not be touched while
+   the process that writes into it is still alive. It is skipped when the run never reached `sink`
+   (no `run_id`) and when the stage says the point of no return has passed. A failed one is written
+   into that run's Run Log as an `abort_failed` line rather than swallowed, and the hold it failed to
+   release is remembered — which table it is on, and which run's abort to resend — so a person can
+   retry it on demand.
+
+   **The parent's own death is answered from both ends**, because a hold nobody releases is a target
+   table nobody can write again. On a graceful shutdown the process stops every in-flight run before
+   it seals anything — the same signal it sends for a stop request, under the name *service
+   restarted* rather than *stopped by user*, and skipping the ones past the point of no return — and
+   waits, bounded by 40 seconds, for those wrap-ups to send their aborts. A death it cannot answer
+   (SIGKILL, a crash, a power cut) leaves those run rows unsealed, and **the next start reads them
+   before it seals them**: every one that reached `sink` and had not passed the point of no return is
+   booked as an unreleased hold *before the port opens*, and a background pass resends the abort —
+   success clears the booking, failure leaves it on the row with its reason and the manual retry.
+   What still leaks: a hold whose abort was still failing when the process went away, since the
+   booking lives in memory, and a run whose evidence never named an agent. There is still no
+   timeout-based reclaim on the `sink` side.
+
+**Target table hold**
+   `sink`'s record that one run is using a target table; it is what a second run collides with
+   (`TARGET_TABLE_BUSY`). Releasing it is not a separate action — it happens when the run commits or
+   is aborted. Because release is asynchronous and can fail, **`source` reports the hold's fate
+   rather than the stop request's**: from the moment a stop is signalled until the abort has been
+   sent and answered, the run says the hold is still being released; if the abort failed — the
+   child's own or the parent's — the run says the hold is still held, and names the reason.
+   **A hold is a fact about a table, not about a task or a run**: its identity is the agent, the
+   database and the table name (compared case-insensitively) — the same key `sink` collides on — read
+   off the evidence pinned when the run started. So every run row writing that table reports the hold,
+   a neighbouring task's row included, and no run may be started while that table's hold is
+   unreleased. The refusal comes from `source`, before the request would reach the agent that would
+   refuse it anyway. **Nothing may present a task as re-runnable while its target table is still
+   held**, in the UI or in the API; the one residue is a task that has never run, which has no row to
+   report on and is stopped by the server instead. The retry is manual and explicit
+   (`POST /api/runs/{run_record_id}/release`, the same abort as before, sent by a person instead of
+   by the parent — the path says which row was clicked, what gets released is the hold on that row's
+   table); nothing retries on a timer — the only resend no person asked for is the one a restart makes
+   on its way up (see **Abort**) — and short of that, clearing the hold on the agent by hand is the
+   only other remedy.
 
 **Swap**
    Completed inside a single transaction on the target: an `INSERT ... SELECT` from the staging table
@@ -403,6 +460,10 @@ branches on the version.
    **It is a historical record, not a state store** — authoritative run state still lives only in the
    child's memory, and a history row is a **best-effort projection of the log**. Losing it costs no
    correctness, only traceability.
+   When the log carries no terminal at all, the row still says **why it cannot say** — the process
+   vanished, the service restarted, or **the user stopped it**. That last one is known only because
+   the stop was marked when the signal was sent; a run someone stopped on purpose and a run the OOM
+   killer took must not read the same on screen.
    Its identity is the **`run_record_id`** minted when the parent accepts the submission; `run_id` is
    a **nullable field** on the row, and `null` means the submission **never reached sink** (the
    precheck rejected it). Retention is by age, defaulting to 90 days.

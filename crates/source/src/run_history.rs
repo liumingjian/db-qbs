@@ -144,10 +144,21 @@ impl RunTrigger {
     }
 }
 
+/// 一次运行**没有留下终态日志**时，父进程替它写下的那句「为什么说不清」。
+///
+/// 三格闭集，且这三格只回答同一个问题的三种成因，不是运行阶段（[`RunStage`] 那五格
+/// 一格不动）。区分它们的价值全在事后：一次被人按停的运行和一次被 OOM 杀掉的运行，
+/// 在历史里长得一模一样的话，「昨晚那次到底是谁弄的」就永远没有答案。
+///
+/// [`RunStage`]: db_qbs_shared::RunStage
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnknownReason {
     ProcessDisappeared,
     ServiceRestarted,
+    /// 有人在任务中心按了「停止运行」，父进程发出的 SIGTERM 把子进程带走了（#269）。
+    /// 标记打在**发信号那一刻**，所以它说的是「这次死亡是我们要的」，
+    /// 而不是「事后猜的」。
+    StoppedByUser,
 }
 
 impl UnknownReason {
@@ -155,6 +166,7 @@ impl UnknownReason {
         match self {
             Self::ProcessDisappeared => "PROCESS_DISAPPEARED",
             Self::ServiceRestarted => "SERVICE_RESTARTED",
+            Self::StoppedByUser => "STOPPED_BY_USER",
         }
     }
 
@@ -162,6 +174,7 @@ impl UnknownReason {
         match self {
             Self::ProcessDisappeared => "进程消失，无终态日志",
             Self::ServiceRestarted => "服务重启，结局未知",
+            Self::StoppedByUser => "已由用户停止",
         }
     }
 }
@@ -664,6 +677,29 @@ impl HistoryStore {
             .map_err(|error| format!("查询 SQLite 运行历史列表失败：{error}"))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("读取 SQLite 运行历史列表失败：{error}"))?;
+        Ok(history)
+    }
+
+    /// 进程死的那一刻还没走完的那几行（`outcome IS NULL`）。
+    ///
+    /// **必须在 [`Self::seal_incomplete`] 之前问**：封口那一下把它们全改成 `FAILED`，
+    /// 之后再问就一行都认不出来了。问它是为了目标表占用：source 自己被重启时，
+    /// 子进程连同它那一刀 abort 一起没了，而占用在目标端是纯内存的，
+    /// 没人补这一刀就永远挂着（#272）。
+    pub fn list_incomplete(&self) -> Result<Vec<RunHistory>, String> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(&format!(
+                "{HISTORY_SELECT}
+                  WHERE outcome IS NULL
+               ORDER BY started_at_ms ASC, rowid ASC"
+            ))
+            .map_err(|error| format!("准备 SQLite 非终态运行历史查询失败：{error}"))?;
+        let history = statement
+            .query_map([], history_from_row)
+            .map_err(|error| format!("查询 SQLite 非终态运行历史失败：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("读取 SQLite 非终态运行历史失败：{error}"))?;
         Ok(history)
     }
 

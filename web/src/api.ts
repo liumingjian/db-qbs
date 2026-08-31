@@ -443,13 +443,33 @@ export interface RunHistory {
    * 读到 `null` 不是错误。
    */
   failure_kind: string | null;
-  unknown_reason: "PROCESS_DISAPPEARED" | "SERVICE_RESTARTED" | null;
+  /**
+   * 没有终态日志时，服务端替这次运行写下的「为什么说不清」（source 侧 `UnknownReason`）。
+   * `STOPPED_BY_USER` 是有人按了停止运行——它和进程被 OOM 杀掉分得开，是故意的。
+   */
+  unknown_reason:
+    | "PROCESS_DISAPPEARED"
+    | "SERVICE_RESTARTED"
+    | "STOPPED_BY_USER"
+    | null;
   seq: number;
   rows_pushed: number;
   bytes: number;
   ms: number;
   last_ts: string | null;
   mapping_issues: MappingIssue[];
+  /**
+   * 这次运行占着的目标表**现在**是什么处境（source 侧 `TargetHold`，#271）。
+   *
+   * 说的是占用，不是停止请求：停止是异步的，接口发出信号就返回，占用要等子进程退出、
+   * 父进程补发 abort 之后才真的还回来。`RELEASING` 是还在还的路上（含重试正在路上），
+   * `HELD` 是 abort 失败、占用留在了目标端，`null` 才是还清了。
+   *
+   * **纯内存的事实**，不落库：服务端重启后一律读回 `null`。
+   */
+  target_hold?: "RELEASING" | "HELD" | null;
+  /** `HELD` 时没能释放掉的原因，目标端原话。其余情况是 `null`。 */
+  target_hold_message?: string | null;
 }
 
 export interface LiveRunDetail {
@@ -472,6 +492,9 @@ export interface LiveRunDetail {
   bytes: number;
   ms: number;
   last_ts: string | null;
+  /** 与 {@link RunHistory.target_hold} 同一栏：在飞的时候它只可能是 `RELEASING` 或 `null`。 */
+  target_hold?: "RELEASING" | "HELD" | null;
+  target_hold_message?: string | null;
   live: true;
 }
 
@@ -881,6 +904,22 @@ export async function cancelRun(
   );
 }
 
+/**
+ * 重试释放这次运行没能还回来的目标表占用（#271）。
+ *
+ * 发的就是当初那条 abort，只是这一次由人按下。**这是占用泄漏之后唯一的补救入口**，
+ * 在它之前只能去目标端手工清。服务端只对确实欠着占用的运行开门：没欠着是 404。
+ */
+export async function releaseTargetHold(
+  runRecordId: string,
+): Promise<{ message: string }> {
+  return postJson<{ message: string }>(
+    `/api/runs/${encodeURIComponent(runRecordId)}/release`,
+    {},
+    "释放目标表占用失败",
+  );
+}
+
 export async function createTask(input: TaskInput): Promise<Task> {
   const response = await fetch("/api/tasks", {
     method: "POST",
@@ -903,6 +942,53 @@ export async function updateTask(taskId: string, input: TaskInput): Promise<Task
     body: JSON.stringify(taskInputFrom(input)),
   });
   return readJson<Task>(response, "更新任务失败");
+}
+
+/**
+ * 删任务被拒（409）时，服务端点名的那几次拦住了删除的运行（#270/#271）。
+ *
+ * 与 [`referencedTasksFrom`] 同一形态：拿不到就返回空数组——报文正文里本来就带着同一句话。
+ */
+export function blockingRunsFrom(error: unknown): string[] {
+  return namesFromConflict(error, "runs");
+}
+
+/**
+ * 删任务被拒时红底那句话该说什么（#270/#271）。
+ *
+ * 与 [`deleteRefusalMessage`](./datasource.ts) 同一条道理：服务端那句话把
+ * run_record_id 连在句子里，而同一批 id 紧接着又摆成列表，于是界面上点名两遍。
+ * 名字**只留列表**，这里只说拦住的是什么、下一步该做什么。
+ *
+ * 两种拦法要做的事完全不同（去停止运行 vs 去重试释放占用），分辨靠报文里那一格
+ * `reason`，**不靠猜服务端那句中文**。认不出的 `reason`（旧服务端、以后新增的拦法）
+ * 原样退回服务端那句话——那时候一句啰嗦的实话胜过一句自己编的。
+ */
+export function deleteTaskRefusalMessage(
+  error: unknown,
+  message: string,
+  blockedBy: string[],
+): string {
+  if (blockedBy.length === 0) {
+    return message;
+  }
+  switch (refusalReasonFrom(error)) {
+    case "RUN_IN_FLIGHT":
+      return `任务还有 ${blockedBy.length} 次运行没结束；请先停止它，等它收尾后再删除任务`;
+    case "TARGET_HELD":
+      return "任务上一次运行的目标表占用还没释放；请先在那一行点「锁未释放，点此重试」，释放成功后再删除任务";
+    default:
+      return message;
+  }
+}
+
+/** 409 报文里那一格给机器读的拒绝理由。没有就是 `null`。 */
+function refusalReasonFrom(error: unknown): string | null {
+  if (!(error instanceof ApiError) || error.status !== 409) {
+    return null;
+  }
+  const reason = errorDetail(error.body)?.reason;
+  return typeof reason === "string" ? reason : null;
 }
 
 export async function deleteTask(taskId: string): Promise<Task> {

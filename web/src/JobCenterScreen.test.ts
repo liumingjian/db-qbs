@@ -74,6 +74,7 @@ const BASE_PROPS = {
   startingTaskId: null,
   onStart: () => undefined,
   onStop: () => undefined,
+  onRetryRelease: () => undefined,
   onRerun: () => undefined,
   onEditFailure: () => undefined,
   onChanged: () => undefined,
@@ -82,6 +83,70 @@ const BASE_PROPS = {
 };
 
 describe("job row actions", () => {
+  // #271：占用还在的时候，那一格说的必须是实话——第六颗按钮会挤坏这一列，
+  // 所以三态四态全挤在第一格里，与「发起与停止共用这一格」是同一个决定。
+  it("says 停止中… instead of offering a run while the hold is being released", () => {
+    const html = renderToStaticMarkup(createElement(JobCenterScreen, {
+      ...BASE_PROPS,
+      latestRuns: new Map([
+        [
+          "task-1",
+          {
+            ...LATEST_RUN,
+            outcome: null,
+            finished_at: null,
+            stage: "STREAMING",
+            target_hold: "RELEASING" as const,
+          } as RunHistory,
+        ],
+      ]),
+    }));
+
+    expect(html).toContain("停止中…（目标表占用尚未释放）");
+    expect(html).not.toContain("发起运行");
+    // 已经停过一次了，「停止运行」那一颗也不该再出现。
+    expect(html).not.toContain("停止运行 record-1");
+  });
+
+  it("offers the retry instead of a run while the hold could not be released", () => {
+    const html = renderToStaticMarkup(createElement(JobCenterScreen, {
+      ...BASE_PROPS,
+      latestRuns: new Map([
+        [
+          "task-1",
+          {
+            ...LATEST_RUN,
+            outcome: "FAILED",
+            unknown_reason: "STOPPED_BY_USER" as const,
+            message: "已由用户停止",
+            target_hold: "HELD" as const,
+            target_hold_message: "暂存表 drop 不掉",
+          } as RunHistory,
+        ],
+      ]),
+    }));
+
+    expect(html).toContain("锁未释放，点此重试（暂存表 drop 不掉）");
+    expect(html).not.toContain("发起运行");
+  });
+
+  // 操作列**恰好五颗**，第六颗会挤坏它——所以发起、停止、停止中、锁未释放四态
+  // 全挤在第一格里。这条用例数的就是那一行上的按钮个数（#271）。
+  it("keeps the action column to five buttons while the hold is stuck", () => {
+    const actionButtons = (run: RunHistory) =>
+      (renderToStaticMarkup(createElement(JobCenterScreen, {
+        ...BASE_PROPS,
+        latestRuns: new Map([["task-1", run]]),
+      }))
+        .split('<td class="action-column">')[1]
+        ?.split("</td>")[0]
+        ?.match(/<button/g) ?? []).length;
+
+    expect(actionButtons({ ...LATEST_RUN, target_hold: "HELD" } as RunHistory)).toBe(5);
+    // 占用那一格换的是同一颗按钮的字面，不是多加一颗：没有占用时也是五颗。
+    expect(actionButtons(LATEST_RUN)).toBe(5);
+  });
+
   // The slot is held open rather than dropped (UX review P2-15): a vanishing button
   // puts the same action at a different x on neighbouring rows, so muscle memory
   // lands on whichever button slid into its place.
@@ -98,6 +163,7 @@ describe("job row actions", () => {
       startingTaskId: null,
       onStart: () => undefined,
       onStop: () => undefined,
+      onRetryRelease: () => undefined,
       onRerun: () => undefined,
       onEditFailure: () => undefined,
       onChanged: () => undefined,

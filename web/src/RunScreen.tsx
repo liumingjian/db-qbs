@@ -1,7 +1,7 @@
-import { ArrowLeft, Ban, Play, RefreshCw } from "lucide-react";
+import { ArrowLeft, Ban, Lock, Play, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { cancelRun, fetchRun } from "./api";
+import { cancelRun, fetchRun, releaseTargetHold } from "./api";
 import type { RunDetail, Task } from "./api";
 import {
   ErrorCodeTag,
@@ -18,6 +18,7 @@ import {
   writeStatementLabel,
 } from "./writeMode";
 import { messageFrom } from "./errors";
+import { targetHoldState } from "./targetHold";
 import { FailureEvidence } from "./FailureEvidence";
 import {
   knownTerminalEffect,
@@ -133,6 +134,14 @@ export function RunScreen({
   // 停不停得了和服务端读同一条规则，所以按钮在点下去之前就知道答案——
   // 过去它一直亮着，人只有吃一个 409 才发现封口点已经过了。
   const cancelRefusal = detail === null ? null : abortRefusal(detail.stage);
+  /**
+   * 这次运行写的那张目标表还空出来没有（#271）。
+   *
+   * **这一屏也要认它**：作业中心那一格拦住了「发起运行」，这里的「重新发起」是同一件事
+   * 的第二个入口——占用还在的时候把它亮着，等于当着人的面说一句假话。判据与措辞
+   * 与那一格读的是同一处（`targetHoldState`），两屏不许各说各的。
+   */
+  const hold = targetHoldState(detail);
 
   async function handleCancel() {
     setCancelMessage(null);
@@ -141,6 +150,24 @@ export function RunScreen({
       setCancelMessage(response.message);
     } catch (error) {
       setCancelMessage(messageFrom(error));
+    }
+  }
+
+  /** 重发一次 abort。成了那一格就变回「重新发起」，没成就还留在这里，可以再点。 */
+  async function handleRetryRelease() {
+    setCancelMessage(null);
+    try {
+      const response = await releaseTargetHold(runRecordId);
+      setCancelMessage(response.message);
+    } catch (error) {
+      setCancelMessage(messageFrom(error));
+    }
+    // 这条运行早已终局，轮询也就停了——占用那一栏得自己再读一次，否则屏幕会一直
+    // 停在「锁未释放」上，哪怕它刚刚已经释放了。
+    try {
+      setDetail(await fetchRun(runRecordId));
+    } catch (error) {
+      setLoadError(messageFrom(error));
     }
   }
 
@@ -162,15 +189,36 @@ export function RunScreen({
             <button
               className="button is-ghost"
               type="button"
-              disabled={cancelRefusal !== null}
+              disabled={cancelRefusal !== null || hold.kind !== "free"}
               onClick={() => void handleCancel()}
             >
               <Ban size={ICON.sm} aria-hidden="true" />
-              取消运行
+              {hold.kind === "free" ? "取消运行" : hold.label}
             </button>
             {cancelRefusal !== null && (
               <span className="run-cancel-reason">{cancelRefusal}</span>
             )}
+            {/* 已经停过一次了：这一格改说「停止中…」并按不动，理由挂在旁边。
+                再点一次只是重发一遍 SIGTERM，什么也不会更快（#271）。 */}
+            {cancelRefusal === null && hold.kind !== "free" && (
+              <span className="run-cancel-reason">{hold.detail}</span>
+            )}
+          </span>
+        ) : hold.kind !== "free" ? (
+          // 占用还在目标端挂着，**这一格绝不给「重新发起」**：那一下点下去只会
+          // 换回一个 `TARGET_TABLE_BUSY`。还在释放的时候按不动；释放失败了它就是
+          // 重试那一颗（#271）。
+          <span className="run-cancel">
+            <button
+              className="button is-ghost"
+              type="button"
+              disabled={hold.kind === "releasing"}
+              onClick={() => void handleRetryRelease()}
+            >
+              <Lock size={ICON.sm} aria-hidden="true" />
+              {hold.label}
+            </button>
+            <span className="run-cancel-reason">{hold.detail}</span>
           </span>
         ) : (
           <button className="button is-primary" type="button" onClick={onRelaunch}>

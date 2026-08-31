@@ -32,7 +32,7 @@ use url::Url;
 use crate::scheduler::SCHEDULE_TIME_FORMAT;
 use crate::{
     cleared_cookie_header, embedded_web_asset, fetch_agent_info, generate_target_ddl,
-    CronSchedule,
+    CronSchedule, HttpSinkClient, SinkClient,
     session_cookie_header, session_token_from_cookie_header, validate_builder_dblink,
     validate_source_sql, Agent, AgentEndpoint, AgentEvidence, AgentInput, AgentStore, AuthStore,
     ColumnPrecision, DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess,
@@ -57,12 +57,90 @@ pub type RunRegistry = Arc<Mutex<RunState>>;
 pub struct RunState {
     live_histories: HashMap<String, RunHistory>,
     active_runs: HashMap<String, ActiveRun>,
+    /// 那些**没能释放掉**的目标表占用，按 `run_record_id` 记（#271）。
+    ///
+    /// 在飞登记只活到子进程被收尸为止，而占用泄漏这件事恰恰发生在它被摘掉的那一刻之后
+    /// ——再往后问「这张目标表能不能再被写」，答得出口的只剩这张表。
+    ///
+    /// 键是 `run_record_id`（重试要发的是**那一次**运行的 abort，日志也落在那一支笔上），
+    /// 但**判据是 [`StuckAbort::target`]**：占用是关于一张目标表的，不是关于一个任务的。
+    stuck_aborts: HashMap<String, StuckAbort>,
 }
 
 impl RunState {
     /// 这个任务此刻有没有一次运行在飞。互斥键就是任务本身，见 [`ActiveRun::task_id`]。
     pub fn has_active_run(&self, task_id: &str) -> bool {
         self.active_runs.values().any(|run| run.task_id == task_id)
+    }
+
+    /// 这个任务此刻没结束的那几次运行，点名到 `run_record_id`（#270）。
+    ///
+    /// 与 [`Self::has_active_run`] 同一本账，只是拒绝删除时要把 ID 说出来——
+    /// 只说「有运行在飞」，用户还得自己回列表里找是哪一次。
+    pub fn active_run_ids(&self, task_id: &str) -> Vec<String> {
+        self.active_runs
+            .iter()
+            .filter(|(_, run)| run.task_id == task_id)
+            .map(|(run_record_id, _)| run_record_id.clone())
+            .collect()
+    }
+
+    /// **这张目标表**此刻是个什么处境（#271）。`None` 是「没人占着」。
+    ///
+    /// 问的是表，不是运行、也不是任务：占用是 sink 按「同一台 agent 上同一个库的同一张表」
+    /// 记的，所以一行运行记录能不能再跑，取决于它写的那张表被谁占着，而不是取决于
+    /// 它自己那次运行怎么了。认不出目标表的行（旧记录没有证据）问不出答案，是 `None`。
+    ///
+    /// 两个来源合成一个答案：正在停、收尾还没走完的在飞运行是「还在释放」；
+    /// 收尾时 abort 没成功、占用留在目标端的是「没释放掉」。界面拿它决定那一格
+    /// 显示「停止中…」、「发起运行」还是「锁未释放，点此重试」——
+    /// **服务端的判据只有这一处**，不许第二个地方各算各的。
+    fn target_hold(&self, target: Option<&TargetTable>) -> Option<HoldReport> {
+        let target = target?;
+        if let Some((_, stuck)) = self.stuck_for_target(target) {
+            // 重试正在路上时说的仍是「还在释放」：那一刻占用也许下一秒就没了，
+            // 但它此刻确实还在，所以照样不许发起新运行。
+            return Some(if stuck.retrying {
+                HoldReport {
+                    hold: TargetHold::Releasing,
+                    message: None,
+                }
+            } else {
+                HoldReport {
+                    hold: TargetHold::Held,
+                    message: Some(stuck.message.clone()),
+                }
+            });
+        }
+        self.active_runs
+            .values()
+            .find(|run| run.stop_requested.is_some() && run.target == *target)
+            .map(|_| HoldReport {
+                hold: TargetHold::Releasing,
+                message: None,
+            })
+    }
+
+    /// 占着这张目标表的那份没释放掉的占用，连它挂在哪次运行名下一起给出来。
+    ///
+    /// 至多一份：一张目标表同时只可能有一次运行，占用也就只有一份。
+    fn stuck_for_target(&self, target: &TargetTable) -> Option<(&String, &StuckAbort)> {
+        self.stuck_aborts
+            .iter()
+            .find(|(_, stuck)| stuck.target == *target)
+    }
+
+    /// 这个任务名下**欠着**的那几份占用，点名到 `run_record_id`（#270/#271）。
+    ///
+    /// 删任务那一关按它拦。它与 [`Self::target_hold`] 问的不是同一件事：那边问
+    /// 「这张表能不能再被写」，这边问「删掉这个任务会不会把某份占用的重试入口一起删掉」
+    /// ——重试那颗按钮长在这个任务的行上，任务没了，占用就再也没人点得到。
+    pub fn held_run_ids(&self, task_id: &str) -> Vec<String> {
+        self.stuck_aborts
+            .iter()
+            .filter(|(_, stuck)| stuck.task_id == task_id)
+            .map(|(run_record_id, _)| run_record_id.clone())
+            .collect()
     }
 
     /// 这台 agent 上此刻有几次**由本进程发起**的运行在飞（#266）。
@@ -85,16 +163,125 @@ pub struct ActiveRun {
     /// 这次运行发往哪台 agent。**它不是互斥键**，只用来数并发额度那笔账（#266）：
     /// 额度是**每台 agent** 的，所以分子也必须按 agent 分开数。
     agent_id: String,
+    /// 这次运行写的是哪张目标表（#271）。**占用是关于它的**：停止之后那段窗口里
+    /// 「还在释放」说的是这张表还没空出来，与这次运行属于哪个任务无关。
+    target: TargetTable,
     child_pid: Option<u32>,
     /// 判定用的那一份，**是枚举不是字符串**：能不能取消这次运行由它一个人说了算
     /// （`RunStage::abort_allowed`）。子进程报来一个认不出的拼写时它是 `None`，
     /// 与「还没报过」同待——两端版本对不上时，唯一安全的回答是「我不知道它在做什么」。
     /// 原样的文本另有去处：运行历史那一份仍是字符串，见 `RunHistory::stage`。
     stage: Option<RunStage>,
+    /// 这一刀是我们自己捅的，捅的时候是什么名义（#269/#272）。`None` 是「没捅过」。
+    ///
+    /// 标记打在**发信号那一刻**，不是事后推断的：子进程被信号带走时不会留下任何
+    /// 「我是被停的」的痕迹，父进程唯一知道这件事的时刻就是它自己按下扳机的时刻。
+    /// 终态兜底据此把这次运行记成「已由用户停止」或「服务重启，结局未知」，
+    /// 而不是「进程消失」——主动停止、停服重启与被 OOM 杀掉在历史里必须分得开。
+    stop_requested: Option<UnknownReason>,
+}
+
+/// 一张目标表的身份——**占用说的就是它**（#271）。
+///
+/// 判据与 sink 那头一个字对一个字：同一台 agent、同一个库、同一张表（表名不分大小写，
+/// 见 `crates/sink/src/service.rs` 的 `admit`）。任务不在这个键里，因为任务只是
+/// 「此刻谁在用它」：两个任务指同一张表、或者一个任务被删了重建，占用还是同一份，
+/// 而按任务记的话，换个任务名再点一次「发起运行」就会一路跑到 sink 才撞回
+/// `TARGET_TABLE_BUSY`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TargetTable {
+    agent_id: String,
+    database: String,
+    /// **存的时候就折成小写**：比较靠 `==`，大小写的宽严只在这一处兑现。
+    table: String,
+}
+
+impl TargetTable {
+    fn new(agent_id: &str, database: &str, table: &str) -> Self {
+        Self {
+            agent_id: agent_id.to_owned(),
+            database: database.to_owned(),
+            table: table.to_ascii_lowercase(),
+        }
+    }
+
+    /// 一行运行记录写的是哪张目标表，从**开跑那一刻钉下的证据**里读。
+    ///
+    /// 读证据而不是回任务表现取：任务改了目标表、或者干脆被删了，这一行说的仍该是
+    /// 当时那张表。证据不全（`evidence` 是后来才有的，旧记录没有）时是 `None`——
+    /// 那样的行认不出自己占的是什么，也就报不出占用。
+    fn from_history(history: &RunHistory) -> Option<Self> {
+        let evidence = &history.evidence;
+        Some(Self::new(
+            &evidence.agent.as_ref()?.agent_id,
+            &evidence.target.as_ref()?.database,
+            &evidence.parameters.as_ref()?.target_table,
+        ))
+    }
+}
+
+/// 目标表占用**还在**的两种说法（#271）。没有第三种「已释放」——释放了就是 `None`。
+///
+/// 这是一个上报用的闭集，线上拼写与 [`RunStage`] 同一个规矩：前端照着它分支，
+/// 改一个字就是改契约。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetHold {
+    /// 停止请求已经发出，收尾还没走完：子进程也许还在死，abort 也许还在路上。
+    Releasing,
+    /// 收尾走完了，而占用没释放掉——abort 失败了。人手点一下才有下文。
+    Held,
+}
+
+impl TargetHold {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Releasing => "RELEASING",
+            Self::Held => "HELD",
+        }
+    }
+}
+
+/// 一条运行记录上报出去的那份占用处境（#271）。
+struct HoldReport {
+    hold: TargetHold,
+    /// 没释放掉的原因，原话。「还在释放」时无话可说，所以是 `None`。
+    message: Option<String>,
+}
+
+/// 一次**没能释放掉**的目标表占用（#271）。
+///
+/// 它是这套系统里唯一的手工补救入口的全部凭据：重试一次 abort 要的东西
+/// （发给谁、说的是哪一次运行）都在这里，因为在飞投影那时早已不在了。
+struct StuckAbort {
+    /// 占着的是哪张目标表。**发起运行的那一关按它拦**：这张表还被占着的时候，
+    /// 谁来点「发起运行」都只会换回一个 `TARGET_TABLE_BUSY`——包括另一个指着同一张表的
+    /// 任务，和一个删了重建的同名任务。
+    target: TargetTable,
+    /// 占用是**哪个任务**的运行留下的。它不是占用的判据（判据是 `target`），
+    /// 只回答一个问题：删掉这个任务，会不会把这份占用的重试入口一起删掉（#270）。
+    task_id: String,
+    /// sink 侧那个 21 字符的 run id：abort 认的是它。
+    run_id: String,
+    /// 当时那台 agent 的地址。占用在**当时那台**上，重试就得发到当时那台去。
+    agent_base_url: Option<String>,
+    /// 最近一次没成的原因，原样留着。
+    message: String,
+    /// 已经有人点了重试、这一趟还没回来。第二次点进来当场劝退，
+    /// 免得两趟 abort 一起在路上。
+    retrying: bool,
+    /// 这条运行的日志笔。**跟着占用一起留下来**：重试再失败也要落一行
+    /// `abort_failed`，而行号攥在笔身上——另起一支会把已有的行覆盖掉。
+    run_log: Option<RunLogWriter>,
 }
 
 enum StartRunError {
     AlreadyRunning,
+    /// 这个任务正在停，占用还没还回来（#271）。
+    Stopping,
+    /// 这次要写的那张目标表，占用还没还回来（#271）。硬拦在这里，而不是推过去
+    /// 让目标端回一个 `TARGET_TABLE_BUSY`：本地知道的事没有理由绕一圈才说。
+    /// 欠着占用的**不一定是这个任务上一次运行**——占用是按表记的。
+    TargetHeld,
     Internal(String),
 }
 
@@ -519,6 +706,11 @@ pub fn routes() -> &'static [Route] {
             Route::new(Post, "/api/runs/{}/cancel", |state, _request, id| {
                 handle_cancel_run(state.runs, id)
             }),
+            // 重试一次没能释放掉的目标表占用（#271）。**这是全系统唯一的手工补救入口**：
+            // 在它之前，占用泄漏之后的唯一出路是运维自己去调目标端的 abort 接口。
+            Route::new(Post, "/api/runs/{}/release", |state, _request, id| {
+                handle_release_target(state, id)
+            }),
             Route::new(Get, "/api/runs", |state, request, _id| {
                 handle_list_history(state.runs, state.history, request.query())
             }),
@@ -546,7 +738,7 @@ pub fn routes() -> &'static [Route] {
                 handle_update_task(request, state.tasks, id)
             }),
             Route::new(Delete, "/api/tasks/{}", |state, _request, id| {
-                handle_delete_task(state.tasks, id)
+                handle_delete_task(state, id)
             }),
         ]
     })
@@ -778,6 +970,17 @@ fn handle_start_run(request: &Request, state: &Api<'_>) -> HttpResponse {
             409,
             &json!({ "error": { "message": "该任务已有一次运行进行中" } }),
         ),
+        // 「正在停」与「已经在跑」分成两句（#271）：停止是异步的，点完停止到占用真的
+        // 还回来之间有一段窗口，那段窗口里回一句「已有一次运行进行中」会让人以为
+        // 自己那一下停止没生效。
+        Err(StartRunError::Stopping) => json_response(
+            409,
+            &json!({ "error": { "message": "该任务正在停止，等目标表占用释放后才能再跑" } }),
+        ),
+        Err(StartRunError::TargetHeld) => json_response(
+            409,
+            &json!({ "error": { "message": "这张目标表的占用还没释放，先把它释放掉再发起" } }),
+        ),
         Err(StartRunError::Internal(error)) => internal_error(error),
     }
 }
@@ -817,9 +1020,114 @@ fn handle_cancel_run(runs: &RunRegistry, run_record_id: &str) -> HttpResponse {
     let Some(pid) = child_pid else {
         return internal_error("run 子进程尚未登记".to_owned());
     };
+    // 标记打在**发信号之前**（#269）。信号一旦发出，子进程可能下一微秒就没了，而监督线程
+    // 紧接着就要读这个标记来决定这次运行记成「已由用户停止」还是「进程消失」——
+    // 先 kill 后标记就是在跟一次进程死亡赛跑，输了的那次会被记成意外死亡。
+    // 加锁与发信号仍是**两趟**：`kill(2)` 留在锁外（见函数开头那段）。
+    mark_stop_requested(runs, run_record_id, UnknownReason::StoppedByUser);
     match send_sigterm(pid) {
         Ok(()) => json_response(202, &json!({ "message": "已发送 SIGTERM" })),
-        Err(error) => internal_error(error),
+        Err(error) => {
+            // 信号没发出去，这次运行还在跑：标记得撤回去，否则它将来真的意外死掉时
+            // 会顶着一句「已由用户停止」，而那不是事实。
+            unmark_stop_requested(runs, run_record_id);
+            internal_error(error)
+        }
+    }
+}
+
+/// `POST /api/runs/{}/release` —— 重试一次没能释放掉的目标表占用（#271）。
+///
+/// 路径上的是**哪一行按下了这一下**，释放的却是**那一行写的那张目标表**上欠着的占用
+/// ——两者通常是同一次运行，但不必是：占用是按表记的，同一张表上另一次运行欠下的占用，
+/// 在这一行上照样显示成「锁未释放」，那就得在这一行上点得动。
+///
+/// 只对**确实欠着占用**的表开门：没有欠着就是 404，因为那种情况下没有已知的占用可释放，
+/// 凭空发一次 abort 只是朝目标端乱开枪。
+///
+/// 幂等性由 sink 那头保证（未知的 run 回 200）。这里不自动重试、也不定时重试——
+/// 「abort 不承诺可靠性」那条没变，变的只是**人现在有地方点这一下**。
+fn handle_release_target(state: &Api<'_>, run_record_id: &str) -> HttpResponse {
+    let Some(target) = run_target_table(state, run_record_id) else {
+        return not_found();
+    };
+    // 锁只用来抄一份重试要用的东西，并把「有人正在重试」挂上去，随即松手：
+    // abort 是一次最长 30 秒的 HTTP 往返，攥着这把锁做它，整个界面都要陪着等。
+    let taken = match state.runs.lock() {
+        Ok(mut registry) => {
+            let Some(holder) = registry
+                .stuck_for_target(&target)
+                .map(|(holder, _)| holder.clone())
+            else {
+                // **不是通用 404**：这条运行认得，只是它写的那张表没有欠着的占用。
+                // 凭空发一次 abort 是朝目标端乱开枪，而把这句话说清楚，人才知道自己
+                // 看到的是「已经释放了」而不是「这个接口坏了」。
+                return json_response(
+                    404,
+                    &json!({ "error": { "message": "这次运行没有待释放的目标表占用" } }),
+                );
+            };
+            let stuck = registry
+                .stuck_aborts
+                .get_mut(&holder)
+                .expect("上一句刚在同一把锁下找到它");
+            if stuck.retrying {
+                return json_response(
+                    409,
+                    &json!({ "error": { "message": "正在重试释放目标表占用，请稍候" } }),
+                );
+            }
+            stuck.retrying = true;
+            (holder, stuck.run_id.clone(), stuck.agent_base_url.clone())
+        }
+        Err(_) => return internal_error("run 控制锁已损坏".to_owned()),
+    };
+    // 往下动的是**欠着占用的那次运行**，不一定是路径上的那一次。
+    let (holder, run_id, agent_base_url) = taken;
+    let outcome = match agent_base_url.as_deref() {
+        Some(base_url) => release_target_hold(base_url, &run_id),
+        None => Err(MISSING_AGENT_URL_MESSAGE.to_owned()),
+    };
+    // 收尾与重启补发那一趟共用一处：成了整条摘掉，没成就把原因留在占用上，
+    // 并落一行 `abort_failed`——与第一次失败同一个形状。
+    match settle_stuck_abort(state.runs, &holder, &run_id, outcome) {
+        Ok(()) => json_response(200, &json!({ "message": "目标表占用已释放" })),
+        Err(message) => sink_failure(message),
+    }
+}
+
+/// 这一行运行记录写的是哪张目标表。
+///
+/// 在飞的那份与落库的那份读的是同一样东西（开跑时钉下的证据），所以先问投影、
+/// 再问库，两条路答出来的是同一个键。这条运行根本不存在时是 `None`。
+fn run_target_table(state: &Api<'_>, run_record_id: &str) -> Option<TargetTable> {
+    if let Ok(registry) = state.runs.lock() {
+        if let Some(history) = registry.live_histories.get(run_record_id) {
+            return TargetTable::from_history(history);
+        }
+    }
+    TargetTable::from_history(&state.history.get(run_record_id).ok()??)
+}
+
+/// 记下「这一刀是我们自己捅的」，并连**什么名义**一起记下（#269/#272）：
+/// 人按的是「已由用户停止」，停服收摊时捅的是「服务重启，结局未知」。
+fn mark_stop_requested(runs: &RunRegistry, run_record_id: &str, reason: UnknownReason) {
+    set_stop_requested(runs, run_record_id, Some(reason));
+}
+
+/// 把上一句撤回去：信号根本没发出去，这次运行还在跑。
+///
+/// **两个名字而不是一个参数**：`mark_stop_requested(runs, id, None)` 在调用处
+/// 读起来像「标记停止」，而它做的事正相反——这是一次回滚，那就该在名字上说出来。
+fn unmark_stop_requested(runs: &RunRegistry, run_record_id: &str) {
+    set_stop_requested(runs, run_record_id, None);
+}
+
+fn set_stop_requested(runs: &RunRegistry, run_record_id: &str, reason: Option<UnknownReason>) {
+    if let Ok(mut registry) = runs.lock() {
+        if let Some(run) = registry.active_runs.get_mut(run_record_id) {
+            run.stop_requested = reason;
+        }
     }
 }
 
@@ -841,11 +1149,20 @@ fn handle_get_run(
     history_store: &HistoryStore,
     run_record_id: &str,
 ) -> HttpResponse {
-    let record = match runs.lock() {
-        Ok(registry) => registry.live_histories.get(run_record_id).cloned(),
+    // 「在飞投影」与「占用处境」**一把锁读完**：分两次拿锁，答出来的会是两个时刻的
+    // 拼接——「已经不在飞了，可占用还在释放」这种自相矛盾的回答就是那么来的。
+    let live = match runs.lock() {
+        Ok(registry) => registry
+            .live_histories
+            .get(run_record_id)
+            .cloned()
+            .map(|record| {
+                let hold = registry.target_hold(TargetTable::from_history(&record).as_ref());
+                (record, hold)
+            }),
         Err(_) => return internal_error("run 投影锁已损坏".to_owned()),
     };
-    if let Some(record) = record {
+    if let Some((record, hold)) = live {
         return json_response(
             200,
             &json!({
@@ -870,12 +1187,25 @@ fn handle_get_run(
                 "bytes": record.bytes,
                 "ms": record.ms,
                 "last_ts": record.last_ts,
+                // 目标表占用还在不在（#271）。在飞的时候它只有一种非空取值：
+                // 有人按过停止、这次运行正在收尾。
+                "target_hold": hold.as_ref().map(|report| report.hold.as_str()),
+                "target_hold_message": hold.as_ref().and_then(|report| report.message.clone()),
                 "live": true,
             }),
         );
     }
+    // 落库的那一行：它已经定死了，所以占用另拿一次锁去问不会拼出自相矛盾的回答。
+    // 问的是**这一行写的那张目标表**，答案可能来自别人——同一张表上另一次运行欠下的
+    // 占用，一样让这一行不能重跑。
     match history_store.get(run_record_id) {
-        Ok(Some(history)) => history_response(&history),
+        Ok(Some(history)) => {
+            let hold = match runs.lock() {
+                Ok(registry) => registry.target_hold(TargetTable::from_history(&history).as_ref()),
+                Err(_) => return internal_error("run 投影锁已损坏".to_owned()),
+            };
+            history_response(&history, hold.as_ref())
+        }
         Ok(None) => not_found(),
         Err(error) => internal_error(error),
     }
@@ -956,7 +1286,20 @@ fn handle_list_history(
     match history_store.list(task_id.as_deref()) {
         Ok(history) => match merge_live_history(runs, history, task_id.as_deref()) {
             Ok(merged) => {
-                let values = merged.iter().map(history_value).collect::<Vec<_>>();
+                // 占用处境挨条补上（#271）。作业中心那一格读的就是这个字段：
+                // 一行任务只看它最近那次运行，而「能不能再跑」正写在那一行上。
+                let holds = match runs.lock() {
+                    Ok(registry) => merged
+                        .iter()
+                        .map(|row| registry.target_hold(TargetTable::from_history(row).as_ref()))
+                        .collect::<Vec<_>>(),
+                    Err(_) => return internal_error("run 投影锁已损坏".to_owned()),
+                };
+                let values = merged
+                    .iter()
+                    .zip(&holds)
+                    .map(|(history, hold)| history_value(history, hold.as_ref()))
+                    .collect::<Vec<_>>();
                 json_response(200, &values)
             }
             Err(error) => internal_error(error),
@@ -996,17 +1339,29 @@ fn merge_live_history(
     Ok(history)
 }
 
-fn history_response(history: &RunHistory) -> HttpResponse {
-    json_response(200, &history_value(history))
+fn history_response(history: &RunHistory, hold: Option<&HoldReport>) -> HttpResponse {
+    json_response(200, &history_value(history, hold))
 }
 
-fn history_value(history: &RunHistory) -> Value {
+/// 落库的那一行，加上**只有内存里才知道**的两件事：这条运行还活着没有，
+/// 以及它占的目标表还回来了没有（#271）。两者都不进 SQLite——
+/// 进程一死它们就不成立了，存下来只会在重启之后骗人。
+fn history_value(history: &RunHistory, hold: Option<&HoldReport>) -> Value {
     let mut value =
         serde_json::to_value(history).expect("serializing a run history response must succeed");
     let object = value
         .as_object_mut()
         .expect("run history serializes as an object");
     object.insert("live".to_owned(), Value::Bool(false));
+    object.insert(
+        "target_hold".to_owned(),
+        hold.map_or(Value::Null, |report| json!(report.hold.as_str())),
+    );
+    object.insert(
+        "target_hold_message".to_owned(),
+        hold.and_then(|report| report.message.clone())
+            .map_or(Value::Null, Value::String),
+    );
     value
 }
 
@@ -1079,6 +1434,12 @@ pub(crate) fn dispatch_scheduled_run(state: &Api<'_>, task: &Task) -> DispatchOu
         Err(StartRunError::AlreadyRunning) => {
             DispatchOutcome::Refused("上次尚未结束，本次跳过".to_owned())
         }
+        Err(StartRunError::Stopping) => {
+            DispatchOutcome::Refused("上次正在停止，本次跳过".to_owned())
+        }
+        Err(StartRunError::TargetHeld) => {
+            DispatchOutcome::Refused("目标表的占用还没释放，本次跳过".to_owned())
+        }
         Err(StartRunError::Internal(error)) => DispatchOutcome::Refused(error),
     }
 }
@@ -1138,7 +1499,11 @@ fn start_run(
             source_sql: task.spec.source_sql(),
         }),
     };
-    register_active_run(runs, &run_record_id, &task.task_id, &agent.agent_id)?;
+    // 占用的键在这里就凑齐：agent、库、表三样都在手边，而它们各自的来源
+    // （注册表、数据源、任务定义）此后都可能变，唯有开跑这一刻的取值算数。
+    let target_table =
+        TargetTable::new(&agent.agent_id, &target.database, &task.spec.target_table);
+    register_active_run(runs, &run_record_id, &task.task_id, &agent.agent_id, target_table)?;
     if let Err(error) = history_store.insert(&history, Utc::now(), config.history_retention_days) {
         remove_active_run(runs, &run_record_id);
         return Err(StartRunError::Internal(error));
@@ -1268,6 +1633,11 @@ fn supervise_run(
     runs: RunRegistry,
 ) {
     let mut terminal_observed = false;
+    // 子进程自己那一刀 abort 也可能没砍下去（#271）。砍不下去时它写一行 `abort_failed`，
+    // 而那一行是父进程**唯一**能知道这件事的地方：占用因此留在了目标端，后果与父进程
+    // 补发失败一模一样，界面上就该是同一句话。凭据在见到那一行时当场抄下来——
+    // 终态一到，在飞投影当场被摘掉，事后再抄什么也没有了。
+    let mut child_abort_failure: Option<(RunWrapup, String)> = None;
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else {
             break;
@@ -1283,6 +1653,15 @@ fn supervise_run(
         let Ok(log) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        // 只有失败路径上才会有这一行：子进程的 `abort_best_effort` 是它自己收拾
+        // 暂存表的那一下，跑成了的运行从不发 abort。
+        if log["event"] == "abort_failed" {
+            let message = log["message"]
+                .as_str()
+                .unwrap_or("目标端 abort 失败")
+                .to_owned();
+            child_abort_failure = Some((wrapup_snapshot(&runs, &run_record_id), message));
+        }
         let Some((change, history)) = apply_log_line(&runs, &run_record_id, &log) else {
             continue;
         };
@@ -1303,17 +1682,404 @@ fn supervise_run(
     let _ = child.wait();
     let _ = fs::remove_file(task_path);
     if !terminal_observed {
+        // 收尾要用的那几样东西**只住在这条在飞投影里**，而它下面就要被摘掉，所以先抄一份。
+        let wrapup = wrapup_snapshot(&runs, &run_record_id);
+        // 「进程消失」与「已由用户停止」是同一个事实的两种成因：子进程被信号带走时
+        // 什么都留不下，唯一知道这是不是我们自己要的，是发信号时打下的那个标记。
+        let reason = wrapup
+            .stop_requested
+            .unwrap_or(UnknownReason::ProcessDisappeared);
         let history = runs.lock().ok().and_then(|mut registry| {
             let history = registry.live_histories.get_mut(&run_record_id)?;
-            history.mark_unknown(UnknownReason::ProcessDisappeared, Utc::now());
+            history.mark_unknown(reason, Utc::now());
             Some(history.clone())
         });
         if let Some(history) = history {
             let _ = history_store.save(&history, Utc::now(), retention_days);
         }
+        // 子进程没来得及说完的那句 abort，父进程替它说（#269）。**必须在 `child.wait()`
+        // 之后**：暂存表要等发起写入的那个进程死透了才动得。
+        if let Some(message) = abort_on_behalf_of_child(&wrapup, &mut run_log) {
+            // 没释放掉：这件事必须活得比在飞登记更久（#271）。登记下一行就摘了，
+            // 而占用还在目标端挂着——不记下来，界面下一秒就会把这个任务显示成可以重跑，
+            // 而那是**假的**：再发起一次只会撞回一个 `TARGET_TABLE_BUSY`。
+            record_stuck_abort(&runs, &run_record_id, &wrapup, message, run_log);
+        }
+    } else if let Some((wrapup, message)) = child_abort_failure {
+        // 子进程自己走完了终态，所以父进程不补 abort（那只会在已封口的 run 上换回 409）；
+        // 可它路上那一刀没砍下去，占用照样挂着。**占用还在就不许显示成可以重跑**，
+        // 这一条不分是谁那一刀没成（#271）。
+        record_stuck_abort(&runs, &run_record_id, &wrapup, message, run_log);
     }
     remove_live_history(&runs, &run_record_id);
     remove_active_run(&runs, &run_record_id);
+}
+
+/// 子进程退出后，父进程收尾要用到的全部事实。
+struct RunWrapup {
+    /// 这次运行是谁的。占用没释放掉时，重试那颗按钮长在**这个任务**的行上，
+    /// 所以删这个任务的那一关也要认它（#270）。
+    task_id: String,
+    /// 这次运行写的是哪张目标表。占用没释放掉时，拦住的是**这张表**的下一次运行（#271）。
+    target: Option<TargetTable>,
+    /// 这次死亡是不是我们自己要的，以及什么名义（发信号那一刻打的标记）。
+    stop_requested: Option<UnknownReason>,
+    /// sink 侧那个 21 字符的 run id。`None` 表示子进程一行日志都没发出来就没了，
+    /// sink 从来不知道有过这次运行——没有占用可释放，也就不该发 abort。
+    run_id: Option<String>,
+    /// 目标端 agent 的地址，取自开跑那一刻的证据快照。agent 后来被改了地址也不影响：
+    /// 暂存表在**当时那台**上，abort 就得发到当时那台去。
+    agent_base_url: Option<String>,
+    /// 最后一次听说的阶段：abort 权限挂在它上面，且只有这一份实现。
+    stage: Option<RunStage>,
+}
+
+fn wrapup_snapshot(runs: &RunRegistry, run_record_id: &str) -> RunWrapup {
+    let Ok(registry) = runs.lock() else {
+        return RunWrapup {
+            task_id: String::new(),
+            target: None,
+            stop_requested: None,
+            run_id: None,
+            agent_base_url: None,
+            stage: None,
+        };
+    };
+    let history = registry.live_histories.get(run_record_id);
+    RunWrapup {
+        task_id: registry
+            .active_runs
+            .get(run_record_id)
+            .map(|run| run.task_id.clone())
+            .unwrap_or_default(),
+        target: registry
+            .active_runs
+            .get(run_record_id)
+            .map(|run| run.target.clone()),
+        stop_requested: registry
+            .active_runs
+            .get(run_record_id)
+            .and_then(|run| run.stop_requested),
+        run_id: history.and_then(|history| history.run_id.clone()),
+        agent_base_url: history
+            .and_then(|history| history.evidence.agent.as_ref())
+            .map(|agent| agent.base_url.clone()),
+        stage: registry
+            .active_runs
+            .get(run_record_id)
+            .and_then(|run| run.stage),
+    }
+}
+
+/// 替死掉的子进程向 sink 补发一次 abort：释放目标表占用，并把暂存表 drop 掉。
+///
+/// 为什么非得父进程来做：停止运行走的是 SIGTERM，而子进程没有信号处理，被内核直接
+/// 终止，来不及调用它自己那条 `abort_best_effort`。sink 那边的目标表占用是纯内存的，
+/// 只在提交或收到 abort 时删除——没人补这一刀，同一张目标表就再也开不了第二次运行
+/// （`TARGET_TABLE_BUSY`）。
+///
+/// 三种情况不发：
+/// * 子进程自己走完了终态（调用方已判）——那时 sink 侧要么已提交、要么子进程自己
+///   abort 过了，再发一次只会在 `sealed` 的 run 上换回一个 409，平白造出一条「失败」。
+/// * 没有 run_id 或没有 agent 地址：sink 根本不知道这次运行。
+/// * 阶段已过封口点：暂存表的处置权整个归 sink 了，source 永久放弃 abort 权。
+///   **这一条不漏占用**：`COMMITTING` 是 sink 的 `commit` 正在跑，而它的每一条出口
+///   （换表成了、校验没过、目标端报错）都会走 `finish_run` 把占用摘掉——那时没有占用
+///   需要 source 去释放。何况已封口的 run 上发 abort 只会换回一个 409 `RUN_SEALED`，
+///   记下来只会在界面上立起一颗永远点不成的「锁未释放，点此重试」。
+///
+/// 失败**不吞**：落成一行 `abort_failed` 运行日志，和子进程自己 abort 失败时写的那行
+/// 同一个形状，并把失败的原因**回给调用方**——占用还在这件事要上报到界面上（#271）。
+/// 这里仍旧不自动重试：「abort 不承诺可靠性」那条没有变，变的是人有地方点重试了。
+///
+/// 返回 `None` 有两种意思：这次不必发（三种不发的情况），或者发了并且成了。
+/// 两者对占用而言是同一件事——目标表是空闲的。
+fn abort_on_behalf_of_child(wrapup: &RunWrapup, run_log: &mut RunLogWriter) -> Option<String> {
+    let run_id = wrapup.run_id.as_deref()?;
+    // 认不出的阶段拼写（子进程比父进程新）按「可能还没封口」办：多发一次 abort 是幂等的，
+    // 少发一次却会把目标表永久锁住。
+    if wrapup.stage.is_some_and(|stage| !stage.abort_allowed()) {
+        return None;
+    }
+    let Some(base_url) = wrapup.agent_base_url.as_deref() else {
+        let message = "运行证据里没有目标端 agent 地址".to_owned();
+        log_abort_failed(run_log, run_id, message.clone());
+        return Some(message);
+    };
+    match release_target_hold(base_url, run_id) {
+        Ok(()) => None,
+        Err(message) => {
+            log_abort_failed(run_log, run_id, message.clone());
+            Some(message)
+        }
+    }
+}
+
+/// source **自己**重启时，上一条命没走完的那几次运行留下的目标表占用（#272）。
+///
+/// 为什么非补不可：子进程的死法有两种，父进程收得了尸的那一种已经由
+/// [`abort_on_behalf_of_child`] 补过 abort 了；另一种是父进程跟它一起没了
+/// ——升级重部署、机器重启、`kill` 掉 source 都算。那一刀因此谁也没砍，
+/// 而 sink 那边的目标表占用是纯内存的，只在提交或收到 abort 时删除：占用于是
+/// **永远**挂在目标端，这张表再也开不了第二次运行，界面上却什么都看不出来
+/// ——重启后的 source 把这几行历史封了口就忘干净了，下一次「发起运行」照放，
+/// 一路跑到 sink 才撞回一个 `TARGET_TABLE_BUSY`。
+///
+/// 补的方式与人点「锁未释放，点此重试」是同一条路（[`release_target_hold`]），
+/// 只是这一趟由启动本身发起。**先把占用如实记上，再去释放**：登记是同步的，
+/// 释放是后台的一趟 HTTP——反过来的话，从开门到 abort 回来的那几秒里，
+/// 这张表会被显示成可以重跑，而那是假的。占用挂着的这段时间它显示「停止中…」
+/// （`retrying` 为真），释放成了就整条摘掉，没释放掉就落回「锁未释放，点此重试」。
+///
+/// 哪几行不补，与子进程那一路一个判据：没有 run_id（sink 从不知道有过这次运行）、
+/// 认不出目标表（老历史没有证据）、阶段已过封口点（处置权归 sink，它自己会摘掉占用）。
+pub fn reclaim_after_restart(
+    history_store: &HistoryStore,
+    run_logs: &RunLogStore,
+    runs: &RunRegistry,
+    retention_days: u64,
+) -> Result<(), String> {
+    // 抄在封口**之前**：封口把这几行的 `outcome` 全填上，之后就再也认不出
+    // 哪几次运行可能还在目标端占着表。
+    let incomplete = history_store.list_incomplete()?;
+    history_store.seal_incomplete(
+        UnknownReason::ProcessDisappeared,
+        Utc::now(),
+        retention_days,
+    )?;
+    let mut pending = Vec::new();
+    {
+        let Ok(mut registry) = runs.lock() else {
+            return Ok(());
+        };
+        for history in &incomplete {
+            let (Some(run_id), Some(target)) =
+                (history.run_id.clone(), TargetTable::from_history(history))
+            else {
+                continue;
+            };
+            // 认不出的阶段拼写按「可能还没封口」办，与 `abort_on_behalf_of_child` 同理：
+            // 多发一次 abort 是幂等的，少发一次却把目标表永久锁住。
+            if history
+                .stage
+                .as_deref()
+                .and_then(RunStage::parse)
+                .is_some_and(|stage| !stage.abort_allowed())
+            {
+                continue;
+            }
+            let agent_base_url = history
+                .evidence
+                .agent
+                .as_ref()
+                .map(|agent| agent.base_url.clone());
+            registry.stuck_aborts.insert(
+                history.run_record_id.clone(),
+                StuckAbort {
+                    target,
+                    task_id: history.task_id.clone(),
+                    run_id: run_id.clone(),
+                    agent_base_url: agent_base_url.clone(),
+                    message: ORPHANED_HOLD_MESSAGE.to_owned(),
+                    // 这一趟 abort 已经在路上了：这段窗口里别人再点重试只会让两趟
+                    // abort 一起飞。
+                    retrying: true,
+                    // 补写的那支笔要**接着**上一条命的行号写，否则一行 `abort_failed`
+                    // 会把这条运行原有的日志第一行盖掉。
+                    run_log: Some(RunLogWriter::resuming(
+                        run_logs.clone(),
+                        history.run_record_id.clone(),
+                        history.task_id.clone(),
+                        history.started_at_ms(),
+                    )),
+                },
+            );
+            pending.push((history.run_record_id.clone(), run_id, agent_base_url));
+        }
+    }
+    if pending.is_empty() {
+        return Ok(());
+    }
+    // 后台一趟，不挡启动：每次 abort 都是一趟最长 30 秒的 HTTP 往返，
+    // 串在启动路径上等于让整个界面陪着等目标端。
+    let runs = Arc::clone(runs);
+    thread::spawn(move || {
+        for (run_record_id, run_id, agent_base_url) in pending {
+            let outcome = match agent_base_url.as_deref() {
+                Some(base_url) => release_target_hold(base_url, &run_id),
+                None => Err(MISSING_AGENT_URL_MESSAGE.to_owned()),
+            };
+            let _ = settle_stuck_abort(&runs, &run_record_id, &run_id, outcome);
+        }
+    });
+    Ok(())
+}
+
+/// 停服收摊：把在飞的运行停掉，**并等它们的收尾走完**（#272）。
+///
+/// 这是 [`reclaim_after_restart`] 的另一半，管的是同一件事：目标表占用在 sink 那边
+/// 是纯内存的，只在提交或收到 abort 时删除。source 一走了之，占用就永远挂在目标端，
+/// 那张表再也开不了第二次运行。而收摊这一半必须在**本进程里**做完——重启后那一半
+/// 看的是「没走完的历史行」，可优雅退出会在最后把它们全封了口，下一条命于是一行也看不见。
+///
+/// 做法就是替每一次在飞运行按一次「停止运行」，名义是**服务重启**而不是用户停止：
+/// 两者在历史里必须分得开，昨晚那次到底是谁弄的，事后只有这一列答得出来。
+/// 随后等在飞登记空掉——真正发 abort 的是各自的监督线程，进程一退它们就没了，
+/// 所以这里等的不是礼貌，是那一刀砍没砍下去。等不到就算了，剩下的交给下一条命。
+///
+/// 已过封口点的那几次**不发信号**：暂存表的处置权已整个归 sink，它自己会摘掉占用；
+/// 这时候把子进程打断，只会让一次已经在换表的运行在历史里落个「结局未知」。
+/// 它们照样在等待之列——收尾走完了才轮到封口。
+///
+/// 不自己落日志：这一趟的每一个结果都已经有地方说了——每次运行的历史行上写着
+/// 「服务重启，结局未知」，abort 没砍下去的那几次在各自的运行日志里落着 `abort_failed`。
+pub fn stop_runs_for_shutdown(runs: &RunRegistry, grace: Duration) {
+    let victims: Vec<(String, Option<u32>, Option<RunStage>)> = match runs.lock() {
+        Ok(registry) => registry
+            .active_runs
+            .iter()
+            .map(|(run_record_id, run)| (run_record_id.clone(), run.child_pid, run.stage))
+            .collect(),
+        Err(_) => return,
+    };
+    if victims.is_empty() {
+        return;
+    }
+    for (run_record_id, child_pid, stage) in &victims {
+        if stage.is_some_and(|stage| !stage.abort_allowed()) {
+            continue;
+        }
+        let Some(pid) = child_pid else {
+            continue;
+        };
+        // 标记打在发信号之前，与 `handle_cancel_run` 同一个理由：先 kill 后标记
+        // 就是在跟一次进程死亡赛跑。
+        mark_stop_requested(runs, run_record_id, UnknownReason::ServiceRestarted);
+        if send_sigterm(*pid).is_err() {
+            // 信号没发出去，这次运行还在跑：标记撤回去，否则它将来真的死掉时
+            // 会顶着一句「服务重启」，而那不是事实。
+            unmark_stop_requested(runs, run_record_id);
+        }
+    }
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline {
+        match runs.lock() {
+            Ok(registry) if registry.active_runs.is_empty() => return,
+            Err(_) => return,
+            Ok(_) => {}
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// 一趟 abort 回来之后，那份占用记录该怎么办（#271/#272）。
+///
+/// 两个发起处（人点的重试、重启后的自动补发）共用这一处：成了就整条摘掉，
+/// 没成就把原因原样留在上面、把「正在重试」放下来，并落一行 `abort_failed`。
+/// 原样把 `outcome` 回给调用方，接口那边照它挑回话。
+fn settle_stuck_abort(
+    runs: &RunRegistry,
+    run_record_id: &str,
+    run_id: &str,
+    outcome: Result<(), String>,
+) -> Result<(), String> {
+    let Err(message) = outcome else {
+        if let Ok(mut registry) = runs.lock() {
+            registry.stuck_aborts.remove(run_record_id);
+        }
+        return Ok(());
+    };
+    // 笔先取出来，日志落在**锁外**：写它是一次 SQLite 往返，攥着 run 控制锁做它，
+    // 整个界面都在排队。
+    let mut run_log = runs
+        .lock()
+        .ok()
+        .and_then(|mut registry| registry.stuck_aborts.get_mut(run_record_id)?.run_log.take());
+    if let Some(run_log) = run_log.as_mut() {
+        log_abort_failed(run_log, run_id, message.clone());
+    }
+    if let Ok(mut registry) = runs.lock() {
+        if let Some(stuck) = registry.stuck_aborts.get_mut(run_record_id) {
+            stuck.retrying = false;
+            stuck.message.clone_from(&message);
+            stuck.run_log = run_log;
+        }
+    }
+    Err(message)
+}
+
+/// 重启补发时挂在占用上的那句话。补发这一趟还没回来时界面并不显示它
+/// （那时是「停止中…」），它是补发**失败**之前的占位。
+const ORPHANED_HOLD_MESSAGE: &str =
+    "source 重启前这次运行没有走完，目标表占用可能还留在目标端；正在补发一次 abort";
+
+/// 开跑时就没记下 agent 地址（实际上到不了这里）：说清楚这次只能人到目标端去清，
+/// 别装作重试过了。
+const MISSING_AGENT_URL_MESSAGE: &str = "运行证据里没有目标端 agent 地址，这次占用只能在目标端手工清";
+
+/// 向目标端发一次 abort：目标表占用与暂存表一起了结。
+///
+/// **补发与重试走的是同一条路**（#271）：一条是子进程死后父进程自动补的那一刀，
+/// 一条是人在界面上点出来的那一刀，除了发起的人不同，别的一个字都不该不一样。
+fn release_target_hold(base_url: &str, run_id: &str) -> Result<(), String> {
+    let mut sink = HttpSinkClient::new(base_url)?;
+    sink.abort(run_id).map(|_| ()).map_err(|error| error.message)
+}
+
+/// 把一次没能释放掉的占用挂到登记表上（#271）。
+///
+/// 连日志笔一起交过去：重试再失败也要落一行 `abort_failed`，而行号攥在笔身上，
+/// 另起一支会把这条运行已有的日志行覆盖掉。
+fn record_stuck_abort(
+    runs: &RunRegistry,
+    run_record_id: &str,
+    wrapup: &RunWrapup,
+    message: String,
+    run_log: RunLogWriter,
+) {
+    // 没有 run_id 就走不到这里（`abort_on_behalf_of_child` 头一行就退了），
+    // 目标表也是开跑时就登记好的，走到这里必有。两条写全只为不留说不清的分支：
+    // 记不下占用的键，这份占用就再也拦不住任何东西，那时宁可不记。
+    let (Some(run_id), Some(target)) = (wrapup.run_id.clone(), wrapup.target.clone()) else {
+        return;
+    };
+    if let Ok(mut registry) = runs.lock() {
+        registry.stuck_aborts.insert(
+            run_record_id.to_owned(),
+            StuckAbort {
+                target,
+                task_id: wrapup.task_id.clone(),
+                run_id,
+                agent_base_url: wrapup.agent_base_url.clone(),
+                message,
+                retrying: false,
+                run_log: Some(run_log),
+            },
+        );
+    }
+}
+
+fn log_abort_failed(run_log: &mut RunLogWriter, run_id: &str, message: String) {
+    let mut line = Vec::new();
+    if write_log_line_with_fields(
+        &mut line,
+        LogLevel::Warn,
+        LogEvent::AbortFailed,
+        Some(run_id),
+        None,
+        json!({ "message": message }),
+    )
+    .is_err()
+    {
+        return;
+    }
+    let line = String::from_utf8_lossy(&line).trim_end().to_owned();
+    {
+        let stdout = io::stdout();
+        let mut writer = stdout.lock();
+        let _ = writeln!(writer, "{line}");
+    }
+    run_log.write(&line);
 }
 
 fn apply_log_line(
@@ -1341,20 +2107,35 @@ fn register_active_run(
     run_record_id: &str,
     task_id: &str,
     agent_id: &str,
+    target: TargetTable,
 ) -> Result<(), StartRunError> {
     let mut runs = runs
         .lock()
         .map_err(|_| StartRunError::Internal("run 控制锁已损坏".to_owned()))?;
-    if runs.active_runs.values().any(|run| run.task_id == task_id) {
-        return Err(StartRunError::AlreadyRunning);
+    if let Some(active) = runs.active_runs.values().find(|run| run.task_id == task_id) {
+        return Err(if active.stop_requested.is_some() {
+            StartRunError::Stopping
+        } else {
+            StartRunError::AlreadyRunning
+        });
+    }
+    // 这张目标表的占用还挂在目标端：**这一关就是「占用还在时绝不让它看起来能重跑」
+    // 那条铁律的服务端一半**（#271）。前端那颗按钮是另一半，两半各自成立。
+    //
+    // 拦的判据是**表**不是任务：占用本来就是 sink 按表记的，按任务拦的话，另一个指着
+    // 同一张表的任务照样点得动「发起运行」，一路跑到 sink 才撞回 `TARGET_TABLE_BUSY`。
+    if runs.stuck_for_target(&target).is_some() {
+        return Err(StartRunError::TargetHeld);
     }
     runs.active_runs.insert(
         run_record_id.to_owned(),
         ActiveRun {
             task_id: task_id.to_owned(),
             agent_id: agent_id.to_owned(),
+            target,
             child_pid: None,
             stage: None,
+            stop_requested: None,
         },
     );
     Ok(())
@@ -1481,12 +2262,74 @@ fn handle_update_task(request: &Request, store: &TaskStore, task_id: &str) -> Ht
     }
 }
 
-fn handle_delete_task(store: &TaskStore, task_id: &str) -> HttpResponse {
-    match store.delete(task_id) {
+/// 删任务：还有运行没结束就拒（#270），与删数据源 / 删 agent 同一形态的 409。
+///
+/// 不做「自动停止再删除」：删除不可逆，让它顺手终止一次可能正在往目标库写数据的运行，
+/// 风险大于便利。正确的顺序是用户先停止、等这次运行收尾，再删任务。
+///
+/// 拦两种情况，因为**这个任务名下有两种东西会被删任务变成孤儿**：
+///
+/// * 还没结束的运行（`active_run_ids`）——任务一没，停止它的入口就没了。
+/// * 还没还回来的目标表占用（`held_run_ids`，#271）——占用是纯内存的，重试释放的那颗
+///   按钮长在这个任务的行上；任务一没，占用还挂在目标端，而界面上再没有一处点得到它。
+///
+/// 这两条与「能不能再发起一次」**不是同一个判据**，而且不该是：发起那一关拦的是
+/// 「这张目标表被占着」（可能被别的任务占着），删除这一关拦的是「这个任务欠着东西」。
+/// 两者在这个任务自己的占用上重合，所以「停完了、释放干净了就删得掉」仍然成立；
+/// 别的任务占着同一张表时删得掉但跑不起来，那不是自相矛盾——两句话说的本就是两件事。
+fn handle_delete_task(state: &Api<'_>, task_id: &str) -> HttpResponse {
+    let (active, held) = match state.runs.lock() {
+        Ok(registry) => (
+            registry.active_run_ids(task_id),
+            registry.held_run_ids(task_id),
+        ),
+        Err(_) => return internal_error("run 控制锁已损坏".to_owned()),
+    };
+    // 点名到 run_record_id：一个任务至多一次在飞，但报文形状跟着删数据源那条走
+    // （复数名词的数组 + 一句自己就能读懂的 message），前端拿不到数组时原样显示它。
+    if !active.is_empty() {
+        return delete_task_refused(
+            "RUN_IN_FLIGHT",
+            format!(
+                "任务还有运行没结束（{}）；请先停止这次运行，等它收尾后再删除任务",
+                active.join("、")
+            ),
+            active,
+        );
+    }
+    if !held.is_empty() {
+        return delete_task_refused(
+            "TARGET_HELD",
+            format!(
+                "任务上一次运行的目标表占用还没释放（{}）；请先在这一行点「锁未释放，点此重试」，释放成功后再删除任务",
+                held.join("、")
+            ),
+            held,
+        );
+    }
+    match state.tasks.delete(task_id) {
         Ok(Some(task)) => json_response(200, &task),
         Ok(None) => not_found(),
         Err(error) => internal_error(error),
     }
+}
+
+/// 删任务被拒时的那一份 409：两种拦法**同一个形状**，前端只认一种报文。
+///
+/// `reason` 是给机器读的那一格（`RUN_IN_FLIGHT` / `TARGET_HELD`）：两种拦法要人做的事
+/// 不同（去停止 vs 去重试释放），而界面上那句话不该靠**猜服务端的中文**来分辨是哪一种。
+/// `message` 仍旧自己就能读懂，给不认这一格的调用方（curl、旧界面）留着。
+fn delete_task_refused(reason: &str, message: String, runs: Vec<String>) -> HttpResponse {
+    json_response(
+        409,
+        &json!({
+            "error": {
+                "message": message,
+                "reason": reason,
+                "runs": runs,
+            }
+        }),
+    )
 }
 
 fn handle_list_datasources(store: &DatasourceStore) -> HttpResponse {

@@ -11,9 +11,11 @@ import { ICON } from "./components/DesignSystem";
 import type { FormEvent } from "react";
 
 import {
+  blockingRunsFrom,
   createTask,
   cancelRun,
   deleteTask,
+  deleteTaskRefusalMessage,
   fetchSession,
   listAgents,
   listDatasources,
@@ -21,6 +23,7 @@ import {
   listTasks,
   logout,
   onSessionLost,
+  releaseTargetHold,
   startRun,
   updateTask,
 } from "./api";
@@ -46,7 +49,7 @@ import type { DatasourceOption, EntryFix, EntryGuard } from "./entry";
 import { TaskEntryDialog } from "./TaskEntryDialog";
 import { TaskWizardScreen } from "./TaskWizardScreen";
 import type { TaskWizardScreenHandle } from "./TaskWizardScreen";
-import { Modal } from "./ui";
+import { DeleteRefusal, Modal } from "./ui";
 import { openExisting, openNew, taskName, toSpec } from "./wizard";
 import type { Draft, Step } from "./wizard";
 
@@ -681,6 +684,23 @@ function Workbench({
     }
   }
 
+  /**
+   * 重试释放上一次运行没能还回来的目标表占用（#271）。
+   *
+   * 成了就什么都不用说：清单一刷新，那一格自己变回「发起运行」，而那正是人想看到的。
+   * 没成才留一句话在屏顶——占用还挂着，界面照旧显示「锁未释放」，可以再点一次。
+   */
+  async function handleRetryRelease(runRecordId: string) {
+    setStartError(null);
+    try {
+      await releaseTargetHold(runRecordId);
+    } catch (error) {
+      setStartError(messageFrom(error));
+    } finally {
+      void loadList();
+    }
+  }
+
   async function handleDelete(task: Task) {
     await deleteTask(task.task_id);
     setTasks(
@@ -926,6 +946,7 @@ function Workbench({
               startingTaskId={startingTaskId}
               onStart={(task) => void handleStart(task)}
               onStop={(runRecordId) => void handleStop(runRecordId)}
+              onRetryRelease={(runRecordId) => void handleRetryRelease(runRecordId)}
               /* 重跑与发起现在是**同一件事**：按任务当前的定义再跑一次。
                  上一次没有留下任何需要预填的取值，所以也没有第二条代码路径。 */
               onRerun={handleStart}
@@ -1091,16 +1112,22 @@ function DeleteDialog({
   onDelete: () => Promise<void>;
 }) {
   const [error, setError] = useState<string | null>(null);
+  // 被拦下时服务端点名的那几次运行（#270/#271）。红底那句话只说数量与该做什么，
+  // 点名交给这份列表——与删数据源那屏同一块 `DeleteRefusal`，不是照抄的第二份。
+  const [blockedBy, setBlockedBy] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
   async function handleDelete() {
     setSubmitting(true);
     setError(null);
+    setBlockedBy([]);
     try {
       await onDelete();
       onClose();
     } catch (deleteError) {
-      setError(messageFrom(deleteError));
+      const runs = blockingRunsFrom(deleteError);
+      setError(deleteTaskRefusalMessage(deleteError, messageFrom(deleteError), runs));
+      setBlockedBy(runs);
     } finally {
       setSubmitting(false);
     }
@@ -1113,11 +1140,7 @@ function DeleteDialog({
           确认删除任务“<strong>{task.name}</strong>”？
         </p>
         <span className="task-id">{task.task_id}</span>
-        {error !== null && (
-          <div className="form-error" role="alert">
-            {error}
-          </div>
-        )}
+        <DeleteRefusal message={error} blockedBy={blockedBy} />
       </div>
       <footer className="modal-footer">
         <button

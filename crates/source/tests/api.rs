@@ -6,15 +6,18 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use db_qbs_source::http::{routes, Access, Api, Method, Request, Response, RunState};
+use db_qbs_source::http::{
+    reclaim_after_restart, routes, stop_runs_for_shutdown, Access, Api, Method, Request, Response,
+    RunState,
+};
 use db_qbs_source::{
     AgentStore, AuthStore, DatasourceStore, HistoryStore, OracleAccess, OracleRowSource,
     RunLogStore, ScheduleState, SourceColumn, SourceConfig, SourceReadError, TaskSpec, TaskStore,
@@ -24,10 +27,13 @@ use serde_json::Value;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
-/// 一台**在应答**的目标端 agent 桩：只认 `/v1/agent/info`，别的一律 503。
+/// 一台**在应答**的目标端 agent 桩：认 `/v1/agent/info` 与 `/v1/runs/{id}/abort`，别的一律 503。
 ///
 /// 与 `source_skeleton.rs` 里那台同一个形状——注册 agent、探测、目标端元数据这几条
 /// 都得先过它，一台不在线的 agent 会让它们统统停在「agent 不在线」那一步。
+///
+/// abort 也得认：子进程一死，父进程就会替它补发一次（#269）。这台桩是**全局共享**的，
+/// 想对某一次 abort 下断言的用例请另起一台 [`abort_recording_agent`]。
 fn agent_stub_url() -> &'static str {
     static STUB: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     STUB.get_or_init(|| {
@@ -44,24 +50,118 @@ fn agent_stub_url() -> &'static str {
                     .unwrap_or_default()
                     .to_owned();
                 let info = request_line.contains("/v1/agent/info");
+                let aborted = aborted_run_id(&request_line);
                 let body = if info {
-                    r#"{"agent_id":"stub-agent","name":"桩 agent","version":"0.0.0-test","max_concurrent_runs":1}"#
+                    r#"{"agent_id":"stub-agent","name":"桩 agent","version":"0.0.0-test","max_concurrent_runs":1}"#.to_owned()
+                } else if let Some(run_id) = &aborted {
+                    format!(r#"{{"run_id":"{run_id}","staging_dropped":true}}"#)
                 } else {
-                    r#"{"error":{"code":"BAD_REQUEST","message":"桩只认 /v1/agent/info","run_id":null,"details":{}}}"#
+                    r#"{"error":{"code":"BAD_REQUEST","message":"桩只认 /v1/agent/info","run_id":null,"details":{}}}"#.to_owned()
                 };
-                let status = if info { "200 OK" } else { "503 Service Unavailable" };
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
-                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.flush();
+                let status = if info || aborted.is_some() {
+                    "200 OK"
+                } else {
+                    "503 Service Unavailable"
+                };
+                respond_and_close(stream, status, &body);
             }
         });
         url
     })
     .as_str()
+}
+
+/// 回一条响应，然后**体面地**关掉这条连接。
+///
+/// 写完就 drop 会在客户端还没写完请求时发出 RST，客户端于是连状态行都读不到
+/// （macOS 上是 `Error encountered in the status line: Invalid argument (os error 22)`）——
+/// 一条与被测行为毫无关系的偶发失败。所以：写完先半关，再把对端剩下的字节读干净，
+/// 让四次挥手走完。读超时兜底，免得一条赖着不走的连接把这条单线程 accept 循环堵死。
+fn respond_and_close(mut stream: TcpStream, status: &str, body: &str) {
+    let _ = write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.flush();
+    let _ = stream.shutdown(Shutdown::Write);
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let mut drained = Vec::new();
+    let _ = stream.read_to_end(&mut drained);
+}
+
+/// `POST /v1/runs/<run_id>/abort` 里的那个 run id，不是这条路就是 `None`。
+fn aborted_run_id(request_line: &str) -> Option<String> {
+    let path = request_line.split_whitespace().nth(1)?;
+    let rest = path.strip_prefix("/v1/runs/")?;
+    Some(rest.strip_suffix("/abort")?.to_owned())
+}
+
+/// 一台**只记 abort** 的目标端 agent 桩：`/v1/agent/info` 照常应答，
+/// `/v1/runs/{id}/abort` 按 `abort_succeeds` 成或败，并把见到的每一个 run id 记下来。
+///
+/// 它回答的是 #269 那两个问题：父进程到底替子进程发了没有，以及发去的是哪一次运行。
+fn abort_recording_agent(abort_succeeds: bool) -> (String, Arc<Mutex<Vec<String>>>) {
+    let (url, aborts, _switch) = switchable_abort_agent(abort_succeeds);
+    (url, aborts)
+}
+
+/// 同一台桩，但 abort 成不成**中途可以改**。
+///
+/// #271 的重试要走的正是「先失败、再成功」这条路：第一次补发失败、占用留在目标端，
+/// 人点一下重试、这次成了。没有这个开关就演不出那一幕。
+fn switchable_abort_agent(
+    abort_succeeds: bool,
+) -> (String, Arc<Mutex<Vec<String>>>, Arc<AtomicBool>) {
+    let succeeds = Arc::new(AtomicBool::new(abort_succeeds));
+    let switch = Arc::clone(&succeeds);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let aborts = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&aborts);
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut head = [0_u8; 1024];
+            let read = stream.read(&mut head).unwrap_or(0);
+            let request_line = String::from_utf8_lossy(&head[..read])
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            let info = request_line.contains("/v1/agent/info");
+            let aborted = aborted_run_id(&request_line);
+            if let Some(run_id) = &aborted {
+                recorder.lock().unwrap().push(run_id.clone());
+            }
+            let (status, body) = if info {
+                (
+                    "200 OK",
+                    r#"{"agent_id":"stub-agent","name":"桩 agent","version":"0.0.0-test","max_concurrent_runs":1}"#.to_owned(),
+                )
+            } else if let Some(run_id) = &aborted {
+                if succeeds.load(Ordering::Relaxed) {
+                    (
+                        "200 OK",
+                        format!(r#"{{"run_id":"{run_id}","staging_dropped":true}}"#),
+                    )
+                } else {
+                    (
+                        "500 Internal Server Error",
+                        r#"{"error":{"code":"SINK_ENVIRONMENT","message":"暂存表 drop 不掉","run_id":null,"details":{}}}"#.to_owned(),
+                    )
+                }
+            } else {
+                (
+                    "503 Service Unavailable",
+                    r#"{"error":{"code":"BAD_REQUEST","message":"桩只认 /v1/agent/info","run_id":null,"details":{}}}"#.to_owned(),
+                )
+            };
+            respond_and_close(stream, status, &body);
+        }
+    });
+    (url, aborts, switch)
 }
 
 fn temp_directory() -> PathBuf {
@@ -164,6 +264,30 @@ impl Rig {
         }
     }
 
+    /// 同一份数据目录上的**第二条命**（#272）：进程被杀掉、又被拉起来是什么样，
+    /// 这台 rig 就是什么样——磁盘上那几行没走完的历史照旧在，而在飞登记是纯内存的，
+    /// 跟着上一条命一起没了，所以它是空的。
+    ///
+    /// 上一条命的假子进程还在睡，没人管它：真进程里那些孤儿也是这样，
+    /// 而这条用例问的是**新进程看见了什么**。
+    fn second_life(&self) -> Self {
+        let directory = self.directory.clone();
+        Self {
+            config: self.config.clone(),
+            config_path: self.config_path.clone(),
+            tasks: TaskStore::open(&directory).unwrap(),
+            datasources: DatasourceStore::open(&directory).unwrap(),
+            agents: Arc::new(Mutex::new(AgentStore::open(&directory).unwrap())),
+            history: HistoryStore::open(&directory).unwrap(),
+            run_logs: RunLogStore::open(&directory).unwrap(),
+            runs: Arc::new(Mutex::new(RunState::default())),
+            schedule: Arc::new(Mutex::new(ScheduleState::default())),
+            auth: AuthStore::open(&directory).unwrap(),
+            session: self.session.clone(),
+            directory,
+        }
+    }
+
     /// 给一条请求挂上这台 rig 的会话 cookie。手搓 `Request` 的用例也得过这一道。
     fn authorized(&self, request: Request) -> Request {
         request.with_header("Cookie", format!("{SESSION_COOKIE}={}", self.session))
@@ -220,12 +344,33 @@ impl Rig {
 
     /// 注册一台 agent，返回它的 id。
     fn register_agent(&self, name: &str) -> String {
+        self.register_agent_at(name, agent_stub_url())
+    }
+
+    /// 注册一台**指定地址**的 agent：要对这台桩收到了什么下断言的用例走这条。
+    fn register_agent_at(&self, name: &str, base_url: &str) -> String {
         let response = self.post(
             "/api/agents",
-            &format!(r#"{{"name":"{name}","base_url":"{}"}}"#, agent_stub_url()),
+            &format!(r#"{{"name":"{name}","base_url":"{base_url}"}}"#),
         );
         assert_eq!(response.status, 201, "{}", response.body_text());
         self.json(&response)["agent_id"].as_str().unwrap().to_owned()
+    }
+
+    /// 等到这个任务名下**再没有在飞的运行**。
+    ///
+    /// 「投影不再是活的」不等于「这个任务可以再跑了」：子进程死掉之后，父进程还要替它
+    /// 向目标端补发一次 abort（#269），那一小段里在飞登记仍然在——界面上就是「停止中…」。
+    /// 收尾之后紧接着再起一次的用例，等的必须是这一条，不是 `live == false`。
+    fn wait_until_idle(&self, task_id: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if !self.runs.lock().unwrap().has_active_run(task_id) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "等在飞运行释放超时");
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     fn create_oracle_datasource(&self, name: &str) -> String {
@@ -373,6 +518,10 @@ fn every_route_reaches_its_handler() {
     let target_id = rig.create_mysql_datasource("目标库", &agent_id);
     let doomed_id = rig.create_mysql_datasource("待删数据源", &agent_id);
     let task_id = rig.create_task("搬一次", "HOLDINGS", &(source_id.clone(), target_id.clone()));
+    // 删任务那一格另开一个任务：`task_id` 下面要起一次运行、而且这条假子进程会一直睡到
+    // 这条用例跑完，删它只会被 #270 那道拒绝挡回来（409），走不到 handler 的 200 分支。
+    let doomed_task_id =
+        rig.create_task("待删任务", "HOLDINGS_DOOMED", &(source_id.clone(), target_id.clone()));
 
     let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
     assert_eq!(started.status, 202, "{}", started.body_text());
@@ -523,6 +672,14 @@ fn every_route_reaches_its_handler() {
             String::new(),
             409,
         ),
+        // 这次运行没欠着占用，所以重试释放这条 404——那是它认得这条路的证据（#271）。
+        (
+            Method::Post,
+            "/api/runs/{}/release",
+            format!("/api/runs/{run_record_id}/release"),
+            String::new(),
+            404,
+        ),
         (Method::Get, "/api/runs", "/api/runs".into(), String::new(), 200),
         (
             Method::Get,
@@ -564,7 +721,7 @@ fn every_route_reaches_its_handler() {
         (
             Method::Delete,
             "/api/tasks/{}",
-            format!("/api/tasks/{task_id}"),
+            format!("/api/tasks/{doomed_task_id}"),
             String::new(),
             200,
         ),
@@ -1160,6 +1317,9 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
             "ms": 22,
             "last_ts": "2026-08-15T10:00:05.000Z",
             "live": true,
+            // 在飞的这一行也报占用（#271）：没人按停止，所以两格都是空的。
+            "target_hold": null,
+            "target_hold_message": null,
         })
     );
     let live_list = rig.json(&rig.get(&format!("/api/runs?task_id={task_id}")));
@@ -1426,6 +1586,7 @@ fn run_launch_rejects_a_second_run_of_the_same_task_until_child_reap() {
         });
     }
     wait_for_empty_directory(&rig.directory.join("run-tasks"));
+    rig.wait_until_idle(&first_task_id);
 
     let relaunched = start(&first_task_id);
     wait_for_json(&rig, &format!("/api/runs/{relaunched}"), |body| {
@@ -1487,6 +1648,8 @@ fi
         wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
             body["live"] == false
         });
+        // 收尾还要替子进程补发一次 abort，在飞登记要等那一步走完才摘（#269）。
+        rig.wait_until_idle(&task_id);
     }
 
     let committing = start(&task_id);
@@ -1510,6 +1673,709 @@ fi
     });
 
     let _ = fs::remove_dir_all(directory);
+}
+
+/// 停止运行的完整一趟（#269）：SIGTERM → 确认子进程退出 → 替它向目标端补发 abort。
+///
+/// 三件事一起证：顺序是硬的（子进程还活着时**一个字节都没发过去**）、abort 发的是
+/// 这一次运行的 run_id、以及占用释放之后同一个任务立刻能再跑。
+#[test]
+fn stopping_a_run_aborts_on_the_child_s_behalf_only_after_it_has_exited() {
+    let directory = temp_directory();
+    let stopped = directory.join("child-caught-term");
+    let release = directory.join("release-dying-child");
+    let rig = Rig::with_child(&format!(
+        r#"trap 'printf "%s\n" caught >> "{}"; while [ ! -f "{}" ]; do sleep 0.02; done; exit 0' TERM
+printf '%s\n' '{{"ts":"2026-08-15T14:00:00.000Z","level":"info","event":"stage_changed","run_id":"run-stopped","task":null,"stage":"STREAMING"}}'
+while :; do sleep 0.02; done
+"#,
+        stopped.display(),
+        release.display(),
+    ));
+    let (agent_url, aborts) = abort_recording_agent(true);
+    let agent_id = rig.register_agent_at("目标端", &agent_url);
+    let source_id = rig.create_oracle_datasource("源库");
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+
+    let start = || {
+        let response = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+        assert_eq!(response.status, 202, "{}", response.body_text());
+        rig.json(&response)["run_record_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    let run_record_id = start();
+    wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["stage"] == "STREAMING"
+    });
+    // 还没人按停止：目标表占用这一栏是空的，那一格上写的是「发起运行」。
+    let running = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(running["target_hold"], Value::Null);
+
+    let canceled = rig.post(&format!("/api/runs/{run_record_id}/cancel"), "");
+    assert_eq!(canceled.status, 202, "{}", canceled.body_text());
+
+    // 信号到了，子进程**还没死**（它卡在 trap 里）：这一刻暂存表一动都不能动。
+    wait_for_file_text(&stopped, |text| text.contains("caught"));
+    thread::sleep(Duration::from_millis(100));
+    let too_early = aborts.lock().unwrap().clone();
+    assert!(too_early.is_empty(), "子进程还活着就发了 abort：{too_early:?}");
+
+    // 这段窗口界面上写的是「停止中…」，而且**发起运行这条路是关着的**（#271）：
+    // 占用还在目标端挂着，这时候放一次新运行进去只会撞回一个 `TARGET_TABLE_BUSY`。
+    let stopping = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(stopping["target_hold"], "RELEASING");
+    assert_eq!(stopping["live"], true);
+    let refused = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(refused.status, 409, "{}", refused.body_text());
+    assert_eq!(
+        rig.json(&refused)["error"]["message"],
+        "该任务正在停止，等目标表占用释放后才能再跑"
+    );
+    // 清单那一头说的是同一句话：作业中心读的是这条路，不是运行详情那条。
+    let listed = rig.json(&rig.get("/api/runs"));
+    let row = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["run_record_id"] == run_record_id.as_str())
+        .expect("清单里得有这次运行");
+    assert_eq!(row["target_hold"], "RELEASING");
+
+    fs::write(&release, "").unwrap();
+    rig.wait_until_idle(&task_id);
+    assert_eq!(aborts.lock().unwrap().clone(), vec!["run-stopped"]);
+
+    // 占用真的还回来了：那一栏空了，界面这才敢把「发起运行」放出来。
+    let released = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(released["target_hold"], Value::Null);
+    assert_eq!(released["target_hold_message"], Value::Null);
+
+    // 主动停止在历史里说得出自己是主动停止的，不再和 OOM、崩溃混作一谈。
+    let history = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(history["live"], false);
+    assert_eq!(history["outcome"], "FAILED");
+    assert_eq!(history["unknown_reason"], "STOPPED_BY_USER");
+    assert_eq!(history["message"], "已由用户停止");
+    assert_eq!(history["target_table_effect"], Value::Null);
+
+    // 占用一还，同一张目标表马上能再跑一次。
+    let again = start();
+    wait_for_json(&rig, &format!("/api/runs/{again}"), |body| {
+        body["stage"] == "STREAMING"
+    });
+    assert_eq!(
+        rig.post(&format!("/api/runs/{again}/cancel"), "").status,
+        202
+    );
+    rig.wait_until_idle(&task_id);
+
+    let _ = fs::remove_dir_all(directory);
+}
+
+/// 补发的 abort 失败了**不吞**：失败事实落成一行 `abort_failed` 运行日志（#269）。
+///
+/// 目标表这时仍被占着，怎么把这件事摆到用户面前是后续票的事；这里守的是
+/// 「它至少被记下来了」。
+#[test]
+fn a_failed_abort_after_a_stop_is_written_into_the_run_log() {
+    let rig = Rig::with_child(
+        r#"trap 'exit 0' TERM
+printf '%s\n' '{"ts":"2026-08-15T14:10:00.000Z","level":"info","event":"stage_changed","run_id":"run-unabortable","task":null,"stage":"STREAMING"}'
+while :; do sleep 0.02; done
+"#,
+    );
+    let (agent_url, aborts) = abort_recording_agent(false);
+    let agent_id = rig.register_agent_at("目标端", &agent_url);
+    let source_id = rig.create_oracle_datasource("源库");
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["stage"] == "STREAMING"
+    });
+    assert_eq!(
+        rig.post(&format!("/api/runs/{run_record_id}/cancel"), "").status,
+        202
+    );
+    rig.wait_until_idle(&task_id);
+    assert_eq!(aborts.lock().unwrap().clone(), vec!["run-unabortable"]);
+
+    let logs = wait_for_json(&rig, &format!("/api/runs/{run_record_id}/logs"), |body| {
+        body["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|line| line["line"].as_str().unwrap().contains("abort_failed"))
+    });
+    let failed = logs["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|line| serde_json::from_str::<Value>(line["line"].as_str().unwrap()).ok())
+        .find(|line| line["event"] == "abort_failed")
+        .expect("abort 失败要留下一行日志");
+    assert_eq!(failed["level"], "warn");
+    assert_eq!(failed["run_id"], "run-unabortable");
+    assert_eq!(failed["message"], "暂存表 drop 不掉");
+    // 停止这件事本身照旧记成「已由用户停止」——abort 成没成功是另一件事。
+    let history = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(history["unknown_reason"], "STOPPED_BY_USER");
+}
+
+/// 补发的 abort 没成时，占用留在目标端——界面上那一格就得说「锁未释放」，
+/// 并且**发起运行必须是关着的**；点一下重试，成了才放行（#271）。
+///
+/// 这条用例走的是整条路：失败 → 拦住新运行 → 重试仍失败（照旧拦住、照旧落日志）→
+/// 目标端缓过来后重试成功 → 占用还回来 → 同一个任务这才跑得起来。
+#[test]
+fn a_stuck_target_hold_blocks_new_runs_until_a_retry_releases_it() {
+    let rig = Rig::with_child(
+        r#"trap 'exit 0' TERM
+printf '%s\n' '{"ts":"2026-08-15T14:30:00.000Z","level":"info","event":"stage_changed","run_id":"run-held","task":null,"stage":"STREAMING"}'
+while :; do sleep 0.02; done
+"#,
+    );
+    let (agent_url, aborts, succeeds) = switchable_abort_agent(false);
+    let agent_id = rig.register_agent_at("目标端", &agent_url);
+    let source_id = rig.create_oracle_datasource("源库");
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+
+    let start = || rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    let started = start();
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["stage"] == "STREAMING"
+    });
+    assert_eq!(
+        rig.post(&format!("/api/runs/{run_record_id}/cancel"), "")
+            .status,
+        202
+    );
+    rig.wait_until_idle(&task_id);
+
+    // 补发那一刀没成：这条运行如实说自己欠着一份占用，连原因的原话一起带出来。
+    let held = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(held["live"], false);
+    assert_eq!(held["target_hold"], "HELD");
+    assert_eq!(held["target_hold_message"], "暂存表 drop 不掉");
+    // 停止本身照旧记成「已由用户停止」——abort 成没成是另一件事（#269）。
+    assert_eq!(held["unknown_reason"], "STOPPED_BY_USER");
+
+    // **占用还在的时候，发起运行是关着的**：这是那条铁律的服务端一半。
+    let refused = start();
+    assert_eq!(refused.status, 409, "{}", refused.body_text());
+    assert_eq!(
+        rig.json(&refused)["error"]["message"],
+        "这张目标表的占用还没释放，先把它释放掉再发起"
+    );
+
+    // 重试一次，目标端还是不行：如实回 502，占用照旧挂着，失败照旧落一行日志。
+    let retried = rig.post(&format!("/api/runs/{run_record_id}/release"), "");
+    assert_eq!(retried.status, 502, "{}", retried.body_text());
+    let retried_body = rig.json(&retried);
+    assert_eq!(retried_body["error"]["message"], "暂存表 drop 不掉");
+    assert_eq!(retried_body["error"]["kind"], "sink");
+    assert_eq!(
+        rig.json(&rig.get(&format!("/api/runs/{run_record_id}")))["target_hold"],
+        "HELD"
+    );
+    let logs = wait_for_json(&rig, &format!("/api/runs/{run_record_id}/logs"), |body| {
+        abort_failures(body) == 2
+    });
+    assert_eq!(abort_failures(&logs), 2, "重试失败也得留下一行");
+
+    // 目标端缓过来了，人再点一次：这一次占用真的还回来了。
+    succeeds.store(true, Ordering::Relaxed);
+    let released = rig.post(&format!("/api/runs/{run_record_id}/release"), "");
+    assert_eq!(released.status, 200, "{}", released.body_text());
+    assert_eq!(rig.json(&released)["message"], "目标表占用已释放");
+    let freed = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(freed["target_hold"], Value::Null);
+    assert_eq!(freed["target_hold_message"], Value::Null);
+    // 三次都发给了同一次运行：补发一次，重试两次。
+    assert_eq!(
+        aborts.lock().unwrap().clone(),
+        vec!["run-held", "run-held", "run-held"]
+    );
+    // 释放干净了，同一个任务这才跑得起来。
+    let again = start();
+    assert_eq!(again.status, 202, "{}", again.body_text());
+    let again_id = rig.json(&again)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // 收摊前先等它报出阶段：没报阶段的 run 停不了（「尚未进入可取消阶段」），
+    // 那一句 409 与这条用例要证的事毫无关系。
+    wait_for_json(&rig, &format!("/api/runs/{again_id}"), |body| {
+        body["stage"] == "STREAMING"
+    });
+    assert_eq!(
+        rig.post(&format!("/api/runs/{again_id}/cancel"), "").status,
+        202
+    );
+    rig.wait_until_idle(&task_id);
+
+    // 已经释放过的运行再点一次重试：404，说的是「没有待释放的占用」，
+    // 而不是含混的「找不到」——那两件事在界面上要走不同的路。
+    let nothing_to_do = rig.post(&format!("/api/runs/{run_record_id}/release"), "");
+    assert_eq!(nothing_to_do.status, 404, "{}", nothing_to_do.body_text());
+    assert_eq!(
+        rig.json(&nothing_to_do)["error"]["message"],
+        "这次运行没有待释放的目标表占用"
+    );
+}
+
+/// 子进程自己那一刀 abort 没砍下去时，占用同样留在目标端（#271）。
+///
+/// 这条路径父进程**不补 abort**（子进程已经走完终态，再发只会在已封口的 run 上换回
+/// 409），但占用还挂着这件事一模一样——界面照样不许显示成可以重跑，重试那颗照样在。
+#[test]
+fn a_child_reported_abort_failure_holds_the_target_table_too() {
+    let rig = Rig::with_child(
+        r#"printf '%s\n' '{"ts":"2026-08-15T15:00:00.000Z","level":"info","event":"stage_changed","run_id":"run-child-abort","task":null,"stage":"STREAMING"}'
+printf '%s\n' '{"ts":"2026-08-15T15:00:03.000Z","level":"warn","event":"abort_failed","run_id":"run-child-abort","task":null,"message":"暂存表 drop 不掉"}'
+printf '%s\n' '{"ts":"2026-08-15T15:00:04.000Z","level":"error","event":"run_finished","run_id":"run-child-abort","task":null,"terminal":"FAILED","stage":"FAILED","message":"目标端拒绝","failure_kind":"SINK_WRITE","source_code":null,"sink_code":"WRITE_FAILED","column":null,"value":null,"source_rows":1,"source_batches":1,"staged_rows":0,"received_batches":1,"sink_reported_rows":0,"purged_rows":0,"fetch_ms":1,"push_ms":1,"commit_ms":0,"count_ms":0,"cursor_ms":0}'
+"#,
+    );
+    let (agent_url, aborts) = abort_recording_agent(true);
+    let agent_id = rig.register_agent_at("目标端", &agent_url);
+    let source_id = rig.create_oracle_datasource("源库");
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    rig.wait_until_idle(&task_id);
+
+    // 父进程一个字节都没往目标端发——它信子进程自己报的终态。
+    assert!(
+        aborts.lock().unwrap().is_empty(),
+        "报了终态的运行不该被父进程补一刀"
+    );
+    // 但占用还挂着，所以这一行如实说「没释放掉」，发起运行也被拦住。
+    let held = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(held["outcome"], "FAILED");
+    assert_eq!(held["target_hold"], "HELD");
+    assert_eq!(held["target_hold_message"], "暂存表 drop 不掉");
+    assert_eq!(
+        rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#))
+            .status,
+        409
+    );
+
+    // 点一下重试，这一次成了：占用还回来，任务重新跑得起来。
+    let released = rig.post(&format!("/api/runs/{run_record_id}/release"), "");
+    assert_eq!(released.status, 200, "{}", released.body_text());
+    assert_eq!(aborts.lock().unwrap().clone(), vec!["run-child-abort"]);
+    assert_eq!(
+        rig.json(&rig.get(&format!("/api/runs/{run_record_id}")))["target_hold"],
+        Value::Null
+    );
+    assert_eq!(
+        rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#))
+            .status,
+        202
+    );
+    rig.wait_until_idle(&task_id);
+}
+
+/// 占用是**一张目标表**的事，不是一个任务的事（#271）。
+///
+/// 指着同一张表的另一个任务，跑不起来、在自己那一行上看得见「锁未释放」、也点得动重试。
+/// 而删任务那一关拦的是另一件事：欠着占用的那个任务删不掉，因为重试的入口就长在它
+/// 那一行上，删了它占用就再没人点得到（#270）。
+#[test]
+fn a_stuck_hold_is_about_the_target_table_not_the_task_that_left_it() {
+    let rig = Rig::with_child(
+        r#"trap 'exit 0' TERM
+printf '%s\n' '{"ts":"2026-08-15T16:00:00.000Z","level":"info","event":"stage_changed","run_id":"run-shared-table","task":null,"stage":"STREAMING"}'
+while :; do sleep 0.02; done
+"#,
+    );
+    let (agent_url, _aborts, succeeds) = switchable_abort_agent(true);
+    let agent_id = rig.register_agent_at("目标端", &agent_url);
+    let source_id = rig.create_oracle_datasource("源库");
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let datasources = (source_id, target_id);
+    // 两个任务，同一台 agent 上的同一张目标表——占用记在表上，于是它们共用同一份。
+    let neighbour = rig.create_task("邻居", "HOLDINGS", &datasources);
+    let holder = rig.create_task("欠着占用的", "HOLDINGS", &datasources);
+
+    let start = |task_id: &str| rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    let stop_and_settle = |task_id: &str| -> String {
+        let started = start(task_id);
+        assert_eq!(started.status, 202, "{}", started.body_text());
+        let run_record_id = rig.json(&started)["run_record_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+            body["stage"] == "STREAMING"
+        });
+        assert_eq!(
+            rig.post(&format!("/api/runs/{run_record_id}/cancel"), "")
+                .status,
+            202
+        );
+        rig.wait_until_idle(task_id);
+        run_record_id
+    };
+
+    // 邻居先跑一次、停掉，补发的 abort 成了：它那一行干干净净。
+    let neighbour_run = stop_and_settle(&neighbour);
+    assert_eq!(
+        rig.json(&rig.get(&format!("/api/runs/{neighbour_run}")))["target_hold"],
+        Value::Null
+    );
+
+    // 这一次 abort 不成了：占用留在目标端，欠着它的是另一个任务的运行。
+    succeeds.store(false, Ordering::Relaxed);
+    let holder_run = stop_and_settle(&holder);
+    assert_eq!(
+        rig.json(&rig.get(&format!("/api/runs/{holder_run}")))["target_hold"],
+        "HELD"
+    );
+
+    // **邻居那一行也如实说「锁未释放」**：占用挂在同一张表上，这一行照样不能重跑。
+    let neighbour_row = rig.json(&rig.get(&format!("/api/runs/{neighbour_run}")));
+    assert_eq!(neighbour_row["target_hold"], "HELD");
+    assert_eq!(neighbour_row["target_hold_message"], "暂存表 drop 不掉");
+    // 而且它真的发不起来——拦在 source，不必一路跑到目标端才撞回 `TARGET_TABLE_BUSY`。
+    let refused = start(&neighbour);
+    assert_eq!(refused.status, 409, "{}", refused.body_text());
+    assert_eq!(
+        rig.json(&refused)["error"]["message"],
+        "这张目标表的占用还没释放，先把它释放掉再发起"
+    );
+
+    // 欠着占用的那个任务删不掉：删了它，重试那颗按钮就跟着没了，占用永远留在目标端。
+    let refused_delete = rig.delete(&format!("/api/tasks/{holder}"));
+    assert_eq!(refused_delete.status, 409, "{}", refused_delete.body_text());
+    let refusal = rig.json(&refused_delete);
+    let message = refusal["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("目标表占用还没释放") && message.contains(&holder_run),
+        "{message}"
+    );
+    assert_eq!(refusal["error"]["runs"], serde_json::json!([holder_run]));
+    assert_eq!(rig.get(&format!("/api/tasks/{holder}")).status, 200);
+
+    // 重试也是按表算的：从**邻居那一行**点下去，释放的是同一张表上欠着的那份占用。
+    succeeds.store(true, Ordering::Relaxed);
+    let released = rig.post(&format!("/api/runs/{neighbour_run}/release"), "");
+    assert_eq!(released.status, 200, "{}", released.body_text());
+    assert_eq!(
+        rig.json(&rig.get(&format!("/api/runs/{holder_run}")))["target_hold"],
+        Value::Null
+    );
+
+    // 占用还清了，两边一起恢复：任务删得掉，运行也发得起来。
+    assert_eq!(rig.delete(&format!("/api/tasks/{holder}")).status, 200);
+    let again = start(&neighbour);
+    assert_eq!(again.status, 202, "{}", again.body_text());
+    let again_id = rig.json(&again)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // 同上：先等它报出阶段，再收摊。
+    wait_for_json(&rig, &format!("/api/runs/{again_id}"), |body| {
+        body["stage"] == "STREAMING"
+    });
+    assert_eq!(
+        rig.post(&format!("/api/runs/{again_id}/cancel"), "").status,
+        202
+    );
+    rig.wait_until_idle(&neighbour);
+}
+
+/// 已过封口点的运行死掉时，父进程既不补 abort，**也不记一份占用**（#271）。
+///
+/// 那时 sink 的 `commit` 已经在跑，它的每一条出口都会自己把占用摘掉；而对着一个已封口的
+/// run 发 abort 只换回一个 409 `RUN_SEALED`，记下来只会在界面上立起一颗永远点不成的
+/// 「锁未释放，点此重试」。所以这条路径上正确的行为是**什么都不做**。
+#[test]
+fn a_child_that_died_after_the_point_of_no_return_leaves_no_hold_behind() {
+    let rig = Rig::with_child(
+        r#"printf '%s\n' '{"ts":"2026-08-15T17:00:00.000Z","level":"info","event":"stage_changed","run_id":"run-committing","task":null,"stage":"COMMITTING"}'
+sleep 0.2
+"#,
+    );
+    let (agent_url, aborts) = abort_recording_agent(true);
+    let agent_id = rig.register_agent_at("目标端", &agent_url);
+    let source_id = rig.create_oracle_datasource("源库");
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["stage"] == "COMMITTING"
+    });
+    rig.wait_until_idle(&task_id);
+
+    // 一个字节都没发过去：封口点之后 abort 权已经不在 source 手上。
+    let seen = aborts.lock().unwrap().clone();
+    assert!(seen.is_empty(), "已封口的运行不该被补一刀 abort：{seen:?}");
+    // 也没有留下一份占用：那一格照旧是「发起运行」，下一次运行发得起来。
+    let history = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(history["live"], false);
+    assert_eq!(history["unknown_reason"], "PROCESS_DISAPPEARED");
+    assert_eq!(history["target_hold"], Value::Null);
+    let again = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(again.status, 202, "{}", again.body_text());
+    rig.wait_until_idle(&task_id);
+}
+
+/// source 自己被杀掉时，在飞那次运行的目标表占用留在了目标端——**下一条命起来就得
+/// 把它记上账**，而不是把这张表显示成可以重跑（#272）。
+///
+/// 这是「占用还在就绝不让它看起来能重跑」那条铁律在**进程边界**上的一半：
+/// 子进程被父进程收了尸的那一种早就补过 abort 了，这里说的是父进程自己没了的那一种。
+#[test]
+fn a_restart_books_the_hold_left_behind_by_a_run_nobody_could_abort() {
+    let rig = Rig::with_child(
+        r#"printf '%s\n' '{"ts":"2026-08-31T06:35:16.000Z","level":"info","event":"stage_changed","run_id":"run-orphan","task":null,"stage":"STREAMING"}'
+while :; do sleep 0.02; done
+"#,
+    );
+    let (agent_url, aborts) = abort_recording_agent(false);
+    let agent_id = rig.register_agent_at("目标端", &agent_url);
+    let source_id = rig.create_oracle_datasource("源库");
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["stage"] == "STREAMING"
+    });
+
+    // 进程在这一刻被 `kill -9`：没有收尾、没有 abort，磁盘上留下一行没走完的历史。
+    let restarted = rig.second_life();
+    reclaim_after_restart(&restarted.history, &restarted.run_logs, &restarted.runs, 90).unwrap();
+
+    // 补发那一趟没成（目标端 drop 不掉暂存表），于是占用如实挂着，原话照抄。
+    let held = wait_for_json(&restarted, &format!("/api/runs/{run_record_id}"), |body| {
+        body["target_hold"] == "HELD"
+    });
+    assert_eq!(held["target_hold_message"], "暂存表 drop 不掉");
+    assert_eq!(held["unknown_reason"], "PROCESS_DISAPPEARED");
+    assert_eq!(aborts.lock().unwrap().clone(), vec!["run-orphan"]);
+
+    // 这张表这时候一次新运行都放不进去——放进去也只会撞回目标端的 `TARGET_TABLE_BUSY`。
+    let refused = restarted.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(refused.status, 409, "{}", refused.body_text());
+    assert_eq!(
+        restarted.json(&refused)["error"]["message"],
+        "这张目标表的占用还没释放，先把它释放掉再发起"
+    );
+
+    // 补发失败照旧落一行 `abort_failed`，而且**接在上一条命写的那行后面**：
+    // 新起一支从 0 数的笔会把这条运行原有的日志逐行盖掉。
+    let logs = restarted.json(&restarted.get(&format!("/api/runs/{run_record_id}/logs")));
+    let lines = logs["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0]["line"].as_str().unwrap().contains("stage_changed"));
+    assert_eq!(abort_failures(&logs), 1);
+}
+
+/// 补发那一趟成了：占用还回来，这张表当场又能跑（#272）。
+#[test]
+fn a_restart_releases_the_hold_and_the_table_is_free_again() {
+    let rig = Rig::with_child(
+        r#"printf '%s\n' '{"ts":"2026-08-31T06:35:16.000Z","level":"info","event":"stage_changed","run_id":"run-orphan","task":null,"stage":"STREAMING"}'
+while :; do sleep 0.02; done
+"#,
+    );
+    let (agent_url, aborts) = abort_recording_agent(true);
+    let agent_id = rig.register_agent_at("目标端", &agent_url);
+    let source_id = rig.create_oracle_datasource("源库");
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["stage"] == "STREAMING"
+    });
+
+    let restarted = rig.second_life();
+    reclaim_after_restart(&restarted.history, &restarted.run_logs, &restarted.runs, 90).unwrap();
+
+    let released = wait_for_json(&restarted, &format!("/api/runs/{run_record_id}"), |body| {
+        body["target_hold"] == Value::Null
+    });
+    assert_eq!(released["target_hold_message"], Value::Null);
+    // 发的是**那一次**运行的 run_id：目标端认的是它。
+    assert_eq!(aborts.lock().unwrap().clone(), vec!["run-orphan"]);
+    let again = restarted.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(again.status, 202, "{}", again.body_text());
+}
+
+/// 优雅停服也得先收摊（#272）：在飞的运行停掉、abort 补上、占用还回去，**然后**才封口。
+///
+/// 这一半不能指望下一条命：退出前那一下封口会把没走完的那几行全填上 `outcome`，
+/// 下一条命起来时一行都看不见——`reclaim_after_restart` 于是无从下手。
+/// 记的名义也不是「已由用户停止」：没人按过那颗按钮。
+#[test]
+fn a_graceful_shutdown_stops_in_flight_runs_and_hands_the_hold_back() {
+    let rig = Rig::with_child(
+        r#"trap 'exit 0' TERM
+printf '%s\n' '{"ts":"2026-08-31T07:00:00.000Z","level":"info","event":"stage_changed","run_id":"run-shutdown","task":null,"stage":"STREAMING"}'
+while :; do sleep 0.02; done
+"#,
+    );
+    let (agent_url, aborts) = abort_recording_agent(true);
+    let agent_id = rig.register_agent_at("目标端", &agent_url);
+    let source_id = rig.create_oracle_datasource("源库");
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["stage"] == "STREAMING"
+    });
+
+    stop_runs_for_shutdown(&rig.runs, Duration::from_secs(5));
+
+    // 收摊回来时在飞登记已经空了：等的就是那一刀砍没砍下去。
+    assert!(!rig.runs.lock().unwrap().has_active_run(&task_id));
+    assert_eq!(aborts.lock().unwrap().clone(), vec!["run-shutdown"]);
+    let history = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(history["unknown_reason"], "SERVICE_RESTARTED");
+    assert_eq!(history["message"], "服务重启，结局未知");
+    assert_eq!(history["target_hold"], Value::Null);
+}
+
+/// 这条运行的日志里有几行 `abort_failed`。
+fn abort_failures(logs: &Value) -> usize {
+    logs["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|line| serde_json::from_str::<Value>(line["line"].as_str().unwrap()).ok())
+        .filter(|line| line["event"] == "abort_failed")
+        .count()
+}
+
+/// 子进程自己跑完了就**不补 abort**：那时暂存表要么已经换进目标表、要么它自己收拾过了，
+/// 再发一次只会在已封口的 run 上换回一个 409，平白造出一条「abort 失败」。
+#[test]
+fn a_run_that_reported_its_own_terminal_is_not_aborted_by_the_parent() {
+    let rig = Rig::with_child(
+        r#"printf '%s\n' '{"ts":"2026-08-15T14:20:00.000Z","level":"info","event":"stage_changed","run_id":"run-complete","task":null,"stage":"STREAMING"}'
+printf '%s\n' '{"ts":"2026-08-15T14:20:07.000Z","level":"info","event":"run_finished","run_id":"run-complete","task":null,"terminal":"SUCCEEDED","stage":"SUCCEEDED","message":"done","source_code":null,"sink_code":null,"column":null,"value":null,"source_rows":7,"source_batches":2,"staged_rows":7,"received_batches":2,"sink_reported_rows":7,"purged_rows":0,"fetch_ms":4,"push_ms":22,"commit_ms":6,"count_ms":2,"cursor_ms":1}'
+"#,
+    );
+    let (agent_url, aborts) = abort_recording_agent(true);
+    let agent_id = rig.register_agent_at("目标端", &agent_url);
+    let source_id = rig.create_oracle_datasource("源库");
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let history = wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["live"] == false
+    });
+    assert_eq!(history["outcome"], "SUCCEEDED");
+    rig.wait_until_idle(&task_id);
+    thread::sleep(Duration::from_millis(100));
+    let seen = aborts.lock().unwrap().clone();
+    assert!(seen.is_empty(), "跑完的运行不该被补一刀 abort：{seen:?}");
+}
+
+/// 任务还有运行没结束时删任务被拒（#270）；停止之后再删同一个任务就成功。
+///
+/// 拒绝而不是「自动停止再删除」：删除不可逆，顺手终止一次可能正在写数据的运行，
+/// 风险大于便利。
+#[test]
+fn delete_task_is_refused_while_a_run_is_in_flight_and_succeeds_after_the_stop() {
+    let rig = Rig::with_child(
+        r#"trap 'exit 0' TERM
+printf '%s\n' "{\"ts\":\"2026-08-15T13:00:00.000Z\",\"level\":\"info\",\"event\":\"stage_changed\",\"run_id\":\"run-1\",\"task\":null,\"stage\":\"STREAMING\"}"
+while :; do sleep 0.02; done
+"#,
+    );
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["stage"] == "STREAMING"
+    });
+
+    let refused = rig.delete(&format!("/api/tasks/{task_id}"));
+    assert_eq!(refused.status, 409, "{}", refused.body_text());
+    let refused_body = rig.json(&refused);
+    let message = refused_body["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("请先停止") && message.contains(&run_record_id),
+        "{message}"
+    );
+    assert_eq!(
+        refused_body["error"]["runs"],
+        serde_json::json!([run_record_id])
+    );
+    // 拒了就是一个字节都没删：任务还在，运行也还在飞。
+    assert_eq!(rig.get(&format!("/api/tasks/{task_id}")).status, 200);
+    assert_eq!(
+        rig.json(&rig.get(&format!("/api/runs/{run_record_id}")))["live"],
+        true
+    );
+
+    let canceled = rig.post(&format!("/api/runs/{run_record_id}/cancel"), "");
+    assert_eq!(canceled.status, 202, "{}", canceled.body_text());
+
+    // 「在飞」的账在监督线程里销，而销账要等父进程替子进程补发完那一次 abort（#269），
+    // 比 `live` 转 false 晚一点点——判据是「停完了终究删得掉」，不是「下一个请求就删得掉」。
+    rig.wait_until_idle(&task_id);
+    let deleted = rig.delete(&format!("/api/tasks/{task_id}"));
+    assert_eq!(deleted.status, 200, "{}", deleted.body_text());
+    assert_eq!(rig.get(&format!("/api/tasks/{task_id}")).status, 404);
 }
 
 /// 一台**记账的** agent 桩：照常应答 `/v1/agent/info`，别的 503，
