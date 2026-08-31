@@ -411,6 +411,23 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .form-field textarea { resize: vertical; min-height: 132px; padding: 9px 10px; font-family: var(--font-num); font-size: var(--size-meta); line-height: 1.65; }
 .form-field input:focus, .form-field textarea:focus { border-color: var(--brand); outline: 0; box-shadow: 0 0 0 2px var(--brand-dim); }
 .form-error { padding: 9px 12px; border-left: 3px solid var(--crit); background: var(--crit-bg); color: var(--crit); font-size: var(--size-body); }
+
+/* 系统设置沿用现有卡片、表单与状态标签，只增加一层稳定的双栏结构。 */
+.settings-layout { display: grid; grid-template-columns: 180px minmax(0, 1fr); min-height: 420px; }
+.settings-nav { padding: 12px; border-right: 1px solid var(--line); background: var(--mute-bg); }
+.settings-nav > span { min-height: var(--ctl-h); display: flex; align-items: center; gap: 8px; padding: 0 10px; border-radius: var(--radius); color: var(--dim); font-size: var(--size-meta); }
+.settings-nav > .is-active { background: var(--panel); color: var(--brand); font-weight: var(--weight-em); }
+.settings-pane { min-width: 0; display: flex; flex-direction: column; gap: 18px; padding: var(--pad); }
+.settings-pane-header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--gap); }
+.settings-pane-header h2 { margin: 0; font-size: var(--size-section); letter-spacing: 0; }
+.settings-pane-header p { margin: 5px 0 0; color: var(--mute); font-size: var(--size-meta); }
+.account-facts { display: grid; grid-template-columns: repeat(3, minmax(120px, 1fr)); margin: 0; border: 1px solid var(--line); }
+.account-facts > div { padding: 12px; border-right: 1px solid var(--line); }
+.account-facts > div:last-child { border-right: 0; }
+.account-facts dt { color: var(--mute); font-size: var(--size-cap); }
+.account-facts dd { margin: 4px 0 0; color: var(--text); font-size: var(--size-body); }
+.operator-password-form { max-width: 520px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; }
+.settings-actions { display: flex; align-items: center; gap: 10px; padding-top: 18px; border-top: 1px solid var(--line); }
 .delete-copy p { margin: 0 0 6px; }
 .delete-copy strong { font-weight: var(--weight-em); }
 /* 批量删除的二次确认把要删的任务名**逐条列全**，不是「确定删除 3 个任务？」（ADR-0043 §6）。 */
@@ -1106,7 +1123,7 @@ select, .page-size {
   .sidebar { display: none; }
   .fold-toggle { display: none; }
   .mobile-brand { display: inline; }
-  .mobile-nav { display: flex; align-items: center; gap: 2px; }
+  .mobile-nav { min-width: 0; display: flex; align-items: center; gap: 2px; overflow-x: auto; }
   .mobile-nav button { height: 30px; display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; border: 0; border-radius: var(--radius); background: transparent; color: var(--dim); cursor: pointer; font-size: var(--size-meta); }
   .mobile-nav button.is-active { background: var(--brand-dim); color: var(--brand); font-weight: var(--weight-em); }
   .topbar .breadcrumb, .topbar .environment { display: none; }
@@ -1140,6 +1157,13 @@ select, .page-size {
   .run-content { padding: 12px; }
   .run-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .evidence-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .settings-layout { grid-template-columns: minmax(0, 1fr); }
+  .settings-nav { border-right: 0; border-bottom: 1px solid var(--line); }
+  .account-facts { grid-template-columns: minmax(0, 1fr); }
+  .account-facts > div { border-right: 0; border-bottom: 1px solid var(--line); }
+  .account-facts > div:last-child { border-bottom: 0; }
+  .operator-password-form { grid-template-columns: minmax(0, 1fr); }
+  .operator-password-form .button { justify-self: start; }
 }
 
 @media (max-width: 620px) {
@@ -1159,6 +1183,7 @@ select, .page-size {
   .run-metrics { grid-template-columns: minmax(0, 1fr); }
   .evidence-grid { grid-template-columns: minmax(0, 1fr); }
   .live-progress-row { grid-template-columns: minmax(0, 1fr); }
+  .settings-actions { align-items: flex-start; flex-direction: column; }
 }
 
 

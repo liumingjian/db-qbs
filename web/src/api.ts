@@ -528,6 +528,16 @@ export class ApiError extends Error {
 export interface SessionState {
   authenticated: boolean;
   username: string | null;
+  role: Role | null;
+}
+
+export type Role = "ADMIN" | "OPERATOR";
+
+export interface OperatorAccount {
+  username: "operator";
+  role: "OPERATOR";
+  enabled: boolean;
+  has_password: boolean;
 }
 
 type SessionLostListener = () => void;
@@ -602,6 +612,25 @@ export async function changePassword(
     }),
   });
   await readJson<unknown>(response, "修改口令失败");
+}
+
+export async function fetchOperatorAccount(): Promise<OperatorAccount> {
+  const response = await fetch("/api/operator-account", {
+    headers: { Accept: "application/json" },
+  });
+  return readJson<OperatorAccount>(response, "读取操作员账号失败");
+}
+
+export async function updateOperatorAccount(input: {
+  enabled: boolean;
+  password?: string;
+}): Promise<OperatorAccount> {
+  const response = await fetch("/api/operator-account", {
+    method: "PUT",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return readJson<OperatorAccount>(response, "更新操作员账号失败");
 }
 
 export function emptySpec(): TaskSpec {
@@ -1186,6 +1215,13 @@ export function errorDetail(body: unknown): Record<string, unknown> | undefined 
   return typeof detail === "object" && detail !== null
     ? (detail as Record<string, unknown>)
     : undefined;
+}
+
+/** 只认服务端稳定的授权错误码，不靠中文消息判断权限失败。 */
+export function isForbidden(error: unknown): boolean {
+  return error instanceof ApiError &&
+    error.status === 403 &&
+    errorDetail(error.body)?.code === "FORBIDDEN";
 }
 
 function errorMessage(body: unknown): string | undefined {

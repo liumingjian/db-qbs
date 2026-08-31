@@ -45,6 +45,8 @@ const MOCK_USER = "admin";
 
 let password = "admin";
 const sessions = new Set<string>();
+let operatorEnabled = false;
+let operatorHasPassword = false;
 
 interface AgentRow {
   agent_id: string;
@@ -646,7 +648,11 @@ const ROUTES: Route[] = [
     public: true,
     handler: ({ token }) => {
       const live = token !== null && sessions.has(token);
-      return ok({ authenticated: live, username: live ? MOCK_USER : null });
+      return ok({
+        authenticated: live,
+        username: live ? MOCK_USER : null,
+        role: live ? "ADMIN" : null,
+      });
     },
   },
   {
@@ -661,7 +667,7 @@ const ROUTES: Route[] = [
       sessions.add(token);
       return {
         status: 200,
-        body: { authenticated: true, username: MOCK_USER },
+        body: { authenticated: true, username: MOCK_USER, role: "ADMIN" },
         cookie: `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Strict`,
       };
     },
@@ -690,6 +696,35 @@ const ROUTES: Route[] = [
       // 改口令销掉除自己以外的全部票据。
       for (const other of [...sessions]) if (other !== token) sessions.delete(other);
       return ok({});
+    },
+  },
+  {
+    method: "GET",
+    pattern: "/api/operator-account",
+    handler: () => ok({
+      username: "operator",
+      role: "OPERATOR",
+      enabled: operatorEnabled,
+      has_password: operatorHasPassword,
+    }),
+  },
+  {
+    method: "PUT",
+    pattern: "/api/operator-account",
+    handler: ({ body }) => {
+      if (typeof body.password === "string" && body.password !== "") {
+        operatorHasPassword = true;
+      }
+      if (body.enabled === true && !operatorHasPassword) {
+        return fail(400, "启用操作员前必须设置口令");
+      }
+      operatorEnabled = body.enabled === true;
+      return ok({
+        username: "operator",
+        role: "OPERATOR",
+        enabled: operatorEnabled,
+        has_password: operatorHasPassword,
+      });
     },
   },
 
