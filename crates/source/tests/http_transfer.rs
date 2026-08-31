@@ -4,7 +4,8 @@ use std::thread;
 
 use db_qbs_source::{
     run_transfer, ColumnSupport, HttpSinkClient, OpenRunRequest, RowSource, SinkClient,
-    SinkErrorKind, SourceColumn, SourceReadError, TargetConnection, TransferRequest, WriteMode,
+    SinkErrorKind, SourceColumn, SourceReadError, TargetConnection, Terminal, TransferEvent,
+    TransferRequest, WriteMode,
 };
 use serde_json::{json, Value};
 
@@ -94,6 +95,86 @@ fn rows_cross_the_http_protocol_then_commit() {
 }
 
 #[test]
+fn lost_commit_response_preserves_cleaned_and_swapped_diagnosis() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let opened = serve_one(
+            &listener,
+            json!({
+                "run_id": RUN_ID,
+                "staging_table": format!("ORDERS__stg_{RUN_ID}"),
+                "columns_checked": 1,
+            }),
+        );
+        // The sink committed but the connection disappeared before its response reached source.
+        let committed = receive_one(&listener);
+        let diagnosed = serve_one(
+            &listener,
+            json!({
+                "run_id": RUN_ID,
+                "staging_table": format!("ORDERS__stg_{RUN_ID}"),
+                "batches_received": 0,
+                "rows_written": 0,
+                "sealed": true,
+                "terminal": "CLEANED_AND_SWAPPED",
+                "purged_rows": 17,
+                "swapped_rows": 0,
+            }),
+        );
+        [opened, committed, diagnosed]
+    });
+
+    let mut source = FakeSource {
+        rows: Vec::new().into_iter(),
+    };
+    let mut sink = HttpSinkClient::new(&base_url).unwrap();
+    let mut events = Vec::new();
+    let failure = run_transfer(
+        &mut source,
+        &mut sink,
+        TransferRequest {
+            run_id: RUN_ID.to_owned(),
+            target_table: "ORDERS".to_owned(),
+            target: TargetConnection {
+                host: "127.0.0.1".to_owned(),
+                port: 3306,
+                username: "sink".to_owned(),
+                password: "change-me".to_owned(),
+                database: "qbs".to_owned(),
+            },
+            write_mode: WriteMode::Append,
+            pre_sql: Some(PRE_SQL.to_owned()),
+            primary_key: vec!["ID".to_owned()],
+        },
+        |event| events.push(event),
+    )
+    .unwrap_err();
+
+    let requests = server.join().unwrap();
+    assert_eq!(
+        requests.map(|request| request.path),
+        [
+            "/v1/runs".to_owned(),
+            format!("/v1/runs/{RUN_ID}/commit"),
+            format!("/v1/runs/{RUN_ID}"),
+        ]
+    );
+    assert_eq!(failure.kind, db_qbs_source::FailureKind::Network);
+    assert_eq!(
+        failure.commit_diagnostic.as_deref(),
+        Some("目标端报告该 run 已完成 preSQL 清理与导入（清理 17 行、导入 0 行），清理与导入已在同一事务中提交，重跑前请先确认")
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        TransferEvent::CommitDiagnosed {
+            terminal: Some(Terminal::CleanedAndSwapped),
+            message,
+        } if message.contains("清理 17 行、导入 0 行")
+    )));
+}
+
+#[test]
 fn error_response_preserves_sink_diagnostics() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
@@ -176,6 +257,16 @@ fn serve_one(listener: &TcpListener, response: Value) -> Request {
 }
 
 fn serve_one_with_status(listener: &TcpListener, status: &str, response: Value) -> Request {
+    let (request, stream) = receive_one_with_stream(listener);
+    write_response(stream, status, response);
+    request
+}
+
+fn receive_one(listener: &TcpListener) -> Request {
+    receive_one_with_stream(listener).0
+}
+
+fn receive_one_with_stream(listener: &TcpListener) -> (Request, TcpStream) {
     let (stream, _) = listener.accept().unwrap();
     let mut reader = BufReader::new(stream);
     let mut request_line = String::new();
@@ -202,12 +293,19 @@ fn serve_one_with_status(listener: &TcpListener, status: &str, response: Value) 
 
     let mut body = vec![0; content_length];
     reader.read_exact(&mut body).unwrap();
-    write_response(reader.into_inner(), status, response);
-    Request {
-        path,
-        content_type,
-        body: serde_json::from_slice(&body).unwrap(),
-    }
+    let stream = reader.into_inner();
+    (
+        Request {
+            path,
+            content_type,
+            body: if body.is_empty() {
+                Value::Null
+            } else {
+                serde_json::from_slice(&body).unwrap()
+            },
+        },
+        stream,
+    )
 }
 
 fn write_response(mut stream: TcpStream, status: &str, response: Value) {
