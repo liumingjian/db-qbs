@@ -80,7 +80,7 @@ describe("rerun eligibility", () => {
     });
   });
 
-  it.each(["PROCESS_DISAPPEARED", "SERVICE_RESTARTED"] as const)(
+  it.each(["PROCESS_DISAPPEARED", "SERVICE_RESTARTED", "STOPPED_BY_USER"] as const)(
     "offers a rerun on an unknown outcome (%s) — upsert 幂等，重跑是安全的",
     (unknownReason) => {
       const row = history({
