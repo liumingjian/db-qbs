@@ -91,6 +91,7 @@ pub struct TransferRequest {
     pub primary_key: Vec<String>,
     /// 任务定义里的写入模式（#261），原样过线。
     pub write_mode: WriteMode,
+    pub pre_sql: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,6 +267,7 @@ pub fn run_transfer(
         target_table: request.target_table,
         target: request.target,
         write_mode: request.write_mode,
+        pre_sql: request.pre_sql,
         primary_key: request.primary_key.clone(),
         source_columns: source.columns().to_vec(),
         range_check_results: None,

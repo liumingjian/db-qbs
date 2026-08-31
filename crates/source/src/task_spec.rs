@@ -56,6 +56,8 @@ pub struct TaskSpec {
     ///
     /// 它是标量，和 [`Self::where_clause`] 一样**必须排在 `columns` 之前**。
     pub write_mode: WriteMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_sql: Option<String>,
     /// 调度用的**五字段 cron 表达式**（#265），按**服务器本地时区**解读。
     ///
     /// `None` 或空白 = 这个任务没有周期，只能手动发起。语法与语义只有一份定义，

@@ -39,6 +39,7 @@ fn open_request_for(run_id: &str) -> OpenRunRequest {
             database: "qbs".to_owned(),
         },
         write_mode: WriteMode::Append,
+        pre_sql: None,
         primary_key: vec!["D_BIZ".to_owned()],
         source_columns: vec![SourceColumn {
             name: "D_BIZ".to_owned(),
@@ -192,6 +193,47 @@ fn an_append_run_still_leaves_what_was_there_and_says_swapped() {
     assert_eq!(destination.target_row_values("T_POSITION").len(), 2);
     let value = serde_json::to_value(service.get(RUN_ID).unwrap()).unwrap();
     assert_eq!(value["terminal"], "SWAPPED");
+}
+
+#[test]
+fn append_with_pre_sql_reports_the_cleanup_count_and_distinct_terminal() {
+    let destination = Arc::new(destination());
+    let service = SinkService::new("qbs", destination.clone());
+    let pre_sql = "/* exact */\nDELETE FROM qbs.T_POSITION WHERE D_BIZ < CURRENT_DATE;";
+    service
+        .open(OpenRunRequest {
+            pre_sql: Some(pre_sql.to_owned()),
+            ..open_request()
+        })
+        .unwrap();
+    service.write_batch(RUN_ID, one_row()).unwrap();
+
+    let committed = service.commit(RUN_ID, 1, 1).unwrap();
+
+    assert_eq!(committed.purged_rows, 7);
+    let requests = destination.swap_requests.lock().unwrap();
+    assert_eq!(requests[0].pre_sql.as_deref(), Some(pre_sql));
+    drop(requests);
+    let value = serde_json::to_value(service.get(RUN_ID).unwrap()).unwrap();
+    assert_eq!(value["terminal"], "CLEANED_AND_SWAPPED");
+    assert_eq!(value["purged_rows"], 7);
+}
+
+#[test]
+fn open_revalidates_pre_sql_before_creating_staging() {
+    let destination = Arc::new(destination());
+    let service = SinkService::new("qbs", destination.clone());
+
+    let error = service
+        .open(OpenRunRequest {
+            pre_sql: Some("DELETE FROM qbs.OTHER WHERE D_BIZ < CURRENT_DATE".to_owned()),
+            ..open_request()
+        })
+        .unwrap_err();
+
+    assert_eq!(error.status, 400);
+    assert_eq!(error.code, "BAD_REQUEST");
+    assert!(destination.created.lock().unwrap().is_empty());
 }
 
 /// #264：清空是**导入的一部分**，不是它前面的一步。
