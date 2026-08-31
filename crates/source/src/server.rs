@@ -18,7 +18,10 @@ use serde_json::json;
 use signal_hook::consts::SIGTERM;
 use tiny_http::Server;
 
-use crate::http::{emit, Api, AgentRegistry, Request, RunState, RUN_TASKS_DIRECTORY};
+use crate::http::{
+    emit, reclaim_after_restart, stop_runs_for_shutdown, AgentRegistry, Api, Request, RunState,
+    RUN_TASKS_DIRECTORY,
+};
 use crate::scheduler::scheduler_loop;
 use crate::{
     fetch_agent_info, AgentStore, AuthStore, DatasourceStore, HistoryStore, RunLogStore,
@@ -42,13 +45,17 @@ pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
     // 会话与口令跟任务、数据源同一个库、同一份 0600。**开在监听之前**：
     // 端口一开就得有一道门，不能有一个「表还没建好、于是先放行」的窗口。
     let auth_store = AuthStore::open(&config.data_dir)?;
-    history_store.seal_incomplete(
-        UnknownReason::ProcessDisappeared,
-        Utc::now(),
+    let runs = Arc::new(Mutex::new(RunState::default()));
+    // 上一条命的收尾（#272）：没走完的那几行封口，它们留在目标端的目标表占用记上账、
+    // 后台补发 abort。**在开门之前**做完记账那一半，那几张表因此从第一秒起就拦得住
+    // 新运行——子进程随父进程一起没了，那一刀 abort 谁也没替它砍。
+    reclaim_after_restart(
+        &history_store,
+        &run_log_store,
+        &runs,
         config.history_retention_days,
     )?;
     clean_run_tasks(&config.data_dir)?;
-    let runs = Arc::new(Mutex::new(RunState::default()));
     // 调度器的状态开在这里、由 `Api` 借着：写它的是那条调度线程，读它的是 HTTP 面
     // （`GET /api/schedule`）——排队中的任务因此在界面上看得见（#266）。
     let schedule: ScheduleRegistry = Arc::new(Mutex::new(ScheduleState::default()));
@@ -139,6 +146,10 @@ pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
             })
             .collect()
     });
+    // 收摊排在**收工作线程的结局之前**（#272）：在飞运行的目标表占用挂在目标端，
+    // 而 abort 只有本进程发得出去——一走了之，那几张表就永远开不了第二次运行。
+    // 一条工作线程 panic 过就把这一趟跳过去，等于让一次半死的服务多留一份泄漏。
+    stop_runs_for_shutdown(&runs, SHUTDOWN_GRACE);
     for outcome in workers {
         outcome?;
     }
@@ -275,6 +286,14 @@ fn is_loopback(listen: &str) -> bool {
 
 /// 共用监听器的工作线程数。见 `serve` 里那段说明。
 const HTTP_WORKER_THREADS: usize = 8;
+
+/// 停服时等在飞运行收尾的上限（#272）。
+///
+/// 等的是「子进程死透 + 替它发一次 abort」：前者是一次信号，后者是一趟发往目标端的
+/// HTTP，`ureq` 那边的读超时是 30 秒。取 40 秒是给一次这样的往返留够余量，
+/// 又不至于让一次重启在系统的停服时限（systemd 默认 90 秒）里被硬杀。
+/// 等不到就走人：占用会留在目标端，下一条命起来时由 [`reclaim_after_restart`] 接手。
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(40);
 
 /// 一条工作线程的一辈子：取一个请求、处理完、回头再取。
 ///

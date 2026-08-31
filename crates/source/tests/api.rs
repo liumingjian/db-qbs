@@ -14,7 +14,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use db_qbs_source::http::{routes, Access, Api, Method, Request, Response, RunState};
+use db_qbs_source::http::{
+    reclaim_after_restart, routes, stop_runs_for_shutdown, Access, Api, Method, Request, Response,
+    RunState,
+};
 use db_qbs_source::{
     AgentStore, AuthStore, DatasourceStore, HistoryStore, OracleAccess, OracleRowSource,
     RunLogStore, ScheduleState, SourceColumn, SourceConfig, SourceReadError, TaskSpec, TaskStore,
@@ -258,6 +261,30 @@ impl Rig {
             schedule: &self.schedule,
             auth: &self.auth,
             describe_source,
+        }
+    }
+
+    /// 同一份数据目录上的**第二条命**（#272）：进程被杀掉、又被拉起来是什么样，
+    /// 这台 rig 就是什么样——磁盘上那几行没走完的历史照旧在，而在飞登记是纯内存的，
+    /// 跟着上一条命一起没了，所以它是空的。
+    ///
+    /// 上一条命的假子进程还在睡，没人管它：真进程里那些孤儿也是这样，
+    /// 而这条用例问的是**新进程看见了什么**。
+    fn second_life(&self) -> Self {
+        let directory = self.directory.clone();
+        Self {
+            config: self.config.clone(),
+            config_path: self.config_path.clone(),
+            tasks: TaskStore::open(&directory).unwrap(),
+            datasources: DatasourceStore::open(&directory).unwrap(),
+            agents: Arc::new(Mutex::new(AgentStore::open(&directory).unwrap())),
+            history: HistoryStore::open(&directory).unwrap(),
+            run_logs: RunLogStore::open(&directory).unwrap(),
+            runs: Arc::new(Mutex::new(RunState::default())),
+            schedule: Arc::new(Mutex::new(ScheduleState::default())),
+            auth: AuthStore::open(&directory).unwrap(),
+            session: self.session.clone(),
+            directory,
         }
     }
 
@@ -2120,6 +2147,138 @@ sleep 0.2
     let again = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
     assert_eq!(again.status, 202, "{}", again.body_text());
     rig.wait_until_idle(&task_id);
+}
+
+/// source 自己被杀掉时，在飞那次运行的目标表占用留在了目标端——**下一条命起来就得
+/// 把它记上账**，而不是把这张表显示成可以重跑（#272）。
+///
+/// 这是「占用还在就绝不让它看起来能重跑」那条铁律在**进程边界**上的一半：
+/// 子进程被父进程收了尸的那一种早就补过 abort 了，这里说的是父进程自己没了的那一种。
+#[test]
+fn a_restart_books_the_hold_left_behind_by_a_run_nobody_could_abort() {
+    let rig = Rig::with_child(
+        r#"printf '%s\n' '{"ts":"2026-08-31T06:35:16.000Z","level":"info","event":"stage_changed","run_id":"run-orphan","task":null,"stage":"STREAMING"}'
+while :; do sleep 0.02; done
+"#,
+    );
+    let (agent_url, aborts) = abort_recording_agent(false);
+    let agent_id = rig.register_agent_at("目标端", &agent_url);
+    let source_id = rig.create_oracle_datasource("源库");
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["stage"] == "STREAMING"
+    });
+
+    // 进程在这一刻被 `kill -9`：没有收尾、没有 abort，磁盘上留下一行没走完的历史。
+    let restarted = rig.second_life();
+    reclaim_after_restart(&restarted.history, &restarted.run_logs, &restarted.runs, 90).unwrap();
+
+    // 补发那一趟没成（目标端 drop 不掉暂存表），于是占用如实挂着，原话照抄。
+    let held = wait_for_json(&restarted, &format!("/api/runs/{run_record_id}"), |body| {
+        body["target_hold"] == "HELD"
+    });
+    assert_eq!(held["target_hold_message"], "暂存表 drop 不掉");
+    assert_eq!(held["unknown_reason"], "PROCESS_DISAPPEARED");
+    assert_eq!(aborts.lock().unwrap().clone(), vec!["run-orphan"]);
+
+    // 这张表这时候一次新运行都放不进去——放进去也只会撞回目标端的 `TARGET_TABLE_BUSY`。
+    let refused = restarted.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(refused.status, 409, "{}", refused.body_text());
+    assert_eq!(
+        restarted.json(&refused)["error"]["message"],
+        "这张目标表的占用还没释放，先把它释放掉再发起"
+    );
+
+    // 补发失败照旧落一行 `abort_failed`，而且**接在上一条命写的那行后面**：
+    // 新起一支从 0 数的笔会把这条运行原有的日志逐行盖掉。
+    let logs = restarted.json(&restarted.get(&format!("/api/runs/{run_record_id}/logs")));
+    let lines = logs["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0]["line"].as_str().unwrap().contains("stage_changed"));
+    assert_eq!(abort_failures(&logs), 1);
+}
+
+/// 补发那一趟成了：占用还回来，这张表当场又能跑（#272）。
+#[test]
+fn a_restart_releases_the_hold_and_the_table_is_free_again() {
+    let rig = Rig::with_child(
+        r#"printf '%s\n' '{"ts":"2026-08-31T06:35:16.000Z","level":"info","event":"stage_changed","run_id":"run-orphan","task":null,"stage":"STREAMING"}'
+while :; do sleep 0.02; done
+"#,
+    );
+    let (agent_url, aborts) = abort_recording_agent(true);
+    let agent_id = rig.register_agent_at("目标端", &agent_url);
+    let source_id = rig.create_oracle_datasource("源库");
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["stage"] == "STREAMING"
+    });
+
+    let restarted = rig.second_life();
+    reclaim_after_restart(&restarted.history, &restarted.run_logs, &restarted.runs, 90).unwrap();
+
+    let released = wait_for_json(&restarted, &format!("/api/runs/{run_record_id}"), |body| {
+        body["target_hold"] == Value::Null
+    });
+    assert_eq!(released["target_hold_message"], Value::Null);
+    // 发的是**那一次**运行的 run_id：目标端认的是它。
+    assert_eq!(aborts.lock().unwrap().clone(), vec!["run-orphan"]);
+    let again = restarted.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(again.status, 202, "{}", again.body_text());
+}
+
+/// 优雅停服也得先收摊（#272）：在飞的运行停掉、abort 补上、占用还回去，**然后**才封口。
+///
+/// 这一半不能指望下一条命：退出前那一下封口会把没走完的那几行全填上 `outcome`，
+/// 下一条命起来时一行都看不见——`reclaim_after_restart` 于是无从下手。
+/// 记的名义也不是「已由用户停止」：没人按过那颗按钮。
+#[test]
+fn a_graceful_shutdown_stops_in_flight_runs_and_hands_the_hold_back() {
+    let rig = Rig::with_child(
+        r#"trap 'exit 0' TERM
+printf '%s\n' '{"ts":"2026-08-31T07:00:00.000Z","level":"info","event":"stage_changed","run_id":"run-shutdown","task":null,"stage":"STREAMING"}'
+while :; do sleep 0.02; done
+"#,
+    );
+    let (agent_url, aborts) = abort_recording_agent(true);
+    let agent_id = rig.register_agent_at("目标端", &agent_url);
+    let source_id = rig.create_oracle_datasource("源库");
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["stage"] == "STREAMING"
+    });
+
+    stop_runs_for_shutdown(&rig.runs, Duration::from_secs(5));
+
+    // 收摊回来时在飞登记已经空了：等的就是那一刀砍没砍下去。
+    assert!(!rig.runs.lock().unwrap().has_active_run(&task_id));
+    assert_eq!(aborts.lock().unwrap().clone(), vec!["run-shutdown"]);
+    let history = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(history["unknown_reason"], "SERVICE_RESTARTED");
+    assert_eq!(history["message"], "服务重启，结局未知");
+    assert_eq!(history["target_hold"], Value::Null);
 }
 
 /// 这条运行的日志里有几行 `abort_failed`。

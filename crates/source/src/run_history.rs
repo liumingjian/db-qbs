@@ -680,6 +680,29 @@ impl HistoryStore {
         Ok(history)
     }
 
+    /// 进程死的那一刻还没走完的那几行（`outcome IS NULL`）。
+    ///
+    /// **必须在 [`Self::seal_incomplete`] 之前问**：封口那一下把它们全改成 `FAILED`，
+    /// 之后再问就一行都认不出来了。问它是为了目标表占用：source 自己被重启时，
+    /// 子进程连同它那一刀 abort 一起没了，而占用在目标端是纯内存的，
+    /// 没人补这一刀就永远挂着（#272）。
+    pub fn list_incomplete(&self) -> Result<Vec<RunHistory>, String> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(&format!(
+                "{HISTORY_SELECT}
+                  WHERE outcome IS NULL
+               ORDER BY started_at_ms ASC, rowid ASC"
+            ))
+            .map_err(|error| format!("准备 SQLite 非终态运行历史查询失败：{error}"))?;
+        let history = statement
+            .query_map([], history_from_row)
+            .map_err(|error| format!("查询 SQLite 非终态运行历史失败：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("读取 SQLite 非终态运行历史失败：{error}"))?;
+        Ok(history)
+    }
+
     pub fn seal_incomplete(
         &self,
         reason: UnknownReason,

@@ -129,6 +129,22 @@ impl RunLogStore {
             .map_err(|error| format!("提交 SQLite 运行日志事务失败：{error}"))
     }
 
+    /// 这条运行已经写到第几行。没有行时是 0，也就是「从头写起」。
+    ///
+    /// 只有一个用处：进程重启之后还要往**上一条命**的日志里补写（见
+    /// [`RunLogWriter::resuming`]）。正常路径上的监督线程不查它——序号在本地攥着，
+    /// 一条运行只有一支笔。
+    pub fn last_seq(&self, run_record_id: &str) -> Result<i64, String> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM run_log_lines WHERE run_record_id = ?1",
+                params![run_record_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("查询 SQLite 运行日志行号失败：{error}"))
+    }
+
     /// 取 `after` 之后的行，最多 [`RUN_LOG_PAGE_LIMIT`] 条，按序号升序。
     ///
     /// `after = 0` 就是「从头开始」。运行进行中与已结束走的是同一条路：
@@ -196,6 +212,27 @@ impl RunLogWriter {
             task_id,
             started_at_ms,
             seq: 0,
+        }
+    }
+
+    /// 接着上一条命写下去的一支笔（#272）。
+    ///
+    /// 序号从库里已有的最后一行续上，**不是从 0**：`append` 是
+    /// `INSERT OR REPLACE`，从 0 起的第二支笔会把这条运行原有的日志逐行盖掉。
+    /// 只在 source 重启后补写用——重启前那支笔跟着进程一起没了。
+    pub fn resuming(
+        store: RunLogStore,
+        run_record_id: String,
+        task_id: String,
+        started_at_ms: i64,
+    ) -> Self {
+        let seq = store.last_seq(&run_record_id).unwrap_or(0);
+        Self {
+            store,
+            run_record_id,
+            task_id,
+            started_at_ms,
+            seq,
         }
     }
 
