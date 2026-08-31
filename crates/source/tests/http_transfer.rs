@@ -9,6 +9,8 @@ use db_qbs_source::{
 use serde_json::{json, Value};
 
 const RUN_ID: &str = "20260814153000_a3f19c";
+const PRE_SQL: &str =
+    "/* exact */\nDELETE FROM qbs.ORDERS WHERE ID IN (SELECT ID FROM qbs.STALE_ORDERS);";
 
 #[test]
 fn rows_cross_the_http_protocol_then_commit() {
@@ -53,7 +55,7 @@ fn rows_cross_the_http_protocol_then_commit() {
                 database: "qbs".to_owned(),
             },
             write_mode: WriteMode::Append,
-            pre_sql: None,
+            pre_sql: Some(PRE_SQL.to_owned()),
             primary_key: vec!["ID".to_owned()],
         },
         |_| {},
@@ -76,6 +78,7 @@ fn rows_cross_the_http_protocol_then_commit() {
         .iter()
         .all(|request| request.content_type == "application/json"));
     assert_eq!(requests[0].body["run_id"], RUN_ID);
+    assert_eq!(requests[0].body["pre_sql"], PRE_SQL);
     assert_eq!(requests[0].body["source_columns"][0]["name"], "ID");
     assert_eq!(
         requests[1].body,

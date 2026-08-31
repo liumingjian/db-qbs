@@ -191,6 +191,41 @@ fn a_keyless_target_appends_and_a_second_run_doubles_it() {
     assert!(!swap_rows_consistent(WriteStatement::Insert, 3, 6));
 }
 
+#[test]
+#[ignore = "needs a real MySQL; run docs/spikes/fixtures/local-rig/scripts/run-mysql-destination-live.sh"]
+fn append_pre_sql_on_a_keyless_target_cleans_then_uses_plain_insert() {
+    let mut rig = Rig::open_without_a_key("pre_sql_keyless");
+    rig.stage_and_swap(
+        "r1",
+        &[("1", "keep"), ("2", "dirty"), ("3", "dirty")],
+    )
+    .expect("laying down old keyless target rows");
+    let pre_sql = format!(
+        "DELETE FROM `{}`.`{}` WHERE K IN ('2', '3')",
+        rig.database, rig.target_table
+    );
+
+    let cleaned = rig
+        .append_with_pre_sql("r2", &[("2", "fresh"), ("4", "new")], &pre_sql)
+        .expect("cleanup and plain insert must commit together");
+
+    assert_eq!(cleaned.purged_rows, 2);
+    assert_eq!((cleaned.staged_rows, cleaned.swapped_rows), (2, 2));
+    assert!(swap_rows_consistent(
+        WriteStatement::Insert,
+        cleaned.staged_rows,
+        cleaned.swapped_rows
+    ));
+    assert_eq!(
+        rig.target_rows(),
+        vec![
+            ("1".to_owned(), "keep".to_owned()),
+            ("2".to_owned(), "fresh".to_owned()),
+            ("4".to_owned(), "new".to_owned()),
+        ]
+    );
+}
+
 /// #264：清空后导入的一次真实往返——**跑完之后目标表精确等于本次查询的结果**。
 ///
 /// 这是本票的核心承诺，而它只有真 MySQL 能回答：替身证得了编排顺序，证不了
