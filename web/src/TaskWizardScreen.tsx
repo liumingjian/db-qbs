@@ -61,7 +61,7 @@ import type {
   WriteView,
 } from "./wizard";
 import { ScheduleCard } from "./ScheduleCard";
-import { WRITE_MODES } from "./writeMode";
+import { writeModeLabel, WRITE_MODES } from "./writeMode";
 
 export interface TaskWizardScreenProps {
   initial: Draft;
@@ -1299,7 +1299,7 @@ function StepBody({
           里更该并排做的是「写入模式」与「主键」——它们一起决定了写出去的是哪条语句。
           目标表那一屏离它有一整个步骤的距离，把模式摆到那里，人会在还没有列清单、
           因而还看不见主键的时候先选写法。 */}
-      <WriteModeCard write={model.write} change={change} />
+      <WriteModeCard write={model.write} preSql={draft.spec.pre_sql ?? ""} change={change} />
       {model.rows.length === 0 ? <p className="wizard-empty">{draft.fetchMode === "sql" ? "尚未识别结果列" : "未选择源表"}</p> : (
         /* 主键任何时候都归人做，包括先清空再导入那一档：那一档确实不靠主键去重，
            但主键仍决定写入语句是 upsert 还是纯 INSERT，而那是一个人有权改的决定。
@@ -1405,15 +1405,21 @@ function StepBody({
       <div><dt>WHERE</dt><dd>{confirmView.where}</dd></div>
       <div><dt>主键</dt><dd>{confirmView.primaryKey.join(", ")}</dd></div>
       <div className="is-wide"><dt>字段映射</dt><dd>{confirmView.mappings.map((mapping) => <span className="mapping-chip" key={mapping.source}>{mapping.source} → {mapping.target}</span>)}</dd></div>
-      <div><dt>写入方式</dt><dd>{WRITE_MODES.find((entry) => entry.mode === confirmView.write.mode)?.label ?? confirmView.write.mode}（{confirmView.write.statementLabel}）</dd></div>
+      <div><dt>写入方式</dt><dd>{writeModeLabel(confirmView.write.mode, draft.spec.pre_sql)}（{confirmView.write.statementLabel}）</dd></div>
       {/* agent 离线原来要等点了「开始导入」才知道——那是最贵的一次发现。 */}
       <div><dt>目标端 Agent</dt><dd><span className={draft.targetAgentOnline ? "confirm-check is-passed" : "confirm-check is-warn"}>{draft.targetAgentOnline ? "在线" : "离线"}</span></dd></div>
       <div className="is-wide"><dt>不搬的列</dt><dd>{dropped.length === 0 ? <span className="confirm-none">源表所有列都会搬</span> : dropped.map((column) => <span className="mapping-chip is-dropped" key={column.name}>{column.name}</span>)}</dd></div>
       <div className="is-wide"><dt>目标表检查</dt><dd><ConfirmTargetCheckCell check={confirmView.targetCheck} busy={busy === "check"} onCheck={loadCheck} /></dd></div>
     </dl>
+    {(draft.spec.pre_sql ?? "").trim() !== "" && (
+      <section className="generated-sql">
+        <header><div><strong>preSQL 清理语句</strong><span>保存时原样记录</span></div></header>
+        <pre className="ddl-output"><HighlightedSql sql={draft.spec.pre_sql!} /></pre>
+      </section>
+    )}
     <Blockers blockers={model.blockers} />
-    {/* 写入语义的常驻交底（2026-08 UX 评审 P0-1）：这一步是「开始导入」前的最后一屏，
-        而这个产品**从不删行**。不写清楚的话，第一次用的人会按「全量同步」去理解
+    {/* 写入语义的常驻交底（2026-08 UX 评审 P0-1）：这一步是「开始导入」前的最后一屏。
+        普通 APPEND 不删行，带 preSQL 的 APPEND 会按条件清理；不写清楚的话，人会误判
         自己刚配好的这张目标表。它不是告警，所以不着 --crit / --warn。
         文本按写法分叉（#261）：无主键那条路上「按主键 upsert」是句假话。 */}
     <UpsertNote text={confirmView.write.note} />
@@ -1463,9 +1469,11 @@ function StepBody({
  */
 function WriteModeCard({
   write,
+  preSql,
   change,
 }: {
   write: WriteView;
+  preSql: string;
   change: (intent: Change) => void;
 }) {
   return (
@@ -1488,6 +1496,20 @@ function WriteModeCard({
             </label>
           ))}
         </fieldset>
+        {write.mode === "APPEND" && (
+          <section className="pre-sql-editor">
+            <header><div><strong>preSQL 清理</strong><span>导入前执行一条带 WHERE 的目标表 DELETE</span></div></header>
+            <HighlightedSqlInput
+              value={preSql}
+              placeholder="DELETE FROM t_customer WHERE biz_date = CURRENT_DATE;"
+              label="preSQL 清理语句"
+              rows={6}
+              wrap
+              onChange={(sql) => change({ type: "pre-sql", sql })}
+            />
+            <p className="write-mode-responsibility">源 SQL 的取数范围与 preSQL 的清理条件相互独立；两者的对应关系由任务作者负责。</p>
+          </section>
+        )}
         <dl className="write-mode-statement">
           <dt>写入语句</dt>
           <dd>

@@ -7,6 +7,8 @@ import type { RunEvidence, TaskSpec } from "./api";
 import {
   APPEND_ONLY_CONCLUSION,
   clearsTarget,
+  hasPreSql,
+  runPreSql,
   runWriteSemantics,
   runWriteView,
   targetHasUniqueKey,
@@ -14,6 +16,7 @@ import {
   writeSemanticsNote,
   writeStatementLabel,
   writeStatementOf,
+  writeModeLabel,
   WRITE_MODES,
 } from "./writeMode";
 
@@ -27,6 +30,11 @@ describe("writeStatementOf", () => {
 });
 
 describe("写入模式清单", () => {
+  it("distinguishes APPEND cleanup without treating blank SQL as enabled", () => {
+    expect(hasPreSql(" \n")).toBe(false);
+    expect(writeModeLabel("APPEND", "DELETE FROM t WHERE id = 1")).toBe("追加写 + preSQL 清理");
+    expect(writeModeLabel("APPEND", " ")).toBe("追加写");
+  });
   it("两档：追加写与先清空再导入", () => {
     expect(WRITE_MODES.map((entry) => entry.mode)).toEqual([
       "APPEND",
@@ -65,6 +73,13 @@ describe("写入语义那句话", () => {
     expect(writeSemanticsDone("upsert")).toContain("按主键 upsert");
     expect(writeSemanticsDone("insert")).toContain("再追加一份");
     expect(writeSemanticsDone("insert")).not.toContain("按主键 upsert");
+  });
+
+  it("preSQL append states cleanup and transactional import instead of delete-free semantics", () => {
+    const note = writeSemanticsNote("upsert", "APPEND", "DELETE FROM t WHERE id = 1");
+    expect(note).toContain("追加写 + preSQL 清理");
+    expect(note).toContain("同一事务");
+    expect(note).not.toContain("源端删除的行不会跟着消失");
   });
 
   it("清空模式下那两个坑都不存在，换来的是另一笔代价，而它必须说满", () => {
@@ -127,6 +142,12 @@ describe("运行详情说的是当时那一次", () => {
     expect(runWriteSemantics(evidence, spec)).toBe(
       writeSemanticsDone("upsert", "APPEND"),
     );
+  });
+
+  it("reads preSQL from immutable run evidence instead of the current task", () => {
+    const oldSql = "DELETE FROM t_customer WHERE id = 1";
+    expect(runPreSql({ parameters: { ...evidence.parameters!, pre_sql: oldSql } })).toBe(oldSql);
+    expect(runPreSql(undefined)).toBeUndefined();
   });
 
   it("早于 #264 的历史行没有 write_mode，按当时唯一的那一档读", () => {

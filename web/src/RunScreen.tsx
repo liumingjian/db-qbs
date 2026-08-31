@@ -15,6 +15,7 @@ import {
 import {
   runWriteSemantics,
   runWriteView,
+  writeModeLabel,
   writeStatementLabel,
 } from "./writeMode";
 import { messageFrom } from "./errors";
@@ -33,6 +34,7 @@ import { runPresentation } from "./run";
 import type { RunPresentation } from "./run";
 import { abortRefusal } from "./runStage";
 import type { Step } from "./wizard";
+import { HighlightedSql } from "./SqlEditor";
 
 const RUN_POLL_INTERVAL_MS = 1000;
 const countFormatter = new Intl.NumberFormat("zh-CN");
@@ -248,6 +250,12 @@ export function RunScreen({
       ) : (
         <div className="run-content">
           <RunIdentity task={task} detail={detail} />
+          {(detail.evidence?.parameters?.pre_sql ?? "").trim() !== "" && (
+            <section className="panel">
+              <h3>当次执行的 preSQL</h3>
+              <pre className="drawer-sql"><HighlightedSql sql={detail.evidence!.parameters!.pre_sql!} /></pre>
+            </section>
+          )}
           {detail.live ? (
             <LiveRun detail={detail} presentation={presentation} now={now} />
           ) : (
@@ -302,7 +310,10 @@ function RunIdentity({ task, detail }: { task: Task; detail: RunDetail }) {
           这次是「合并」还是「又追加了一份」。读的是当次快照，不是任务此刻的主键。 */}
       <DetailValue
         label="写入方式"
-        value={writeStatementLabel(runWriteView(detail.evidence, task.spec).statement)}
+        value={`${writeModeLabel(
+          runWriteView(detail.evidence, task.spec).mode,
+          detail.evidence?.parameters?.pre_sql,
+        )}（${writeStatementLabel(runWriteView(detail.evidence, task.spec).statement)}）`}
       />
       <DetailValue label="暂存表" value={detail.staging_table ?? "—"} />
     </dl>
@@ -423,6 +434,7 @@ function FinishedRun({
       <dl className="run-metrics is-finished">
         <Metric label="已推行数" value={formatCount(detail.rows_pushed)} />
         <Metric label="批次数" value={formatCount(detail.seq)} />
+        <Metric label="清理行数" value={formatCount(detail.purged_rows ?? 0)} />
         <Metric label="累计批次耗时" value={formatDuration(detail.ms)} />
         <Metric label="累计字节" value={formatBytes(detail.bytes)} />
       </dl>

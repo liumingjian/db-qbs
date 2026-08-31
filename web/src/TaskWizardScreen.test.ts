@@ -117,6 +117,37 @@ function renderWizard(
 }
 
 describe("the mapping step UI", () => {
+  it("shows the preSQL editor in both APPEND source flows and hides it in clear mode", () => {
+    const table = renderWizard(mappingDraft());
+    expect(table).toContain("preSQL 清理");
+    expect(table).toContain("对应关系由任务作者负责");
+
+    const custom = renderWizard({
+      ...mappingDraft(),
+      fetchMode: "sql",
+      spec: { ...mappingDraft().spec, owner: "", table: "", source_sql: "SELECT ID FROM APP.T" },
+    });
+    expect(custom).toContain('aria-label="preSQL 清理语句"');
+
+    const clear = renderWizard({
+      ...mappingDraft(),
+      spec: { ...mappingDraft().spec, write_mode: "CLEAR_THEN_IMPORT" },
+    });
+    expect(clear).not.toContain('aria-label="preSQL 清理语句"');
+  });
+
+  it("shows exact preSQL and cleanup semantics on the confirmation step", () => {
+    const sql = "/* keep formatting */\nDELETE  FROM t_customer WHERE id = 7;";
+    const html = renderWizard({
+      ...mappingDraft(),
+      step: 4,
+      spec: { ...mappingDraft().spec, pre_sql: sql },
+    });
+    expect(html).toContain("追加写 + preSQL 清理");
+    expect(html).toContain("keep formatting");
+    expect(html).toContain("DELETE");
+  });
+
   it("uses one confirmation shape for the wizard module's exact loss description", () => {
     const html = renderToStaticMarkup(createElement(WizardConfirmDialog, {
       loss: { headline: "这个改动会清掉：", lines: ["手写的过滤条件", "已勾的 1 个主键列"] },
