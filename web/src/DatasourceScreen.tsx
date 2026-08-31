@@ -63,6 +63,7 @@ export function DatasourceScreen({
   agents,
   tasks,
   loading,
+  canManage = true,
   onChanged,
 }: {
   datasources: Datasource[];
@@ -70,6 +71,7 @@ export function DatasourceScreen({
   agents: Agent[];
   tasks: Task[];
   loading: boolean;
+  canManage?: boolean;
   onChanged: () => Promise<void>;
 }) {
   const [dialog, setDialog] = useState<DatasourceDialogState>(null);
@@ -129,14 +131,16 @@ export function DatasourceScreen({
             {loading ? "正在读取" : `共 ${datasources.length} 个`}
           </span>
         </div>
-        <button
-          className="button is-primary"
-          type="button"
-          onClick={() => setDialog({ kind: "create" })}
-        >
-          <Plus size={ICON.sm} aria-hidden="true" />
-          新建数据源
-        </button>
+        {canManage && (
+          <button
+            className="button is-primary"
+            type="button"
+            onClick={() => setDialog({ kind: "create" })}
+          >
+            <Plus size={ICON.sm} aria-hidden="true" />
+            新建数据源
+          </button>
+        )}
       </header>
 
       {loading && datasources.length === 0 && (
@@ -152,14 +156,16 @@ export function DatasourceScreen({
           </div>
           <h2>还没有数据源</h2>
           <p>先录一条 Oracle 源库与一条 MySQL 目标库，任务才有得选。</p>
-          <button
-            className="button is-primary"
-            type="button"
-            onClick={() => setDialog({ kind: "create" })}
-          >
-            <Plus size={ICON.sm} aria-hidden="true" />
-            新建数据源
-          </button>
+          {canManage && (
+            <button
+              className="button is-primary"
+              type="button"
+              onClick={() => setDialog({ kind: "create" })}
+            >
+              <Plus size={ICON.sm} aria-hidden="true" />
+              新建数据源
+            </button>
+          )}
         </div>
       )}
 
@@ -169,12 +175,13 @@ export function DatasourceScreen({
           agents={agents}
           referenceCounts={counts}
           rowTests={rowTests}
+          canManage={canManage}
           onTest={testRow}
           onAction={setDialog}
         />
       )}
 
-      {dialog?.kind === "create" && (
+      {canManage && dialog?.kind === "create" && (
         <DatasourceFormDialog
           title="新建数据源"
           existing={null}
@@ -183,7 +190,7 @@ export function DatasourceScreen({
           onChanged={onChanged}
         />
       )}
-      {dialog?.kind === "edit" && (
+      {canManage && dialog?.kind === "edit" && (
         <DatasourceFormDialog
           title={`编辑 · ${dialog.datasource.name}`}
           existing={dialog.datasource}
@@ -196,7 +203,7 @@ export function DatasourceScreen({
           }}
         />
       )}
-      {dialog?.kind === "delete" && (
+      {canManage && dialog?.kind === "delete" && (
         <DatasourceDeleteDialog
           datasource={dialog.datasource}
           onClose={() => setDialog(null)}
@@ -220,6 +227,7 @@ function DatasourceTable({
   agents,
   referenceCounts,
   rowTests,
+  canManage,
   onTest,
   onAction,
 }: {
@@ -227,6 +235,7 @@ function DatasourceTable({
   agents: Agent[];
   referenceCounts: Map<string, number>;
   rowTests: Record<string, RowTestState>;
+  canManage: boolean;
   onTest: (datasource: Datasource) => void;
   onAction: (dialog: DatasourceDialogState) => void;
 }) {
@@ -247,7 +256,7 @@ function DatasourceTable({
                 占着一格宽度却答不了任何问题。表单里那个「已设置 · 留空 = 不改」的徽标
                 照旧留着，它答的是「这次留空会怎样」，是另一回事。 */}
             <th>被引用</th>
-            <th className="action-column">操作</th>
+            {canManage && <th className="action-column">操作</th>}
           </tr>
         </thead>
         <tbody>
@@ -267,7 +276,7 @@ function DatasourceTable({
                 </td>
                 <td className="mono">{datasource.username}</td>
                 <td>{count === 0 ? "未被引用" : `${count} 个任务`}</td>
-                <td className="action-column">
+                {canManage && <td className="action-column">
                   {/* 行内动作**全用图标**、靠 `title` 认（ADR-0043 §5；ADR-0042 §6 已作废）。
                       「正在连接」这一态不再靠按钮文字自陈——它挂在 `title` / `aria-label` 上，
                       图标同时转起来，禁用的只有这一行自己。 */}
@@ -309,7 +318,7 @@ function DatasourceTable({
                       {test.message}
                     </span>
                   )}
-                </td>
+                </td>}
               </tr>
             );
           })}

@@ -5,6 +5,7 @@ import {
   PanelLeftClose,
   Radio,
   Server,
+  Settings,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ICON } from "./components/DesignSystem";
@@ -31,6 +32,7 @@ import type {
   Agent,
   RunHistory,
   SessionState,
+  Role,
   Task,
   Datasource,
 } from "./api";
@@ -44,6 +46,7 @@ import { ChangePasswordDialog } from "./ChangePasswordDialog";
 import { DatasourceScreen } from "./DatasourceScreen";
 import { LoginScreen } from "./LoginScreen";
 import { UserMenu } from "./UserMenu";
+import { SystemSettingsScreen } from "./SystemSettingsScreen";
 import { entryNeedsDialog, evaluateEdit, evaluateEntry, gateFix, gateReason, preselect } from "./entry";
 import type { DatasourceOption, EntryFix, EntryGuard } from "./entry";
 import { TaskEntryDialog } from "./TaskEntryDialog";
@@ -68,17 +71,17 @@ type DialogState =
  * 落地页本来也一直是作业中心（见 `pageFromHash` 的兜底），导航第一项是 agent 时，
  * 高亮的那一项和展开的那一屏对不上。
  */
-type NavigationPage = "jobs" | "datasources" | "agents";
+type NavigationPage = "jobs" | "datasources" | "agents" | "settings";
 type Page = NavigationPage | "wizard";
 
 /**
  * 已退役的地址。**重定向而不是 404**：它们还在旧链接与旧文档里流通，接住比让人撞墙便宜。
  *
- * `#settings` 是这一轮加进来的：那一屏降成了顶栏右上角的「关于」浮层（UX 评审 P1-12）。
+ * `#settings` 重新用于管理员的系统设置；原来的只读「关于」仍留在用户菜单里。
  */
-const RETIRED_HASHES = ["#history", "#/history", "#settings", "#/settings"];
+const RETIRED_HASHES = ["#history", "#/history"];
 
-function pageFromHash(hash: string): Page {
+function pageFromHash(hash: string, canManage: boolean): Page {
   if (runRecordFromHash(hash) !== null) {
     // 运行详情压在作业中心这一屏上：面包屑与侧栏高亮都归它。
     return "jobs";
@@ -88,6 +91,9 @@ function pageFromHash(hash: string): Page {
   }
   if (hash === "#datasources") {
     return "datasources";
+  }
+  if (hash === "#settings" && canManage) {
+    return "settings";
   }
   if (hash === "#wizard") {
     return "wizard";
@@ -168,7 +174,14 @@ const NAV_ITEMS: readonly { page: NavigationPage; label: string }[] = [
   { page: "jobs", label: "作业中心" },
   { page: "datasources", label: "数据源" },
   { page: "agents", label: "目标端 Agent" },
+  { page: "settings", label: "系统设置" },
 ];
+
+export function navigationItemsFor(role: Role) {
+  return role === "ADMIN"
+    ? NAV_ITEMS
+    : NAV_ITEMS.filter((item) => item.page !== "settings");
+}
 
 function navIcon(page: NavigationPage, size: number) {
   switch (page) {
@@ -178,6 +191,8 @@ function navIcon(page: NavigationPage, size: number) {
       return <Database size={size} aria-hidden="true" />;
     case "datasources":
       return <Server size={size} aria-hidden="true" />;
+    case "settings":
+      return <Settings size={size} aria-hidden="true" />;
   }
 }
 
@@ -199,12 +214,12 @@ export function App() {
     // 而画一个连不上后端的工作台只会得到满屏「加载失败」。
     void fetchSession()
       .then(setSession)
-      .catch(() => setSession({ authenticated: false, username: null }));
+      .catch(() => setSession({ authenticated: false, username: null, role: null }));
   }, []);
 
   useEffect(() => {
     // 任何一条请求撞上 401 都从这里回到登录页。订阅只有这一处，见 `api.ts`。
-    onSessionLost(() => setSession({ authenticated: false, username: null }));
+    onSessionLost(() => setSession({ authenticated: false, username: null, role: null }));
     return () => onSessionLost(null);
   }, []);
 
@@ -221,20 +236,25 @@ export function App() {
   return (
     <Workbench
       username={session.username ?? "admin"}
-      onSignedOut={() => setSession({ authenticated: false, username: null })}
+      role={session.role ?? "OPERATOR"}
+      onSignedOut={() => setSession({ authenticated: false, username: null, role: null })}
     />
   );
 }
 
 function Workbench({
   username,
+  role,
   onSignedOut,
 }: {
   username: string;
+  role: Role;
   onSignedOut: () => void;
 }) {
+  const canManage = role === "ADMIN";
+  const navItems = navigationItemsFor(role);
   const [page, setPage] = useState<Page>(() =>
-    pageFromHash(window.location.hash),
+    pageFromHash(window.location.hash, canManage),
   );
   const [collapsed, setCollapsed] = useState<boolean>(readCollapsed);
   const [tasks, setTasks] = useState<Task[] | null>(null);
@@ -423,7 +443,11 @@ function Workbench({
         window.location.replace("#jobs");
         return;
       }
-      const requested = pageFromHash(window.location.hash);
+      if (window.location.hash === "#settings" && !canManage) {
+        window.location.replace("#jobs");
+        return;
+      }
+      const requested = pageFromHash(window.location.hash, canManage);
       if (pageRef.current === "wizard" && wizardDraftRef.current !== null && requested !== "wizard") {
         window.history.replaceState(null, "", "#wizard");
         wizardScreenRef.current?.requestLeave(() => commitNavigation(requested));
@@ -437,7 +461,7 @@ function Workbench({
     handleHashChange();
     window.addEventListener("hashchange", handleHashChange);
     return () => window.removeEventListener("hashchange", handleHashChange);
-  }, []);
+  }, [canManage]);
 
   useEffect(() => {
     if (page !== "wizard" || wizardDraft !== null) return;
@@ -723,7 +747,7 @@ function Workbench({
           <span className="brand-text">db-qbs</span>
         </div>
         <nav aria-label="主导航">
-          {NAV_ITEMS.map((item) => (
+          {navItems.map((item) => (
             <a
               key={item.page}
               className={`nav-item ${navPage === item.page ? "is-active" : ""}`}
@@ -762,7 +786,7 @@ function Workbench({
           </button>
           <span className="mobile-brand">db-qbs</span>
           <nav className="mobile-nav" aria-label="主导航">
-            {NAV_ITEMS.map((item) => (
+            {navItems.map((item) => (
               <button
                 key={item.page}
                 className={navPage === item.page ? "is-active" : ""}
@@ -984,6 +1008,7 @@ function Workbench({
               agents={agents}
               datasources={datasources}
               loading={datasourcesLoading}
+              canManage={canManage}
               onChanged={loadDatasources}
             />
           )}
@@ -994,8 +1019,13 @@ function Workbench({
               agents={agents}
               tasks={tasks ?? []}
               loading={datasourcesLoading}
+              canManage={canManage}
               onChanged={loadDatasources}
             />
+          )}
+
+          {activeRun === null && page === "settings" && canManage && (
+            <SystemSettingsScreen />
           )}
 
         </div>
@@ -1058,6 +1088,8 @@ function pageLabel(page: Page): string {
       return "作业中心";
     case "datasources":
       return "数据源";
+    case "settings":
+      return "系统设置";
     case "wizard":
       return "新建导入";
   }

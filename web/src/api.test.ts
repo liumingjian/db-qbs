@@ -23,13 +23,83 @@ import {
   cancelRun,
   releaseTargetHold,
   fetchRun,
+  fetchOperatorAccount,
+  fetchSession,
+  isForbidden,
   listRunHistory,
   listTasks,
   startRun,
+  onSessionLost,
   taskInputFrom,
+  updateOperatorAccount,
   updateTask,
 } from "./api";
 import type { TaskInput, TaskSpec } from "./api";
+
+describe("role-aware session and account API", () => {
+  afterEach(() => {
+    onSessionLost(null);
+    vi.unstubAllGlobals();
+  });
+
+  it("decodes the authenticated username and role", async () => {
+    const session = { authenticated: true, username: "operator", role: "OPERATOR" };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(session), { status: 200 }),
+    ));
+
+    await expect(fetchSession()).resolves.toEqual(session);
+  });
+
+  it("broadcasts session invalidation on 401", async () => {
+    const lost = vi.fn();
+    onSessionLost(lost);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: { message: "请先登录" } }), { status: 401 }),
+    ));
+
+    await expect(fetchOperatorAccount()).rejects.toMatchObject({ status: 401 });
+    expect(lost).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the stable forbidden code without treating it as session loss", async () => {
+    const lost = vi.fn();
+    onSessionLost(lost);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { code: "FORBIDDEN", message: "需要管理员权限" } }),
+        { status: 403 },
+      ),
+    ));
+
+    const failure = await fetchOperatorAccount().catch((error: unknown) => error);
+    expect(isForbidden(failure)).toBe(true);
+    expect(failure).toMatchObject({ status: 403, message: "需要管理员权限" });
+    expect(lost).not.toHaveBeenCalled();
+  });
+
+  it("reads and updates the fixed Operator account without returning a password", async () => {
+    const account = {
+      username: "operator",
+      role: "OPERATOR",
+      enabled: true,
+      has_password: true,
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(account), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(account), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchOperatorAccount()).resolves.toEqual(account);
+    await expect(updateOperatorAccount({ enabled: true, password: "new-secret" })).resolves.toEqual(account);
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/operator-account", {
+      method: "PUT",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: true, password: "new-secret" }),
+    });
+    expect(JSON.stringify(account)).not.toContain("new-secret");
+  });
+});
 
 /** 两个数据源 id 是绑定、不是规格（ADR-0037 §8），但它们跟 `name` 一样属于任务定义。 */
 function taskInput(overrides: Partial<TaskInput> = {}): TaskInput {
