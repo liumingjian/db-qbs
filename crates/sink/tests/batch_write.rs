@@ -278,6 +278,7 @@ fn open_request(source_columns: Vec<SourceColumn>) -> OpenRunRequest {
             database: "qbs".to_owned(),
         },
         write_mode: WriteMode::Append,
+        pre_sql: None,
         primary_key: vec!["D_BIZ".to_owned()],
         source_columns,
         range_check_results: None,

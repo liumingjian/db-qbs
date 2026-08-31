@@ -210,6 +210,7 @@ fn run() -> bool {
         target: task.target.clone(),
         primary_key: task.spec.primary_key.clone(),
         write_mode: task.spec.write_mode,
+        pre_sql: task.spec.pre_sql.clone(),
     };
     let result = run_transfer(&mut source, &mut sink, request, |event| {
         emit_transfer_event(event, &run_id, &task_path)
@@ -217,7 +218,16 @@ fn run() -> bool {
 
     match result {
         Ok(summary) => {
-            emit_successful_run(&summary, task.spec.write_mode, &run_id, &task_path);
+            emit_successful_run(
+                &summary,
+                task.spec.write_mode,
+                task.spec
+                    .pre_sql
+                    .as_deref()
+                    .is_some_and(|sql| !sql.trim().is_empty()),
+                &run_id,
+                &task_path,
+            );
             true
         }
         Err(failure) => {
@@ -256,11 +266,14 @@ fn verify_agent(task: &db_qbs_source::TaskConfig) -> Result<(), String> {
 fn emit_successful_run(
     summary: &TransferSummary,
     write_mode: WriteMode,
+    has_pre_sql: bool,
     run_id: &str,
     task: &Path,
 ) {
     let target_table_effect = if write_mode.clears_target() {
         Terminal::Replaced
+    } else if has_pre_sql {
+        Terminal::CleanedAndSwapped
     } else {
         Terminal::Swapped
     };

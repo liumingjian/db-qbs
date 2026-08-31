@@ -182,11 +182,13 @@ pub struct OpenRunRequest {
     /// 本次运行的目标端连接（ADR-0037 §1/§2）。`sink.toml` 的 `mysql_dsn` / `database` 已退役，
     /// 库名也随本字段过来——暂存表 DDL 的库名限定按它取。
     pub target: TargetConnection,
-    /// 任务定义里的写入模式（#261/#264）。追加写只写不删；清空后导入会在切换事务里
-    /// 先对目标表整表 `DELETE` 再导入。**它不改变写入语句的选择**——那一件事只由
+    /// 任务定义里的写入模式（#261/#264）。清空后导入会在切换事务里先对目标表整表
+    /// `DELETE` 再导入；APPEND 是否先清理由 `pre_sql` 单独表达。**它不改变写入语句的选择**——那一件事只由
     /// [`crate::WriteStatement::for_primary_key`] 决定。
     #[serde(default)]
     pub write_mode: WriteMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_sql: Option<String>,
     /// upsert 的去重键（ADR-0035 §2），**可以为空**（#261）。
     ///
     /// 非空：用户在构建器里勾了主键，sink 侧预检去目标表核对「约束确有、列在选中列里、
@@ -240,8 +242,8 @@ pub struct CommitRequest {
 pub struct CommitResponse {
     pub source_rows: u64,
     pub staged_rows: u64,
-    /// 追加写下**恒为 0**（ADR-0035 §4）：那句话是真的，确实没删任何行。
-    /// 清空后导入（#264）下它是切换事务里那条整表 `DELETE` 真的删掉的行数。
+    /// 普通 APPEND 下为 0；带 preSQL 的 APPEND 和清空后导入（#264）下，分别是
+    /// 对应 `DELETE` 真正删掉的行数。
     pub purged_rows: u64,
     pub swapped_rows: u64,
     pub count_ms: u64,
@@ -256,7 +258,7 @@ pub struct AbortResponse {
 }
 
 /// run 的终态（ADR-0012）。**它同时是「目标表最后被怎么了」的词表**，
-/// 所以三个值必须各说各的事，不能合并同类项（#264）。
+/// 所以每个值必须各说各的事，不能合并同类项（#264）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Terminal {
@@ -266,6 +268,7 @@ pub enum Terminal {
     /// #264 之前这个词兼职表示「目标端认下了这次写入」，清空后导入接进来之后它
     /// **收窄**成上面这一句：整表被替换是另一件事，共用一个词会让历史记录读起来是假的。
     Swapped,
+    CleanedAndSwapped,
     /// **整表被替换**——清空后导入（`WriteMode::ClearThenImport`）：同一个事务里
     /// 先整表 `DELETE` 再导入，跑完之后目标表精确等于本次查询的结果。
     /// 原有数据已经没了，且**不可撤销**。
@@ -277,6 +280,7 @@ impl Terminal {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Swapped => "SWAPPED",
+            Self::CleanedAndSwapped => "CLEANED_AND_SWAPPED",
             Self::Replaced => "REPLACED",
             Self::Discarded => "DISCARDED",
         }

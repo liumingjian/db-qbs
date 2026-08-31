@@ -347,6 +347,7 @@ mod tests {
             owner: "HTBR45".to_owned(),
             table: "T_R_FR_ASTSTAT".to_owned(),
             write_mode: WriteMode::Append,
+            pre_sql: None,
             schedule_cron: None,
             schedule_enabled: false,
             columns: vec![mapping("ID"), mapping("D_BIZ")],

@@ -111,6 +111,8 @@ pub struct RunParametersEvidence {
     /// 缺席的老历史行落到 `Append`：本字段之前，产品只有追加写这一档。
     #[serde(default)]
     pub write_mode: WriteMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_sql: Option<String>,
     pub source_sql: String,
 }
 
@@ -210,8 +212,8 @@ pub struct RunHistory {
     pub started_at: String,
     pub finished_at: Option<String>,
     pub outcome: Option<String>,
-    /// 目标表最后被怎么了。三个值：`SWAPPED`「按主键合并进目标表」、
-    /// `REPLACED`「整表被替换」（清空后导入，#264）、`DISCARDED`「没被触碰」，
+    /// 目标表最后被怎么了：`SWAPPED`「按主键合并进目标表」、
+    /// `CLEANED_AND_SWAPPED`「清理后合并」、`REPLACED`「整表被替换」（#264）、`DISCARDED`「没被触碰」，
     /// 外加一个 `UNKNOWN`「说不清」。
     ///
     /// 和 `stage` 一样**是字符串不是枚举，且不认识的值原样搬运**：这一列是日志的

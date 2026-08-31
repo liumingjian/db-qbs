@@ -356,7 +356,10 @@ SELECT INDEX_NAME, COLUMN_NAME
                 // 它也**不改写下面选哪条语句**：有主键仍 upsert，无主键仍纯 INSERT。
                 // 保留 upsert 是为了容忍同一次运行内出现重复主键——对着刚清空的表打纯
                 // INSERT，两行同键就会撞 `ERROR 1062` 半途而废。
-                let purged_rows = if request.write_mode.clears_target() {
+                let purged_rows = if let Some(pre_sql) = request.pre_sql.as_deref() {
+                    transaction.query_drop(pre_sql)?;
+                    transaction.affected_rows()
+                } else if request.write_mode.clears_target() {
                     transaction.query_drop(build_clear_statement(
                         &self.database,
                         &request.target_table,
@@ -410,8 +413,8 @@ SELECT INDEX_NAME, COLUMN_NAME
                 transaction.commit()?;
                 Ok(AtomicSwapOutcome::Swapped(AtomicSwapResult {
                     staged_rows,
-                    // 追加写下这个 0 是事实，不是拿 0 糊弄（ADR-0035 §4）；
-                    // 清空后导入下它是上面那条整表 DELETE 真的删掉的行数（#264）。
+                    // 普通 APPEND 下这个 0 是事实；带 preSQL 的 APPEND 与清空后导入下，
+                    // 它是上面对应 DELETE 真正删掉的行数。
                     purged_rows,
                     swapped_rows,
                     count_ms,

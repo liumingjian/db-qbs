@@ -234,6 +234,33 @@ fn a_clear_then_import_run_leaves_the_target_exactly_equal_to_this_run() {
     ));
 }
 
+#[test]
+#[ignore = "needs a real MySQL; run docs/spikes/fixtures/local-rig/scripts/run-mysql-destination-live.sh"]
+fn append_pre_sql_cleans_only_its_range_then_upserts_the_staged_rows() {
+    let mut rig = Rig::open("pre_sql_append");
+    rig.stage_and_swap("r1", &[("1", "keep"), ("2", "dirty"), ("4", "dirty")])
+        .expect("laying down old target rows");
+    let pre_sql = format!(
+        "DELETE FROM `{}`.`{}` WHERE K IN ('2', '4')",
+        rig.database, rig.target_table
+    );
+
+    let cleaned = rig
+        .append_with_pre_sql("r2", &[("2", "fresh"), ("4", "new")], &pre_sql)
+        .expect("cleanup and upsert must commit together");
+
+    assert_eq!(cleaned.purged_rows, 2);
+    assert_eq!(cleaned.staged_rows, 2);
+    assert_eq!(
+        rig.target_rows(),
+        vec![
+            ("1".to_owned(), "keep".to_owned()),
+            ("2".to_owned(), "fresh".to_owned()),
+            ("4".to_owned(), "new".to_owned()),
+        ]
+    );
+}
+
 /// #264：导入中途失败时，目标表**原样不动**——包括那条已经执行过的整表 DELETE。
 ///
 /// 这一条是不用 `TRUNCATE` 的全部理由。`TRUNCATE` 是 DDL、隐式提交，同样的失败会
@@ -691,6 +718,24 @@ impl Rig {
         self.stage_and_swap_as(run, rows, WriteMode::ClearThenImport)
     }
 
+    fn append_with_pre_sql(
+        &mut self,
+        run: &str,
+        rows: &[(&str, &str)],
+        pre_sql: &str,
+    ) -> Result<AtomicSwapResult, String> {
+        let rows: Vec<(&str, Option<&str>)> = rows
+            .iter()
+            .map(|(key, value)| (*key, Some(*value)))
+            .collect();
+        self.stage_and_swap_nullable_with_pre_sql(
+            run,
+            &rows,
+            WriteMode::Append,
+            Some(pre_sql.to_owned()),
+        )
+    }
+
     fn stage_and_swap_as(
         &mut self,
         run: &str,
@@ -712,6 +757,16 @@ impl Rig {
         run: &str,
         rows: &[(&str, Option<&str>)],
         write_mode: WriteMode,
+    ) -> Result<AtomicSwapResult, String> {
+        self.stage_and_swap_nullable_with_pre_sql(run, rows, write_mode, None)
+    }
+
+    fn stage_and_swap_nullable_with_pre_sql(
+        &mut self,
+        run: &str,
+        rows: &[(&str, Option<&str>)],
+        write_mode: WriteMode,
+        pre_sql: Option<String>,
     ) -> Result<AtomicSwapResult, String> {
         let staging_table = format!("{}_stg_{run}", self.prefix);
         let columns = self
@@ -739,6 +794,7 @@ impl Rig {
                 staging_table: staging_table.clone(),
                 target_table: self.target_table.clone(),
                 write_mode,
+                pre_sql,
                 primary_key: self.primary_key.clone(),
                 columns: names,
                 source_rows: rows.len() as u64,

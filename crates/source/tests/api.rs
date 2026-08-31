@@ -430,6 +430,17 @@ fn task_json(name: &str, target_table: &str, datasources: &(String, String)) -> 
     )
 }
 
+fn task_json_with_pre_sql(
+    name: &str,
+    target_table: &str,
+    datasources: &(String, String),
+    pre_sql: &str,
+) -> String {
+    let mut task: Value = serde_json::from_str(&task_json(name, target_table, datasources)).unwrap();
+    task["spec"]["pre_sql"] = Value::String(pre_sql.to_owned());
+    serde_json::to_string(&task).unwrap()
+}
+
 /// 上面那份规格现算出来的源端 SQL。父子两端算的是同一份，历史里钉的也是它。
 const EXPECTED_SOURCE_SQL: &str = "SELECT a.ID AS ID,\n       a.D_BIZ AS D_BIZ\n  FROM APP.HOLDINGS a\n WHERE D_BIZ = DATE '2026-08-14'";
 
@@ -1146,6 +1157,47 @@ fn task_crud_persists_stable_identity_without_exposing_credentials() {
 }
 
 #[test]
+fn table_task_pre_sql_is_validated_persisted_and_updated_against_the_bound_target() {
+    let rig = Rig::new();
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let datasources = (source_id, target_id);
+    let original = "/* exact */\nDELETE FROM qbs.HOLDINGS WHERE D_BIZ < CURRENT_DATE;";
+
+    let created = rig.post(
+        "/api/tasks",
+        &task_json_with_pre_sql("持仓清理", "HOLDINGS", &datasources, original),
+    );
+    assert_eq!(created.status, 201, "{}", created.body_text());
+    let created = rig.json(&created);
+    let task_id = created["task_id"].as_str().unwrap();
+    assert_eq!(created["spec"]["pre_sql"], original);
+    assert_eq!(
+        rig.json(&rig.get(&format!("/api/tasks/{task_id}")))["spec"]["pre_sql"],
+        original
+    );
+
+    let updated_sql = "DELETE FROM HOLDINGS WHERE D_BIZ = CURRENT_DATE";
+    let updated = rig.put(
+        &format!("/api/tasks/{task_id}"),
+        &task_json_with_pre_sql("持仓清理", "HOLDINGS", &datasources, updated_sql),
+    );
+    assert_eq!(updated.status, 200, "{}", updated.body_text());
+    assert_eq!(rig.json(&updated)["spec"]["pre_sql"], updated_sql);
+
+    let wrong_target = rig.post(
+        "/api/tasks",
+        &task_json_with_pre_sql(
+            "越界清理",
+            "HOLDINGS",
+            &datasources,
+            "DELETE FROM other.HOLDINGS WHERE ID = 1",
+        ),
+    );
+    assert_eq!(wrong_target.status, 400, "{}", wrong_target.body_text());
+    assert!(wrong_target.body_text().contains("当前任务的目标表"));
+}
+
+#[test]
 fn task_writes_reject_client_identity_and_incomplete_definitions() {
     let rig = Rig::new();
     let (_agent_id, source_id, target_id) = rig.seed();
@@ -1458,11 +1510,18 @@ while [ ! -f '{}' ]; do sleep 0.02; done
         release.display(),
     ));
     let (agent_id, source_id, target_id) = rig.seed();
-    let task_id = rig.create_task(
-        "holdings",
-        "HOLDINGS",
-        &(source_id.clone(), target_id.clone()),
+    let pre_sql = "/* snapshot */\nDELETE FROM qbs.HOLDINGS WHERE D_BIZ < CURRENT_DATE;";
+    let created = rig.post(
+        "/api/tasks",
+        &task_json_with_pre_sql(
+            "holdings",
+            "HOLDINGS",
+            &(source_id.clone(), target_id.clone()),
+            pre_sql,
+        ),
     );
+    assert_eq!(created.status, 201, "{}", created.body_text());
+    let task_id = rig.json(&created)["task_id"].as_str().unwrap().to_owned();
 
     let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
     assert_eq!(started.status, 202, "{}", started.body_text());
@@ -1496,6 +1555,7 @@ while [ ! -f '{}' ]; do sleep 0.02; done
     assert_eq!(accepted["evidence"]["parameters"]["target_table"], "HOLDINGS");
     assert_eq!(accepted["evidence"]["parameters"]["primary_key"], serde_json::json!(["ID"]));
     assert_eq!(accepted["evidence"]["parameters"]["source_sql"], EXPECTED_SOURCE_SQL);
+    assert_eq!(accepted["evidence"]["parameters"]["pre_sql"], pre_sql);
     assert!(!serde_json::to_string(&accepted).unwrap().contains("change-me"));
     assert!(!serde_json::to_string(&accepted).unwrap().contains("secret"));
     assert_eq!(accepted["seq"], 0);
