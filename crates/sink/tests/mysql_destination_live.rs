@@ -261,6 +261,65 @@ fn append_pre_sql_cleans_only_its_range_then_upserts_the_staged_rows() {
     );
 }
 
+#[test]
+#[ignore = "needs a real MySQL; run docs/spikes/fixtures/local-rig/scripts/run-mysql-destination-live.sh"]
+fn pre_sql_cleanup_is_rolled_back_when_the_following_import_fails() {
+    let mut rig = Rig::open("pre_sql_import_fail");
+    rig.stage_and_swap("r1", &[("1", "a"), ("2", "b"), ("3", "c")])
+        .expect("laying down the target rows that must survive");
+    let before = rig.target_rows();
+    let pre_sql = format!(
+        "DELETE FROM `{}`.`{}` WHERE K IN ('1', '2')",
+        rig.database, rig.target_table
+    );
+
+    let failure = rig
+        .stage_and_swap_nullable_with_pre_sql(
+            "r2",
+            &[("7", Some("g")), ("8", None)],
+            WriteMode::Append,
+            Some(pre_sql),
+        )
+        .expect_err("a NULL into the target's NOT NULL column must fail the import");
+
+    assert!(
+        failure.contains("1048") || failure.to_ascii_uppercase().contains("NULL"),
+        "the failure must come from the import after cleanup: {failure}"
+    );
+    assert_eq!(
+        rig.target_rows(),
+        before,
+        "the successful cleanup and the failed import must roll back together"
+    );
+}
+
+#[test]
+#[ignore = "needs a real MySQL; run docs/spikes/fixtures/local-rig/scripts/run-mysql-destination-live.sh"]
+fn pre_sql_runtime_error_leaves_the_target_unchanged_and_skips_import() {
+    let mut rig = Rig::open("pre_sql_runtime_fail");
+    rig.stage_and_swap("r1", &[("1", "a"), ("2", "b")])
+        .expect("laying down the target rows that must survive");
+    let before = rig.target_rows();
+    let pre_sql = format!(
+        "DELETE FROM `{}`.`{}` WHERE `MISSING_COLUMN` = 1",
+        rig.database, rig.target_table
+    );
+
+    let failure = rig
+        .append_with_pre_sql("r2", &[("7", "must-not-land")], &pre_sql)
+        .expect_err("MySQL must reject the missing cleanup predicate column");
+
+    assert!(
+        failure.contains("1054") || failure.to_ascii_uppercase().contains("UNKNOWN COLUMN"),
+        "the failure must come from executing preSQL: {failure}"
+    );
+    assert_eq!(
+        rig.target_rows(),
+        before,
+        "preSQL failed before import, so neither cleanup nor the staged row may land"
+    );
+}
+
 /// #264：导入中途失败时，目标表**原样不动**——包括那条已经执行过的整表 DELETE。
 ///
 /// 这一条是不用 `TRUNCATE` 的全部理由。`TRUNCATE` 是 DDL、隐式提交，同样的失败会

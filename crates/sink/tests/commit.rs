@@ -360,12 +360,95 @@ fn swap_failure_discards_staging_and_records_a_discarded_tombstone() {
 }
 
 #[test]
+fn pre_sql_swap_failure_reports_rolled_back_cleanup_without_committed_evidence() {
+    let destination = Arc::new(destination());
+    destination.target_rows.lock().unwrap().insert(
+        (
+            "T_POSITION".to_owned(),
+            "[\"2026-01-01 00:00:00\"]".to_owned(),
+        ),
+        vec![Some("2026-01-01 00:00:00".to_owned())],
+    );
+    *destination.swap_error.lock().unwrap() = Some(AtomicSwapError::Other(
+        "unknown column in cleanup predicate".to_owned(),
+    ));
+    let service = SinkService::new("qbs", destination.clone());
+    service
+        .open(OpenRunRequest {
+            pre_sql: Some("DELETE FROM qbs.T_POSITION WHERE MISSING_COLUMN = 1".to_owned()),
+            ..open_request()
+        })
+        .unwrap();
+    service.write_batch(RUN_ID, one_row()).unwrap();
+
+    let error = service.commit(RUN_ID, 1, 1).unwrap_err();
+
+    assert_eq!((error.status, error.code), (500, "SWAP_FAILED"));
+    assert!(error.message.contains("事务已回滚"), "{}", error.message);
+    assert!(
+        error.message.contains("清理和导入的目标效果均已丢弃"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains("未提交任何清理"),
+        "{}",
+        error.message
+    );
+    assert_eq!(destination.target_row_values("T_POSITION").len(), 1);
+    let status = serde_json::to_value(service.get(RUN_ID).unwrap()).unwrap();
+    assert_eq!(status["terminal"], "DISCARDED");
+    assert_eq!(status["purged_rows"], 0);
+    assert_eq!(status["swapped_rows"], 0);
+}
+
+#[test]
+fn pre_sql_row_count_failure_happens_before_cleanup_and_reports_no_cleanup() {
+    let destination = Arc::new(destination());
+    destination.target_rows.lock().unwrap().insert(
+        (
+            "T_POSITION".to_owned(),
+            "[\"2026-01-01 00:00:00\"]".to_owned(),
+        ),
+        vec![Some("2026-01-01 00:00:00".to_owned())],
+    );
+    let service = SinkService::new("qbs", destination.clone());
+    service
+        .open(OpenRunRequest {
+            pre_sql: Some("DELETE FROM qbs.T_POSITION WHERE D_BIZ < CURRENT_DATE".to_owned()),
+            ..open_request()
+        })
+        .unwrap();
+    service.write_batch(RUN_ID, one_row()).unwrap();
+    destination.lose_staged_rows(1);
+
+    let error = service.commit(RUN_ID, 1, 1).unwrap_err();
+
+    assert_eq!(error.code, "VERIFY_FAILED");
+    assert_eq!(destination.target_row_values("T_POSITION").len(), 1);
+    let status = serde_json::to_value(service.get(RUN_ID).unwrap()).unwrap();
+    assert_eq!(status["terminal"], "DISCARDED");
+    assert_eq!(status["purged_rows"], 0);
+    assert_eq!(status["swapped_rows"], 0);
+}
+
+#[test]
 fn lock_wait_timeout_and_deadlock_report_target_busy() {
     for errno in [1205, 1213] {
         let destination = Arc::new(destination());
         *destination.swap_error.lock().unwrap() = Some(AtomicSwapError::TargetBusy { errno });
         let service = SinkService::new("qbs", destination.clone());
-        service.open(open_request()).unwrap();
+        let request = if errno == 1205 {
+            OpenRunRequest {
+                pre_sql: Some(
+                    "DELETE FROM qbs.T_POSITION WHERE D_BIZ < CURRENT_DATE".to_owned(),
+                ),
+                ..open_request()
+            }
+        } else {
+            open_request()
+        };
+        service.open(request).unwrap();
         service.write_batch(RUN_ID, one_row()).unwrap();
 
         let error = service.commit(RUN_ID, 1, 1).unwrap_err();
@@ -375,11 +458,18 @@ fn lock_wait_timeout_and_deadlock_report_target_busy() {
         assert_eq!(error.details["errno"], errno);
         assert!(error.message.contains("另一个 run"), "{}", error.message);
         assert!(error.message.contains("重跑即可"), "{}", error.message);
+        if errno == 1205 {
+            assert!(error.message.contains("事务已回滚"), "{}", error.message);
+            assert!(
+                error.message.contains("未提交任何清理"),
+                "{}",
+                error.message
+            );
+        }
         assert_eq!(destination.dropped.lock().unwrap().len(), 1);
-        assert_eq!(
-            serde_json::to_value(service.get(RUN_ID).unwrap()).unwrap()["terminal"],
-            "DISCARDED"
-        );
+        let status = serde_json::to_value(service.get(RUN_ID).unwrap()).unwrap();
+        assert_eq!(status["terminal"], "DISCARDED");
+        assert_eq!(status["purged_rows"], 0);
     }
 }
 
