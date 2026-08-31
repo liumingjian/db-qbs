@@ -4,10 +4,9 @@
 //! 它握着目标库的 `DELETE`：能连上 sink 端口的人照旧可以清空重写任一目标表，
 //! 完全绕过这里。部署形态（loopback / 反代）仍然是那一半唯一的防线。
 //!
-//! 账号只有一个（`admin`），没有注册，也没有第二个管理员。**默认口令 `admin` 长期有效**，
-//! 只有人自己改才变——所以「能连上端口」与「进得来」之间隔的是两次输入，不是一道真正的墙。
-//! 登录失败不限速、不冷却、不锁定，界面上也不提示还在用默认口令：三条都是所有者的裁定。
-//! 忘了口令的出路只有一条，在 source 主机上跑 `db-qbs-source reset-password`。
+//! 账号固定为两个：`admin` 是管理员，`operator` 是操作员，不存在注册、账号 CRUD 或角色分配。
+//! 升级时原管理员散列原样迁入；操作员没有默认口令且默认禁用。管理员忘记口令的出路仍只有
+//! 一条：在 source 主机上跑 `db-qbs-source reset-password`。
 //!
 //! **会话票据明文落库**，不做二次哈希。理由不是省事：`data_dir` 的读权限本来就等于
 //! 全盘失守（数据源口令的密钥就在同一个目录、同样 0600），对能读到这张表的人，
@@ -24,13 +23,14 @@ use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt
 use argon2::Argon2;
 use chrono::{DateTime, Utc};
 use rand::RngCore;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use serde::Serialize;
 
 const DATABASE_FILE: &str = "db-qbs.sqlite3";
 
-/// 唯一的账号名。它不是配置项——单用户产品里「用户名」这一栏存在的意义只有一个：
-/// 让登录表单看起来像个登录表单。
+/// 两个固定账号名。它们不是配置项，也不能增加第三个账号。
 pub const USERNAME: &str = "admin";
+pub const OPERATOR_USERNAME: &str = "operator";
 
 /// 出厂口令。`reset-password` 把口令送回的也是它。
 pub const DEFAULT_PASSWORD: &str = "admin";
@@ -47,6 +47,37 @@ pub const SESSION_IDLE_SECONDS: i64 = 8 * 60 * 60;
 pub struct IssuedSession {
     pub token: String,
     pub max_age_seconds: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum Role {
+    Admin,
+    Operator,
+}
+
+impl Role {
+    fn from_database(value: &str) -> Result<Self, String> {
+        match value {
+            "ADMIN" => Ok(Self::Admin),
+            "OPERATOR" => Ok(Self::Operator),
+            _ => Err(format!("登录库含有未知角色：{value}")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountIdentity {
+    pub username: String,
+    pub role: Role,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct OperatorAccount {
+    pub username: &'static str,
+    pub role: Role,
+    pub enabled: bool,
+    pub has_password: bool,
 }
 
 /// 口令与会话两张表的门。连接进 `Mutex` 的理由与 [`crate::TaskStore`] 同一条（#255）。
@@ -88,7 +119,8 @@ impl AuthStore {
                  CREATE TABLE IF NOT EXISTS sessions (
                     token         TEXT PRIMARY KEY NOT NULL,
                     created_at    INTEGER NOT NULL,
-                    last_seen_at  INTEGER NOT NULL
+                    last_seen_at  INTEGER NOT NULL,
+                    account_username TEXT NOT NULL DEFAULT 'admin'
                  );",
             )
             .map_err(|error| format!("初始化 SQLite 登录表失败：{error}"))?;
@@ -97,12 +129,65 @@ impl AuthStore {
             .busy_timeout(Duration::from_secs(5))
             .map_err(|error| format!("配置 SQLite 忙等待失败：{error}"))?;
 
+        if !column_exists(&connection, "sessions", "account_username")? {
+            connection
+                .execute(
+                    "ALTER TABLE sessions ADD COLUMN account_username TEXT NOT NULL DEFAULT 'admin'",
+                    [],
+                )
+                .map_err(|error| format!("迁移 SQLite 会话表失败：{error}"))?;
+        }
+        let legacy_hash: Option<String> = connection
+            .query_row(
+                "SELECT password_hash FROM credentials WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("读取旧管理员口令失败：{error}"))?;
+        let admin_hash = match legacy_hash {
+            Some(hash) => hash,
+            None => {
+                let hash = hash_password(DEFAULT_PASSWORD)?;
+                connection
+                    .execute(
+                        "INSERT INTO credentials (id, password_hash) VALUES (1, ?1)",
+                        params![hash],
+                    )
+                    .map_err(|error| format!("写入默认管理员口令失败：{error}"))?;
+                hash
+            }
+        };
+        connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS accounts (
+                    username      TEXT PRIMARY KEY CHECK (username IN ('admin', 'operator')),
+                    role          TEXT NOT NULL,
+                    enabled       INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                    password_hash TEXT,
+                    CHECK ((username = 'admin' AND role = 'ADMIN') OR
+                           (username = 'operator' AND role = 'OPERATOR'))
+                );",
+            )
+            .map_err(|error| format!("初始化 SQLite 账号表失败：{error}"))?;
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO accounts (username, role, enabled, password_hash)
+                 VALUES ('admin', 'ADMIN', 1, ?1)",
+                params![admin_hash],
+            )
+            .map_err(|error| format!("迁移管理员账号失败：{error}"))?;
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO accounts (username, role, enabled, password_hash)
+                 VALUES ('operator', 'OPERATOR', 0, NULL)",
+                [],
+            )
+            .map_err(|error| format!("初始化操作员账号失败：{error}"))?;
+
         let store = Self {
             connection: Mutex::new(connection),
         };
-        if store.password_hash()?.is_none() {
-            store.write_password_hash(&hash_password(DEFAULT_PASSWORD)?)?;
-        }
         Ok(store)
     }
 
@@ -115,10 +200,16 @@ impl AuthStore {
     /// 口令对不对。用户名不对也一样是 `false`——**两种失败不分开报**，
     /// 因为分开报只会告诉试口令的人「账号叫 admin」，而那件事本来就写在文档里。
     pub fn verify_password(&self, username: &str, password: &str) -> Result<bool, String> {
-        if username != USERNAME {
-            return Ok(false);
-        }
-        let Some(stored) = self.password_hash()? else {
+        let row: Option<(bool, Option<String>)> = self
+            .connection()?
+            .query_row(
+                "SELECT enabled, password_hash FROM accounts WHERE username = ?1",
+                params![username],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("读取账号失败：{error}"))?;
+        let Some((true, Some(stored))) = row else {
             return Ok(false);
         };
         verify_password(&stored, password)
@@ -126,13 +217,29 @@ impl AuthStore {
 
     /// 发一张新票据。**不动别的会话**：同一个账号允许多处同时登着（办公室一份、家里一份），
     /// 新登录踢掉旧登录在单账号产品里只会自伤——它防不住任何人，只会把自己踢下线。
-    pub fn issue_session(&self, now: DateTime<Utc>) -> Result<IssuedSession, String> {
+    pub fn issue_session(
+        &self,
+        username: &str,
+        now: DateTime<Utc>,
+    ) -> Result<IssuedSession, String> {
+        let exists: bool = self
+            .connection()?
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM accounts WHERE username = ?1 AND enabled = 1)",
+                params![username],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("读取账号失败：{error}"))?;
+        if !exists {
+            return Err("账号未启用".to_owned());
+        }
         let token = generate_token();
         let stamp = now.timestamp();
         self.connection()?
             .execute(
-                "INSERT INTO sessions (token, created_at, last_seen_at) VALUES (?1, ?2, ?2)",
-                params![token, stamp],
+                "INSERT INTO sessions (token, created_at, last_seen_at, account_username)
+                 VALUES (?1, ?2, ?2, ?3)",
+                params![token, stamp, username],
             )
             .map_err(|error| format!("写入会话失败：{error}"))?;
         Ok(IssuedSession {
@@ -146,22 +253,33 @@ impl AuthStore {
     /// 过期的当场删掉再判否：留着它只会让这张表长成一个没人清的坟场，
     /// 而「过期」与「从来没有过」对调用方是同一个答案。
     pub fn authenticate(&self, token: &str, now: DateTime<Utc>) -> Result<bool, String> {
+        Ok(self.resolve_session(token, now)?.is_some())
+    }
+
+    pub fn resolve_session(
+        &self,
+        token: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<AccountIdentity>, String> {
         let stamp = now.timestamp();
-        let last_seen: Option<i64> = self
+        let account: Option<(i64, String, String)> = self
             .connection()?
             .query_row(
-                "SELECT last_seen_at FROM sessions WHERE token = ?1",
+                "SELECT sessions.last_seen_at, accounts.username, accounts.role
+                 FROM sessions
+                 JOIN accounts ON accounts.username = sessions.account_username
+                 WHERE sessions.token = ?1 AND accounts.enabled = 1",
                 params![token],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()
             .map_err(|error| format!("读取会话失败：{error}"))?;
-        let Some(last_seen) = last_seen else {
-            return Ok(false);
+        let Some((last_seen, username, role)) = account else {
+            return Ok(None);
         };
         if stamp - last_seen >= SESSION_IDLE_SECONDS {
             self.forget(token)?;
-            return Ok(false);
+            return Ok(None);
         }
         self.connection()?
             .execute(
@@ -169,7 +287,33 @@ impl AuthStore {
                 params![token, stamp],
             )
             .map_err(|error| format!("刷新会话失败：{error}"))?;
-        Ok(true)
+        Ok(Some(AccountIdentity {
+            username,
+            role: Role::from_database(&role)?,
+        }))
+    }
+
+    /// 取票据当前所属账号，但不再刷新一次滑动窗口。路由入口已经完成过刷新；
+    /// 改密 handler 只需要知道该改哪一个固定账号。
+    pub fn session_identity(&self, token: &str) -> Result<Option<AccountIdentity>, String> {
+        self.connection()?
+            .query_row(
+                "SELECT accounts.username, accounts.role
+                 FROM sessions
+                 JOIN accounts ON accounts.username = sessions.account_username
+                 WHERE sessions.token = ?1 AND accounts.enabled = 1",
+                params![token],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("读取会话账号失败：{error}"))?
+            .map(|(username, role)| {
+                Ok(AccountIdentity {
+                    username,
+                    role: Role::from_database(&role)?,
+                })
+            })
+            .transpose()
     }
 
     /// 退出登录：只销这一张票，别处登着的不受影响（见 [`AuthStore::issue_session`]）。
@@ -185,15 +329,37 @@ impl AuthStore {
     ///
     /// 改完**除了 `keep` 之外的会话全部失效**：改口令这个动作的常见动机就是
     /// 「我怀疑别处有人登着」，留着那些票据等于这次改密什么也没做。
-    pub fn change_password(&self, current: &str, next: &str, keep: &str) -> Result<(), String> {
-        if !self.verify_password(USERNAME, current)? {
+    pub fn change_password(
+        &self,
+        username: &str,
+        current: &str,
+        next: &str,
+        keep: &str,
+    ) -> Result<(), String> {
+        if !self.verify_password(username, current)? {
             return Err("当前口令不正确".to_owned());
         }
         validate_new_password(next)?;
-        self.write_password_hash(&hash_password(next)?)?;
-        self.connection()?
-            .execute("DELETE FROM sessions WHERE token <> ?1", params![keep])
+        let hash = hash_password(next)?;
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("开始修改口令事务失败：{error}"))?;
+        transaction
+            .execute(
+                "UPDATE accounts SET password_hash = ?2 WHERE username = ?1",
+                params![username, hash],
+            )
+            .map_err(|error| format!("写入口令失败：{error}"))?;
+        transaction
+            .execute(
+                "DELETE FROM sessions WHERE account_username = ?1 AND token <> ?2",
+                params![username, keep],
+            )
             .map_err(|error| format!("清理其它会话失败：{error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("提交口令修改失败：{error}"))?;
         Ok(())
     }
 
@@ -202,10 +368,23 @@ impl AuthStore {
     /// 会话一起清是这条命令的一半：跑它的场景是「我进不去了」，而进不去的人无从判断
     /// 此刻还有谁的浏览器攥着一张有效票据。
     pub fn reset_password(&self) -> Result<(), String> {
-        self.write_password_hash(&hash_password(DEFAULT_PASSWORD)?)?;
-        self.connection()?
-            .execute("DELETE FROM sessions", [])
+        let hash = hash_password(DEFAULT_PASSWORD)?;
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("开始重置口令事务失败：{error}"))?;
+        transaction
+            .execute(
+                "UPDATE accounts SET password_hash = ?1 WHERE username = 'admin'",
+                params![hash],
+            )
+            .map_err(|error| format!("写入口令失败：{error}"))?;
+        transaction
+            .execute("DELETE FROM sessions WHERE account_username = 'admin'", [])
             .map_err(|error| format!("清理会话失败：{error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("提交口令重置失败：{error}"))?;
         Ok(())
     }
 
@@ -214,27 +393,81 @@ impl AuthStore {
         self.verify_password(USERNAME, DEFAULT_PASSWORD)
     }
 
-    fn password_hash(&self) -> Result<Option<String>, String> {
+    pub fn operator_account(&self) -> Result<OperatorAccount, String> {
         self.connection()?
             .query_row(
-                "SELECT password_hash FROM credentials WHERE id = 1",
+                "SELECT enabled, password_hash IS NOT NULL FROM accounts WHERE username = 'operator'",
                 [],
-                |row| row.get(0),
+                |row| Ok(OperatorAccount {
+                    username: OPERATOR_USERNAME,
+                    role: Role::Operator,
+                    enabled: row.get(0)?,
+                    has_password: row.get(1)?,
+                }),
             )
-            .optional()
-            .map_err(|error| format!("读取口令失败：{error}"))
+            .map_err(|error| format!("读取操作员账号失败：{error}"))
     }
 
-    fn write_password_hash(&self, hash: &str) -> Result<(), String> {
-        self.connection()?
-            .execute(
-                "INSERT INTO credentials (id, password_hash) VALUES (1, ?1)
-                 ON CONFLICT (id) DO UPDATE SET password_hash = excluded.password_hash",
-                params![hash],
-            )
-            .map_err(|error| format!("写入口令失败：{error}"))?;
+    pub fn update_operator(&self, enabled: bool, password: Option<&str>) -> Result<(), String> {
+        if let Some(password) = password {
+            validate_new_password(password)?;
+        }
+        let hash = password.map(hash_password).transpose()?;
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("开始修改操作员事务失败：{error}"))?;
+        update_operator(&transaction, enabled, hash.as_deref())?;
+        if !enabled || hash.is_some() {
+            transaction
+                .execute(
+                    "DELETE FROM sessions WHERE account_username = 'operator'",
+                    [],
+                )
+                .map_err(|error| format!("清理操作员会话失败：{error}"))?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("提交操作员修改失败：{error}"))?;
         Ok(())
     }
+}
+
+fn update_operator(
+    transaction: &Transaction<'_>,
+    enabled: bool,
+    hash: Option<&str>,
+) -> Result<(), String> {
+    let has_password: bool = transaction
+        .query_row(
+            "SELECT password_hash IS NOT NULL FROM accounts WHERE username = 'operator'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("读取操作员账号失败：{error}"))?;
+    if enabled && hash.is_none() && !has_password {
+        return Err("启用操作员前必须设置口令".to_owned());
+    }
+    transaction.execute(
+        "UPDATE accounts SET enabled = ?1, password_hash = COALESCE(?2, password_hash) WHERE username = 'operator'",
+        params![enabled, hash],
+    ).map_err(|error| format!("写入操作员账号失败：{error}"))?;
+    Ok(())
+}
+
+fn column_exists(connection: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|error| format!("读取 SQLite 表结构失败：{error}"))?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| format!("读取 SQLite 表结构失败：{error}"))?;
+    for name in names {
+        if name.map_err(|error| format!("读取 SQLite 表结构失败：{error}"))? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// 新口令的全部规矩：**非空**。
