@@ -347,9 +347,20 @@ branches on the version.
    (no `run_id`) and when the stage says the point of no return has passed. A failed one is written
    into that run's Run Log as an `abort_failed` line rather than swallowed, and the hold it failed to
    release is remembered — which table it is on, and which run's abort to resend — so a person can
-   retry it on demand. **SIGKILL, a parent crash, and a
-   power cut still leak** — there is no timeout-based reclaim on the `sink` side, and a source
-   restart forgets the remembered holds along with everything else it keeps in memory.
+   retry it on demand.
+
+   **The parent's own death is answered from both ends**, because a hold nobody releases is a target
+   table nobody can write again. On a graceful shutdown the process stops every in-flight run before
+   it seals anything — the same signal it sends for a stop request, under the name *service
+   restarted* rather than *stopped by user*, and skipping the ones past the point of no return — and
+   waits, bounded by 40 seconds, for those wrap-ups to send their aborts. A death it cannot answer
+   (SIGKILL, a crash, a power cut) leaves those run rows unsealed, and **the next start reads them
+   before it seals them**: every one that reached `sink` and had not passed the point of no return is
+   booked as an unreleased hold *before the port opens*, and a background pass resends the abort —
+   success clears the booking, failure leaves it on the row with its reason and the manual retry.
+   What still leaks: a hold whose abort was still failing when the process went away, since the
+   booking lives in memory, and a run whose evidence never named an agent. There is still no
+   timeout-based reclaim on the `sink` side.
 
 **Target table hold**
    `sink`'s record that one run is using a target table; it is what a second run collides with
@@ -368,8 +379,9 @@ branches on the version.
    report on and is stopped by the server instead. The retry is manual and explicit
    (`POST /api/runs/{run_record_id}/release`, the same abort as before, sent by a person instead of
    by the parent — the path says which row was clicked, what gets released is the hold on that row's
-   table); nothing retries on a timer, and this is the only remedy short of clearing the hold on the
-   agent by hand.
+   table); nothing retries on a timer — the only resend no person asked for is the one a restart makes
+   on its way up (see **Abort**) — and short of that, clearing the hold on the agent by hand is the
+   only other remedy.
 
 **Swap**
    Completed inside a single transaction on the target: an `INSERT ... SELECT` from the staging table
