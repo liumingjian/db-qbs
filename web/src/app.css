@@ -536,6 +536,10 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .write-mode-statement dd { display: flex; flex-direction: column; gap: 2px; margin: 0; font-weight: var(--weight-em); }
 .write-mode-statement dd small { color: var(--mute); font-size: var(--size-meta); font-weight: normal; }
 .write-mode-card .upsert-note { margin: 0 12px 12px; }
+.pre-sql-editor { flex: 1 1 420px; min-width: 0; }
+.pre-sql-editor > header { margin-bottom: 8px; }
+.pre-sql-editor > header > div { display: flex; flex-direction: column; gap: 2px; }
+.write-mode-responsibility { margin: 8px 0 0; color: var(--dim); font-size: var(--size-meta); }
 
 /* 周期调度那一格（#265），摆在最后一屏「任务名」下面。规格跟着 `.write-mode-card`
    走：同样的边线、同样的 48px 表头——同一屏上两块卡差 1px 都看得出来。 */
@@ -1040,7 +1044,8 @@ select, .page-size {
 .phase-item.is-current .phase-dot { background: var(--info); box-shadow: 0 0 0 3px var(--info-bg); }
 .phase-label, .phase-after, .phase-arrow { color: var(--mute); font-family: var(--font-cn); font-size: var(--size-meta); }
 .terminal-block { display: inline-flex; align-items: center; gap: 7px; padding: 3px 9px; border: 1px solid var(--line-strong); border-radius: var(--badge-radius); font-family: var(--font-num); font-size: var(--size-meta); white-space: nowrap; }
-.terminal-block.is-swapped { border-color: var(--ok-bd); background: var(--ok-fill); color: var(--ok-ink); }
+.terminal-block.is-swapped,
+.terminal-block.is-cleaned_and_swapped { border-color: var(--ok-bd); background: var(--ok-fill); color: var(--ok-ink); }
 /* V5：DISCARDED 是描边——无底色 + 1px 边。有底色的话它和实心的 SWAPPED 在灰度打印下
    都是「带边框的填充块」，§8 承诺的「实心块 vs 描边块」就落空了。
    #89：反过来那半边也要成立——SWAPPED 的填充用 --ok-fill 而不是 --ok-bg，

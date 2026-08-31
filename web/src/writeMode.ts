@@ -19,12 +19,26 @@ export type WriteMode = "APPEND" | "CLEAR_THEN_IMPORT";
 
 export type WriteStatement = "upsert" | "insert";
 
+export function hasPreSql(preSql: string | null | undefined): boolean {
+  return (preSql ?? "").trim() !== "";
+}
+
+/** Destructive semantics marker used consistently across task and run surfaces. */
+export function writeModeLabel(mode: WriteMode, preSql?: string | null): string {
+  if (mode === "APPEND" && hasPreSql(preSql)) return "追加写 + preSQL 清理";
+  return WRITE_MODES.find((entry) => entry.mode === mode)?.label ?? mode;
+}
+
+export function runPreSql(evidence: RunEvidence | undefined): string | undefined {
+  return evidence?.parameters?.pre_sql;
+}
+
 /** 写入模式的清单。向导里那组单选按钮直接照它渲染，加一档就多一项。 */
 export const WRITE_MODES: readonly { mode: WriteMode; label: string; hint: string }[] = [
   {
     mode: "APPEND",
     label: "追加写",
-    hint: "把查询结果写进目标表，已有的行一行都不删。",
+    hint: "把查询结果写进目标表；可选 preSQL 会先按条件清理目标表。",
   },
   {
     mode: "CLEAR_THEN_IMPORT",
@@ -77,6 +91,7 @@ export const APPEND_ONLY_CONCLUSION =
 export function writeSemanticsNote(
   statement: WriteStatement,
   mode: WriteMode = "APPEND",
+  preSql?: string | null,
 ): string {
   if (clearsTarget(mode)) {
     // 清空模式下，上面那两个坑一个都不存在——「源端删掉的行留着」正是它来解决的，
@@ -85,6 +100,11 @@ export function writeSemanticsNote(
     return `先清空再导入：同一个事务里先清空目标表再导入，跑完之后目标表精确等于本次查询结果；原有数据不可恢复，也没有撤销入口。写入语句仍是${writeStatementLabel(
       statement,
     )}——清空不改变它。`;
+  }
+  if (hasPreSql(preSql)) {
+    return `追加写 + preSQL 清理：运行会先按条件清理目标表，再执行${writeStatementLabel(
+      statement,
+    )}；清理与导入在同一事务中提交。`;
   }
   return statement === "upsert"
     ? "按主键 upsert：新增和变更会写进目标表；源端删除的行不会跟着消失。"
@@ -145,5 +165,8 @@ export function runWriteSemantics(
   spec: TaskSpec,
 ): string {
   const write = runWriteView(evidence, spec);
+  if (write.mode === "APPEND" && hasPreSql(runPreSql(evidence))) {
+    return "追加写 + preSQL 清理：清理与导入已在同一事务中提交。";
+  }
   return writeSemanticsDone(write.statement, write.mode);
 }

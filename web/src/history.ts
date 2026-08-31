@@ -4,19 +4,21 @@ import { stageLabel } from "./runStage";
 /**
  * 目标表最后被怎么了，**界面认得的那几个**（#264）。
  *
- * 三件事，三个词，一个都不能合并：`SWAPPED` 是「按主键合并进目标表」，`REPLACED`
- * 是「整表被替换」（先清空再导入），`DISCARDED` 是「一根手指头都没碰」。
+ * 四件事，四个词，一个都不能合并：`SWAPPED` 是「按主键合并进目标表」，
+ * `CLEANED_AND_SWAPPED` 是「preSQL 清理与导入一起提交」，`REPLACED` 是「整表被替换」
+ * （先清空再导入），`DISCARDED` 是「没有目标效果提交」。
  *
- * 认得的只有这三个，但**展示层搬运的是服务端给的原字符串**：那一列在服务端就是
+ * 认得的只有这四个，但**展示层搬运的是服务端给的原字符串**：那一列在服务端就是
  * 「日志的尽力投影」，不认识的拼写原样落库（`run_history.rs`）。前端再把它筛一遍、
  * 认不出就渲染成空白，等于把「跑数的子进程比界面新」这件事从屏幕上抹掉——而那正是
  * 最该被看见的时候。所以 `HistoryPresentation.terminalEffect` 是 `string`：原样透出，
  * 但**不据此做任何判断**，要判断的地方问 `knownTerminalEffect`。
  */
-export type TerminalEffect = "SWAPPED" | "REPLACED" | "DISCARDED";
+export type TerminalEffect = "SWAPPED" | "CLEANED_AND_SWAPPED" | "REPLACED" | "DISCARDED";
 
 const TERMINAL_EFFECTS: readonly TerminalEffect[] = [
   "SWAPPED",
+  "CLEANED_AND_SWAPPED",
   "REPLACED",
   "DISCARDED",
 ];
@@ -241,6 +243,8 @@ function succeededConclusion(
   const merged =
     terminalEffect === "SWAPPED"
       ? "，已按主键合并进目标表"
+      : terminalEffect === "CLEANED_AND_SWAPPED"
+        ? `，preSQL 已清理 ${countFormatter.format(history.purged_rows ?? 0)} 行并完成导入`
       : terminalEffect === "REPLACED"
         ? "，目标表已整表替换为本次查询结果"
         : "";

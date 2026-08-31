@@ -122,9 +122,14 @@ branches on the version.
    state regardless of what was there — and it is the only write mode under which rows deleted at
    the source stop lingering at the target. What it costs is stated where it is chosen: the previous
    contents are deleted, and there is no undo.
+   **Optional preSQL is the scoped cleanup form of APPEND** (#273): after staging and verification,
+   one validated, single-target-table `DELETE ... WHERE ...` runs immediately before the existing
+   insert or upsert in the same transaction. The task and every run surface call this out as
+   **APPEND + preSQL cleanup**; it is never presented as delete-free append.
 
 **Task Definition**
-   A **structured spec** (table, columns, filter clause, primary key, **write mode**, **schedule**).
+   A **structured spec** (table, columns, filter clause, primary key, **write mode**, optional
+   **preSQL**, **schedule**).
    **It is the
    single source of
    truth, and the source SQL is generated from it.** **The SQL is not stored in the task definition**
@@ -142,6 +147,9 @@ branches on the version.
    the definition's record of "the target table had nothing to merge on". If the target table's key
    situation has moved since, the two derivations disagree and **the run fails**; the statement kind
    is never switched silently under an unchanged definition.
+   preSQL is valid only under `APPEND`. Blank input means absent; nonblank text is preserved exactly.
+   Each run snapshots that exact SQL beside its source SQL, target table, key, and write mode, so
+   editing the task later cannot rewrite historical cleanup evidence.
 
 **Task Name**
    A **display label on a task, nothing more**: it is not unique, it takes part in no identity, and
@@ -395,8 +403,11 @@ branches on the version.
    (MySQL counts an update as 2, and `CLIENT_FOUND_ROWS` puts the floor at `staged` rather than 0),
    while the plain insert demands **strict equality**. One pure function in `shared` decides both,
    and the statement is passed into it rather than sniffed at each call site.
-   **Under the append write mode, rows deleted at the source do not disappear at the target** —
-   neither statement ever deletes. That is a deliberate debt.
+   **Under append without preSQL, rows deleted at the source do not disappear at the target** —
+   neither import statement deletes. That is a deliberate debt. Under append with preSQL, the
+   validated DELETE runs after staging and verification, immediately before that same import
+   statement. Both share the target transaction, so a cleanup or import failure rolls back every
+   target effect. `purged_rows` is the committed preSQL deletion count on this path.
    **Under clear-then-import the swap has one more step, and it is inside the same transaction**
    (#264): a whole-table `DELETE FROM <target>` immediately before the insert. It is a `DELETE` and
    **never a `TRUNCATE`** — `TRUNCATE` is DDL and commits implicitly, which inside this transaction
@@ -414,11 +425,12 @@ branches on the version.
 
 **Tombstone**
    An in-memory record `sink` keeps for a finished run so that "what happened?" still has an answer
-   after the swap. It records the **resource's final state**, not the run's, and has three values:
+   after the swap. It records the **resource's final state**, not the run's, and has four values:
    `SWAPPED` (**merged by primary key** into the target table, per **Swap** above — it does **not**
-   mean the table was replaced wholesale), `REPLACED` (the target table was **replaced wholesale**:
+   mean the table was replaced wholesale), `CLEANED_AND_SWAPPED` (a run's preSQL cleanup and append
+   import committed together), `REPLACED` (the target table was **replaced wholesale**:
    a clear-then-import run emptied it and imported this run's result, so it now equals that result
-   exactly) and `DISCARDED` (the target table was never touched). `SWAPPED` and `REPLACED` cannot
+   exactly) and `DISCARDED` (no target effect committed). These effects cannot
    share a word: a run history that describes a wholesale replacement as "merged by primary key"
    reads false, which is the entire reason for the third value (#264). **It is a diagnostic cache, not a state store** — only the most recent 32 are kept, and
    losing them costs no correctness, only diagnosability. **Run history does not absorb it**: a
@@ -741,9 +753,10 @@ gets paid off and when lives in the issue tracker, not here.
    no SQL shape precheck, so the problem surfaces only during a real run, or silently loses precision.
    **The mapping precheck is unaffected**: it describes through a cursor on the sink side and remains
    a hard gate.
-9. **Under the append write mode, neither write statement ever deletes.** Rows removed at the
-   source stay in the target table forever; see **Swap**. Clear-then-import is the way out, and it
-   is a per-task choice, not a fix applied to existing tasks.
+9. **Under append without preSQL, neither import statement ever deletes.** Rows removed at the
+   source stay in the target table forever; see **Swap**. A task may opt into a scoped preSQL DELETE,
+   or use clear-then-import for whole-table replacement; neither choice repairs existing tasks
+   automatically.
 9a. **A run against a primary-key-less target table is not idempotent.** Every re-run appends the
    whole result set again, and nothing in the product detects or repairs the duplicates: there is no
    dedupe pass, no "already imported" marker, and the verification gate only compares this run's

@@ -526,6 +526,38 @@ describe("the advance gate", () => {
     expect(toSpec(back).write_mode).toBe("APPEND");
   });
 
+  it("asks before clearing authored preSQL, then clears only after confirmation", () => {
+    let draft = done(apply(openNew(SOURCE, TARGET), {
+      type: "pre-sql",
+      sql: "DELETE FROM t WHERE id = 7;",
+    }));
+    const pending = apply(draft, { type: "write-mode", mode: "CLEAR_THEN_IMPORT" });
+    expect(pending).toMatchObject({
+      kind: "needs-confirm",
+      loses: { lines: ["手写的 preSQL 清理语句"] },
+    });
+    expect(draft.spec.write_mode).toBe("APPEND");
+    expect(draft.spec.pre_sql).toBe("DELETE FROM t WHERE id = 7;");
+    if (pending.kind !== "needs-confirm") throw new Error("expected confirmation");
+    draft = confirm(draft, pending.intent);
+    expect(draft.spec.write_mode).toBe("CLEAR_THEN_IMPORT");
+    expect(draft.spec.pre_sql).toBeUndefined();
+    expect(toSpec(draft).pre_sql).toBeUndefined();
+  });
+
+  it("preserves exact nonblank preSQL and never serializes blank or clear-mode SQL", () => {
+    const original = "/* exact */\nDELETE FROM t WHERE day = CURRENT_DATE;\n";
+    const authored = done(apply(openNew(SOURCE, TARGET), { type: "pre-sql", sql: original }));
+    expect(toSpec(authored).pre_sql).toBe(original);
+
+    const blank = done(apply(openNew(SOURCE, TARGET), { type: "pre-sql", sql: " \n\t" }));
+    expect(toSpec(blank).pre_sql).toBeUndefined();
+    expect(toSpec({
+      ...authored,
+      spec: { ...authored.spec, write_mode: "CLEAR_THEN_IMPORT" },
+    }).pre_sql).toBeUndefined();
+  });
+
   it("catches the target field shapes the server would reject", () => {
     // `specComplete` 曾是 `validate()` 的真子集：这几条它一条都不查，于是「保存」
     // 亮着，点下去被后端打回。
