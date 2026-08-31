@@ -3768,6 +3768,152 @@ fn run_details_expose_only_the_same_aggregate_alert_state_to_both_roles() {
 }
 
 #[test]
+fn disabled_and_incomplete_alerts_are_final_not_sent_without_fake_recipients() {
+    let rig = Rig::new();
+    let now = rig.clock.now();
+    let mut failed = RunHistory::accepted("disabled-alert", "task-disabled", "SELECT secret", now);
+    failed.outcome = Some("FAILED".to_owned());
+    failed.finished_at = Some(now.to_rfc3339());
+    failed.failure_kind = Some("NETWORK".to_owned());
+    rig.history.finalize(&failed, now, 90).unwrap();
+
+    let run = rig.get("/api/runs/disabled-alert");
+    assert_eq!(run.status, 200);
+    assert_eq!(rig.json(&run)["alert"]["delivery_state"], "NOT_SENT");
+    for private in ["recipient", "attempt_count", "last_error", "retry_deadline_at"] {
+        assert!(!run.body_text().contains(private));
+    }
+    assert_eq!(
+        rig.json(&rig.get("/api/email-deliveries?run_record_id=disabled-alert")),
+        serde_json::json!([]),
+        "an Alert-level disposition represents zero recipients without a fake address"
+    );
+
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(false, "SMTP-secret-marker", 24),
+        )
+        .status,
+        200
+    );
+    let mut configured_disabled =
+        RunHistory::accepted("configured-disabled", "task-disabled", "SELECT secret", now);
+    configured_disabled.outcome = Some("FAILED".to_owned());
+    configured_disabled.finished_at = Some(now.to_rfc3339());
+    configured_disabled.failure_kind = Some("NETWORK".to_owned());
+    rig.history.finalize(&configured_disabled, now, 90).unwrap();
+    let deliveries = rig.json(
+        &rig.get("/api/email-deliveries?run_record_id=configured-disabled"),
+    );
+    assert_eq!(deliveries.as_array().unwrap().len(), 2);
+    assert!(deliveries
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|delivery| delivery["state"] == "NOT_SENT"));
+    let retry = format!(
+        "/api/email-deliveries/{}/retry",
+        deliveries[0]["delivery_id"].as_str().unwrap()
+    );
+    assert_eq!(rig.post(&retry, "").status, 400);
+    let suppressed_id = deliveries[1]["delivery_id"].as_str().unwrap();
+    rusqlite::Connection::open(rig.directory.join("db-qbs.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE email_deliveries SET state = 'SUPPRESSED' WHERE delivery_id = ?1",
+            [suppressed_id],
+        )
+        .unwrap();
+    assert_eq!(
+        rig.post(
+            &format!("/api/email-deliveries/{suppressed_id}/retry"),
+            "",
+        )
+        .status,
+        400
+    );
+}
+
+#[test]
+fn disabling_terminates_pending_work_and_reenabling_never_backfills_it() {
+    let rig = Rig::new();
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(true, "SMTP-secret-marker", 24),
+        )
+        .status,
+        200
+    );
+    let now = rig.clock.now();
+    let mut failed = RunHistory::accepted("terminated-alert", "task-disabled", "SELECT 1", now);
+    failed.outcome = Some("FAILED".to_owned());
+    failed.finished_at = Some(now.to_rfc3339());
+    failed.failure_kind = Some("NETWORK".to_owned());
+    rig.history.finalize(&failed, now, 90).unwrap();
+    *rig.mail_transport.failure.lock().unwrap() = Some(MailTransportError::Timeout);
+    assert_eq!(
+        rig.alert_outbox
+            .run_due_attempts(
+                &rig.email_alerts,
+                rig.mail_transport.as_ref(),
+                rig.clock.as_ref(),
+            )
+            .unwrap(),
+        2
+    );
+
+    let disabled = rig.put(
+        "/api/email-alert-settings",
+        &email_alert_settings_json(false, "", 24),
+    );
+    assert_eq!(disabled.status, 200, "{}", disabled.body_text());
+    let terminated = rig.json(
+        &rig.get("/api/email-deliveries?run_record_id=terminated-alert"),
+    );
+    assert!(terminated.as_array().unwrap().iter().all(|delivery| {
+        delivery["state"] == "NOT_SENT"
+            && delivery["last_error"] == "管理员已停用邮件告警"
+            && delivery["next_attempt_at"].is_null()
+    }));
+    assert_eq!(
+        rig.json(&rig.get("/api/runs/terminated-alert"))["alert"]["delivery_state"],
+        "NOT_SENT"
+    );
+
+    let enabled = rig.put(
+        "/api/email-alert-settings",
+        &email_alert_settings_json(true, "", 24),
+    );
+    assert_eq!(enabled.status, 200, "{}", enabled.body_text());
+    *rig.mail_transport.failure.lock().unwrap() = None;
+    assert_eq!(
+        rig.alert_outbox
+            .run_due_attempts(
+                &rig.email_alerts,
+                rig.mail_transport.as_ref(),
+                rig.clock.as_ref(),
+            )
+            .unwrap(),
+        0
+    );
+    let still_terminated = rig.json(
+        &rig.get("/api/email-deliveries?run_record_id=terminated-alert"),
+    );
+    assert!(still_terminated
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|delivery| delivery["state"] == "NOT_SENT"));
+    let retry = format!(
+        "/api/email-deliveries/{}/retry",
+        still_terminated[0]["delivery_id"].as_str().unwrap()
+    );
+    assert_eq!(rig.post(&retry, "").status, 400);
+}
+
+#[test]
 fn only_administrators_can_diagnose_and_retry_exhausted_email_deliveries() {
     let rig = Rig::new();
     assert_eq!(

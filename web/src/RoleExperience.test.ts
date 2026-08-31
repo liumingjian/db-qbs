@@ -172,6 +172,28 @@ describe("role-specific rendering", () => {
     expect(failedTest).toContain("SMTP 连接或响应超时");
   });
 
+  it("requires an explicit acknowledgement before disabling email delivery", () => {
+    const renderDisable = (confirmed: boolean) => renderToStaticMarkup(createElement(EmailAlertSettingsView, {
+      settings: { ...EMAIL_SETTINGS, enabled: true },
+      draft: { ...EMAIL_SETTINGS_INPUT, enabled: false, smtp_secret: "" },
+      busy: false,
+      error: null,
+      saved: null,
+      disableConfirmed: confirmed,
+      onChange: () => undefined,
+      onSubmit: () => undefined,
+      onTest: () => undefined,
+    }));
+
+    const warning = renderDisable(false);
+    expect(warning).toContain("停用会立即终止所有待发送和重试中的邮件");
+    expect(warning).toContain("以后重新启用也不会补发");
+    expect(warning).toContain('<button class="button is-primary" type="submit" disabled="">');
+
+    const confirmed = renderDisable(true);
+    expect(confirmed).toContain('<button class="button is-primary" type="submit">');
+  });
+
   it("shows recipient diagnostics and manual retry only for FAILED deliveries", () => {
     const delivery = (state: EmailDeliveryHistory["state"], recipient: string): EmailDeliveryHistory => ({
       delivery_id: `delivery-${state}`,

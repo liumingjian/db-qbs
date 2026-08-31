@@ -84,15 +84,15 @@ impl AlertOutboxStore {
 
     pub fn summary_for_run(&self, run_record_id: &str) -> Result<Option<RunAlertSummary>, String> {
         let connection = self.connection()?;
-        let alert_id: Option<String> = connection
+        let alert: Option<(String, Option<String>)> = connection
             .query_row(
-                "SELECT alert_id FROM alerts WHERE run_record_id = ?1",
+                "SELECT alert_id, delivery_state FROM alerts WHERE run_record_id = ?1",
                 [run_record_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(|error| format!("查询运行告警状态失败：{error}"))?;
-        let Some(alert_id) = alert_id else {
+        let Some((alert_id, alert_state)) = alert else {
             return Ok(None);
         };
         let mut statement = connection
@@ -105,7 +105,11 @@ impl AlertOutboxStore {
             .map_err(|error| format!("查询运行告警状态失败：{error}"))?;
         Ok(Some(RunAlertSummary {
             alert_id,
-            delivery_state: aggregate_state(&states),
+            delivery_state: alert_state
+                .as_deref()
+                .map(parse_alert_state)
+                .transpose()?
+                .unwrap_or_else(|| aggregate_state(&states)),
         }))
     }
 
@@ -418,6 +422,14 @@ fn parse_delivery_state(value: &str) -> rusqlite::Result<EmailDeliveryState> {
     }
 }
 
+fn parse_alert_state(value: &str) -> Result<AlertDeliveryState, String> {
+    match value {
+        "NOT_SENT" => Ok(AlertDeliveryState::NotSent),
+        "SUPPRESSED" => Ok(AlertDeliveryState::Suppressed),
+        _ => Err(format!("读取运行告警状态失败：未知状态 {value}")),
+    }
+}
+
 fn delivery_history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EmailDeliveryHistory> {
     let state: String = row.get(7)?;
     Ok(EmailDeliveryHistory {
@@ -451,7 +463,8 @@ pub(crate) fn initialize_alert_tables(connection: &Connection) -> Result<(), Str
                 run_trigger          TEXT NOT NULL,
                 failed_at            TEXT NOT NULL,
                 failure_category     TEXT NOT NULL,
-                safe_explanation     TEXT NOT NULL
+                safe_explanation     TEXT NOT NULL,
+                delivery_state       TEXT CHECK (delivery_state IN ('NOT_SENT', 'SUPPRESSED'))
              );
              CREATE TABLE IF NOT EXISTS email_deliveries (
                 delivery_id          TEXT PRIMARY KEY NOT NULL,
@@ -472,7 +485,20 @@ pub(crate) fn initialize_alert_tables(connection: &Connection) -> Result<(), Str
              CREATE INDEX IF NOT EXISTS email_deliveries_pending
                  ON email_deliveries(state, attempt_count);",
         )
-        .map_err(|error| format!("初始化 SQLite 告警表失败：{error}"))
+        .map_err(|error| format!("初始化 SQLite 告警表失败：{error}"))?;
+    let has_delivery_state: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('alerts') WHERE name = 'delivery_state')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("检查 SQLite 告警状态列失败：{error}"))?;
+    if !has_delivery_state {
+        connection
+            .execute("ALTER TABLE alerts ADD COLUMN delivery_state TEXT", [])
+            .map_err(|error| format!("迁移 SQLite 告警状态列失败：{error}"))?;
+    }
+    Ok(())
 }
 
 pub(crate) fn insert_alert_in_transaction(
@@ -487,12 +513,46 @@ pub(crate) fn insert_alert_in_transaction(
         .finished_at
         .as_deref()
         .unwrap_or(&history.started_at);
+    let has_settings_table: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'email_alert_settings')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("检查 SQLite 告警设置失败：{error}"))?;
+    let settings: Option<(bool, bool, String, u8)> = if has_settings_table {
+        transaction
+            .query_row(
+                "SELECT enabled,
+                        enabled = 1 AND smtp_host <> '' AND smtp_port > 0
+                          AND smtp_username <> '' AND smtp_secret <> ''
+                          AND sender_address <> '' AND sender_name <> '' AND recipients <> '[]',
+                        recipients, max_retry_hours
+                   FROM email_alert_settings WHERE singleton_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(|error| format!("读取 SQLite 告警收件人失败：{error}"))?
+    } else {
+        None
+    };
+    let recipients: Vec<String> = settings
+        .as_ref()
+        .map(|(_, _, recipients, _)| serde_json::from_str(recipients))
+        .transpose()
+        .map_err(|error| format!("读取 SQLite 告警收件人失败：{error}"))?
+        .unwrap_or_default();
+    let delivery_available = settings
+        .as_ref()
+        .is_some_and(|(_, complete, _, _)| *complete);
+    let alert_state = (!delivery_available).then_some("NOT_SENT");
     transaction
         .execute(
             "INSERT OR IGNORE INTO alerts (
                 alert_id, run_record_id, run_id, task_id, task_name, run_trigger,
-                failed_at, failure_category, safe_explanation
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                failed_at, failure_category, safe_explanation, delivery_state
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 alert_id,
                 history.run_record_id,
@@ -503,51 +563,46 @@ pub(crate) fn insert_alert_in_transaction(
                 failed_at,
                 history.failure_kind.as_deref().unwrap_or("UNKNOWN"),
                 safe_explanation(history.failure_kind.as_deref()),
+                alert_state,
             ],
         )
         .map_err(|error| format!("创建 SQLite 运行告警失败：{error}"))?;
 
-    let has_settings_table: bool = transaction
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'email_alert_settings')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("检查 SQLite 告警设置失败：{error}"))?;
-    let settings: Option<(String, u8)> = if has_settings_table {
-        transaction
-            .query_row(
-                "SELECT recipients, max_retry_hours FROM email_alert_settings
-                  WHERE singleton_id = 1 AND enabled = 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(|error| format!("读取 SQLite 告警收件人失败：{error}"))?
-    } else {
-        None
-    };
-    let recipients: Vec<String> = settings
-        .as_ref()
-        .map(|(recipients, _)| serde_json::from_str(recipients))
-        .transpose()
-        .map_err(|error| format!("读取 SQLite 告警收件人失败：{error}"))?
-        .unwrap_or_default();
     let started_at = parse_timestamp(failed_at)?;
-    let deadline = retry_deadline(started_at, settings.as_ref().map_or(0, |(_, hours)| *hours));
+    let deadline = retry_deadline(
+        started_at,
+        settings.as_ref().map_or(0, |(_, _, _, hours)| *hours),
+    );
+    let delivery_state = if delivery_available {
+        "PENDING"
+    } else {
+        "NOT_SENT"
+    };
+    let unavailable_reason = settings.as_ref().map_or(
+        "创建告警时邮件告警配置不完整",
+        |(enabled, _, _, _)| {
+            if *enabled {
+                "创建告警时邮件告警配置不完整"
+            } else {
+                "创建告警时邮件告警未启用"
+            }
+        },
+    );
     for (index, recipient) in recipients.iter().enumerate() {
         transaction
             .execute(
                 "INSERT OR IGNORE INTO email_deliveries (
                     delivery_id, alert_id, recipient_snapshot, state, next_attempt_at,
-                    retry_window_started_at, retry_deadline_at
-                 ) VALUES (?1, ?2, ?3, 'PENDING', ?4, ?4, ?5)",
+                    retry_window_started_at, retry_deadline_at, last_error
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7)",
                 params![
                     format!("{alert_id}-{index}"),
                     alert_id,
                     recipient,
+                    delivery_state,
                     started_at.to_rfc3339(),
                     deadline.to_rfc3339(),
+                    (!delivery_available).then_some(unavailable_reason),
                 ],
             )
             .map_err(|error| format!("创建 SQLite 告警投递失败：{error}"))?;
