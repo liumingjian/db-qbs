@@ -221,7 +221,7 @@ impl Rig {
             run_executable,
         };
         let auth = AuthStore::open(&directory).unwrap();
-        let session = auth.issue_session(chrono::Utc::now()).unwrap().token;
+        let session = auth.issue_session("admin", chrono::Utc::now()).unwrap().token;
         Self {
             config_path: directory.join("source.toml"),
             tasks: TaskStore::open(&directory).unwrap(),
@@ -302,6 +302,13 @@ impl Rig {
     fn send_anonymous(&self, method: Method, url: &str, body: &str) -> Response {
         self.api()
             .handle(&Request::new(method, url, body.as_bytes().to_vec()))
+    }
+
+    fn send_with_session(&self, session: &str, method: Method, url: &str, body: &str) -> Response {
+        self.api().handle(
+            &Request::new(method, url, body.as_bytes().to_vec())
+                .with_header("Cookie", format!("{SESSION_COOKIE}={session}")),
+        )
     }
 
     fn get(&self, url: &str) -> Response {
@@ -732,6 +739,20 @@ fn every_route_reaches_its_handler() {
             r#"{"current_password":"admin","new_password":"admin"}"#.into(),
             200,
         ),
+        (
+            Method::Get,
+            "/api/operator-account",
+            "/api/operator-account".into(),
+            String::new(),
+            200,
+        ),
+        (
+            Method::Put,
+            "/api/operator-account",
+            "/api/operator-account".into(),
+            r#"{"enabled":false}"#.into(),
+            200,
+        ),
         // 会话那三条**排在最末，而且退出排最后**：`DELETE /api/session` 会把 rig
         // 自己那张票销掉，排在中间会让它后面每一行都变成 401。
         (Method::Get, "/api/session", "/api/session".into(), String::new(), 200),
@@ -802,6 +823,28 @@ fn task_curl_is_complete_server_assembled_and_uses_the_public_request_origin() {
         format!(
             "curl --silent --show-error --cookie-jar '/tmp/db-qbs-session-{task_id}.cookie' --request POST 'https://qbs.example.test:8443/api/session' --header 'Content-Type: application/json' --data '{{\"username\":\"admin\",\"password\":\"改成你的口令\"}}' > /dev/null && curl --cookie '/tmp/db-qbs-session-{task_id}.cookie' --request POST 'https://qbs.example.test:8443/api/runs' --header 'Content-Type: application/json' --data '{{\"task_id\":\"{task_id}\"}}'; rm -f '/tmp/db-qbs-session-{task_id}.cookie'"
         )
+    );
+
+    rig.auth.update_operator(true, Some("operator-secret")).unwrap();
+    let operator = rig
+        .auth
+        .issue_session("operator", chrono::Utc::now())
+        .unwrap()
+        .token;
+    let operator_response = rig.api().handle(
+        &Request::new(
+            Method::Get,
+            &format!("/api/tasks/{task_id}/curl"),
+            Vec::new(),
+        )
+        .with_header("Cookie", format!("{SESSION_COOKIE}={operator}")),
+    );
+    assert_eq!(operator_response.status, 200);
+    assert!(
+        rig.json(&operator_response)["command"]
+            .as_str()
+            .unwrap()
+            .contains(r#""username":"operator""#)
     );
 }
 
@@ -3066,17 +3109,29 @@ fn every_route_declares_its_access() {
             "{method:?} {pattern} 应当是公开的"
         );
     }
+    let administrator: [(Method, &str); 11] = [
+        (Method::Get, "/api/operator-account"),
+        (Method::Put, "/api/operator-account"),
+        (Method::Post, "/api/agents"),
+        (Method::Post, "/api/agents/{}/probe"),
+        (Method::Put, "/api/agents/{}"),
+        (Method::Delete, "/api/agents/{}"),
+        (Method::Post, "/api/datasources"),
+        (Method::Post, "/api/datasources/test-connection"),
+        (Method::Post, "/api/datasources/{}/test-connection"),
+        (Method::Put, "/api/datasources/{}"),
+        (Method::Delete, "/api/datasources/{}"),
+    ];
     for route in routes() {
         if public.contains(&(route.method, route.pattern)) {
             continue;
         }
-        assert_eq!(
-            route.access,
-            Access::Session,
-            "{:?} {} 不在公开清单里，就必须要求登录——新加路由请先想清楚它归哪一档",
-            route.method,
-            route.pattern
-        );
+        let expected = if administrator.contains(&(route.method, route.pattern)) {
+            Access::Administrator
+        } else {
+            Access::Session
+        };
+        assert_eq!(route.access, expected, "{:?} {} 权限档位不对", route.method, route.pattern);
     }
 }
 
@@ -3142,6 +3197,16 @@ fn the_default_credentials_open_the_door_and_a_wrong_one_does_not() {
         rig.json(&unknown_account)["error"]["message"],
         rig.json(&refused)["error"]["message"]
     );
+    let disabled_operator = rig.send_anonymous(
+        Method::Post,
+        "/api/session",
+        r#"{"username":"operator","password":"admin"}"#,
+    );
+    assert_eq!(disabled_operator.status, 401);
+    assert_eq!(
+        rig.json(&disabled_operator)["error"]["message"],
+        rig.json(&refused)["error"]["message"]
+    );
 
     let accepted = rig.send_anonymous(
         Method::Post,
@@ -3174,13 +3239,182 @@ fn the_session_probe_answers_from_outside_the_door() {
     assert_eq!(inside.status, 200);
     assert_eq!(rig.json(&inside)["authenticated"], true);
     assert_eq!(rig.json(&inside)["username"], "admin");
+    assert_eq!(rig.json(&inside)["role"], "ADMIN");
+}
+
+#[test]
+fn existing_admin_hash_migrates_unchanged_and_operator_starts_disabled() {
+    let bootstrap = temp_directory();
+    let first = AuthStore::open(&bootstrap).unwrap();
+    drop(first);
+    let bootstrap_database = rusqlite::Connection::open(bootstrap.join("db-qbs.sqlite3")).unwrap();
+    let legacy: String = bootstrap_database
+        .query_row("SELECT password_hash FROM credentials WHERE id = 1", [], |row| row.get(0))
+        .unwrap();
+    drop(bootstrap_database);
+    fs::remove_dir_all(bootstrap).unwrap();
+
+    let directory = temp_directory();
+    let database = rusqlite::Connection::open(directory.join("db-qbs.sqlite3")).unwrap();
+    database
+        .execute_batch(
+            "CREATE TABLE credentials (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                password_hash TEXT NOT NULL
+             );
+             CREATE TABLE sessions (
+                token TEXT PRIMARY KEY NOT NULL,
+                created_at INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+    database
+        .execute(
+            "INSERT INTO credentials (id, password_hash) VALUES (1, ?1)",
+            [&legacy],
+        )
+        .unwrap();
+    let now = chrono::Utc::now();
+    database
+        .execute(
+            "INSERT INTO sessions (token, created_at, last_seen_at) VALUES ('legacy-session', ?1, ?1)",
+            [now.timestamp()],
+        )
+        .unwrap();
+    drop(database);
+
+    let reopened = AuthStore::open(&directory).unwrap();
+    let database = rusqlite::Connection::open(directory.join("db-qbs.sqlite3")).unwrap();
+    let migrated: String = database
+        .query_row("SELECT password_hash FROM accounts WHERE username = 'admin'", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(migrated, legacy, "迁移不该重新散列管理员口令");
+    drop(database);
+
+    assert!(reopened.verify_password("admin", "admin").unwrap());
+    assert_eq!(
+        reopened
+            .resolve_session("legacy-session", now)
+            .unwrap()
+            .unwrap()
+            .username,
+        "admin"
+    );
+    assert!(!reopened.verify_password("operator", "admin").unwrap());
+    assert!(!reopened.verify_password("nobody", "admin").unwrap());
+    let operator = reopened.operator_account().unwrap();
+    assert!(!operator.enabled);
+    assert!(!operator.has_password);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn administrator_activates_operator_and_session_reports_the_fixed_identity() {
+    let rig = Rig::new();
+    let before = rig.get("/api/operator-account");
+    assert_eq!(before.status, 200);
+    assert_eq!(rig.json(&before)["enabled"], false);
+    assert_eq!(rig.json(&before)["has_password"], false);
+    assert_eq!(rig.json(&before)["role"], "OPERATOR");
+
+    let incomplete = rig.put("/api/operator-account", r#"{"enabled":true}"#);
+    assert_eq!(incomplete.status, 400);
+
+    let enabled = rig.put(
+        "/api/operator-account",
+        r#"{"enabled":true,"password":"operator-secret"}"#,
+    );
+    assert_eq!(enabled.status, 200, "{}", enabled.body_text());
+    assert_eq!(rig.json(&enabled)["enabled"], true);
+    assert_eq!(rig.json(&enabled)["has_password"], true);
+    assert!(!enabled.body_text().contains("operator-secret"));
+
+    let login = rig.send_anonymous(
+        Method::Post,
+        "/api/session",
+        r#"{"username":"operator","password":"operator-secret"}"#,
+    );
+    assert_eq!(login.status, 200, "{}", login.body_text());
+    assert_eq!(rig.json(&login)["username"], "operator");
+    assert_eq!(rig.json(&login)["role"], "OPERATOR");
+    let cookie = login.header("Set-Cookie").unwrap();
+    let token = cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .split_once('=')
+        .unwrap()
+        .1;
+    let state = rig.send_with_session(token, Method::Get, "/api/session", "");
+    assert_eq!(rig.json(&state)["username"], "operator");
+    assert_eq!(rig.json(&state)["role"], "OPERATOR");
+}
+
+#[test]
+fn operator_can_use_daily_work_routes_but_admin_routes_return_stable_403() {
+    let rig = Rig::new();
+    rig.auth.update_operator(true, Some("operator-secret")).unwrap();
+    let token = rig
+        .auth
+        .issue_session("operator", chrono::Utc::now())
+        .unwrap()
+        .token;
+
+    for route in routes() {
+        if route.access == Access::Public {
+            continue;
+        }
+        let url = route.pattern.replace("{}", "some-id");
+        let response = rig.send_with_session(&token, route.method, &url, "{}");
+        if route.access == Access::Administrator {
+            assert_eq!(response.status, 403, "{:?} {}", route.method, route.pattern);
+            assert_eq!(rig.json(&response)["error"]["code"], "FORBIDDEN");
+        } else {
+            assert_ne!(response.status, 401, "{:?} {}", route.method, route.pattern);
+            assert_ne!(response.status, 403, "{:?} {}", route.method, route.pattern);
+        }
+    }
+}
+
+#[test]
+fn operator_password_reset_and_disable_invalidate_only_operator_sessions() {
+    let rig = Rig::new();
+    rig.auth.update_operator(true, Some("first")).unwrap();
+    let current = rig.auth.issue_session("operator", chrono::Utc::now()).unwrap().token;
+    let elsewhere = rig.auth.issue_session("operator", chrono::Utc::now()).unwrap().token;
+    let admin = rig.auth.issue_session("admin", chrono::Utc::now()).unwrap().token;
+
+    let changed = rig.send_with_session(
+        &current,
+        Method::Put,
+        "/api/password",
+        r#"{"current_password":"first","new_password":"second"}"#,
+    );
+    assert_eq!(changed.status, 200, "{}", changed.body_text());
+    assert_eq!(rig.send_with_session(&current, Method::Get, "/api/tasks", "").status, 200);
+    assert_eq!(rig.send_with_session(&elsewhere, Method::Get, "/api/tasks", "").status, 401);
+    assert_eq!(rig.send_with_session(&admin, Method::Get, "/api/tasks", "").status, 200);
+
+    let reset = rig.put(
+        "/api/operator-account",
+        r#"{"enabled":true,"password":"third"}"#,
+    );
+    assert_eq!(reset.status, 200);
+    assert_eq!(rig.send_with_session(&current, Method::Get, "/api/tasks", "").status, 401);
+    assert!(rig.auth.verify_password("operator", "third").unwrap());
+
+    let active = rig.auth.issue_session("operator", chrono::Utc::now()).unwrap().token;
+    assert_eq!(rig.put("/api/operator-account", r#"{"enabled":false}"#).status, 200);
+    assert_eq!(rig.send_with_session(&active, Method::Get, "/api/tasks", "").status, 401);
+    assert!(!rig.auth.verify_password("operator", "third").unwrap());
 }
 
 /// 退出销的是**这一张票**，别处登着的同一个账号不受影响。
 #[test]
 fn logging_out_burns_one_ticket_and_leaves_the_others_alone() {
     let rig = Rig::new();
-    let elsewhere = rig.auth.issue_session(chrono::Utc::now()).unwrap().token;
+    let elsewhere = rig.auth.issue_session("admin", chrono::Utc::now()).unwrap().token;
     let elsewhere_cookie = format!("db_qbs_session={elsewhere}");
 
     let goodbye = rig.delete("/api/session");
@@ -3220,7 +3454,13 @@ fn every_authenticated_request_slides_the_cookie_forward() {
 #[test]
 fn changing_the_password_keeps_this_session_and_burns_the_rest() {
     let rig = Rig::new();
-    let elsewhere = rig.auth.issue_session(chrono::Utc::now()).unwrap().token;
+    let elsewhere = rig.auth.issue_session("admin", chrono::Utc::now()).unwrap().token;
+    rig.auth.update_operator(true, Some("operator-secret")).unwrap();
+    let operator = rig
+        .auth
+        .issue_session("operator", chrono::Utc::now())
+        .unwrap()
+        .token;
 
     let wrong = rig.put(
         "/api/password",
@@ -3250,6 +3490,11 @@ fn changing_the_password_keeps_this_session_and_burns_the_rest() {
     assert_eq!(stale.status, 401, "改完口令，别处那张票还认");
     // 而**发起这次改密的这一张留着**：改完口令立刻被自己踢出去毫无道理。
     assert_eq!(rig.get("/api/tasks").status, 200);
+    assert_eq!(
+        rig.send_with_session(&operator, Method::Get, "/api/tasks", "").status,
+        200,
+        "管理员改密不该清掉操作员会话"
+    );
 
     assert_eq!(
         rig.send_anonymous(
@@ -3280,7 +3525,7 @@ fn changing_the_password_keeps_this_session_and_burns_the_rest() {
 fn a_session_expires_only_after_eight_idle_hours() {
     let rig = Rig::new();
     let start = chrono::Utc::now();
-    let token = rig.auth.issue_session(start).unwrap().token;
+    let token = rig.auth.issue_session("admin", start).unwrap().token;
     let hours = |n: i64| start + chrono::Duration::hours(n);
 
     assert!(rig.auth.authenticate(&token, hours(7)).unwrap(), "7 小时就被踢了");
@@ -3298,8 +3543,8 @@ fn a_session_expires_only_after_eight_idle_hours() {
 #[test]
 fn resetting_the_password_returns_to_the_factory_default_and_burns_every_session() {
     let rig = Rig::new();
-    rig.auth.change_password("admin", "新口令", "").unwrap();
-    let token = rig.auth.issue_session(chrono::Utc::now()).unwrap().token;
+    rig.auth.change_password("admin", "admin", "新口令", "").unwrap();
+    let token = rig.auth.issue_session("admin", chrono::Utc::now()).unwrap().token;
 
     rig.auth.reset_password().unwrap();
 

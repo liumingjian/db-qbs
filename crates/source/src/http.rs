@@ -36,7 +36,7 @@ use crate::{
     session_cookie_header, session_token_from_cookie_header, validate_builder_dblink,
     validate_source_sql, Agent, AgentEndpoint, AgentEvidence, AgentInput, AgentStore, AuthStore,
     ColumnPrecision, DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess,
-    OracleRowSource, RowSource, RunEvidence, RunHistory, RunLogStore, RunLogWriter,
+    OracleRowSource, Role, RowSource, RunEvidence, RunHistory, RunLogStore, RunLogWriter,
     RunParametersEvidence, RunTrigger, ScheduleRegistry,
     SourceColumn, SourceConfig, SourceEvidence, SourceReadError, TargetCheckRequest,
     TargetCheckResult, TargetConnection, TargetEvidence, Task, TaskConfig, TaskInput, TaskSpec,
@@ -550,6 +550,8 @@ pub enum Access {
     Public,
     /// 要一张活着的会话票据，没有就是 401。
     Session,
+    /// 只有管理员能进；操作员带着有效票据也只会得到稳定的 403。
+    Administrator,
 }
 
 /// 一条路由。`pattern` 里最多有一个 `{}`，代表一段资源 id。
@@ -579,6 +581,10 @@ impl Route {
             access: Access::Public,
             handler,
         }
+    }
+
+    fn administrator(method: Method, pattern: &'static str, handler: Handler) -> Self {
+        Self { method, pattern, access: Access::Administrator, handler }
     }
 
     /// 带占位的样式比字面量样式**后**匹配，见 `route_api`。
@@ -623,6 +629,12 @@ pub fn routes() -> &'static [Route] {
             Route::new(Put, "/api/password", |state, request, _id| {
                 handle_change_password(request, state)
             }),
+            Route::administrator(Get, "/api/operator-account", |state, _request, _id| {
+                handle_get_operator_account(state)
+            }),
+            Route::administrator(Put, "/api/operator-account", |state, request, _id| {
+                handle_update_operator_account(request, state)
+            }),
             Route::new(Post, "/api/columns", |state, request, _id| {
                 handle_column_fetch(request, state)
             }),
@@ -656,28 +668,28 @@ pub fn routes() -> &'static [Route] {
             Route::new(Get, "/api/agents", |state, _request, _id| {
                 handle_list_agents(state)
             }),
-            Route::new(Post, "/api/agents", |state, request, _id| {
+            Route::administrator(Post, "/api/agents", |state, request, _id| {
                 handle_register_agent(request, state)
             }),
-            Route::new(Post, "/api/agents/{}/probe", |state, _request, id| {
+            Route::administrator(Post, "/api/agents/{}/probe", |state, _request, id| {
                 handle_probe_agent(state, id)
             }),
-            Route::new(Put, "/api/agents/{}", |state, request, id| {
+            Route::administrator(Put, "/api/agents/{}", |state, request, id| {
                 handle_update_agent(request, state, id)
             }),
-            Route::new(Delete, "/api/agents/{}", |state, _request, id| {
+            Route::administrator(Delete, "/api/agents/{}", |state, _request, id| {
                 handle_delete_agent(state, id)
             }),
             Route::new(Get, "/api/datasources", |state, _request, _id| {
                 handle_list_datasources(state.datasources)
             }),
-            Route::new(Post, "/api/datasources", |state, request, _id| {
+            Route::administrator(Post, "/api/datasources", |state, request, _id| {
                 handle_create_datasource(request, state)
             }),
-            Route::new(Post, "/api/datasources/test-connection", |state, request, _id| {
+            Route::administrator(Post, "/api/datasources/test-connection", |state, request, _id| {
                 handle_test_datasource_draft(request, state)
             }),
-            Route::new(
+            Route::administrator(
                 Post,
                 "/api/datasources/{}/test-connection",
                 |state, _request, id| handle_test_datasource(state, id),
@@ -685,10 +697,10 @@ pub fn routes() -> &'static [Route] {
             Route::new(Get, "/api/datasources/{}", |state, _request, id| {
                 handle_get_datasource(state.datasources, id)
             }),
-            Route::new(Put, "/api/datasources/{}", |state, request, id| {
+            Route::administrator(Put, "/api/datasources/{}", |state, request, id| {
                 handle_update_datasource(request, state, id)
             }),
-            Route::new(Delete, "/api/datasources/{}", |state, _request, id| {
+            Route::administrator(Delete, "/api/datasources/{}", |state, _request, id| {
                 handle_delete_datasource(state, id)
             }),
             Route::new(Post, "/api/target/tables", |state, request, _id| {
@@ -774,9 +786,9 @@ impl Api<'_> {
             .and_then(session_token_from_cookie_header);
         // 认一次就顺手把滑动窗口往前推了，所以它必须只发生一次，不能每个 handler 各来一遍。
         let session = match token {
-            Some(token) => match self.auth.authenticate(token, Utc::now()) {
-                Ok(true) => Some(token),
-                Ok(false) => None,
+            Some(token) => match self.auth.resolve_session(token, Utc::now()) {
+                Ok(Some(identity)) => Some((token, identity)),
+                Ok(None) => None,
                 Err(error) => return internal_error(error),
             },
             None => None,
@@ -792,9 +804,17 @@ impl Api<'_> {
                 if route.access == Access::Public {
                     return (route.handler)(self, request, resource_id);
                 }
-                let Some(token) = session else {
+                let Some((token, identity)) = &session else {
                     return unauthorized();
                 };
+                if route.access == Access::Administrator && identity.role != Role::Admin {
+                    let mut response = forbidden();
+                    response.headers.push((
+                        "Set-Cookie".to_owned(),
+                        session_cookie_header(token, SESSION_IDLE_SECONDS),
+                    ));
+                    return response;
+                }
                 let mut response = (route.handler)(self, request, resource_id);
                 // 服务端那份窗口刚被推过了，cookie 也得跟着续期——否则浏览器会在
                 // **登录满 8 小时**那一刻把票据丢掉，而服务端那一份其实还活着，
@@ -832,24 +852,33 @@ struct PasswordChangeInput {
     new_password: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperatorAccountInput {
+    enabled: bool,
+    #[serde(default)]
+    password: Option<String>,
+}
+
 /// 「我登着吗」。**它是公开的**：让还没登录的人问这一句，前端才能在首屏决定
 /// 摆登录页还是摆应用，而不必先撞一个 401 再从错误里反推。
 fn handle_session_state(request: &Request, state: &Api<'_>) -> HttpResponse {
-    let authenticated = match request
+    let account = match request
         .header("Cookie")
         .and_then(session_token_from_cookie_header)
     {
-        Some(token) => match state.auth.authenticate(token, Utc::now()) {
-            Ok(live) => live,
+        Some(token) => match state.auth.resolve_session(token, Utc::now()) {
+            Ok(account) => account,
             Err(error) => return internal_error(error),
         },
-        None => false,
+        None => None,
     };
     json_response(
         200,
         &json!({
-            "authenticated": authenticated,
-            "username": if authenticated { Some(USERNAME) } else { None },
+            "authenticated": account.is_some(),
+            "username": account.as_ref().map(|account| account.username.as_str()),
+            "role": account.as_ref().map(|account| account.role),
         }),
     )
 }
@@ -865,21 +894,30 @@ fn handle_login(request: &Request, state: &Api<'_>) -> HttpResponse {
     match state.auth.verify_password(&input.username, &input.password) {
         Ok(true) => {}
         // 账号错与口令错**回同一句话**：分开报只会告诉试口令的人账号叫什么。
-        Ok(false) => {
-            return json_response(401, &json!({ "error": { "message": "账号或口令不正确" } }))
-        }
+        Ok(false) => return login_refused(),
         Err(error) => return internal_error(error),
     }
-    let issued = match state.auth.issue_session(Utc::now()) {
+    let issued = match state.auth.issue_session(&input.username, Utc::now()) {
         Ok(issued) => issued,
+        // 校验通过到发票之间若管理员恰好禁用了操作员，对外仍是同一种登录失败。
+        Err(error) if error == "账号未启用" => return login_refused(),
         Err(error) => return internal_error(error),
     };
-    let mut response = json_response(200, &json!({ "authenticated": true, "username": USERNAME }));
+    let role = if input.username == USERNAME { Role::Admin } else { Role::Operator };
+    let mut response = json_response(200, &json!({
+        "authenticated": true,
+        "username": input.username,
+        "role": role,
+    }));
     response.headers.push((
         "Set-Cookie".to_owned(),
         session_cookie_header(&issued.token, issued.max_age_seconds),
     ));
     response
+}
+
+fn login_refused() -> HttpResponse {
+    json_response(401, &json!({ "error": { "message": "账号或口令不正确" } }))
 }
 
 /// 退出登录。**销的只有这一张票**——别处登着的同一个账号不受影响。
@@ -914,11 +952,37 @@ fn handle_change_password(request: &Request, state: &Api<'_>) -> HttpResponse {
         .header("Cookie")
         .and_then(session_token_from_cookie_header)
         .unwrap_or_default();
-    match state
-        .auth
-        .change_password(&input.current_password, &input.new_password, keep)
+    let account = match state.auth.session_identity(keep) {
+        Ok(Some(account)) => account,
+        Ok(None) => return unauthorized(),
+        Err(error) => return internal_error(error),
+    };
+    match state.auth.change_password(
+        &account.username,
+        &input.current_password,
+        &input.new_password,
+        keep,
+    )
     {
         Ok(()) => json_response(200, &json!({ "message": "口令已修改" })),
+        Err(error) => bad_request(error),
+    }
+}
+
+fn handle_get_operator_account(state: &Api<'_>) -> HttpResponse {
+    match state.auth.operator_account() {
+        Ok(account) => json_response(200, &account),
+        Err(error) => internal_error(error),
+    }
+}
+
+fn handle_update_operator_account(request: &Request, state: &Api<'_>) -> HttpResponse {
+    let input: OperatorAccountInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    match state.auth.update_operator(input.enabled, input.password.as_deref()) {
+        Ok(()) => handle_get_operator_account(state),
         Err(error) => bad_request(error),
     }
 }
@@ -2210,10 +2274,22 @@ fn handle_task_curl(request: &Request, state: &Api<'_>, task_id: &str) -> HttpRe
     };
     let body = serde_json::to_string(&json!({ "task_id": task_id }))
         .expect("serializing a task identity must succeed");
+    let token = request
+        .header("Cookie")
+        .and_then(session_token_from_cookie_header)
+        .unwrap_or_default();
+    let account = match state.auth.session_identity(token) {
+        Ok(Some(account)) => account,
+        Ok(None) => return unauthorized(),
+        Err(error) => return internal_error(error),
+    };
     // 手拼而不是走 `json!`：`serde_json` 的 map 是有序的**字典序**，于是
     // `password` 会排到 `username` 前面——功能上无所谓，但这段命令是给人读的。
-    // 两个值都是常量，都不含引号，没有转义面。
-    let credentials = format!(r#"{{"username":"{USERNAME}","password":"改成你的口令"}}"#);
+    // 用户名来自两个固定账号之一，不含引号，没有转义面。
+    let credentials = format!(
+        r#"{{"username":"{}","password":"改成你的口令"}}"#,
+        account.username
+    );
     // **两条命令，不是一条。** `/api/runs` 现在要一张会话票据，所以先登录换 cookie、
     // 再拿着 cookie 发起。少了前半条，这段命令会稳定地撞回 401——
     // 那不是「脚本写错了」，是这段命令自己不完整。
@@ -2921,6 +2997,13 @@ fn not_found() -> HttpResponse {
 /// ——回登录页去。
 fn unauthorized() -> HttpResponse {
     json_response(401, &json!({ "error": { "message": "请先登录" } }))
+}
+
+fn forbidden() -> HttpResponse {
+    json_response(
+        403,
+        &json!({ "error": { "code": "FORBIDDEN", "message": "需要管理员权限" } }),
+    )
 }
 
 /// **失败的正文只有一种壳**（#199）：`{"error": {"message": ...}}`，`kind` 是壳里的

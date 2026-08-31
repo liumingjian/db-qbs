@@ -30,8 +30,8 @@ pub use agent::{fetch_agent_info, normalize_base_url, Agent, AgentInput, AgentSt
 // 登录、会话与口令（source 的 HTTP 面）。**它护不到 sink**——那半边仍然没有鉴权。
 pub use auth::{
     cleared_cookie_header, session_cookie_header, session_token_from_cookie_header,
-    validate_new_password, AuthStore, IssuedSession, DEFAULT_PASSWORD, SESSION_COOKIE,
-    SESSION_IDLE_SECONDS, USERNAME,
+    validate_new_password, AccountIdentity, AuthStore, IssuedSession, OperatorAccount, Role,
+    DEFAULT_PASSWORD, OPERATOR_USERNAME, SESSION_COOKIE, SESSION_IDLE_SECONDS, USERNAME,
 };
 // 五字段 cron 的解析与推算（#265）。手写、无依赖，见 `cron.rs` 模块头。
 pub use cron::CronSchedule;
