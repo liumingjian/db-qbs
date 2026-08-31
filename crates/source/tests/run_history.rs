@@ -3,14 +3,76 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{TimeDelta, TimeZone, Utc};
 use db_qbs_source::{
-    expired_history_indices, fold_history_lines, AgentEvidence, ColumnMapping, HistoryStore,
-    RunEvidence, RunHistory, RunParametersEvidence, SourceEvidence, TargetEvidence, UnknownReason,
-    WriteMode,
+    expired_history_indices, fold_history_lines, AgentEvidence, ColumnMapping, FinalizeOutcome,
+    HistoryStore, RunEvidence, RunHistory, RunParametersEvidence, SourceEvidence, TargetEvidence,
+    UnknownReason, WriteMode,
 };
 
 const SOURCE_SQL: &str = "SELECT a.ID AS ID\n  FROM APP.ORDERS a\n WHERE D_BIZ = DATE '2026-08-14'";
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn terminal_finalization_inserts_or_updates_once_and_replay_preserves_the_first_outcome() {
+    let suffix = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "db-qbs-run-finalization-test-{}-{suffix}",
+        std::process::id()
+    ));
+    fs::create_dir(&directory).unwrap();
+    let store = HistoryStore::open(&directory).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 31, 10, 0, 0).unwrap();
+
+    let mut accepted = RunHistory::accepted("accepted", "task-1", SOURCE_SQL, now);
+    store.insert(&accepted, now, 90).unwrap();
+    accepted.mark_parent_failure("first failure".to_owned(), now);
+    assert_eq!(
+        store.finalize(&accepted, now, 90).unwrap(),
+        FinalizeOutcome::Finalized
+    );
+
+    let mut replay = accepted.clone();
+    replay.message = Some("later replay must not rewrite history".to_owned());
+    assert_eq!(
+        store.finalize(&replay, now, 90).unwrap(),
+        FinalizeOutcome::Replayed
+    );
+    assert_eq!(
+        store.get("accepted").unwrap().unwrap().message.as_deref(),
+        Some("first failure")
+    );
+
+    let mut skipped = RunHistory::accepted("skipped", "task-1", SOURCE_SQL, now);
+    skipped.mark_skipped("上次尚未结束，本次跳过".to_owned(), now);
+    assert_eq!(
+        store.finalize(&skipped, now, 90).unwrap(),
+        FinalizeOutcome::Finalized
+    );
+    assert_eq!(store.list(None).unwrap().len(), 2);
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn finalization_rejects_nonterminal_history() {
+    let suffix = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "db-qbs-run-nonterminal-finalization-test-{}-{suffix}",
+        std::process::id()
+    ));
+    fs::create_dir(&directory).unwrap();
+    let store = HistoryStore::open(&directory).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 31, 10, 0, 0).unwrap();
+    let accepted = RunHistory::accepted("accepted", "task-1", SOURCE_SQL, now);
+
+    assert_eq!(
+        store.finalize(&accepted, now, 90).unwrap_err(),
+        "不能封口没有结局的运行历史"
+    );
+    assert!(store.get("accepted").unwrap().is_none());
+
+    fs::remove_dir_all(directory).unwrap();
+}
 
 fn evidence() -> RunEvidence {
     RunEvidence {

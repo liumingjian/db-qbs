@@ -125,6 +125,12 @@ pub enum HistoryChange {
     Terminal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalizeOutcome {
+    Finalized,
+    Replayed,
+}
+
 /// 一次运行是**谁发起的**：人按的，还是到点了调度器发的（#266）。
 ///
 /// 两者在运行历史里必须分得开：夜里两点那次是不是自动跑的、还是有人手动补的一次，
@@ -650,6 +656,91 @@ impl HistoryStore {
             .map_err(|error| format!("提交 SQLite 运行历史事务失败：{error}"))
     }
 
+    /// Persist one terminal transition. Alert and delivery records join this transaction.
+    pub fn finalize(
+        &self,
+        history: &RunHistory,
+        now: DateTime<Utc>,
+        retention_days: u64,
+    ) -> Result<FinalizeOutcome, String> {
+        if history.outcome.is_none() {
+            return Err("不能封口没有结局的运行历史".to_owned());
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("开启 SQLite 运行封口事务失败：{error}"))?;
+        let stored_outcome = transaction
+            .query_row(
+                "SELECT outcome FROM run_history WHERE run_record_id = ?1",
+                [&history.run_record_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(|error| format!("查询 SQLite 运行封口状态失败：{error}"))?;
+        if stored_outcome.flatten().is_some() {
+            transaction
+                .commit()
+                .map_err(|error| format!("提交 SQLite 运行封口事务失败：{error}"))?;
+            return Ok(FinalizeOutcome::Replayed);
+        }
+
+        let mapping_issues = json_array_text(&history.mapping_issues)?;
+        let evidence = json_object_text(&history.evidence)?;
+        let changed = transaction
+            .execute(
+                "UPDATE run_history SET
+                    run_id=:run_id, run_trigger=:run_trigger, task_id=:task_id, task_name=:task_name,
+                    source_sql=:source_sql, staging_table=:staging_table,
+                    started_at=:started_at, started_at_ms=:started_at_ms,
+                    finished_at=:finished_at, outcome=:outcome,
+                    target_table_effect=:target_table_effect, stage=:stage,
+                    source_rows=:source_rows, staged_rows=:staged_rows,
+                    sink_reported_rows=:sink_reported_rows, purged_rows=:purged_rows,
+                    source_batches=:source_batches, received_batches=:received_batches,
+                    total_rows=:total_rows, precount_ms=:precount_ms,
+                    fetch_ms=:fetch_ms, push_ms=:push_ms, commit_ms=:commit_ms,
+                    count_ms=:count_ms, cursor_ms=:cursor_ms, source_code=:source_code,
+                    sink_code=:sink_code, [column]=:column, [value]=:value, message=:message,
+                    unknown_reason=:unknown_reason, failure_kind=:failure_kind, seq=:seq,
+                    rows_pushed=:rows_pushed, bytes=:bytes, ms=:ms, last_ts=:last_ts,
+                    mapping_issues=:mapping_issues, evidence=:evidence
+                  WHERE run_record_id=:run_record_id AND outcome IS NULL",
+                history_params!(history, mapping_issues, evidence),
+            )
+            .map_err(|error| format!("封口 SQLite 运行历史失败：{error}"))?;
+        if changed == 0 {
+            transaction
+                .execute(
+                    "INSERT INTO run_history (
+                        run_record_id, run_id, run_trigger, task_id, task_name, source_sql,
+                        staging_table, started_at, started_at_ms, finished_at, outcome,
+                        target_table_effect, stage, source_rows, staged_rows, sink_reported_rows,
+                        purged_rows, source_batches, received_batches, total_rows, precount_ms,
+                        fetch_ms, push_ms, commit_ms, count_ms, cursor_ms, source_code, sink_code,
+                        [column], [value], message, unknown_reason, failure_kind, seq, rows_pushed,
+                        bytes, ms, last_ts, mapping_issues, evidence
+                     ) VALUES (
+                        :run_record_id, :run_id, :run_trigger, :task_id, :task_name, :source_sql,
+                        :staging_table, :started_at, :started_at_ms, :finished_at, :outcome,
+                        :target_table_effect, :stage, :source_rows, :staged_rows,
+                        :sink_reported_rows, :purged_rows, :source_batches, :received_batches,
+                        :total_rows, :precount_ms, :fetch_ms, :push_ms, :commit_ms, :count_ms,
+                        :cursor_ms, :source_code, :sink_code, :column, :value, :message,
+                        :unknown_reason, :failure_kind, :seq, :rows_pushed, :bytes, :ms,
+                        :last_ts, :mapping_issues, :evidence
+                     )",
+                    history_params!(history, mapping_issues, evidence),
+                )
+                .map_err(|error| format!("插入 SQLite 终态运行历史失败：{error}"))?;
+        }
+        cleanup_transaction(&transaction, now, retention_days)?;
+        transaction
+            .commit()
+            .map_err(|error| format!("提交 SQLite 运行封口事务失败：{error}"))?;
+        Ok(FinalizeOutcome::Finalized)
+    }
+
     pub fn get(&self, run_record_id: &str) -> Result<Option<RunHistory>, String> {
         self.connection()?
             .query_row(
@@ -709,31 +800,11 @@ impl HistoryStore {
         now: DateTime<Utc>,
         retention_days: u64,
     ) -> Result<(), String> {
-        let mut connection = self.connection()?;
-        let transaction = connection
-            .transaction()
-            .map_err(|error| format!("开启 SQLite 启动清扫事务失败：{error}"))?;
-        let finished_at = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        transaction
-            .execute(
-                "UPDATE run_history
-                    SET outcome = 'FAILED', target_table_effect = NULL, finished_at = ?1,
-                        source_code = NULL, sink_code = NULL, [column] = NULL,
-                        [value] = NULL, message = ?2, unknown_reason = ?3,
-                        failure_kind = ?4
-                  WHERE outcome IS NULL",
-                params![
-                    finished_at,
-                    reason.message(),
-                    reason.as_str(),
-                    FailureKind::Unknown.as_str()
-                ],
-            )
-            .map_err(|error| format!("封口 SQLite 非终态运行历史失败：{error}"))?;
-        cleanup_transaction(&transaction, now, retention_days)?;
-        transaction
-            .commit()
-            .map_err(|error| format!("提交 SQLite 启动清扫事务失败：{error}"))
+        for mut history in self.list_incomplete()? {
+            history.mark_unknown(reason, now);
+            self.finalize(&history, now, retention_days)?;
+        }
+        Ok(())
     }
 
     fn connection(&self) -> Result<Connection, String> {

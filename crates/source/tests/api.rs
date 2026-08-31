@@ -19,13 +19,41 @@ use db_qbs_source::http::{
     RunState,
 };
 use db_qbs_source::{
-    AgentStore, AuthStore, DatasourceStore, HistoryStore, OracleAccess, OracleRowSource,
-    RunLogStore, ScheduleState, SourceColumn, SourceConfig, SourceReadError, TaskSpec, TaskStore,
-    SESSION_COOKIE,
+    AgentStore, AuthStore, Clock, DatasourceStore, HistoryStore, MailTransport, OracleAccess,
+    OracleRowSource, OutgoingMail, RunLogStore, ScheduleState, SourceColumn, SourceConfig,
+    SourceReadError, TaskSpec, TaskStore, SESSION_COOKIE,
 };
 use serde_json::Value;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+struct TestClock(Mutex<chrono::DateTime<chrono::Utc>>);
+
+impl TestClock {
+    fn new(now: chrono::DateTime<chrono::Utc>) -> Self {
+        Self(Mutex::new(now))
+    }
+
+    fn set(&self, now: chrono::DateTime<chrono::Utc>) {
+        *self.0.lock().unwrap() = now;
+    }
+}
+
+impl Clock for TestClock {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        *self.0.lock().unwrap()
+    }
+}
+
+#[derive(Default)]
+struct FakeMailTransport(Mutex<Vec<OutgoingMail>>);
+
+impl MailTransport for FakeMailTransport {
+    fn send(&self, mail: &OutgoingMail) -> Result<(), String> {
+        self.0.lock().unwrap().push(mail.clone());
+        Ok(())
+    }
+}
 
 /// 一台**在应答**的目标端 agent 桩：认 `/v1/agent/info` 与 `/v1/runs/{id}/abort`，别的一律 503。
 ///
@@ -190,6 +218,8 @@ struct Rig {
     runs: Arc<Mutex<RunState>>,
     schedule: db_qbs_source::ScheduleRegistry,
     auth: AuthStore,
+    clock: Arc<TestClock>,
+    mail_transport: Arc<FakeMailTransport>,
     /// 这台 rig 的会话票据。**每条请求默认都带着它**——`/api/*` 现在整片要求登录，
     /// 不带就是 401，而这个文件里的用例问的几乎都不是「没登录会怎样」。
     /// 真要问那一句的用例走 [`Rig::send_anonymous`]。
@@ -220,8 +250,13 @@ impl Rig {
             history_retention_days: 90,
             run_executable,
         };
+        let clock = Arc::new(TestClock::new(
+            chrono::DateTime::parse_from_rfc3339("2026-08-31T10:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        ));
         let auth = AuthStore::open(&directory).unwrap();
-        let session = auth.issue_session(chrono::Utc::now()).unwrap().token;
+        let session = auth.issue_session(clock.now()).unwrap().token;
         Self {
             config_path: directory.join("source.toml"),
             tasks: TaskStore::open(&directory).unwrap(),
@@ -232,6 +267,8 @@ impl Rig {
             runs: Arc::new(Mutex::new(RunState::default())),
             schedule: Arc::new(Mutex::new(ScheduleState::default())),
             auth,
+            clock,
+            mail_transport: Arc::new(FakeMailTransport::default()),
             session,
             config,
             directory,
@@ -260,6 +297,8 @@ impl Rig {
             runs: &self.runs,
             schedule: &self.schedule,
             auth: &self.auth,
+            clock: self.clock.clone(),
+            mail_transport: self.mail_transport.clone(),
             describe_source,
         }
     }
@@ -283,6 +322,8 @@ impl Rig {
             runs: Arc::new(Mutex::new(RunState::default())),
             schedule: Arc::new(Mutex::new(ScheduleState::default())),
             auth: AuthStore::open(&directory).unwrap(),
+            clock: self.clock.clone(),
+            mail_transport: self.mail_transport.clone(),
             session: self.session.clone(),
             directory,
         }
@@ -1097,6 +1138,26 @@ fn renaming_a_task_leaves_earlier_runs_carrying_the_old_name() {
     assert_eq!(listed[0]["task_name"], "持仓明细");
     let detail = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
     assert_eq!(detail["task_name"], "持仓明细");
+}
+
+#[test]
+fn the_in_process_api_uses_the_rig_clock_when_accepting_a_run() {
+    let rig = Rig::new();
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let task_id = rig.create_task("clocked", "CLOCKED", &(source_id, target_id));
+    let now = chrono::DateTime::parse_from_rfc3339("2026-08-31T10:05:06.789Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    rig.clock.set(now);
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let detail = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(detail["started_at"], "2026-08-31T10:05:06.789Z");
 }
 
 #[test]
@@ -2179,7 +2240,14 @@ while :; do sleep 0.02; done
 
     // 进程在这一刻被 `kill -9`：没有收尾、没有 abort，磁盘上留下一行没走完的历史。
     let restarted = rig.second_life();
-    reclaim_after_restart(&restarted.history, &restarted.run_logs, &restarted.runs, 90).unwrap();
+    reclaim_after_restart(
+        &restarted.history,
+        &restarted.run_logs,
+        &restarted.runs,
+        90,
+        restarted.clock.as_ref(),
+    )
+    .unwrap();
 
     // 补发那一趟没成（目标端 drop 不掉暂存表），于是占用如实挂着，原话照抄。
     let held = wait_for_json(&restarted, &format!("/api/runs/{run_record_id}"), |body| {
@@ -2230,7 +2298,14 @@ while :; do sleep 0.02; done
     });
 
     let restarted = rig.second_life();
-    reclaim_after_restart(&restarted.history, &restarted.run_logs, &restarted.runs, 90).unwrap();
+    reclaim_after_restart(
+        &restarted.history,
+        &restarted.run_logs,
+        &restarted.runs,
+        90,
+        restarted.clock.as_ref(),
+    )
+    .unwrap();
 
     let released = wait_for_json(&restarted, &format!("/api/runs/{run_record_id}"), |body| {
         body["target_hold"] == Value::Null

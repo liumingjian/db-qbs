@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use chrono::{Local, NaiveDateTime, Utc};
+use chrono::{Local, NaiveDateTime};
 use db_qbs_shared::{LogEvent, LogLevel};
 use serde::Serialize;
 use serde_json::json;
@@ -343,7 +343,7 @@ fn record_skipped(state: &Api<'_>, task: &Task) {
 /// 落一行「到点了但没发起」的历史。**没有运行标识**（`run_id` 为空）：这一次
 /// 根本没走到向 sink 发请求那一步，与「预检拒绝、从未到达代理」同构。
 fn record_history(state: &Api<'_>, task: &Task, message: String) {
-    let now = Utc::now();
+    let now = state.clock.now();
     let mut history = RunHistory::accepted(
         &crate::http::generate_run_record_id(),
         &task.task_id,
@@ -355,7 +355,7 @@ fn record_history(state: &Api<'_>, task: &Task, message: String) {
     history.mark_skipped(message.clone(), now);
     if let Err(error) = state
         .history
-        .insert(&history, now, state.config.history_retention_days)
+        .finalize(&history, now, state.config.history_retention_days)
     {
         emit(
             LogLevel::Error,
