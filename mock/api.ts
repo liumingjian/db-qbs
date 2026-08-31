@@ -195,6 +195,8 @@ type RunRow = Record<string, unknown> & {
   started_at: string;
   /** 只在假运行里用：到点之后才推进阶段。不上线，界面读不到它。 */
   __startedMs?: number;
+  /** 同上，只在假运行里用：这次停止是什么时候按下的（#271）。 */
+  __holdSinceMs?: number;
 };
 
 function evidenceFor(task: TaskRow): Json {
@@ -532,6 +534,7 @@ const COMMITTING_MS = 3_000;
 
 /** 把一条在飞的假运行推到「现在」该在的样子。 */
 function advance(row: RunRow): RunRow {
+  settleHold(row);
   const started = row.__startedMs;
   if (started === undefined) return row;
   const elapsed = Date.now() - started;
@@ -586,10 +589,32 @@ function advance(row: RunRow): RunRow {
 
 const inFlight = (row: RunRow) => row.__startedMs !== undefined;
 
+/** 停止之后，占用要「还在释放」多久才见分晓。 */
+const HOLD_RELEASING_MS = 3_000;
+
+/**
+ * 停止之后那段窗口（#271）。
+ *
+ * 假后端在这里**故意让第一次释放失败**：只有这样，「锁未释放，点此重试」那一档
+ * 在 `npm run dev:mock` 下才走得通——点了重试就真的释放掉。
+ */
+function settleHold(row: RunRow): void {
+  const since = row.__holdSinceMs;
+  if (since === undefined) return;
+  if (Date.now() - since < HOLD_RELEASING_MS) {
+    row.target_hold = "RELEASING";
+    row.target_hold_message = null;
+    return;
+  }
+  row.target_hold = "HELD";
+  row.target_hold_message = "目标端没应答，暂存表没能 drop（mock）";
+}
+
 /** 对外的行：内部字段不出门。 */
 function publicRow(row: RunRow): Json {
-  const { __startedMs, ...rest } = row;
+  const { __startedMs, __holdSinceMs, ...rest } = row;
   void __startedMs;
+  void __holdSinceMs;
   return rest;
 }
 
@@ -1070,6 +1095,9 @@ const ROUTES: Route[] = [
         return fail(409, "这次运行已经过了可以中止的阶段");
       }
       delete row.__startedMs;
+      // 停止是**异步**的：信号发出去就回，目标表占用要等子进程退出、父进程补发
+      // abort 之后才真的还回来（#271）。这一行记下那一刻，界面据此显示「停止中…」。
+      row.__holdSinceMs = Date.now();
       Object.assign(row, {
         stage: "FAILED",
         outcome: "FAILED",
@@ -1077,8 +1105,26 @@ const ROUTES: Route[] = [
         finished_at: new Date().toISOString(),
         failure_kind: "CANCELLED",
         message: "运行被手动中止，暂存表已丢弃",
+        target_hold: "RELEASING",
+        target_hold_message: null,
       });
-      return ok({ message: "已请求中止，暂存表已丢弃" });
+      return ok({ message: "已发送 SIGTERM" });
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/api/runs/{}/release",
+    handler: ({ id }) => {
+      const row = runs.find((r) => r.run_record_id === id);
+      if (row === undefined) return fail(404, "运行记录不存在");
+      settleHold(row);
+      // 与真后端同形：只对确实欠着占用的运行开门。
+      if (row.target_hold !== "HELD") {
+        return fail(404, "这次运行没有待释放的目标表占用");
+      }
+      delete row.__holdSinceMs;
+      Object.assign(row, { target_hold: null, target_hold_message: null });
+      return ok({ message: "目标表占用已释放" });
     },
   },
   {

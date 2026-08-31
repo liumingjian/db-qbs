@@ -458,6 +458,18 @@ export interface RunHistory {
   ms: number;
   last_ts: string | null;
   mapping_issues: MappingIssue[];
+  /**
+   * 这次运行占着的目标表**现在**是什么处境（source 侧 `TargetHold`，#271）。
+   *
+   * 说的是占用，不是停止请求：停止是异步的，接口发出信号就返回，占用要等子进程退出、
+   * 父进程补发 abort 之后才真的还回来。`RELEASING` 是还在还的路上（含重试正在路上），
+   * `HELD` 是 abort 失败、占用留在了目标端，`null` 才是还清了。
+   *
+   * **纯内存的事实**，不落库：服务端重启后一律读回 `null`。
+   */
+  target_hold?: "RELEASING" | "HELD" | null;
+  /** `HELD` 时没能释放掉的原因，目标端原话。其余情况是 `null`。 */
+  target_hold_message?: string | null;
 }
 
 export interface LiveRunDetail {
@@ -480,6 +492,9 @@ export interface LiveRunDetail {
   bytes: number;
   ms: number;
   last_ts: string | null;
+  /** 与 {@link RunHistory.target_hold} 同一栏：在飞的时候它只可能是 `RELEASING` 或 `null`。 */
+  target_hold?: "RELEASING" | "HELD" | null;
+  target_hold_message?: string | null;
   live: true;
 }
 
@@ -886,6 +901,22 @@ export async function cancelRun(
     `/api/runs/${encodeURIComponent(runRecordId)}/cancel`,
     {},
     "取消运行失败",
+  );
+}
+
+/**
+ * 重试释放这次运行没能还回来的目标表占用（#271）。
+ *
+ * 发的就是当初那条 abort，只是这一次由人按下。**这是占用泄漏之后唯一的补救入口**，
+ * 在它之前只能去目标端手工清。服务端只对确实欠着占用的运行开门：没欠着是 404。
+ */
+export async function releaseTargetHold(
+  runRecordId: string,
+): Promise<{ message: string }> {
+  return postJson<{ message: string }>(
+    `/api/runs/${encodeURIComponent(runRecordId)}/release`,
+    {},
+    "释放目标表占用失败",
   );
 }
 

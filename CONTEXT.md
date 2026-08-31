@@ -324,7 +324,8 @@ branches on the version.
 **Abort**
    The cleanup action by which `source`, on hitting an error, tells `sink` to discard the staging
    table — which is also what releases `sink`'s hold on the target table. It is idempotent and
-   **promises nothing about reliability** — a failed abort is logged and not retried. Whether it is
+   **promises nothing about reliability** — a failed abort is logged and never retried on its own;
+   retrying it is a person's decision, not a timer's. Whether it is
    still permitted is a property of the **Run Stage**, with one implementation both ends read. It
    exists to clear the most common leftover: "the process is still alive, this run just failed."
    **It is only ever sent before commit**: once `COMMITTING` is entered, the staging table's
@@ -338,9 +339,24 @@ branches on the version.
    itself: signal, confirmed exit, then abort, because the staging table must not be touched while
    the process that writes into it is still alive. It is skipped when the run never reached `sink`
    (no `run_id`) and when the stage says the point of no return has passed. A failed one is written
-   into that run's Run Log as an `abort_failed` line rather than swallowed; the hold then stays
-   until someone clears it by hand. **SIGKILL, a parent crash, and a power cut still leak** — there
-   is no timeout-based reclaim on the `sink` side.
+   into that run's Run Log as an `abort_failed` line rather than swallowed, and the hold it failed to
+   release is remembered by name so it can be retried on demand. **SIGKILL, a parent crash, and a
+   power cut still leak** — there is no timeout-based reclaim on the `sink` side, and a source
+   restart forgets the remembered holds along with everything else it keeps in memory.
+
+**Target table hold**
+   `sink`'s record that one run is using a target table; it is what a second run collides with
+   (`TARGET_TABLE_BUSY`). Releasing it is not a separate action — it happens when the run commits or
+   is aborted. Because release is asynchronous and can fail, **`source` reports the hold's fate
+   rather than the stop request's**: from the moment a stop is signalled until the abort has been
+   sent and answered, the run says the hold is still being released; if the abort failed — the
+   child's own or the parent's — the run says the hold is still held, and names the reason. A run may not be started while a hold from its
+   task's previous run is unreleased — the refusal comes from `source`, before the request would
+   reach the agent that would refuse it anyway. **Nothing may present a task as re-runnable while
+   its target table is still held**, in the UI or in the API. The retry is manual and explicit
+   (`POST /api/runs/{run_record_id}/release`, the same abort as before, sent by a person instead of
+   by the parent); nothing retries on a timer, and this is the only remedy short of clearing the
+   hold on the agent by hand.
 
 **Swap**
    Completed inside a single transaction on the target: an `INSERT ... SELECT` from the staging table

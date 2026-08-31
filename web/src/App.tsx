@@ -22,6 +22,7 @@ import {
   listTasks,
   logout,
   onSessionLost,
+  releaseTargetHold,
   startRun,
   updateTask,
 } from "./api";
@@ -682,6 +683,23 @@ function Workbench({
     }
   }
 
+  /**
+   * 重试释放上一次运行没能还回来的目标表占用（#271）。
+   *
+   * 成了就什么都不用说：清单一刷新，那一格自己变回「发起运行」，而那正是人想看到的。
+   * 没成才留一句话在屏顶——占用还挂着，界面照旧显示「锁未释放」，可以再点一次。
+   */
+  async function handleRetryRelease(runRecordId: string) {
+    setStartError(null);
+    try {
+      await releaseTargetHold(runRecordId);
+    } catch (error) {
+      setStartError(messageFrom(error));
+    } finally {
+      void loadList();
+    }
+  }
+
   async function handleDelete(task: Task) {
     await deleteTask(task.task_id);
     setTasks(
@@ -927,6 +945,7 @@ function Workbench({
               startingTaskId={startingTaskId}
               onStart={(task) => void handleStart(task)}
               onStop={(runRecordId) => void handleStop(runRecordId)}
+              onRetryRelease={(runRecordId) => void handleRetryRelease(runRecordId)}
               /* 重跑与发起现在是**同一件事**：按任务当前的定义再跑一次。
                  上一次没有留下任何需要预填的取值，所以也没有第二条代码路径。 */
               onRerun={handleStart}

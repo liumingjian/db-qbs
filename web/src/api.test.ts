@@ -20,6 +20,7 @@ import {
   previewBuilderRows,
   previewErrorMessage,
   cancelRun,
+  releaseTargetHold,
   fetchRun,
   listRunHistory,
   listTasks,
@@ -295,6 +296,20 @@ describe("run history API", () => {
     }));
   });
 
+  // #271：占用泄漏之后唯一的补救入口。发的是同一条 abort，只是由人按下。
+  it("retries the target-table hold release on the run's own identity", async () => {
+    const released = { message: "目标表占用已释放" };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(released), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(releaseTargetHold("record/01")).resolves.toEqual(released);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/runs/record%2F01/release",
+      expect.objectContaining({ method: "POST", body: "{}" }),
+    );
+  });
 });
 
 describe("task cURL API", () => {
