@@ -1,7 +1,7 @@
-import { ArrowLeft, Ban, Play, RefreshCw } from "lucide-react";
+import { ArrowLeft, Ban, Lock, Play, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { cancelRun, fetchRun } from "./api";
+import { cancelRun, fetchRun, releaseTargetHold } from "./api";
 import type { RunDetail, Task } from "./api";
 import {
   ErrorCodeTag,
@@ -133,6 +133,17 @@ export function RunScreen({
   // 停不停得了和服务端读同一条规则，所以按钮在点下去之前就知道答案——
   // 过去它一直亮着，人只有吃一个 409 才发现封口点已经过了。
   const cancelRefusal = detail === null ? null : abortRefusal(detail.stage);
+  /**
+   * 这次运行占着的目标表还回来了没有（#271）。
+   *
+   * **这一屏也要认它**：作业中心那一格拦住了「发起运行」，这里的「重新发起」是同一件事
+   * 的第二个入口——占用还在的时候把它亮着，等于当着人的面说一句假话。
+   */
+  const targetHold = detail?.target_hold ?? null;
+  const holdReason =
+    targetHold === "RELEASING"
+      ? "已发出停止，正在等目标表占用释放"
+      : detail?.target_hold_message ?? "目标表占用没能释放";
 
   async function handleCancel() {
     setCancelMessage(null);
@@ -141,6 +152,24 @@ export function RunScreen({
       setCancelMessage(response.message);
     } catch (error) {
       setCancelMessage(messageFrom(error));
+    }
+  }
+
+  /** 重发一次 abort。成了那一格就变回「重新发起」，没成就还留在这里，可以再点。 */
+  async function handleRetryRelease() {
+    setCancelMessage(null);
+    try {
+      const response = await releaseTargetHold(runRecordId);
+      setCancelMessage(response.message);
+    } catch (error) {
+      setCancelMessage(messageFrom(error));
+    }
+    // 这条运行早已终局，轮询也就停了——占用那一栏得自己再读一次，否则屏幕会一直
+    // 停在「锁未释放」上，哪怕它刚刚已经释放了。
+    try {
+      setDetail(await fetchRun(runRecordId));
+    } catch (error) {
+      setLoadError(messageFrom(error));
     }
   }
 
@@ -162,15 +191,36 @@ export function RunScreen({
             <button
               className="button is-ghost"
               type="button"
-              disabled={cancelRefusal !== null}
+              disabled={cancelRefusal !== null || targetHold !== null}
               onClick={() => void handleCancel()}
             >
               <Ban size={ICON.sm} aria-hidden="true" />
-              取消运行
+              {targetHold === null ? "取消运行" : "停止中…"}
             </button>
             {cancelRefusal !== null && (
               <span className="run-cancel-reason">{cancelRefusal}</span>
             )}
+            {/* 已经停过一次了：这一格改说「停止中…」并按不动，理由挂在旁边。
+                再点一次只是重发一遍 SIGTERM，什么也不会更快（#271）。 */}
+            {cancelRefusal === null && targetHold !== null && (
+              <span className="run-cancel-reason">{holdReason}</span>
+            )}
+          </span>
+        ) : targetHold !== null ? (
+          // 占用还在目标端挂着，**这一格绝不给「重新发起」**：那一下点下去只会
+          // 换回一个 `TARGET_TABLE_BUSY`。还在释放的时候按不动；释放失败了它就是
+          // 重试那一颗（#271）。
+          <span className="run-cancel">
+            <button
+              className="button is-ghost"
+              type="button"
+              disabled={targetHold === "RELEASING"}
+              onClick={() => void handleRetryRelease()}
+            >
+              <Lock size={ICON.sm} aria-hidden="true" />
+              {targetHold === "RELEASING" ? "停止中…" : "锁未释放，点此重试"}
+            </button>
+            <span className="run-cancel-reason">{holdReason}</span>
           </span>
         ) : (
           <button className="button is-primary" type="button" onClick={onRelaunch}>

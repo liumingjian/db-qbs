@@ -61,6 +61,52 @@ describe("row run action", () => {
     ).toEqual({ kind: "stop", runRecordId: "record-7", refusal: null });
   });
 
+  // #271：停止是异步的，占用要等子进程退出、父进程补发 abort 之后才真的还回来。
+  // 那段窗口里这一格既不是「发起」也不是「停止」，而是「停止中…」。
+  it("reports the hold, not the stop request, once a stop has been signalled", () => {
+    expect(
+      rowRunAction(
+        history({
+          outcome: null,
+          finished_at: null,
+          stage: "STREAMING",
+          target_hold: "RELEASING",
+        }),
+        false,
+      ),
+    ).toEqual({ kind: "releasing" });
+  });
+
+  it("offers a retry — never a start — while the hold could not be released", () => {
+    // 占用还在目标端挂着，这时候把这一格显示成「发起运行」是一句假话：
+    // 点下去只换回一个 TARGET_TABLE_BUSY。
+    expect(
+      rowRunAction(
+        history({
+          outcome: "FAILED",
+          unknown_reason: "STOPPED_BY_USER",
+          target_hold: "HELD",
+          target_hold_message: "暂存表 drop 不掉",
+        }),
+        false,
+      ),
+    ).toEqual({
+      kind: "held",
+      runRecordId: "record-7",
+      reason: "暂存表 drop 不掉",
+    });
+  });
+
+  it("keeps the hold in charge even while the start action is busy", () => {
+    // `startBusy` 只管「正在发起」那一档；占用还在时它一个字都改不了。
+    expect(rowRunAction(history({ target_hold: "HELD" }), true)).toMatchObject({
+      kind: "held",
+    });
+    expect(rowRunAction(history({ target_hold: "RELEASING" }), true)).toEqual({
+      kind: "releasing",
+    });
+  });
+
   it("only disables the start action while that task is being submitted", () => {
     expect(rowRunAction(undefined, true)).toEqual({ kind: "start", disabled: true });
   });

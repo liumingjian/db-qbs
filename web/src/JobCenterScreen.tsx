@@ -3,6 +3,8 @@ import {
   CalendarClock,
   Clock3,
   Database,
+  LoaderCircle,
+  Lock,
   Pencil,
   Play,
   Plus,
@@ -70,6 +72,13 @@ export interface JobCenterProps {
   startingTaskId: string | null;
   onStart: (task: Task) => void;
   onStop: (runRecordId: string) => void;
+  /**
+   * 重试释放这次运行没能还回来的目标表占用（#271）。
+   *
+   * 与发起、停止**共用操作列的第一格**：占用还在的时候那一格不给「发起运行」，
+   * 给的是这一颗。
+   */
+  onRetryRelease: (runRecordId: string) => void;
   /** 重跑就是按这个任务当前的定义再跑一次；上一次那条记录不再带进来（没有可预填的东西）。 */
   onRerun: (task: Task) => void;
   onEditFailure: (task: Task, step: Step) => void;
@@ -91,6 +100,7 @@ export function JobCenterScreen({
   startingTaskId,
   onStart,
   onStop,
+  onRetryRelease,
   onRerun,
   onEditFailure,
   onChanged,
@@ -896,14 +906,36 @@ function JobResults({
                 </td>
                 <td className="action-column">
                   <span className="row-actions">
-                    {/* 发起与停止共用这一格：进行中只给停止，终局或从未运行只给发起。
-                        发起请求在途时只锁这一行，别的任务仍然可以操作。 */}
+                    {/* 发起、停止、停止中、锁未释放**共用这一格**：这一列恰好五颗，
+                        第六颗会挤坏它。四态互斥，判定全在 `rowRunAction` 一处
+                        （#271）。 */}
                     {runAction.kind === "start" ? (
                       <ActionButton
                         label={runAction.disabled ? "正在发起" : "发起运行"}
                         icon={<Play size={ICON.md} />}
                         disabled={runAction.disabled}
                         onClick={() => onStart(task)}
+                      />
+                    ) : runAction.kind === "releasing" ? (
+                      // 停止已经发出，占用还没还回来：按不动，也**不许变回发起运行**。
+                      // 界面说得出「还没释放」，比它假装已经好了要好（#271）。
+                      <ActionButton
+                        label="停止中…（目标表占用尚未释放）"
+                        icon={<LoaderCircle size={ICON.md} />}
+                        disabled
+                        onClick={() => undefined}
+                      />
+                    ) : runAction.kind === "held" ? (
+                      // abort 失败，占用留在目标端。这一颗是全系统唯一的补救入口：
+                      // 点一下就重发一次 abort，成了才轮到「发起运行」。
+                      <ActionButton
+                        label={
+                          runAction.reason === null
+                            ? "锁未释放，点此重试"
+                            : `锁未释放，点此重试：${runAction.reason}`
+                        }
+                        icon={<Lock size={ICON.md} />}
+                        onClick={() => onRetryRelease(runAction.runRecordId)}
                       />
                     ) : (
                       // 停不停得了与运行详情屏读同一条规则（UX 评审 P1-11）：

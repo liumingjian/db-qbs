@@ -74,6 +74,7 @@ const BASE_PROPS = {
   startingTaskId: null,
   onStart: () => undefined,
   onStop: () => undefined,
+  onRetryRelease: () => undefined,
   onRerun: () => undefined,
   onEditFailure: () => undefined,
   onChanged: () => undefined,
@@ -82,6 +83,69 @@ const BASE_PROPS = {
 };
 
 describe("job row actions", () => {
+  // #271：占用还在的时候，那一格说的必须是实话——第六颗按钮会挤坏这一列，
+  // 所以三态四态全挤在第一格里，与「发起与停止共用这一格」是同一个决定。
+  it("says 停止中… instead of offering a run while the hold is being released", () => {
+    const html = renderToStaticMarkup(createElement(JobCenterScreen, {
+      ...BASE_PROPS,
+      latestRuns: new Map([
+        [
+          "task-1",
+          {
+            ...LATEST_RUN,
+            outcome: null,
+            finished_at: null,
+            stage: "STREAMING",
+            target_hold: "RELEASING",
+          } as RunHistory,
+        ],
+      ]),
+    }));
+
+    expect(html).toContain("停止中…（目标表占用尚未释放）");
+    expect(html).not.toContain("发起运行");
+    // 已经停过一次了，「停止运行」那一颗也不该再出现。
+    expect(html).not.toContain("停止运行 record-1");
+  });
+
+  it("offers the retry instead of a run while the hold could not be released", () => {
+    const html = renderToStaticMarkup(createElement(JobCenterScreen, {
+      ...BASE_PROPS,
+      latestRuns: new Map([
+        [
+          "task-1",
+          {
+            ...LATEST_RUN,
+            outcome: "FAILED",
+            unknown_reason: "STOPPED_BY_USER",
+            message: "已由用户停止",
+            target_hold: "HELD",
+            target_hold_message: "暂存表 drop 不掉",
+          } as RunHistory,
+        ],
+      ]),
+    }));
+
+    expect(html).toContain("锁未释放，点此重试：暂存表 drop 不掉");
+    expect(html).not.toContain("发起运行");
+  });
+
+  it("keeps the action column to five buttons while the hold is stuck", () => {
+    const html = renderToStaticMarkup(createElement(JobCenterScreen, {
+      ...BASE_PROPS,
+      latestRuns: new Map([
+        ["task-1", { ...LATEST_RUN, target_hold: "HELD" } as RunHistory],
+      ]),
+    }));
+
+    expect(html.match(/<button/g) ?? []).toHaveLength(
+      (renderToStaticMarkup(createElement(JobCenterScreen, {
+        ...BASE_PROPS,
+        latestRuns: new Map([["task-1", LATEST_RUN]]),
+      })).match(/<button/g) ?? []).length,
+    );
+  });
+
   // The slot is held open rather than dropped (UX review P2-15): a vanishing button
   // puts the same action at a different x on neighbouring rows, so muscle memory
   // lands on whichever button slid into its place.
@@ -98,6 +162,7 @@ describe("job row actions", () => {
       startingTaskId: null,
       onStart: () => undefined,
       onStop: () => undefined,
+      onRetryRelease: () => undefined,
       onRerun: () => undefined,
       onEditFailure: () => undefined,
       onChanged: () => undefined,

@@ -29,6 +29,7 @@ export type RerunAction =
  * - `live` / `succeeded` → 没有入口。进行中的不该被再捅一次，成功的没有重跑的由头。
  *
  * 任务已被删除时**不让入口消失**——凭空消失会被读成「功能坏了」，禁用加一句原因才是实话。
+ * 目标表占用还没还回来时同样禁用（#271）：那时候「可以重跑」是一句假话。
  */
 export function rerunAction(
   row: RunHistory,
@@ -37,6 +38,22 @@ export function rerunAction(
   const kind = historyPresentation(row).kind;
   if (kind !== "failed" && kind !== "unknown") {
     return { kind: "hidden" };
+  }
+  // 目标表占用还挂在目标端时**一律不给重跑**（#271）：这一条比「结局是什么」更硬，
+  // 因为它说的不是这次跑得怎么样，而是下一次根本跑不起来——点下去只换回一个
+  // `TARGET_TABLE_BUSY`。入口照旧不消失，禁用并说清楚下一步该做什么。
+  if (row.target_hold === "RELEASING") {
+    return {
+      kind: "disabled",
+      reason: "已发出停止，目标表占用还没释放。等它释放后再重跑。",
+    };
+  }
+  if (row.target_hold === "HELD") {
+    return {
+      kind: "disabled",
+      reason:
+        "上一次的目标表占用没能释放，这时候重跑会被目标端拒掉。先点「锁未释放，点此重试」，释放成功后再重跑。",
+    };
   }
   if (tasks === null) {
     // 读失败时 `App` 的 `tasks` 也停在 `null`，所以这句话**不许说成「还在读」**——
