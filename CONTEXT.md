@@ -669,8 +669,9 @@ branches on the version.
 **Source API**
    Every HTTP request `source` answers goes through one function: `Api::handle(&Request) -> Response`
    in `crates/source/src/http.rs`. It lives in the **library, not the binary** — `server_main.rs` is
-   under twenty lines and owns nothing but the process entry point. Tests therefore drive the whole
-   API in-process; none of them spawns a process or opens a socket.
+   under twenty lines and owns nothing but the process entry point. Tests drive ordinary API behavior
+   in-process through explicit seams; focused integration tests use real processes and loopback sockets
+   where restart recovery, SMTP delivery, and bounded shutdown behavior require those boundaries.
 
    **Authentication and required role are columns on the route table, not lines in handlers**, and
    they are checked before dispatch. Exactly three routes are public — `GET`, `POST` and `DELETE`
