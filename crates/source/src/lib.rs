@@ -10,6 +10,7 @@ mod agent;
 mod auth;
 mod cron;
 mod datasource;
+mod email_alert;
 mod failure_kind;
 pub mod http;
 mod oracle_source;
@@ -48,6 +49,10 @@ pub use db_qbs_shared::{
 pub use datasource::{
     Datasource, DatasourceInput, DatasourceSettings, DatasourceSettingsView, DatasourceStore,
     DatasourceView,
+};
+pub use email_alert::{
+    EmailAlertSettings, EmailAlertSettingsInput, EmailAlertStore, EmailDeliverySettings,
+    EmailProviderPreset, SmtpSecurity,
 };
 pub use db_qbs_shared::{
     classify_column, column_support, derive_number_shape, is_business_date_column,
