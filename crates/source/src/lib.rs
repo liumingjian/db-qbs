@@ -32,7 +32,8 @@ mod web_assets;
 
 pub use agent::{fetch_agent_info, normalize_base_url, Agent, AgentInput, AgentStatus, AgentStore};
 pub use alert_outbox::{
-    spawn_outbox_worker, AlertDeliveryState, AlertOutboxStore, RunAlertSummary,
+    spawn_outbox_worker, AlertDeliveryState, AlertOutboxStore, EmailDeliveryHistory,
+    EmailDeliveryState, ManualRetryOutcome, RunAlertSummary, RETRY_BASE_SECONDS, RETRY_CAP_SECONDS,
 };
 // 登录、会话与口令（source 的 HTTP 面）。**它护不到 sink**——那半边仍然没有鉴权。
 pub use auth::{

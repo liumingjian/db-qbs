@@ -649,6 +649,14 @@ pub fn routes() -> &'static [Route] {
             Route::administrator(Post, "/api/email-alert-settings/test", |state, _request, _id| {
                 handle_test_email_alert_settings(state)
             }),
+            Route::administrator(Get, "/api/email-deliveries", |state, request, _id| {
+                handle_list_email_deliveries(state, request.query())
+            }),
+            Route::administrator(
+                Post,
+                "/api/email-deliveries/{}/retry",
+                |state, _request, id| handle_retry_email_delivery(state, id),
+            ),
             Route::new(Post, "/api/columns", |state, request, _id| {
                 handle_column_fetch(request, state)
             }),
@@ -1069,6 +1077,37 @@ fn handle_test_email_alert_settings(state: &Api<'_>) -> HttpResponse {
         EmailTestStatus::Success
     };
     persist_test_result(state, status, latest_error)
+}
+
+fn handle_list_email_deliveries(state: &Api<'_>, query: Option<&str>) -> HttpResponse {
+    let run_record_id = url::form_urlencoded::parse(query.unwrap_or_default().as_bytes())
+        .find(|(key, _)| key == "run_record_id")
+        .map(|(_, value)| value.into_owned());
+    match state
+        .alert_outbox
+        .delivery_history(run_record_id.as_deref())
+    {
+        Ok(deliveries) => json_response(200, &deliveries),
+        Err(error) => internal_error(error),
+    }
+}
+
+fn handle_retry_email_delivery(state: &Api<'_>, delivery_id: &str) -> HttpResponse {
+    let settings = match state.email_alerts.get() {
+        Ok(settings) => settings,
+        Err(error) => return internal_error(error),
+    };
+    match state
+        .alert_outbox
+        .manual_retry(delivery_id, state.clock.now(), settings.max_retry_hours)
+    {
+        Ok(crate::ManualRetryOutcome::Retried(delivery)) => json_response(200, &delivery),
+        Ok(crate::ManualRetryOutcome::NotFound) => not_found(),
+        Ok(crate::ManualRetryOutcome::Ineligible) => {
+            bad_request("只有已耗尽重试窗口的失败投递才能手动重试".to_owned())
+        }
+        Err(error) => internal_error(error),
+    }
 }
 
 fn persist_test_result(

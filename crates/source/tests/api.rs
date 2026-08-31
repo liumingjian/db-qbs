@@ -615,6 +615,26 @@ fn every_route_reaches_its_handler() {
         .as_str()
         .unwrap()
         .to_owned();
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(true, "route-test-secret", 0),
+        )
+        .status,
+        200
+    );
+    let now = rig.clock.now();
+    let mut failed = RunHistory::accepted("route-alert", "route-task", "SELECT 1", now);
+    failed.outcome = Some("FAILED".to_owned());
+    failed.finished_at = Some(now.to_rfc3339());
+    failed.failure_kind = Some("NETWORK".to_owned());
+    rig.history.finalize(&failed, now, 90).unwrap();
+    let pending_delivery_id = rig
+        .alert_outbox
+        .delivery_history(Some("route-alert"))
+        .unwrap()[0]
+        .delivery_id
+        .clone();
 
     // (方法, 路由样式, 实打实的 URL, 请求体, 期望状态码)
     let checks: Vec<(Method, &str, String, String, u16)> = vec![
@@ -852,6 +872,20 @@ fn every_route_reaches_its_handler() {
             "/api/email-alert-settings/test".into(),
             String::new(),
             200,
+        ),
+        (
+            Method::Get,
+            "/api/email-deliveries",
+            "/api/email-deliveries".into(),
+            String::new(),
+            200,
+        ),
+        (
+            Method::Post,
+            "/api/email-deliveries/{}/retry",
+            format!("/api/email-deliveries/{pending_delivery_id}/retry"),
+            String::new(),
+            400,
         ),
         // 会话那三条**排在最末，而且退出排最后**：`DELETE /api/session` 会把 rig
         // 自己那张票销掉，排在中间会让它后面每一行都变成 401。
@@ -3243,12 +3277,14 @@ fn every_route_declares_its_access() {
             "{method:?} {pattern} 应当是公开的"
         );
     }
-    let administrator: [(Method, &str); 14] = [
+    let administrator: [(Method, &str); 16] = [
         (Method::Get, "/api/operator-account"),
         (Method::Put, "/api/operator-account"),
         (Method::Get, "/api/email-alert-settings"),
         (Method::Put, "/api/email-alert-settings"),
         (Method::Post, "/api/email-alert-settings/test"),
+        (Method::Get, "/api/email-deliveries"),
+        (Method::Post, "/api/email-deliveries/{}/retry"),
         (Method::Post, "/api/agents"),
         (Method::Post, "/api/agents/{}/probe"),
         (Method::Put, "/api/agents/{}"),
@@ -3705,11 +3741,7 @@ fn run_details_expose_only_the_same_aggregate_alert_state_to_both_roles() {
     rig.auth
         .update_operator(true, Some("operator-secret"))
         .unwrap();
-    let operator = rig
-        .auth
-        .issue_session("operator", now)
-        .unwrap()
-        .token;
+    let operator = rig.auth.issue_session("operator", now).unwrap().token;
     let path = "/api/runs/aggregate-alert-run";
     let admin_response = rig.get(path);
     let operator_response = rig.send_with_session(&operator, Method::Get, path, "");
@@ -3733,6 +3765,84 @@ fn run_details_expose_only_the_same_aggregate_alert_state_to_both_roles() {
             assert!(!body.contains(private), "run projection leaked {private}");
         }
     }
+}
+
+#[test]
+fn only_administrators_can_diagnose_and_retry_exhausted_email_deliveries() {
+    let rig = Rig::new();
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(true, "SMTP-secret-marker", 0),
+        )
+        .status,
+        200
+    );
+    let now = rig.clock.now();
+    let mut failed = RunHistory::accepted(
+        "delivery-diagnostics",
+        "task-delivery",
+        "SELECT private_marker FROM source",
+        now,
+    );
+    failed.task_name = "投递诊断".to_owned();
+    failed.outcome = Some("FAILED".to_owned());
+    failed.finished_at = Some(now.to_rfc3339());
+    failed.failure_kind = Some("NETWORK".to_owned());
+    rig.history.finalize(&failed, now, 90).unwrap();
+    *rig.mail_transport.failure.lock().unwrap() = Some(MailTransportError::Timeout);
+    assert_eq!(
+        rig.alert_outbox
+            .run_due_attempts(
+                &rig.email_alerts,
+                rig.mail_transport.as_ref(),
+                rig.clock.as_ref(),
+            )
+            .unwrap(),
+        2
+    );
+
+    rig.auth
+        .update_operator(true, Some("operator-secret"))
+        .unwrap();
+    let operator = rig
+        .auth
+        .issue_session("operator", now)
+        .unwrap()
+        .token;
+    let private_path = "/api/email-deliveries?run_record_id=delivery-diagnostics";
+    let refused = rig.send_with_session(&operator, Method::Get, private_path, "");
+    assert_eq!(refused.status, 403);
+    assert!(!refused.body_text().contains("Ops@example.com"));
+    assert!(!refused.body_text().contains("attempt_count"));
+
+    let history_response = rig.get(private_path);
+    assert_eq!(history_response.status, 200);
+    let history = rig.json(&history_response);
+    assert_eq!(history.as_array().unwrap().len(), 2);
+    assert_eq!(history[0]["state"], "FAILED");
+    assert_eq!(history[0]["attempt_count"], 1);
+    assert_eq!(history[0]["last_error"], "SMTP 连接或响应超时");
+    assert_eq!(history[0]["alert_id"], "alert-delivery-diagnostics");
+    assert!(history[0]["recipient"].is_string());
+    let delivery_id = history[0]["delivery_id"].as_str().unwrap();
+
+    rig.clock.set(now + chrono::Duration::hours(1));
+    let retry_path = format!("/api/email-deliveries/{delivery_id}/retry");
+    let retried = rig.post(&retry_path, "");
+    assert_eq!(retried.status, 200, "{}", retried.body_text());
+    let retried = rig.json(&retried);
+    assert_eq!(retried["state"], "PENDING");
+    assert_eq!(
+        retried["attempt_count"], 1,
+        "manual retry keeps lifetime count"
+    );
+    assert_eq!(retried["next_attempt_at"], rig.clock.now().to_rfc3339());
+    assert_eq!(rig.post(&retry_path, "").status, 400);
+
+    let operator_retry = rig.send_with_session(&operator, Method::Post, &retry_path, "");
+    assert_eq!(operator_retry.status, 403);
+    assert!(!operator_retry.body_text().contains("Ops@example.com"));
 }
 
 #[test]

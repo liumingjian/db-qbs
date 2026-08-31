@@ -24,6 +24,7 @@ import {
   releaseTargetHold,
   fetchRun,
   fetchEmailAlertSettings,
+  fetchEmailDeliveries,
   fetchOperatorAccount,
   fetchSession,
   isForbidden,
@@ -31,6 +32,7 @@ import {
   listTasks,
   startRun,
   sendTestEmail,
+  retryEmailDelivery,
   onSessionLost,
   taskInputFrom,
   updateOperatorAccount,
@@ -150,6 +152,40 @@ describe("role-aware session and account API", () => {
 
     await expect(sendTestEmail()).resolves.toEqual(result);
     expect(fetchMock).toHaveBeenCalledWith("/api/email-alert-settings/test", {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    });
+  });
+
+  it("reads Administrator delivery diagnostics and retries by stable delivery ID", async () => {
+    const delivery = {
+      delivery_id: "delivery-1",
+      alert_id: "alert-record-1",
+      run_record_id: "record-1",
+      task_id: "task-1",
+      task_name: "同步任务",
+      failed_at: "2026-08-31T10:00:00+00:00",
+      recipient: "ops@example.com",
+      state: "FAILED" as const,
+      attempt_count: 4,
+      first_attempt_at: "2026-08-31T10:00:00+00:00",
+      last_attempt_at: "2026-08-31T10:07:00+00:00",
+      next_attempt_at: null,
+      retry_window_started_at: "2026-08-31T10:00:00+00:00",
+      retry_deadline_at: "2026-08-31T10:10:00+00:00",
+      last_error: "SMTP 服务器暂时拒绝请求",
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify([delivery]), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...delivery, state: "PENDING" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchEmailDeliveries("record 1")).resolves.toEqual([delivery]);
+    await expect(retryEmailDelivery("delivery/1")).resolves.toMatchObject({ state: "PENDING" });
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/email-deliveries?run_record_id=record%201", {
+      headers: { Accept: "application/json" },
+    });
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/email-deliveries/delivery%2F1/retry", {
       method: "POST",
       headers: { Accept: "application/json" },
     });

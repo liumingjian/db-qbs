@@ -1,15 +1,17 @@
-import { KeyRound, Mail, Save, Send, Settings, UserRoundCheck } from "lucide-react";
+import { KeyRound, Mail, RefreshCw, Save, Send, Settings, UserRoundCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 
 import {
   fetchEmailAlertSettings,
+  fetchEmailDeliveries,
   fetchOperatorAccount,
+  retryEmailDelivery,
   sendTestEmail,
   updateEmailAlertSettings,
   updateOperatorAccount,
 } from "./api";
-import type { EmailAlertSettings, EmailAlertSettingsInput, OperatorAccount } from "./api";
+import type { EmailAlertSettings, EmailAlertSettingsInput, EmailDeliveryHistory, OperatorAccount } from "./api";
 import { ICON } from "./components/DesignSystem";
 import { messageFrom } from "./errors";
 import { FormField } from "./ui";
@@ -41,14 +43,16 @@ export function SystemSettingsScreen() {
 function EmailAlertSettingsPane() {
   const [settings, setSettings] = useState<EmailAlertSettings | null>(null);
   const [draft, setDraft] = useState<EmailAlertSettingsInput | null>(null);
+  const [deliveries, setDeliveries] = useState<EmailDeliveryHistory[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
 
   useEffect(() => {
-    void fetchEmailAlertSettings().then((loaded) => {
+    void Promise.all([fetchEmailAlertSettings(), fetchEmailDeliveries()]).then(([loaded, history]) => {
       setSettings(loaded);
       setDraft(inputFrom(loaded));
+      setDeliveries(history);
     }).catch((loadError) => setError(messageFrom(loadError)));
   }, []);
 
@@ -88,21 +92,40 @@ function EmailAlertSettingsPane() {
     }
   }
 
+  async function retryDelivery(deliveryId: string) {
+    setBusy(true);
+    setError(null);
+    setSaved(null);
+    try {
+      const retried = await retryEmailDelivery(deliveryId);
+      setDeliveries((current) => current.map((delivery) => (
+        delivery.delivery_id === retried.delivery_id ? retried : delivery
+      )));
+      setSaved("邮件投递已重新进入发送队列。");
+    } catch (retryError) {
+      setError(messageFrom(retryError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (draft === null && error === null) {
     return <div className="loading-state" aria-live="polite">正在读取邮件告警设置...</div>;
   }
-  return <EmailAlertSettingsView settings={settings} draft={draft} busy={busy} error={error} saved={saved} onChange={setDraft} onSubmit={(event) => void submit(event)} onTest={() => void testEmail()} />;
+  return <EmailAlertSettingsView settings={settings} draft={draft} deliveries={deliveries} busy={busy} error={error} saved={saved} onChange={setDraft} onSubmit={(event) => void submit(event)} onTest={() => void testEmail()} onRetry={(deliveryId) => void retryDelivery(deliveryId)} />;
 }
 
-export function EmailAlertSettingsView({ settings, draft, busy, error, saved, onChange, onSubmit, onTest }: {
+export function EmailAlertSettingsView({ settings, draft, deliveries = [], busy, error, saved, onChange, onSubmit, onTest, onRetry = () => undefined }: {
   settings: EmailAlertSettings | null;
   draft: EmailAlertSettingsInput | null;
+  deliveries?: EmailDeliveryHistory[];
   busy: boolean;
   error: string | null;
   saved: string | null;
   onChange: (draft: EmailAlertSettingsInput) => void;
   onSubmit: (event: FormEvent) => void;
   onTest: () => void;
+  onRetry?: (deliveryId: string) => void;
 }) {
   const patch = (change: Partial<EmailAlertSettingsInput>) => {
     if (draft !== null) onChange({ ...draft, ...change });
@@ -188,8 +211,53 @@ export function EmailAlertSettingsView({ settings, draft, busy, error, saved, on
           {settings.latest_test_result.error !== null && <div className="form-error" role="status">{settings.latest_test_result.error}</div>}
         </section>
       )}
+      <EmailDeliveryHistoryView deliveries={deliveries} busy={busy} onRetry={onRetry} />
     </div>
   );
+}
+
+export function EmailDeliveryHistoryView({ deliveries, busy, onRetry }: {
+  deliveries: EmailDeliveryHistory[];
+  busy: boolean;
+  onRetry: (deliveryId: string) => void;
+}) {
+  return (
+    <section className="email-delivery-history" aria-labelledby="email-delivery-history-title">
+      <div className="settings-pane-header">
+        <div><h3 id="email-delivery-history-title">投递历史</h3><p>按收件人显示发送状态与重试诊断。</p></div>
+      </div>
+      {deliveries.length === 0 ? (
+        <div className="empty-state">暂无邮件投递记录</div>
+      ) : (
+        <div className="table-wrap">
+          <table className="data-grid email-delivery-grid">
+            <thead><tr><th>告警 / 任务</th><th>收件人</th><th>状态</th><th>尝试</th><th>最近尝试 / 下次尝试</th><th>诊断</th><th><span className="visually-hidden">操作</span></th></tr></thead>
+            <tbody>{deliveries.map((delivery) => (
+              <tr key={delivery.delivery_id}>
+                <td><strong>{delivery.task_name}</strong><span className="table-side mono">{delivery.alert_id}</span></td>
+                <td className="mono">{delivery.recipient}</td>
+                <td><span className={`state ${deliveryStateClass(delivery.state)}`}>{deliveryStateLabel(delivery.state)}</span></td>
+                <td>{delivery.attempt_count}</td>
+                <td><span className="table-cell">{delivery.last_attempt_at ?? "尚未尝试"}</span><span className="table-side">{delivery.next_attempt_at === null ? `截止 ${delivery.retry_deadline_at}` : `下次 ${delivery.next_attempt_at}`}</span></td>
+                <td>{delivery.last_error ?? "-"}</td>
+                <td>{delivery.state === "FAILED" && <button className="icon-button" type="button" disabled={busy} title="重新发送" aria-label={`重新发送给 ${delivery.recipient}`} onClick={() => onRetry(delivery.delivery_id)}><RefreshCw size={ICON.sm} aria-hidden="true" /></button>}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function deliveryStateLabel(state: EmailDeliveryHistory["state"]): string {
+  return { PENDING: "待发送", SENT: "已发送", FAILED: "失败", NOT_SENT: "未发送", SUPPRESSED: "已抑制" }[state];
+}
+
+function deliveryStateClass(state: EmailDeliveryHistory["state"]): string {
+  if (state === "SENT") return "is-succeeded";
+  if (state === "FAILED") return "is-failed";
+  return "is-unknown";
 }
 
 function inputFrom(settings: EmailAlertSettings): EmailAlertSettingsInput {
