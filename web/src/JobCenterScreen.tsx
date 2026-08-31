@@ -910,8 +910,8 @@ function JobResults({
                 <td className="action-column">
                   <span className="row-actions">
                     {/* 发起、停止、停止中、锁未释放**共用这一格**：这一列恰好五颗，
-                        第六颗会挤坏它。四态互斥，判定全在 `rowRunAction` 一处
-                        （#271）。 */}
+                        第六颗会挤坏它。四态互斥，判定全在 `rowRunAction` 一处，
+                        而占用那两档的字面在 `targetHoldState` 一处（#271）。 */}
                     {runAction.kind === "start" ? (
                       <ActionButton
                         label={runAction.disabled ? "正在发起" : "发起运行"}
@@ -919,26 +919,25 @@ function JobResults({
                         disabled={runAction.disabled}
                         onClick={() => onStart(task)}
                       />
-                    ) : runAction.kind === "releasing" ? (
-                      // 停止已经发出，占用还没还回来：按不动，也**不许变回发起运行**。
-                      // 界面说得出「还没释放」，比它假装已经好了要好（#271）。
+                    ) : runAction.kind === "hold" ? (
+                      // 占用还在：还在释放的时候按不动，释放失败的时候这一颗就是
+                      // 全系统唯一的补救入口，点一下重发一次 abort。两档都**不许变回
+                      // 发起运行**——界面说得出「还没释放」，比它假装已经好了要好。
                       <ActionButton
-                        label="停止中…（目标表占用尚未释放）"
-                        icon={<LoaderCircle size={ICON.md} />}
-                        disabled
-                        onClick={() => undefined}
-                      />
-                    ) : runAction.kind === "held" ? (
-                      // abort 失败，占用留在目标端。这一颗是全系统唯一的补救入口：
-                      // 点一下就重发一次 abort，成了才轮到「发起运行」。
-                      <ActionButton
-                        label={
-                          runAction.reason === null
-                            ? "锁未释放，点此重试"
-                            : `锁未释放，点此重试：${runAction.reason}`
+                        label={`${runAction.hold.label}（${runAction.hold.detail}）`}
+                        icon={
+                          runAction.hold.kind === "releasing" ? (
+                            <LoaderCircle size={ICON.md} />
+                          ) : (
+                            <Lock size={ICON.md} />
+                          )
                         }
-                        icon={<Lock size={ICON.md} />}
-                        onClick={() => onRetryRelease(runAction.runRecordId)}
+                        disabled={runAction.hold.kind === "releasing"}
+                        onClick={() =>
+                          runAction.hold.kind === "held"
+                            ? onRetryRelease(runAction.hold.runRecordId)
+                            : undefined
+                        }
                       />
                     ) : (
                       // 停不停得了与运行详情屏读同一条规则（UX 评审 P1-11）：

@@ -1,6 +1,8 @@
 import type { RunHistory } from "./api";
 import { historyPresentation } from "./history";
 import { abortRefusal } from "./runStage";
+import type { HeldTargetHold } from "./targetHold";
+import { targetHoldState } from "./targetHold";
 import type { Step } from "./wizard";
 
 export type RowRunAction =
@@ -15,37 +17,27 @@ export type RowRunAction =
    */
   | { kind: "stop"; runRecordId: string; refusal: string | null }
   /**
-   * 停止已经发出，目标表占用还没还回来（#271）。
+   * 目标表占用还在（#271）：还在释放，或者释放失败了。
    *
    * 停止是异步的：接口发出信号就返回，占用要等子进程退出、父进程补发 abort 之后才真的
    * 释放。这段窗口里既不能显示「停止运行」（已经停过了），更不能显示「发起运行」——
-   * 那句话是假的，点下去只换回一个 `TARGET_TABLE_BUSY`。
-   */
-  | { kind: "releasing" }
-  /**
-   * abort 失败了，占用留在目标端（#271）。点它重发一次 abort。
+   * 那句话是假的，点下去只换回一个 `TARGET_TABLE_BUSY`。释放失败之后那一档**可点**，
+   * 点下去重发一次 abort：它是这套界面上唯一的手工补救入口。
    *
-   * 这一档**可点但不是发起**：它是这套界面上唯一的手工补救入口，在它之前，占用泄漏
-   * 之后只能去目标端手工清。`reason` 是目标端说的原话，挂在按钮上。
+   * 两档的分别、按钮上的字、旁边那句原因，全在 `targetHoldState` 一处。
    */
-  | { kind: "held"; runRecordId: string; reason: string | null };
+  | { kind: "hold"; hold: HeldTargetHold };
 
 export function rowRunAction(
   run: RunHistory | undefined,
   startBusy: boolean,
 ): RowRunAction {
-  // 占用的处境**压过其余一切**：只要目标表还被这次运行占着，这一格就不许出现
+  // 占用的处境**压过其余一切**：只要那张目标表还被占着，这一格就不许出现
   // 「发起运行」。这条判断放在最前面，是因为它要压住的正是后面那两条——
   // 在飞时压住「停止运行」（已经停过了），终局时压住「发起运行」（那句话是假的）。
-  if (run?.target_hold === "RELEASING") {
-    return { kind: "releasing" };
-  }
-  if (run?.target_hold === "HELD") {
-    return {
-      kind: "held",
-      runRecordId: run.run_record_id,
-      reason: run.target_hold_message ?? null,
-    };
+  const hold = targetHoldState(run);
+  if (hold.kind !== "free") {
+    return { kind: "hold", hold };
   }
   if (run !== undefined && historyPresentation(run).kind === "live") {
     return {

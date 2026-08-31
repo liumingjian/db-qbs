@@ -126,24 +126,25 @@ describe("job row actions", () => {
       ]),
     }));
 
-    expect(html).toContain("锁未释放，点此重试：暂存表 drop 不掉");
+    expect(html).toContain("锁未释放，点此重试（暂存表 drop 不掉）");
     expect(html).not.toContain("发起运行");
   });
 
+  // 操作列**恰好五颗**，第六颗会挤坏它——所以发起、停止、停止中、锁未释放四态
+  // 全挤在第一格里。这条用例数的就是那一行上的按钮个数（#271）。
   it("keeps the action column to five buttons while the hold is stuck", () => {
-    const html = renderToStaticMarkup(createElement(JobCenterScreen, {
-      ...BASE_PROPS,
-      latestRuns: new Map([
-        ["task-1", { ...LATEST_RUN, target_hold: "HELD" as const } as RunHistory],
-      ]),
-    }));
-
-    expect(html.match(/<button/g) ?? []).toHaveLength(
+    const actionButtons = (run: RunHistory) =>
       (renderToStaticMarkup(createElement(JobCenterScreen, {
         ...BASE_PROPS,
-        latestRuns: new Map([["task-1", LATEST_RUN]]),
-      })).match(/<button/g) ?? []).length,
-    );
+        latestRuns: new Map([["task-1", run]]),
+      }))
+        .split('<td class="action-column">')[1]
+        ?.split("</td>")[0]
+        ?.match(/<button/g) ?? []).length;
+
+    expect(actionButtons({ ...LATEST_RUN, target_hold: "HELD" } as RunHistory)).toBe(5);
+    // 占用那一格换的是同一颗按钮的字面，不是多加一颗：没有占用时也是五颗。
+    expect(actionButtons(LATEST_RUN)).toBe(5);
   });
 
   // The slot is held open rather than dropped (UX review P2-15): a vanishing button

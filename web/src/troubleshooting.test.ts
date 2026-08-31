@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { RunHistory } from "./api";
 import { remediationFor, rowRunAction } from "./troubleshooting";
+import { targetHoldState } from "./targetHold";
 
 function history(overrides: Partial<RunHistory> = {}): RunHistory {
   return {
@@ -74,7 +75,7 @@ describe("row run action", () => {
         }),
         false,
       ),
-    ).toEqual({ kind: "releasing" });
+    ).toMatchObject({ kind: "hold", hold: { kind: "releasing" } });
   });
 
   it("offers a retry — never a start — while the hold could not be released", () => {
@@ -91,19 +92,22 @@ describe("row run action", () => {
         false,
       ),
     ).toEqual({
-      kind: "held",
-      runRecordId: "record-7",
-      reason: "暂存表 drop 不掉",
+      kind: "hold",
+      hold: targetHoldState(
+        history({ target_hold: "HELD", target_hold_message: "暂存表 drop 不掉" }),
+      ),
     });
   });
 
   it("keeps the hold in charge even while the start action is busy", () => {
     // `startBusy` 只管「正在发起」那一档；占用还在时它一个字都改不了。
     expect(rowRunAction(history({ target_hold: "HELD" }), true)).toMatchObject({
-      kind: "held",
+      kind: "hold",
+      hold: { kind: "held", runRecordId: "record-7" },
     });
-    expect(rowRunAction(history({ target_hold: "RELEASING" }), true)).toEqual({
-      kind: "releasing",
+    expect(rowRunAction(history({ target_hold: "RELEASING" }), true)).toMatchObject({
+      kind: "hold",
+      hold: { kind: "releasing" },
     });
   });
 

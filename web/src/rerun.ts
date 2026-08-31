@@ -9,6 +9,7 @@
 
 import type { RunHistory, Task } from "./api";
 import { historyPresentation } from "./history";
+import { targetHoldState } from "./targetHold";
 
 export type RerunAction =
   /** 这一行压根没有重跑这回事：进行中、或者已经成功了。 */
@@ -42,18 +43,10 @@ export function rerunAction(
   // 目标表占用还挂在目标端时**一律不给重跑**（#271）：这一条比「结局是什么」更硬，
   // 因为它说的不是这次跑得怎么样，而是下一次根本跑不起来——点下去只换回一个
   // `TARGET_TABLE_BUSY`。入口照旧不消失，禁用并说清楚下一步该做什么。
-  if (row.target_hold === "RELEASING") {
-    return {
-      kind: "disabled",
-      reason: "已发出停止，目标表占用还没释放。等它释放后再重跑。",
-    };
-  }
-  if (row.target_hold === "HELD") {
-    return {
-      kind: "disabled",
-      reason:
-        "上一次的目标表占用没能释放，这时候重跑会被目标端拒掉。先点「锁未释放，点此重试」，释放成功后再重跑。",
-    };
+  // 判据与说辞都在 `targetHoldState` 一处，这里只负责把它摆到重跑这一颗上。
+  const hold = targetHoldState(row);
+  if (hold.kind !== "free") {
+    return { kind: "disabled", reason: hold.rerunRefusal };
   }
   if (tasks === null) {
     // 读失败时 `App` 的 `tasks` 也停在 `null`，所以这句话**不许说成「还在读」**——

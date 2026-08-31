@@ -18,6 +18,7 @@ import {
   writeStatementLabel,
 } from "./writeMode";
 import { messageFrom } from "./errors";
+import { targetHoldState } from "./targetHold";
 import { FailureEvidence } from "./FailureEvidence";
 import {
   knownTerminalEffect,
@@ -134,16 +135,13 @@ export function RunScreen({
   // 过去它一直亮着，人只有吃一个 409 才发现封口点已经过了。
   const cancelRefusal = detail === null ? null : abortRefusal(detail.stage);
   /**
-   * 这次运行占着的目标表还回来了没有（#271）。
+   * 这次运行写的那张目标表还空出来没有（#271）。
    *
    * **这一屏也要认它**：作业中心那一格拦住了「发起运行」，这里的「重新发起」是同一件事
-   * 的第二个入口——占用还在的时候把它亮着，等于当着人的面说一句假话。
+   * 的第二个入口——占用还在的时候把它亮着，等于当着人的面说一句假话。判据与措辞
+   * 与那一格读的是同一处（`targetHoldState`），两屏不许各说各的。
    */
-  const targetHold = detail?.target_hold ?? null;
-  const holdReason =
-    targetHold === "RELEASING"
-      ? "已发出停止，正在等目标表占用释放"
-      : detail?.target_hold_message ?? "目标表占用没能释放";
+  const hold = targetHoldState(detail);
 
   async function handleCancel() {
     setCancelMessage(null);
@@ -191,22 +189,22 @@ export function RunScreen({
             <button
               className="button is-ghost"
               type="button"
-              disabled={cancelRefusal !== null || targetHold !== null}
+              disabled={cancelRefusal !== null || hold.kind !== "free"}
               onClick={() => void handleCancel()}
             >
               <Ban size={ICON.sm} aria-hidden="true" />
-              {targetHold === null ? "取消运行" : "停止中…"}
+              {hold.kind === "free" ? "取消运行" : hold.label}
             </button>
             {cancelRefusal !== null && (
               <span className="run-cancel-reason">{cancelRefusal}</span>
             )}
             {/* 已经停过一次了：这一格改说「停止中…」并按不动，理由挂在旁边。
                 再点一次只是重发一遍 SIGTERM，什么也不会更快（#271）。 */}
-            {cancelRefusal === null && targetHold !== null && (
-              <span className="run-cancel-reason">{holdReason}</span>
+            {cancelRefusal === null && hold.kind !== "free" && (
+              <span className="run-cancel-reason">{hold.detail}</span>
             )}
           </span>
-        ) : targetHold !== null ? (
+        ) : hold.kind !== "free" ? (
           // 占用还在目标端挂着，**这一格绝不给「重新发起」**：那一下点下去只会
           // 换回一个 `TARGET_TABLE_BUSY`。还在释放的时候按不动；释放失败了它就是
           // 重试那一颗（#271）。
@@ -214,13 +212,13 @@ export function RunScreen({
             <button
               className="button is-ghost"
               type="button"
-              disabled={targetHold === "RELEASING"}
+              disabled={hold.kind === "releasing"}
               onClick={() => void handleRetryRelease()}
             >
               <Lock size={ICON.sm} aria-hidden="true" />
-              {targetHold === "RELEASING" ? "停止中…" : "锁未释放，点此重试"}
+              {hold.label}
             </button>
-            <span className="run-cancel-reason">{holdReason}</span>
+            <span className="run-cancel-reason">{hold.detail}</span>
           </span>
         ) : (
           <button className="button is-primary" type="button" onClick={onRelaunch}>
