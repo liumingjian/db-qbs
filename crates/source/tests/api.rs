@@ -19,9 +19,10 @@ use db_qbs_source::http::{
     RunState,
 };
 use db_qbs_source::{
-    AgentStore, AuthStore, Clock, DatasourceStore, EmailAlertStore, HistoryStore, MailTransport,
-    MailTransportError, OracleAccess, OracleRowSource, OutgoingMail, RunLogStore, ScheduleState, SourceColumn,
-    SourceConfig, SourceReadError, TaskSpec, TaskStore, SESSION_COOKIE,
+    AgentStore, AlertOutboxStore, AuthStore, Clock, DatasourceStore, EmailAlertStore, HistoryStore,
+    MailTransport, MailTransportError, OracleAccess, OracleRowSource, OutgoingMail, RunHistory,
+    RunLogStore, ScheduleState, SourceColumn, SourceConfig, SourceReadError, TaskSpec, TaskStore,
+    SESSION_COOKIE,
 };
 use serde_json::Value;
 
@@ -248,6 +249,7 @@ struct Rig {
     schedule: db_qbs_source::ScheduleRegistry,
     auth: AuthStore,
     email_alerts: EmailAlertStore,
+    alert_outbox: AlertOutboxStore,
     clock: Arc<TestClock>,
     mail_transport: Arc<FakeMailTransport>,
     /// 这台 rig 的会话票据。**每条请求默认都带着它**——`/api/*` 现在整片要求登录，
@@ -298,6 +300,7 @@ impl Rig {
             schedule: Arc::new(Mutex::new(ScheduleState::default())),
             auth,
             email_alerts: EmailAlertStore::open(&directory).unwrap(),
+            alert_outbox: AlertOutboxStore::open(&directory).unwrap(),
             clock,
             mail_transport: Arc::new(FakeMailTransport::default()),
             session,
@@ -329,6 +332,7 @@ impl Rig {
             schedule: &self.schedule,
             auth: &self.auth,
             email_alerts: &self.email_alerts,
+            alert_outbox: &self.alert_outbox,
             clock: self.clock.clone(),
             mail_transport: self.mail_transport.clone(),
             describe_source,
@@ -355,6 +359,7 @@ impl Rig {
             schedule: Arc::new(Mutex::new(ScheduleState::default())),
             auth: AuthStore::open(&directory).unwrap(),
             email_alerts: EmailAlertStore::open(&directory).unwrap(),
+            alert_outbox: AlertOutboxStore::open(&directory).unwrap(),
             clock: self.clock.clone(),
             mail_transport: self.mail_transport.clone(),
             session: self.session.clone(),
@@ -3670,6 +3675,109 @@ fn test_email_persists_only_a_sanitized_failure() {
     assert_eq!(settings["latest_test_result"]["error"], "SMTP 连接或响应超时");
     assert!(!settings.to_string().contains("SMTP-secret-marker"));
     assert!(reopened.history.list(None).unwrap().is_empty());
+}
+
+#[test]
+fn run_details_expose_only_the_same_aggregate_alert_state_to_both_roles() {
+    let rig = Rig::new();
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(true, "SMTP-secret-marker", 24),
+        )
+        .status,
+        200
+    );
+    let now = rig.clock.now();
+    let mut failed = RunHistory::accepted(
+        "aggregate-alert-run",
+        "task-aggregate",
+        "SELECT sensitive_sql FROM source",
+        now,
+    );
+    failed.task_name = "汇总状态".to_owned();
+    failed.outcome = Some("FAILED".to_owned());
+    failed.finished_at = Some(now.to_rfc3339());
+    failed.failure_kind = Some("NETWORK".to_owned());
+    failed.message = Some("raw SMTP server response".to_owned());
+    rig.history.finalize(&failed, now, 90).unwrap();
+
+    rig.auth
+        .update_operator(true, Some("operator-secret"))
+        .unwrap();
+    let operator = rig
+        .auth
+        .issue_session("operator", now)
+        .unwrap()
+        .token;
+    let path = "/api/runs/aggregate-alert-run";
+    let admin_response = rig.get(path);
+    let operator_response = rig.send_with_session(&operator, Method::Get, path, "");
+    assert_eq!(admin_response.status, 200);
+    assert_eq!(operator_response.status, 200);
+    let expected = serde_json::json!({
+        "alert_id": "alert-aggregate-alert-run",
+        "delivery_state": "PENDING",
+    });
+    assert_eq!(rig.json(&admin_response)["alert"], expected);
+    assert_eq!(rig.json(&operator_response)["alert"], expected);
+    for response in [admin_response, operator_response] {
+        let body = response.body_text();
+        for private in [
+            "Ops@example.com",
+            "audit@example.org",
+            "SMTP-secret-marker",
+            "attempt_count",
+            "last_error",
+        ] {
+            assert!(!body.contains(private), "run projection leaked {private}");
+        }
+    }
+}
+
+#[test]
+fn accepted_run_failure_finishes_before_the_outbox_first_attempt() {
+    let rig = Rig::with_child(
+        r#"printf '%s\n' '{"ts":"2026-08-31T10:00:01.000Z","event":"run_finished","run_id":"run-alert","terminal":"FAILED","stage":"FAILED","message":"raw failure must stay local","failure_kind":"SOURCE_QUERY","source_code":"ORA-marker","sink_code":null,"column":null,"value":"sample-marker","source_rows":0,"source_batches":0,"staged_rows":0,"received_batches":0,"sink_reported_rows":0,"purged_rows":0,"fetch_ms":1,"push_ms":0,"commit_ms":0,"count_ms":0,"cursor_ms":0}'
+"#,
+    );
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(true, "SMTP-secret-marker", 24),
+        )
+        .status,
+        200
+    );
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let task_id = rig.create_task("源查询失败", "ALERT_TARGET", &(source_id, target_id));
+
+    let accepted = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(accepted.status, 202, "{}", accepted.body_text());
+    let run_record_id = rig.json(&accepted)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let finished = wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["live"] == false
+    });
+    assert_eq!(finished["outcome"], "FAILED");
+    assert_eq!(finished["alert"]["delivery_state"], "PENDING");
+    assert!(rig.mail_transport.sent.lock().unwrap().is_empty());
+
+    assert_eq!(
+        rig.alert_outbox
+            .run_first_attempts(
+                &rig.email_alerts,
+                rig.mail_transport.as_ref(),
+                rig.clock.as_ref(),
+            )
+            .unwrap(),
+        2
+    );
+    let sent = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(sent["outcome"], "FAILED");
+    assert_eq!(sent["alert"]["delivery_state"], "SENT");
 }
 
 fn email_alert_settings_json(enabled: bool, secret: &str, retry_hours: u8) -> String {

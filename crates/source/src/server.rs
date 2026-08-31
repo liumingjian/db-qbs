@@ -24,7 +24,8 @@ use crate::http::{
 };
 use crate::scheduler::scheduler_loop;
 use crate::{
-    fetch_agent_info, AgentStore, AuthStore, Clock, DatasourceStore, HistoryStore, RunLogStore,
+    fetch_agent_info, spawn_outbox_worker, AgentStore, AlertOutboxStore, AuthStore, Clock,
+    DatasourceStore, HistoryStore, RunLogStore,
     ScheduleRegistry, ScheduleState, SourceConfig, SystemClock, TaskStore,
     SmtpMailTransport, UnknownReason,
 };
@@ -47,6 +48,7 @@ pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
     // 端口一开就得有一道门，不能有一个「表还没建好、于是先放行」的窗口。
     let auth_store = AuthStore::open(&config.data_dir)?;
     let email_alert_store = crate::EmailAlertStore::open(&config.data_dir)?;
+    let alert_outbox_store = AlertOutboxStore::open(&config.data_dir)?;
     let runs = Arc::new(Mutex::new(RunState::default()));
     let clock = Arc::new(SystemClock);
     let mail_transport = Arc::new(SmtpMailTransport::default());
@@ -104,6 +106,12 @@ pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
     signal_hook::flag::register(SIGTERM, Arc::clone(&terminated))
         .map_err(|error| format!("注册 SIGTERM 处理失败：{error}"))?;
     spawn_agent_probe_loop(Arc::clone(&agent_store), Arc::clone(&terminated));
+    spawn_outbox_worker(
+        config.data_dir.clone(),
+        mail_transport.clone(),
+        clock.clone(),
+        terminated.clone(),
+    );
     let state = Api {
         config: &config,
         config_path: &config_path,
@@ -116,6 +124,7 @@ pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
         schedule: &schedule,
         auth: &auth_store,
         email_alerts: &email_alert_store,
+        alert_outbox: &alert_outbox_store,
         clock: clock.clone(),
         mail_transport,
         describe_source: crate::OracleRowSource::describe,

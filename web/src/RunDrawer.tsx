@@ -146,6 +146,11 @@ export function RunDrawer({
                 {presentation.kind === "live" && (
                   <div className="drawer-note">{presentation.conclusion}</div>
                 )}
+                {run.alert !== null && run.alert !== undefined && (
+                  <div className="drawer-note" data-testid="run-alert-state">
+                    告警邮件：{run.alert.delivery_state === "SENT" ? "已发送" : "待发送"}
+                  </div>
+                )}
               </div>
             )}
           </section>

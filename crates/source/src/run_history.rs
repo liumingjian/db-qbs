@@ -571,6 +571,7 @@ impl HistoryStore {
         ensure_nullable_text_column(&connection, "failure_kind")?;
         ensure_nullable_integer_column(&connection, "total_rows")?;
         ensure_nullable_integer_column(&connection, "precount_ms")?;
+        crate::alert_outbox::initialize_alert_tables(&connection)?;
         Ok(store)
     }
 
@@ -734,6 +735,7 @@ impl HistoryStore {
                 )
                 .map_err(|error| format!("插入 SQLite 终态运行历史失败：{error}"))?;
         }
+        crate::alert_outbox::insert_alert_in_transaction(&transaction, history)?;
         cleanup_transaction(&transaction, now, retention_days)?;
         transaction
             .commit()
@@ -856,6 +858,24 @@ fn cleanup_transaction(
     let Some(cutoff) = retention_cutoff(now, retention_days) else {
         return Ok(());
     };
+    transaction
+        .execute(
+            "DELETE FROM email_deliveries WHERE alert_id IN (
+                SELECT alert_id FROM alerts WHERE run_record_id IN (
+                    SELECT run_record_id FROM run_history WHERE started_at_ms < ?1
+                )
+             )",
+            [cutoff.timestamp_millis()],
+        )
+        .map_err(|error| format!("清理过期 SQLite 告警投递失败：{error}"))?;
+    transaction
+        .execute(
+            "DELETE FROM alerts WHERE run_record_id IN (
+                SELECT run_record_id FROM run_history WHERE started_at_ms < ?1
+             )",
+            [cutoff.timestamp_millis()],
+        )
+        .map_err(|error| format!("清理过期 SQLite 运行告警失败：{error}"))?;
     transaction
         .execute(
             "DELETE FROM run_history WHERE started_at_ms < ?1",

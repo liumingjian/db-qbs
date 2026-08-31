@@ -7,6 +7,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 mod agent;
+mod alert_outbox;
 mod auth;
 mod cron;
 mod datasource;
@@ -30,6 +31,9 @@ mod transfer;
 mod web_assets;
 
 pub use agent::{fetch_agent_info, normalize_base_url, Agent, AgentInput, AgentStatus, AgentStore};
+pub use alert_outbox::{
+    spawn_outbox_worker, AlertDeliveryState, AlertOutboxStore, RunAlertSummary,
+};
 // 登录、会话与口令（source 的 HTTP 面）。**它护不到 sink**——那半边仍然没有鉴权。
 pub use auth::{
     cleared_cookie_header, session_cookie_header, session_token_from_cookie_header,
