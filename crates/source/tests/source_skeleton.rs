@@ -357,6 +357,10 @@ fn pending_delivery_resumes_after_process_restart_and_blocked_smtp_does_not_dela
 
     let killed = kill_source(first, "-KILL");
     assert!(!killed.status.success(), "{}", output_text(&killed));
+    assert!(
+        !output_text(&killed).contains("test-only-secret"),
+        "SMTP credentials must not enter process logs"
+    );
     drop(first_connection);
 
     let restarted = restart_source(&config, port);
@@ -373,6 +377,10 @@ fn pending_delivery_resumes_after_process_restart_and_blocked_smtp_does_not_dela
     let started = Instant::now();
     let output = terminate(restarted);
     assert_success(&output);
+    assert!(
+        !output_text(&output).contains("test-only-secret"),
+        "SMTP credentials must not enter process logs"
+    );
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "blocked SMTP delayed graceful shutdown for {:?}: {}",

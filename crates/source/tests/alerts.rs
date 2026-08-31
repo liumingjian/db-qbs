@@ -155,6 +155,11 @@ fn failed_accepted_run_is_atomic_idempotent_snapshotted_and_sent_as_safe_multipa
 
     history_store.finalize(&failed, now, 90).unwrap();
     history_store.finalize(&failed, now, 90).unwrap();
+    let database = std::fs::read(directory.join("db-qbs.sqlite3")).unwrap();
+    assert!(
+        !String::from_utf8_lossy(&database).contains("SMTP-secret-marker"),
+        "the SMTP secret must remain encrypted after Alert creation"
+    );
     let pending = outbox.summary_for_run("record-1").unwrap().unwrap();
     assert_eq!(pending.alert_id, "alert-record-1");
     assert_eq!(pending.delivery_state, AlertDeliveryState::Pending);
@@ -922,20 +927,32 @@ fn retention_removes_alerts_and_deliveries_only_with_expired_history() {
             90,
         )
         .unwrap();
+    assert_eq!(outbox.delivery_history(Some("expired")).unwrap().len(), 1);
     history_store
         .finalize(
             &failure("retained", "NETWORK", RunTrigger::Manual, now),
-            now,
+            old,
             90,
         )
         .unwrap();
+    assert_eq!(outbox.delivery_history(Some("retained")).unwrap().len(), 1);
     // Any normal history write runs the same retention transaction.
     let accepted = RunHistory::accepted("cleanup-trigger", "task", "SELECT 1", now);
     history_store.insert(&accepted, now, 90).unwrap();
 
     assert!(history_store.get("expired").unwrap().is_none());
     assert!(outbox.summary_for_run("expired").unwrap().is_none());
+    let database = rusqlite::Connection::open(directory.join("db-qbs.sqlite3")).unwrap();
+    let expired_deliveries: u64 = database
+        .query_row(
+            "SELECT COUNT(*) FROM email_deliveries WHERE alert_id = 'alert-expired'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(expired_deliveries, 0, "recipient rows must not be orphaned");
     assert!(history_store.get("retained").unwrap().is_some());
     assert!(outbox.summary_for_run("retained").unwrap().is_some());
+    assert_eq!(outbox.delivery_history(Some("retained")).unwrap().len(), 1);
     std::fs::remove_dir_all(directory).unwrap();
 }
