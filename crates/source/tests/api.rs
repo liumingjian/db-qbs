@@ -21,8 +21,8 @@ use db_qbs_source::http::{
 use db_qbs_source::{
     AgentStore, AlertOutboxStore, AuthStore, Clock, DatasourceStore, EmailAlertStore, HistoryStore,
     MailTransport, MailTransportError, OracleAccess, OracleRowSource, OutgoingMail, RunHistory,
-    RunLogStore, ScheduleState, SourceColumn, SourceConfig, SourceReadError, TaskSpec, TaskStore,
-    SESSION_COOKIE,
+    RunLogStore, ScheduleState, SourceColumn, SourceConfig, SourceReadError, TaskInput, TaskSpec,
+    TaskStore, SESSION_COOKIE,
 };
 use serde_json::Value;
 
@@ -4670,6 +4670,14 @@ fn the_cron_instant_starts_a_run_that_history_marks_as_scheduled() {
 #[test]
 fn an_occurrence_that_collides_with_a_live_run_is_recorded_without_a_run_id() {
     let rig = Rig::new();
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(true, "schedule-secret", 24),
+        )
+        .status,
+        200
+    );
     let (_agent_id, source_id, target_id) = rig.seed();
     let datasources = (source_id, target_id);
     let task_id = create_scheduled_task(&rig, "每分钟", "HOLDINGS", &datasources, "* * * * *");
@@ -4695,11 +4703,119 @@ fn an_occurrence_that_collides_with_a_live_run_is_recorded_without_a_run_id() {
     assert_eq!(skipped["run_id"], Value::Null, "跳过的那一次没有运行标识");
     assert_eq!(skipped["trigger"], "SCHEDULED");
     assert_eq!(skipped["failure_kind"], "SKIPPED");
+    assert_eq!(skipped["scheduled_refusal_reason"], "PREVIOUS_RUN_ACTIVE");
     assert_eq!(skipped["message"], "上次尚未结束，本次跳过");
     assert_eq!(skipped["outcome"], "FAILED");
     assert_eq!(skipped["target_table_effect"], "DISCARDED");
     assert_eq!(skipped["task_name"], "每分钟");
     assert_eq!(skipped["live"], false);
+    assert_eq!(skipped["alert"]["delivery_state"], "PENDING");
+}
+
+#[test]
+fn a_scheduled_refusal_for_a_missing_datasource_is_alertable() {
+    let rig = Rig::new();
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(true, "schedule-secret", 24),
+        )
+        .status,
+        200
+    );
+    let input: TaskInput = serde_json::from_str(&scheduled_task_json(
+        "悬空源库",
+        "HOLDINGS",
+        &("missing-source".to_owned(), "missing-target".to_owned()),
+        "* * * * *",
+    ))
+    .unwrap();
+    let task = rig.tasks.create(input).unwrap();
+
+    scheduler_pass(&rig, "2026-08-28 03:10");
+    scheduler_pass(&rig, "2026-08-28 03:11");
+
+    let listed = rig.json(&rig.get(&format!("/api/runs?task_id={}", task.task_id)));
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(listed[0]["run_id"], Value::Null);
+    assert_eq!(listed[0]["trigger"], "SCHEDULED");
+    assert_eq!(listed[0]["outcome"], "FAILED");
+    assert_eq!(listed[0]["failure_kind"], "SKIPPED");
+    assert_eq!(
+        listed[0]["scheduled_refusal_reason"],
+        "SOURCE_DATASOURCE_UNAVAILABLE"
+    );
+    assert_eq!(listed[0]["alert"]["delivery_state"], "PENDING");
+}
+
+#[test]
+fn repeated_busy_schedule_alerts_expose_fixed_window_suppression() {
+    let rig = Rig::new();
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(true, "schedule-secret", 24),
+        )
+        .status,
+        200
+    );
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let datasources = (source_id, target_id);
+    let task_id = create_scheduled_task(&rig, "高频任务", "HOLDINGS", &datasources, "* * * * *");
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+
+    scheduler_pass(&rig, "2026-08-28 03:10");
+    let first_at = chrono::DateTime::parse_from_rfc3339("2026-08-31T10:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    for (minute, at) in [
+        (11, first_at),
+        (12, first_at + chrono::Duration::minutes(30)),
+        (13, first_at + chrono::Duration::hours(1)),
+        (
+            14,
+            first_at + chrono::Duration::hours(1) + chrono::Duration::seconds(1),
+        ),
+    ] {
+        rig.clock.set(at);
+        scheduler_pass(&rig, &format!("2026-08-28 03:{minute}"));
+    }
+
+    let listed = rig.json(&rig.get(&format!("/api/runs?task_id={task_id}")));
+    let mut skipped = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["scheduled_refusal_reason"] == "PREVIOUS_RUN_ACTIVE")
+        .collect::<Vec<_>>();
+    skipped.sort_by_key(|row| row["started_at"].as_str().unwrap());
+    assert_eq!(skipped.len(), 4, "{listed}");
+    assert_eq!(
+        skipped
+            .iter()
+            .map(|row| row["alert"]["delivery_state"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["PENDING", "SUPPRESSED", "SUPPRESSED", "PENDING"]
+    );
+    let alert_ids = skipped
+        .iter()
+        .map(|row| row["alert"]["alert_id"].as_str().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(alert_ids.len(), 4, "each occurrence needs distinct Alert evidence");
+    assert!(skipped.iter().all(|row| row.get("recipient").is_none()));
+    assert_eq!(
+        rig.alert_outbox
+            .run_due_attempts(
+                &rig.email_alerts,
+                rig.mail_transport.as_ref(),
+                rig.clock.as_ref(),
+            )
+            .unwrap(),
+        4,
+        "only the two non-suppressed occurrences, each with two recipients, are mailed"
+    );
+    assert_eq!(rig.mail_transport.sent.lock().unwrap().len(), 4);
 }
 
 /// 额度满时**在 source 侧排队**，不推给代理去吃 `RUN_QUOTA_EXCEEDED`——

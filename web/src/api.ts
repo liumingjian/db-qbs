@@ -443,6 +443,7 @@ export interface RunHistory {
    * 读到 `null` 不是错误。
    */
   failure_kind: string | null;
+  scheduled_refusal_reason?: string | null;
   /**
    * 没有终态日志时，服务端替这次运行写下的「为什么说不清」（source 侧 `UnknownReason`）。
    * `STOPPED_BY_USER` 是有人按了停止运行——它和进程被 OOM 杀掉分得开，是故意的。

@@ -75,7 +75,7 @@ pub use protocol::{
 pub use run_history::{
     expired_history_indices, fold_history_lines, AgentEvidence, FinalizeOutcome, HistoryChange,
     HistoryStore, RunEvidence, RunHistory, RunParametersEvidence, RunTrigger, SourceEvidence,
-    TargetEvidence, UnknownReason,
+    ScheduledRefusalReason, TargetEvidence, UnknownReason,
 };
 // 到点派活的那条常驻线程（#266）。行为定义在 `scheduler.rs` 模块头。
 pub use scheduler::{

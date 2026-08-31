@@ -47,6 +47,7 @@ macro_rules! history_params {
             ":message": $history.message,
             ":unknown_reason": $history.unknown_reason,
             ":failure_kind": $history.failure_kind,
+            ":scheduled_refusal_reason": $history.scheduled_refusal_reason,
             ":seq": $history.seq,
             ":rows_pushed": $history.rows_pushed,
             ":bytes": $history.bytes,
@@ -185,6 +186,33 @@ impl UnknownReason {
     }
 }
 
+/// Stable classification for a scheduled occurrence that could not start.
+/// Human-readable wording remains in [`RunHistory::message`] and is not used for decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduledRefusalReason {
+    PreviousRunActive,
+    PreviousRunStopping,
+    SourceDatasourceUnavailable,
+    TargetDatasourceUnavailable,
+    TargetAgentUnavailable,
+    TargetHeld,
+    Internal,
+}
+
+impl ScheduledRefusalReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PreviousRunActive => "PREVIOUS_RUN_ACTIVE",
+            Self::PreviousRunStopping => "PREVIOUS_RUN_STOPPING",
+            Self::SourceDatasourceUnavailable => "SOURCE_DATASOURCE_UNAVAILABLE",
+            Self::TargetDatasourceUnavailable => "TARGET_DATASOURCE_UNAVAILABLE",
+            Self::TargetAgentUnavailable => "TARGET_AGENT_UNAVAILABLE",
+            Self::TargetHeld => "TARGET_HELD",
+            Self::Internal => "INTERNAL",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RunHistory {
     pub run_record_id: String,
@@ -257,6 +285,7 @@ pub struct RunHistory {
     /// 失败分类（[`crate::FailureKind`] 的 `as_str`）。成功、进行中、以及 M2 之前落盘的
     /// 老历史行都是 `None`——消费者读到缺席不得报错（与 ADR-0017 §2 `component` 同一口径）。
     pub failure_kind: Option<String>,
+    pub scheduled_refusal_reason: Option<String>,
     pub seq: u64,
     pub rows_pushed: u64,
     pub bytes: u64,
@@ -308,6 +337,7 @@ impl RunHistory {
             message: None,
             unknown_reason: None,
             failure_kind: None,
+            scheduled_refusal_reason: None,
             seq: 0,
             rows_pushed: 0,
             bytes: 0,
@@ -444,6 +474,16 @@ impl RunHistory {
         self.failure_kind = Some(FailureKind::Skipped.as_str().to_owned());
     }
 
+    pub fn mark_scheduled_refusal(
+        &mut self,
+        reason: ScheduledRefusalReason,
+        message: String,
+        at: DateTime<Utc>,
+    ) {
+        self.mark_skipped(message, at);
+        self.scheduled_refusal_reason = Some(reason.as_str().to_owned());
+    }
+
     pub fn started_at_ms(&self) -> i64 {
         self.started_at_ms
     }
@@ -547,6 +587,7 @@ impl HistoryStore {
                     message             TEXT,
                     unknown_reason      TEXT,
                     failure_kind        TEXT,
+                    scheduled_refusal_reason TEXT,
                     seq                 INTEGER NOT NULL,
                     rows_pushed         INTEGER NOT NULL,
                     bytes               INTEGER NOT NULL,
@@ -569,6 +610,7 @@ impl HistoryStore {
         ensure_json_column(&connection, "mapping_issues", "[]")?;
         ensure_json_column(&connection, "evidence", "{}")?;
         ensure_nullable_text_column(&connection, "failure_kind")?;
+        ensure_nullable_text_column(&connection, "scheduled_refusal_reason")?;
         ensure_nullable_integer_column(&connection, "total_rows")?;
         ensure_nullable_integer_column(&connection, "precount_ms")?;
         crate::alert_outbox::initialize_alert_tables(&connection)?;
@@ -596,7 +638,8 @@ impl HistoryStore {
                     received_batches, total_rows, precount_ms,
                     fetch_ms, push_ms, commit_ms, count_ms, cursor_ms,
                     source_code, sink_code, [column], [value], message, unknown_reason,
-                    failure_kind, seq, rows_pushed, bytes, ms, last_ts, mapping_issues, evidence
+                    failure_kind, scheduled_refusal_reason, seq, rows_pushed, bytes, ms, last_ts,
+                    mapping_issues, evidence
                  ) VALUES (
                     :run_record_id, :run_id, :run_trigger, :task_id, :task_name, :source_sql, :staging_table,
                     :started_at, :started_at_ms, :finished_at, :outcome, :target_table_effect,
@@ -604,7 +647,8 @@ impl HistoryStore {
                     :source_batches, :received_batches, :total_rows, :precount_ms,
                     :fetch_ms, :push_ms, :commit_ms,
                     :count_ms, :cursor_ms, :source_code, :sink_code, :column, :value,
-                    :message, :unknown_reason, :failure_kind, :seq, :rows_pushed, :bytes, :ms,
+                    :message, :unknown_reason, :failure_kind, :scheduled_refusal_reason,
+                    :seq, :rows_pushed, :bytes, :ms,
                     :last_ts, :mapping_issues, :evidence
                  )",
                 history_params!(history, mapping_issues, evidence),
@@ -643,7 +687,8 @@ impl HistoryStore {
                     fetch_ms=:fetch_ms, push_ms=:push_ms, commit_ms=:commit_ms,
                     count_ms=:count_ms, cursor_ms=:cursor_ms, source_code=:source_code,
                     sink_code=:sink_code, [column]=:column, [value]=:value, message=:message,
-                    unknown_reason=:unknown_reason, failure_kind=:failure_kind, seq=:seq,
+                    unknown_reason=:unknown_reason, failure_kind=:failure_kind,
+                    scheduled_refusal_reason=:scheduled_refusal_reason, seq=:seq,
                     rows_pushed=:rows_pushed,
                     bytes=:bytes, ms=:ms, last_ts=:last_ts,
                     mapping_issues=:mapping_issues, evidence=:evidence
@@ -703,7 +748,8 @@ impl HistoryStore {
                     fetch_ms=:fetch_ms, push_ms=:push_ms, commit_ms=:commit_ms,
                     count_ms=:count_ms, cursor_ms=:cursor_ms, source_code=:source_code,
                     sink_code=:sink_code, [column]=:column, [value]=:value, message=:message,
-                    unknown_reason=:unknown_reason, failure_kind=:failure_kind, seq=:seq,
+                    unknown_reason=:unknown_reason, failure_kind=:failure_kind,
+                    scheduled_refusal_reason=:scheduled_refusal_reason, seq=:seq,
                     rows_pushed=:rows_pushed, bytes=:bytes, ms=:ms, last_ts=:last_ts,
                     mapping_issues=:mapping_issues, evidence=:evidence
                   WHERE run_record_id=:run_record_id AND outcome IS NULL",
@@ -719,7 +765,8 @@ impl HistoryStore {
                         target_table_effect, stage, source_rows, staged_rows, sink_reported_rows,
                         purged_rows, source_batches, received_batches, total_rows, precount_ms,
                         fetch_ms, push_ms, commit_ms, count_ms, cursor_ms, source_code, sink_code,
-                        [column], [value], message, unknown_reason, failure_kind, seq, rows_pushed,
+                        [column], [value], message, unknown_reason, failure_kind,
+                        scheduled_refusal_reason, seq, rows_pushed,
                         bytes, ms, last_ts, mapping_issues, evidence
                      ) VALUES (
                         :run_record_id, :run_id, :run_trigger, :task_id, :task_name, :source_sql,
@@ -728,7 +775,8 @@ impl HistoryStore {
                         :sink_reported_rows, :purged_rows, :source_batches, :received_batches,
                         :total_rows, :precount_ms, :fetch_ms, :push_ms, :commit_ms, :count_ms,
                         :cursor_ms, :source_code, :sink_code, :column, :value, :message,
-                        :unknown_reason, :failure_kind, :seq, :rows_pushed, :bytes, :ms,
+                        :unknown_reason, :failure_kind, :scheduled_refusal_reason, :seq,
+                        :rows_pushed, :bytes, :ms,
                         :last_ts, :mapping_issues, :evidence
                      )",
                     history_params!(history, mapping_issues, evidence),
@@ -1022,7 +1070,8 @@ const HISTORY_SELECT: &str = "SELECT
     sink_reported_rows, purged_rows, source_batches, received_batches, fetch_ms, push_ms,
     total_rows, precount_ms,
     commit_ms, count_ms, cursor_ms, source_code, sink_code, [column], [value],
-    message, unknown_reason, failure_kind, seq, rows_pushed, bytes, ms, last_ts,
+    message, unknown_reason, failure_kind, scheduled_refusal_reason, seq, rows_pushed, bytes, ms,
+    last_ts,
     mapping_issues, evidence
   FROM run_history";
 
@@ -1062,6 +1111,7 @@ fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunHistory> {
         message: row.get("message")?,
         unknown_reason: row.get("unknown_reason")?,
         failure_kind: row.get("failure_kind")?,
+        scheduled_refusal_reason: row.get("scheduled_refusal_reason")?,
         seq: row.get("seq")?,
         rows_pushed: row.get("rows_pushed")?,
         bytes: row.get("bytes")?,
