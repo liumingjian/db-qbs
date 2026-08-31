@@ -11,6 +11,7 @@ use crate::{multipart_mail, Clock, EmailAlertStore, MailTransport, RunHistory};
 const DATABASE_FILE: &str = "db-qbs.sqlite3";
 pub const RETRY_BASE_SECONDS: i64 = 60;
 pub const RETRY_CAP_SECONDS: i64 = 60 * 60;
+const BUSY_SKIP_SUPPRESSION_HOURS: i64 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -451,7 +452,8 @@ pub(crate) fn initialize_alert_tables(connection: &Connection) -> Result<(), Str
                 run_trigger          TEXT NOT NULL,
                 failed_at            TEXT NOT NULL,
                 failure_category     TEXT NOT NULL,
-                safe_explanation     TEXT NOT NULL
+                safe_explanation     TEXT NOT NULL,
+                delivery_candidate  INTEGER NOT NULL DEFAULT 0
              );
              CREATE TABLE IF NOT EXISTS email_deliveries (
                 delivery_id          TEXT PRIMARY KEY NOT NULL,
@@ -472,7 +474,25 @@ pub(crate) fn initialize_alert_tables(connection: &Connection) -> Result<(), Str
              CREATE INDEX IF NOT EXISTS email_deliveries_pending
                  ON email_deliveries(state, attempt_count);",
         )
-        .map_err(|error| format!("初始化 SQLite 告警表失败：{error}"))
+        .map_err(|error| format!("初始化 SQLite 告警表失败：{error}"))?;
+    let has_delivery_candidate: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('alerts') WHERE name = 'delivery_candidate'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("检查 SQLite 告警表结构失败：{error}"))?;
+    if !has_delivery_candidate {
+        connection
+            .execute(
+                "ALTER TABLE alerts ADD COLUMN delivery_candidate INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(|error| format!("迁移 SQLite 告警表失败：{error}"))?;
+    }
+    Ok(())
 }
 
 pub(crate) fn insert_alert_in_transaction(
@@ -487,6 +507,11 @@ pub(crate) fn insert_alert_in_transaction(
         .finished_at
         .as_deref()
         .unwrap_or(&history.started_at);
+    let failure_category = history
+        .scheduled_refusal_reason
+        .as_deref()
+        .or(history.failure_kind.as_deref())
+        .unwrap_or("UNKNOWN");
     transaction
         .execute(
             "INSERT OR IGNORE INTO alerts (
@@ -501,8 +526,8 @@ pub(crate) fn insert_alert_in_transaction(
                 history.task_name,
                 history.trigger,
                 failed_at,
-                history.failure_kind.as_deref().unwrap_or("UNKNOWN"),
-                safe_explanation(history.failure_kind.as_deref()),
+                failure_category,
+                safe_explanation(Some(failure_category)),
             ],
         )
         .map_err(|error| format!("创建 SQLite 运行告警失败：{error}"))?;
@@ -535,17 +560,32 @@ pub(crate) fn insert_alert_in_transaction(
         .unwrap_or_default();
     let started_at = parse_timestamp(failed_at)?;
     let deadline = retry_deadline(started_at, settings.as_ref().map_or(0, |(_, hours)| *hours));
+    let delivery_candidate = !recipients.is_empty();
+    let suppressed = failure_category == "PREVIOUS_RUN_ACTIVE"
+        && delivery_candidate
+        && has_busy_skip_candidate(transaction, &history.task_id, failure_category, started_at)?;
+    if delivery_candidate && !suppressed {
+        transaction
+            .execute(
+                "UPDATE alerts SET delivery_candidate = 1 WHERE alert_id = ?1",
+                [&alert_id],
+            )
+            .map_err(|error| format!("记录 SQLite 告警投递候选状态失败：{error}"))?;
+    }
+    let state = if suppressed { "SUPPRESSED" } else { "PENDING" };
     for (index, recipient) in recipients.iter().enumerate() {
         transaction
             .execute(
                 "INSERT OR IGNORE INTO email_deliveries (
                     delivery_id, alert_id, recipient_snapshot, state, next_attempt_at,
                     retry_window_started_at, retry_deadline_at
-                 ) VALUES (?1, ?2, ?3, 'PENDING', ?4, ?4, ?5)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     format!("{alert_id}-{index}"),
                     alert_id,
                     recipient,
+                    state,
+                    (!suppressed).then(|| started_at.to_rfc3339()),
                     started_at.to_rfc3339(),
                     deadline.to_rfc3339(),
                 ],
@@ -555,10 +595,34 @@ pub(crate) fn insert_alert_in_transaction(
     Ok(())
 }
 
+fn has_busy_skip_candidate(
+    transaction: &rusqlite::Transaction<'_>,
+    task_id: &str,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<bool, String> {
+    let window_start = now - TimeDelta::hours(BUSY_SKIP_SUPPRESSION_HOURS);
+    transaction
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                  FROM alerts a
+                 WHERE a.task_id = ?1 AND a.failure_category = ?2
+                   AND julianday(a.failed_at) >= julianday(?3)
+                   AND julianday(a.failed_at) <= julianday(?4)
+                   AND a.delivery_candidate = 1
+             )",
+            params![task_id, reason, window_start.to_rfc3339(), now.to_rfc3339()],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("检查调度跳过告警抑制窗口失败：{error}"))
+}
+
 fn is_alertable(history: &RunHistory) -> bool {
     history.outcome.as_deref() == Some("FAILED")
         && history.unknown_reason.as_deref() != Some("STOPPED_BY_USER")
-        && history.failure_kind.as_deref() != Some("SKIPPED")
+        && (history.failure_kind.as_deref() != Some("SKIPPED")
+            || history.scheduled_refusal_reason.is_some())
 }
 
 fn safe_explanation(kind: Option<&str>) -> &'static str {
@@ -578,6 +642,16 @@ fn safe_explanation(kind: Option<&str>) -> &'static str {
         Some("VERIFY_FAILED") => "写入后的校验未通过，请在系统中查看运行详情。",
         Some("DEFECT") => "运行遇到内部一致性错误，请在系统中查看运行详情。",
         Some("UNKNOWN") => "运行结局无法确认，请在系统中查看运行详情。",
+        Some("PREVIOUS_RUN_ACTIVE") => "调度触发时上一次运行仍未结束，请在系统中查看运行详情。",
+        Some("PREVIOUS_RUN_STOPPING") => "调度触发时上一次运行仍在停止，请在系统中查看运行详情。",
+        Some("SOURCE_DATASOURCE_UNAVAILABLE") => {
+            "调度触发时源端数据源不可用，请在系统中查看运行详情。"
+        }
+        Some("TARGET_DATASOURCE_UNAVAILABLE") => {
+            "调度触发时目标端数据源不可用，请在系统中查看运行详情。"
+        }
+        Some("TARGET_AGENT_UNAVAILABLE") => "调度触发时目标端代理不可用，请在系统中查看运行详情。",
+        Some("TARGET_HELD") => "调度触发时目标表仍被占用，请在系统中查看运行详情。",
         _ => "运行失败，请在系统中查看运行详情。",
     }
 }

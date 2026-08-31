@@ -8,7 +8,7 @@ use chrono::{DateTime, TimeDelta, TimeZone, Utc};
 use db_qbs_source::{
     AlertDeliveryState, AlertOutboxStore, Clock, EmailAlertSettingsInput, EmailAlertStore,
     EmailProviderPreset, HistoryStore, MailTransport, MailTransportError, OutgoingMail, RunHistory,
-    RunTrigger, SmtpSecurity, UnknownReason,
+    RunTrigger, ScheduledRefusalReason, SmtpSecurity, UnknownReason,
 };
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -677,6 +677,104 @@ fn success_user_stop_and_scheduled_skip_do_not_create_an_alert() {
     assert!(outbox.summary_for_run("success").unwrap().is_none());
     assert!(outbox.summary_for_run("stopped").unwrap().is_none());
     assert!(outbox.summary_for_run("skipped").unwrap().is_none());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn busy_schedule_skips_keep_alert_evidence_but_suppress_delivery_for_one_hour() {
+    let directory = temp_directory();
+    let first_at = Utc.with_ymd_and_hms(2026, 8, 31, 10, 0, 0).unwrap();
+    let email = EmailAlertStore::open(&directory).unwrap();
+    email.update(settings(vec!["ops@example.com"])).unwrap();
+    let history_store = HistoryStore::open(&directory).unwrap();
+    let outbox = AlertOutboxStore::open(&directory).unwrap();
+
+    let record = |id: &str, task_id: &str, reason: ScheduledRefusalReason, at| {
+        let mut history = RunHistory::accepted(id, task_id, "SELECT 1", at);
+        history.task_name = "hourly import".to_owned();
+        history.trigger = RunTrigger::Scheduled.as_str().to_owned();
+        history.mark_scheduled_refusal(reason, "display wording is not an identity".to_owned(), at);
+        history_store.finalize(&history, at, 90).unwrap();
+    };
+
+    record(
+        "busy-first",
+        "task-a",
+        ScheduledRefusalReason::PreviousRunActive,
+        first_at,
+    );
+    record(
+        "busy-inside",
+        "task-a",
+        ScheduledRefusalReason::PreviousRunActive,
+        first_at + TimeDelta::minutes(30),
+    );
+    record(
+        "busy-boundary",
+        "task-a",
+        ScheduledRefusalReason::PreviousRunActive,
+        first_at + TimeDelta::hours(1),
+    );
+    record(
+        "busy-outside",
+        "task-a",
+        ScheduledRefusalReason::PreviousRunActive,
+        first_at + TimeDelta::hours(1) + TimeDelta::seconds(1),
+    );
+
+    for id in ["busy-inside", "busy-boundary"] {
+        let summary = outbox.summary_for_run(id).unwrap().unwrap();
+        assert_eq!(summary.delivery_state, AlertDeliveryState::Suppressed);
+        let delivery = outbox.delivery_history(Some(id)).unwrap().remove(0);
+        assert_eq!(delivery.state, db_qbs_source::EmailDeliveryState::Suppressed);
+        assert!(matches!(
+            outbox.manual_retry(&delivery.delivery_id, first_at, 24).unwrap(),
+            db_qbs_source::ManualRetryOutcome::Ineligible
+        ));
+    }
+    assert_eq!(
+        outbox
+            .summary_for_run("busy-first")
+            .unwrap()
+            .unwrap()
+            .delivery_state,
+        AlertDeliveryState::Pending
+    );
+    assert_eq!(
+        outbox
+            .summary_for_run("busy-outside")
+            .unwrap()
+            .unwrap()
+            .delivery_state,
+        AlertDeliveryState::Pending
+    );
+    let alert_ids = ["busy-first", "busy-inside", "busy-boundary", "busy-outside"]
+        .map(|id| outbox.summary_for_run(id).unwrap().unwrap().alert_id);
+    assert_eq!(alert_ids.iter().collect::<std::collections::HashSet<_>>().len(), 4);
+
+    // Task and stable reason are both part of the key; display wording is not.
+    record(
+        "other-task",
+        "task-b",
+        ScheduledRefusalReason::PreviousRunActive,
+        first_at + TimeDelta::minutes(30),
+    );
+    record(
+        "other-reason",
+        "task-a",
+        ScheduledRefusalReason::TargetAgentUnavailable,
+        first_at + TimeDelta::minutes(30),
+    );
+    for id in ["other-task", "other-reason"] {
+        assert_eq!(
+            outbox
+                .summary_for_run(id)
+                .unwrap()
+                .unwrap()
+                .delivery_state,
+            AlertDeliveryState::Pending
+        );
+    }
     std::fs::remove_dir_all(directory).unwrap();
 }
 

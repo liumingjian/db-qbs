@@ -294,7 +294,7 @@ enum StartRunError {
 pub(crate) enum DispatchOutcome {
     Started(String),
     Waiting(String),
-    Refused(String),
+    Refused(crate::ScheduledRefusalReason, String),
 }
 /// agent 注册表被后台探测线程与请求线程共用，所以它是 `Arc<Mutex<...>>`——
 /// 底下是一条 SQLite 连接，`rusqlite::Connection` 不是 `Sync`。
@@ -1627,18 +1627,33 @@ fn agent_endpoint(agent: &Agent) -> AgentEndpoint {
 pub(crate) fn dispatch_scheduled_run(state: &Api<'_>, task: &Task) -> DispatchOutcome {
     let access = match oracle_access(state, &task.source_datasource_id) {
         Ok(access) => access,
-        Err(error) => return DispatchOutcome::Refused(error),
+        Err(error) => {
+            return DispatchOutcome::Refused(
+                crate::ScheduledRefusalReason::SourceDatasourceUnavailable,
+                error,
+            );
+        }
     };
     let target = match state
         .datasources
         .target_connection(&task.target_datasource_id)
     {
         Ok(target) => target,
-        Err(error) => return DispatchOutcome::Refused(error),
+        Err(error) => {
+            return DispatchOutcome::Refused(
+                crate::ScheduledRefusalReason::TargetDatasourceUnavailable,
+                error,
+            );
+        }
     };
     let agent = match resolve_target_agent(state, &task.target_datasource_id) {
         Ok(agent) => agent,
-        Err(error) => return DispatchOutcome::Refused(error),
+        Err(error) => {
+            return DispatchOutcome::Refused(
+                crate::ScheduledRefusalReason::TargetAgentUnavailable,
+                error,
+            );
+        }
     };
     // 没自报额度的 agent 按**一次一个**算，而这 1 不是保守的猜测，是那台 agent 的实情：
     // #260 之前的 sink 是 `for request in server.incoming_requests()`，一个请求一个请求地
@@ -1649,7 +1664,12 @@ pub(crate) fn dispatch_scheduled_run(state: &Api<'_>, task: &Task) -> DispatchOu
     let quota = agent.max_concurrent_runs.unwrap_or(1) as usize;
     let in_flight = match state.runs.lock() {
         Ok(runs) => runs.in_flight_for_agent(&agent.agent_id),
-        Err(_) => return DispatchOutcome::Refused("run 控制锁已损坏".to_owned()),
+        Err(_) => {
+            return DispatchOutcome::Refused(
+                crate::ScheduledRefusalReason::Internal,
+                "run 控制锁已损坏".to_owned(),
+            );
+        }
     };
     if in_flight >= quota {
         return DispatchOutcome::Waiting(format!(
@@ -1671,16 +1691,21 @@ pub(crate) fn dispatch_scheduled_run(state: &Api<'_>, task: &Task) -> DispatchOu
         RunTrigger::Scheduled,
     ) {
         Ok(run_record_id) => DispatchOutcome::Started(run_record_id),
-        Err(StartRunError::AlreadyRunning) => {
-            DispatchOutcome::Refused("上次尚未结束，本次跳过".to_owned())
+        Err(StartRunError::AlreadyRunning) => DispatchOutcome::Refused(
+            crate::ScheduledRefusalReason::PreviousRunActive,
+            "上次尚未结束，本次跳过".to_owned(),
+        ),
+        Err(StartRunError::Stopping) => DispatchOutcome::Refused(
+            crate::ScheduledRefusalReason::PreviousRunStopping,
+            "上次正在停止，本次跳过".to_owned(),
+        ),
+        Err(StartRunError::TargetHeld) => DispatchOutcome::Refused(
+            crate::ScheduledRefusalReason::TargetHeld,
+            "目标表的占用还没释放，本次跳过".to_owned(),
+        ),
+        Err(StartRunError::Internal(error)) => {
+            DispatchOutcome::Refused(crate::ScheduledRefusalReason::Internal, error)
         }
-        Err(StartRunError::Stopping) => {
-            DispatchOutcome::Refused("上次正在停止，本次跳过".to_owned())
-        }
-        Err(StartRunError::TargetHeld) => {
-            DispatchOutcome::Refused("目标表的占用还没释放，本次跳过".to_owned())
-        }
-        Err(StartRunError::Internal(error)) => DispatchOutcome::Refused(error),
     }
 }
 
