@@ -1893,6 +1893,64 @@ while :; do sleep 0.02; done
     );
 }
 
+/// 子进程自己那一刀 abort 没砍下去时，占用同样留在目标端（#271）。
+///
+/// 这条路径父进程**不补 abort**（子进程已经走完终态，再发只会在已封口的 run 上换回
+/// 409），但占用还挂着这件事一模一样——界面照样不许显示成可以重跑，重试那颗照样在。
+#[test]
+fn a_child_reported_abort_failure_holds_the_target_table_too() {
+    let rig = Rig::with_child(
+        r#"printf '%s\n' '{"ts":"2026-08-15T15:00:00.000Z","level":"info","event":"stage_changed","run_id":"run-child-abort","task":null,"stage":"STREAMING"}'
+printf '%s\n' '{"ts":"2026-08-15T15:00:03.000Z","level":"warn","event":"abort_failed","run_id":"run-child-abort","task":null,"message":"暂存表 drop 不掉"}'
+printf '%s\n' '{"ts":"2026-08-15T15:00:04.000Z","level":"error","event":"run_finished","run_id":"run-child-abort","task":null,"terminal":"FAILED","stage":"FAILED","message":"目标端拒绝","failure_kind":"SINK_WRITE","source_code":null,"sink_code":"WRITE_FAILED","column":null,"value":null,"source_rows":1,"source_batches":1,"staged_rows":0,"received_batches":1,"sink_reported_rows":0,"purged_rows":0,"fetch_ms":1,"push_ms":1,"commit_ms":0,"count_ms":0,"cursor_ms":0}'
+"#,
+    );
+    let (agent_url, aborts) = abort_recording_agent(true);
+    let agent_id = rig.register_agent_at("目标端", &agent_url);
+    let source_id = rig.create_oracle_datasource("源库");
+    let target_id = rig.create_mysql_datasource("目标库", &agent_id);
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    rig.wait_until_idle(&task_id);
+
+    // 父进程一个字节都没往目标端发——它信子进程自己报的终态。
+    assert!(
+        aborts.lock().unwrap().is_empty(),
+        "报了终态的运行不该被父进程补一刀"
+    );
+    // 但占用还挂着，所以这一行如实说「没释放掉」，发起运行也被拦住。
+    let held = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(held["outcome"], "FAILED");
+    assert_eq!(held["target_hold"], "HELD");
+    assert_eq!(held["target_hold_message"], "暂存表 drop 不掉");
+    assert_eq!(
+        rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#))
+            .status,
+        409
+    );
+
+    // 点一下重试，这一次成了：占用还回来，任务重新跑得起来。
+    let released = rig.post(&format!("/api/runs/{run_record_id}/release"), "");
+    assert_eq!(released.status, 200, "{}", released.body_text());
+    assert_eq!(aborts.lock().unwrap().clone(), vec!["run-child-abort"]);
+    assert_eq!(
+        rig.json(&rig.get(&format!("/api/runs/{run_record_id}")))["target_hold"],
+        Value::Null
+    );
+    assert_eq!(
+        rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#))
+            .status,
+        202
+    );
+    rig.wait_until_idle(&task_id);
+}
+
 /// 这条运行的日志里有几行 `abort_failed`。
 fn abort_failures(logs: &Value) -> usize {
     logs["lines"]

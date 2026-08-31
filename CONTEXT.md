@@ -344,8 +344,8 @@ branches on the version.
    (`TARGET_TABLE_BUSY`). Releasing it is not a separate action — it happens when the run commits or
    is aborted. Because release is asynchronous and can fail, **`source` reports the hold's fate
    rather than the stop request's**: from the moment a stop is signalled until the abort has been
-   sent and answered, the run says the hold is still being released; if the abort failed, the run
-   says the hold is still held, and names the reason. A run may not be started while a hold from its
+   sent and answered, the run says the hold is still being released; if the abort failed — the
+   child's own or the parent's — the run says the hold is still held, and names the reason. A run may not be started while a hold from its
    task's previous run is unreleased — the refusal comes from `source`, before the request would
    reach the agent that would refuse it anyway. **Nothing may present a task as re-runnable while
    its target table is still held**, in the UI or in the API. The retry is manual and explicit

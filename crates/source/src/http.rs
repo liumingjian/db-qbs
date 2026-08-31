@@ -1508,6 +1508,11 @@ fn supervise_run(
     runs: RunRegistry,
 ) {
     let mut terminal_observed = false;
+    // 子进程自己那一刀 abort 也可能没砍下去（#271）。砍不下去时它写一行 `abort_failed`，
+    // 而那一行是父进程**唯一**能知道这件事的地方：占用因此留在了目标端，后果与父进程
+    // 补发失败一模一样，界面上就该是同一句话。凭据在见到那一行时当场抄下来——
+    // 终态一到，在飞投影当场被摘掉，事后再抄什么也没有了。
+    let mut child_abort_failure: Option<(RunWrapup, String)> = None;
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else {
             break;
@@ -1523,6 +1528,15 @@ fn supervise_run(
         let Ok(log) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        // 只有失败路径上才会有这一行：子进程的 `abort_best_effort` 是它自己收拾
+        // 暂存表的那一下，跑成了的运行从不发 abort。
+        if log["event"] == "abort_failed" {
+            let message = log["message"]
+                .as_str()
+                .unwrap_or("目标端 abort 失败")
+                .to_owned();
+            child_abort_failure = Some((wrapup_snapshot(&runs, &run_record_id), message));
+        }
         let Some((change, history)) = apply_log_line(&runs, &run_record_id, &log) else {
             continue;
         };
@@ -1568,6 +1582,11 @@ fn supervise_run(
             // 而那是**假的**：再发起一次只会撞回一个 `TARGET_TABLE_BUSY`。
             record_stuck_abort(&runs, &run_record_id, &wrapup, message, run_log);
         }
+    } else if let Some((wrapup, message)) = child_abort_failure {
+        // 子进程自己走完了终态，所以父进程不补 abort（那只会在已封口的 run 上换回 409）；
+        // 可它路上那一刀没砍下去，占用照样挂着。**占用还在就不许显示成可以重跑**，
+        // 这一条不分是谁那一刀没成（#271）。
+        record_stuck_abort(&runs, &run_record_id, &wrapup, message, run_log);
     }
     remove_live_history(&runs, &run_record_id);
     remove_active_run(&runs, &run_record_id);
