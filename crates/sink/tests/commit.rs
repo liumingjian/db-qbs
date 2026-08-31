@@ -199,7 +199,7 @@ fn an_append_run_still_leaves_what_was_there_and_says_swapped() {
 fn append_with_pre_sql_reports_the_cleanup_count_and_distinct_terminal() {
     let destination = Arc::new(destination());
     let service = SinkService::new("qbs", destination.clone());
-    let pre_sql = "/* exact */\nDELETE FROM qbs.T_POSITION WHERE D_BIZ < CURRENT_DATE;";
+    let pre_sql = "/* exact */\nDELETE FROM `qbs`.`T_POSITION` WHERE DATE(D_BIZ) < CURRENT_DATE AND D_BIZ IN (SELECT D_BIZ FROM qbs.STALE_POSITION);";
     service
         .open(OpenRunRequest {
             pre_sql: Some(pre_sql.to_owned()),
