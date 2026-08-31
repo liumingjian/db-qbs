@@ -242,7 +242,9 @@ impl EmailAlertStore {
 
     pub fn delivery_settings(&self) -> Result<Option<EmailDeliverySettings>, String> {
         let stored = self.stored()?;
-        if !stored.view.enabled || stored.sealed_secret.is_empty() {
+        if !stored.view.enabled
+            || validate_complete_view(&stored.view, !stored.sealed_secret.is_empty()).is_err()
+        {
             return Ok(None);
         }
         Ok(Some(EmailDeliverySettings {

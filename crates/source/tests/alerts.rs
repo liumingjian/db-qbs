@@ -169,13 +169,13 @@ fn failed_accepted_run_is_atomic_idempotent_snapshotted_and_sent_as_safe_multipa
     let transport = RecordingTransport::default();
     assert_eq!(
         outbox
-            .run_first_attempts(&email, &transport, &FixedClock(now))
+            .run_due_attempts(&email, &transport, &FixedClock(now))
             .unwrap(),
         2
     );
     assert_eq!(
         outbox
-            .run_first_attempts(&email, &transport, &FixedClock(now))
+            .run_due_attempts(&email, &transport, &FixedClock(now))
             .unwrap(),
         0,
         "a replay must not resend a successful first attempt"
@@ -377,7 +377,7 @@ fn a_failed_first_attempt_stays_durable_without_reopening_or_resending_the_run()
 
     assert_eq!(
         outbox
-            .run_first_attempts(&email, &transport, &FixedClock(now))
+            .run_due_attempts(&email, &transport, &FixedClock(now))
             .unwrap(),
         1
     );
@@ -400,10 +400,10 @@ fn a_failed_first_attempt_stays_durable_without_reopening_or_resending_the_run()
     );
     assert_eq!(
         outbox
-            .run_first_attempts(&email, &transport, &FixedClock(now))
+            .run_due_attempts(&email, &transport, &FixedClock(now))
             .unwrap(),
         0,
-        "#287 must schedule later retries; the first-attempt worker must not spin"
+        "#287 must schedule later retries; the due-attempt worker must not spin"
     );
     std::fs::remove_dir_all(directory).unwrap();
 }
@@ -736,7 +736,7 @@ fn manual_retry_uses_a_new_window_current_settings_and_the_original_recipient() 
     email.update(current).unwrap();
     let retried_at = started + TimeDelta::hours(1);
     let result = outbox
-        .manual_retry(&failed.delivery_id, retried_at, 2)
+        .manual_retry(&failed.delivery_id, retried_at, &email)
         .unwrap();
     let db_qbs_source::ManualRetryOutcome::Retried(retried) = result else {
         panic!("failed delivery was not retried");
@@ -764,7 +764,7 @@ fn manual_retry_uses_a_new_window_current_settings_and_the_original_recipient() 
     assert_eq!(outbox.delivery_history(None).unwrap()[0].attempt_count, 2);
     assert!(matches!(
         outbox
-            .manual_retry(&failed.delivery_id, retried_at, 2)
+            .manual_retry(&failed.delivery_id, retried_at, &email)
             .unwrap(),
         db_qbs_source::ManualRetryOutcome::Ineligible
     ));
@@ -844,24 +844,25 @@ fn busy_schedule_skips_keep_alert_evidence_but_suppress_delivery_for_one_hour() 
         "busy-outside",
         "task-a",
         ScheduledRefusalReason::PreviousRunActive,
-        first_at + TimeDelta::hours(1) + TimeDelta::seconds(1),
+        first_at + TimeDelta::hours(2),
     );
 
-    for id in ["busy-inside", "busy-boundary"] {
-        let summary = outbox.summary_for_run(id).unwrap().unwrap();
-        assert_eq!(summary.delivery_state, AlertDeliveryState::Suppressed);
-        let delivery = outbox.delivery_history(Some(id)).unwrap().remove(0);
-        assert_eq!(
-            delivery.state,
-            db_qbs_source::EmailDeliveryState::Suppressed
-        );
-        assert!(matches!(
-            outbox
-                .manual_retry(&delivery.delivery_id, first_at, 24)
-                .unwrap(),
-            db_qbs_source::ManualRetryOutcome::Ineligible
-        ));
-    }
+    let inside = outbox.summary_for_run("busy-inside").unwrap().unwrap();
+    assert_eq!(inside.delivery_state, AlertDeliveryState::Suppressed);
+    let delivery = outbox
+        .delivery_history(Some("busy-inside"))
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        delivery.state,
+        db_qbs_source::EmailDeliveryState::Suppressed
+    );
+    assert!(matches!(
+        outbox
+            .manual_retry(&delivery.delivery_id, first_at, &email)
+            .unwrap(),
+        db_qbs_source::ManualRetryOutcome::Ineligible
+    ));
     assert_eq!(
         outbox
             .summary_for_run("busy-first")
@@ -869,6 +870,15 @@ fn busy_schedule_skips_keep_alert_evidence_but_suppress_delivery_for_one_hour() 
             .unwrap()
             .delivery_state,
         AlertDeliveryState::Pending
+    );
+    assert_eq!(
+        outbox
+            .summary_for_run("busy-boundary")
+            .unwrap()
+            .unwrap()
+            .delivery_state,
+        AlertDeliveryState::Pending,
+        "the one-hour lower bound is exclusive"
     );
     assert_eq!(
         outbox

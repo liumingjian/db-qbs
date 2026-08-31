@@ -1093,13 +1093,9 @@ fn handle_list_email_deliveries(state: &Api<'_>, query: Option<&str>) -> HttpRes
 }
 
 fn handle_retry_email_delivery(state: &Api<'_>, delivery_id: &str) -> HttpResponse {
-    let settings = match state.email_alerts.get() {
-        Ok(settings) => settings,
-        Err(error) => return internal_error(error),
-    };
     match state
         .alert_outbox
-        .manual_retry(delivery_id, state.clock.now(), settings.max_retry_hours)
+        .manual_retry(delivery_id, state.clock.now(), &state.email_alerts)
     {
         Ok(crate::ManualRetryOutcome::Retried(delivery)) => json_response(200, &delivery),
         Ok(crate::ManualRetryOutcome::NotFound) => not_found(),
