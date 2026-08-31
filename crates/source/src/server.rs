@@ -26,7 +26,7 @@ use crate::scheduler::scheduler_loop;
 use crate::{
     fetch_agent_info, AgentStore, AuthStore, Clock, DatasourceStore, HistoryStore, RunLogStore,
     ScheduleRegistry, ScheduleState, SourceConfig, SystemClock, TaskStore,
-    UnconfiguredMailTransport, UnknownReason,
+    SmtpMailTransport, UnknownReason,
 };
 
 pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
@@ -49,7 +49,7 @@ pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
     let email_alert_store = crate::EmailAlertStore::open(&config.data_dir)?;
     let runs = Arc::new(Mutex::new(RunState::default()));
     let clock = Arc::new(SystemClock);
-    let mail_transport = Arc::new(UnconfiguredMailTransport);
+    let mail_transport = Arc::new(SmtpMailTransport::default());
     // 上一条命的收尾（#272）：没走完的那几行封口，它们留在目标端的目标表占用记上账、
     // 后台补发 abort。**在开门之前**做完记账那一半，那几张表因此从第一秒起就拦得住
     // 新运行——子进程随父进程一起没了，那一刀 abort 谁也没替它砍。

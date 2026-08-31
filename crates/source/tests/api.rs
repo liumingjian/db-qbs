@@ -20,7 +20,7 @@ use db_qbs_source::http::{
 };
 use db_qbs_source::{
     AgentStore, AuthStore, Clock, DatasourceStore, EmailAlertStore, HistoryStore, MailTransport,
-    OracleAccess, OracleRowSource, OutgoingMail, RunLogStore, ScheduleState, SourceColumn,
+    MailTransportError, OracleAccess, OracleRowSource, OutgoingMail, RunLogStore, ScheduleState, SourceColumn,
     SourceConfig, SourceReadError, TaskSpec, TaskStore, SESSION_COOKIE,
 };
 use serde_json::Value;
@@ -45,13 +45,42 @@ impl Clock for TestClock {
     }
 }
 
+#[derive(Debug, Clone)]
+struct RecordedMail {
+    host: String,
+    port: u16,
+    security: db_qbs_source::SmtpSecurity,
+    username: String,
+    secret: String,
+    sender_name: String,
+    mail: OutgoingMail,
+}
+
 #[derive(Default)]
-struct FakeMailTransport(Mutex<Vec<OutgoingMail>>);
+struct FakeMailTransport {
+    sent: Mutex<Vec<RecordedMail>>,
+    failure: Mutex<Option<MailTransportError>>,
+}
 
 impl MailTransport for FakeMailTransport {
-    fn send(&self, mail: &OutgoingMail) -> Result<(), String> {
-        self.0.lock().unwrap().push(mail.clone());
-        Ok(())
+    fn send(
+        &self,
+        settings: &db_qbs_source::EmailDeliverySettings,
+        mail: &OutgoingMail,
+    ) -> Result<(), MailTransportError> {
+        self.sent.lock().unwrap().push(RecordedMail {
+            host: settings.host.clone(),
+            port: settings.port,
+            security: settings.security,
+            username: settings.username.clone(),
+            secret: settings.secret.clone(),
+            sender_name: settings.sender_name.clone(),
+            mail: mail.clone(),
+        });
+        match *self.failure.lock().unwrap() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }
 
@@ -810,6 +839,13 @@ fn every_route_reaches_its_handler() {
             "/api/email-alert-settings",
             "/api/email-alert-settings".into(),
             email_alert_settings_json(false, "", 24),
+            200,
+        ),
+        (
+            Method::Post,
+            "/api/email-alert-settings/test",
+            "/api/email-alert-settings/test".into(),
+            String::new(),
             200,
         ),
         // 会话那三条**排在最末，而且退出排最后**：`DELETE /api/session` 会把 rig
@@ -3202,11 +3238,12 @@ fn every_route_declares_its_access() {
             "{method:?} {pattern} 应当是公开的"
         );
     }
-    let administrator: [(Method, &str); 13] = [
+    let administrator: [(Method, &str); 14] = [
         (Method::Get, "/api/operator-account"),
         (Method::Put, "/api/operator-account"),
         (Method::Get, "/api/email-alert-settings"),
         (Method::Put, "/api/email-alert-settings"),
+        (Method::Post, "/api/email-alert-settings/test"),
         (Method::Post, "/api/agents"),
         (Method::Post, "/api/agents/{}/probe"),
         (Method::Put, "/api/agents/{}"),
@@ -3495,6 +3532,7 @@ fn email_alert_settings_default_to_editable_tencent_values() {
             "max_retry_hours": 24,
             "instance_name": "db-qbs",
             "external_base_url": null,
+            "latest_test_result": null,
         })
     );
 }
@@ -3514,7 +3552,7 @@ fn email_alert_settings_persist_encrypted_with_write_only_blank_preserve() {
     assert_eq!(saved_json["external_base_url"], "https://qbs.example.com");
     assert_eq!(saved_json["has_smtp_secret"], true);
     assert!(saved_json.get("smtp_secret").is_none());
-    assert!(rig.mail_transport.0.lock().unwrap().is_empty());
+    assert!(rig.mail_transport.sent.lock().unwrap().is_empty());
 
     let database = fs::read(rig.directory.join("db-qbs.sqlite3")).unwrap();
     assert!(!String::from_utf8_lossy(&database).contains("SMTP-secret-marker"));
@@ -3559,7 +3597,79 @@ fn email_alert_settings_validate_shape_without_smtp_io() {
     let incomplete = email_alert_settings_json(true, "", 24).replace("mail.example.com", "");
     let response = rig.put("/api/email-alert-settings", &incomplete);
     assert_eq!(response.status, 400, "{}", response.body_text());
-    assert!(rig.mail_transport.0.lock().unwrap().is_empty());
+    assert!(rig.mail_transport.sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn test_email_uses_saved_settings_sends_each_recipient_and_persists_success() {
+    let rig = Rig::new();
+    let saved = rig.put(
+        "/api/email-alert-settings",
+        &email_alert_settings_json(false, "SMTP-secret-marker", 24),
+    );
+    assert_eq!(saved.status, 200, "{}", saved.body_text());
+
+    let response = rig.post("/api/email-alert-settings/test", "");
+
+    assert_eq!(response.status, 200, "{}", response.body_text());
+    assert_eq!(rig.json(&response)["status"], "SUCCESS");
+    assert_eq!(rig.json(&response)["tested_at"], "2026-08-31T10:00:00+00:00");
+    assert_eq!(rig.json(&response)["error"], Value::Null);
+    let sent = rig.mail_transport.sent.lock().unwrap();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].host, "mail.example.com");
+    assert_eq!(sent[0].port, 587);
+    assert_eq!(sent[0].security, db_qbs_source::SmtpSecurity::Starttls);
+    assert_eq!(sent[0].username, "mailer");
+    assert_eq!(sent[0].secret, "SMTP-secret-marker");
+    assert_eq!(sent[0].sender_name, "db-qbs alerts");
+    assert_eq!(sent[0].mail.envelope_from, "alerts@example.com");
+    assert_eq!(sent[0].mail.envelope_to, "Ops@example.com");
+    assert_eq!(sent[1].mail.envelope_to, "audit@example.org");
+    let message = String::from_utf8_lossy(&sent[0].mail.message);
+    assert!(message.contains("multipart/alternative"));
+    assert!(message.contains("text/plain"));
+    assert!(message.contains("text/html"));
+    assert!(message.contains("Subject:"));
+    drop(sent);
+
+    assert!(rig.history.list(None).unwrap().is_empty());
+    let reopened = rig.second_life();
+    let settings = reopened.json(&reopened.get("/api/email-alert-settings"));
+    assert_eq!(settings["latest_test_result"]["status"], "SUCCESS");
+    assert_eq!(
+        settings["latest_test_result"]["tested_at"],
+        "2026-08-31T10:00:00+00:00"
+    );
+}
+
+#[test]
+fn test_email_persists_only_a_sanitized_failure() {
+    let rig = Rig::new();
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(false, "SMTP-secret-marker", 24),
+        )
+        .status,
+        200
+    );
+    *rig.mail_transport.failure.lock().unwrap() = Some(MailTransportError::Timeout);
+
+    let response = rig.post("/api/email-alert-settings/test", "");
+
+    assert_eq!(response.status, 200, "{}", response.body_text());
+    assert_eq!(rig.json(&response)["status"], "FAILED");
+    assert_eq!(rig.json(&response)["error"], "SMTP 连接或响应超时");
+    assert!(!response.body_text().contains("SMTP-secret-marker"));
+    assert_eq!(rig.mail_transport.sent.lock().unwrap().len(), 2);
+
+    let reopened = rig.second_life();
+    let settings = reopened.json(&reopened.get("/api/email-alert-settings"));
+    assert_eq!(settings["latest_test_result"]["status"], "FAILED");
+    assert_eq!(settings["latest_test_result"]["error"], "SMTP 连接或响应超时");
+    assert!(!settings.to_string().contains("SMTP-secret-marker"));
+    assert!(reopened.history.list(None).unwrap().is_empty());
 }
 
 fn email_alert_settings_json(enabled: bool, secret: &str, retry_hours: u8) -> String {

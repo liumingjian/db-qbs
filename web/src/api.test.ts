@@ -30,6 +30,7 @@ import {
   listRunHistory,
   listTasks,
   startRun,
+  sendTestEmail,
   onSessionLost,
   taskInputFrom,
   updateOperatorAccount,
@@ -117,8 +118,9 @@ describe("role-aware session and account API", () => {
       max_retry_hours: 24,
       instance_name: "db-qbs",
       external_base_url: null,
+      latest_test_result: null,
     };
-    const { has_smtp_secret: _hasSecret, ...publicInput } = settings;
+    const { has_smtp_secret: _hasSecret, latest_test_result: _latestTest, ...publicInput } = settings;
     const input = { ...publicInput, smtp_secret: "" };
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(settings), { status: 200 }))
@@ -133,6 +135,24 @@ describe("role-aware session and account API", () => {
       body: JSON.stringify(input),
     });
     expect(settings).not.toHaveProperty("smtp_secret");
+  });
+
+  it("sends a test using the saved Email Alert settings", async () => {
+    const result = {
+      status: "FAILED" as const,
+      tested_at: "2026-08-31T10:00:00+00:00",
+      error: "SMTP 连接或响应超时",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(result), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(sendTestEmail()).resolves.toEqual(result);
+    expect(fetchMock).toHaveBeenCalledWith("/api/email-alert-settings/test", {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    });
   });
 });
 

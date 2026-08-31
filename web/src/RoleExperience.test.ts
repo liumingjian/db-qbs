@@ -51,9 +51,11 @@ const EMAIL_SETTINGS: EmailAlertSettings = {
   max_retry_hours: 24,
   instance_name: "db-qbs",
   external_base_url: null,
+  latest_test_result: null,
 };
 const {
   has_smtp_secret: _hasSmtpSecret,
+  latest_test_result: _latestTestResult,
   ...EMAIL_SETTINGS_INPUT
 } = EMAIL_SETTINGS;
 
@@ -139,11 +141,34 @@ describe("role-specific rendering", () => {
       saved: null,
       onChange: () => undefined,
       onSubmit: () => undefined,
+      onTest: () => undefined,
     }));
     expect(email).toContain("smtp.exmail.qq.com");
     expect(email).toContain("隐式 SSL/TLS");
     expect(email).toContain("STARTTLS");
     expect(email).toContain("最大重试小时数");
-    expect(email).not.toContain("测试邮件");
+    expect(email).toContain("发送测试邮件");
+    expect(email).not.toContain("最新测试结果");
+
+    const failedTest = renderToStaticMarkup(createElement(EmailAlertSettingsView, {
+      settings: {
+        ...EMAIL_SETTINGS,
+        latest_test_result: {
+          status: "FAILED",
+          tested_at: "2026-08-31T10:00:00+00:00",
+          error: "SMTP 连接或响应超时",
+        },
+      },
+      draft: { ...EMAIL_SETTINGS_INPUT, smtp_secret: "" },
+      busy: false,
+      error: null,
+      saved: null,
+      onChange: () => undefined,
+      onSubmit: () => undefined,
+      onTest: () => undefined,
+    }));
+    expect(failedTest).toContain("最新测试结果");
+    expect(failedTest).toContain("发送失败");
+    expect(failedTest).toContain("SMTP 连接或响应超时");
   });
 });

@@ -32,7 +32,8 @@ use url::Url;
 use crate::scheduler::SCHEDULE_TIME_FORMAT;
 use crate::{
     cleared_cookie_header, embedded_web_asset, fetch_agent_info, generate_target_ddl,
-    Clock, CronSchedule, HttpSinkClient, MailTransport, SinkClient,
+    multipart_mail, Clock, CronSchedule, EmailTestResult, EmailTestStatus, HttpSinkClient,
+    MailTransport, SinkClient,
     session_cookie_header, session_token_from_cookie_header, validate_builder_dblink,
     validate_source_sql, Agent, AgentEndpoint, AgentEvidence, AgentInput, AgentStore, AuthStore,
     ColumnPrecision, DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess,
@@ -644,6 +645,9 @@ pub fn routes() -> &'static [Route] {
             Route::administrator(Put, "/api/email-alert-settings", |state, request, _id| {
                 handle_update_email_alert_settings(request, state)
             }),
+            Route::administrator(Post, "/api/email-alert-settings/test", |state, _request, _id| {
+                handle_test_email_alert_settings(state)
+            }),
             Route::new(Post, "/api/columns", |state, request, _id| {
                 handle_column_fetch(request, state)
             }),
@@ -1015,6 +1019,80 @@ fn handle_update_email_alert_settings(request: &Request, state: &Api<'_>) -> Htt
         Ok(settings) => json_response(200, &settings),
         Err(error) => bad_request(error),
     }
+}
+
+fn handle_test_email_alert_settings(state: &Api<'_>) -> HttpResponse {
+    let settings = match state.email_alerts.get() {
+        Ok(settings) => settings,
+        Err(error) => return internal_error(error),
+    };
+    let delivery = match state.email_alerts.test_delivery_settings() {
+        Ok(delivery) => delivery,
+        Err(error) => return persist_test_result(state, EmailTestStatus::Failed, Some(error)),
+    };
+
+    let subject = format!("[db-qbs][{}][测试] 邮件配置验证", settings.instance_name);
+    let mut latest_error = None;
+    for recipient in &settings.recipients {
+        let plain = format!(
+            "db-qbs 测试邮件\n\n实例：{}\n收件人：{}\n\n收到此邮件表示已保存的 SMTP 配置可以发送邮件。",
+            settings.instance_name, recipient
+        );
+        let html = format!(
+            "<!doctype html><html><body><h1>db-qbs 测试邮件</h1><p>实例：{}</p><p>收件人：{}</p><p>收到此邮件表示已保存的 SMTP 配置可以发送邮件。</p></body></html>",
+            escape_html(&settings.instance_name),
+            escape_html(recipient),
+        );
+        let mail = match multipart_mail(
+            &delivery.sender_address,
+            &delivery.sender_name,
+            recipient,
+            &subject,
+            plain,
+            html,
+        ) {
+            Ok(mail) => mail,
+            Err(_) => {
+                latest_error = Some("生成测试邮件失败".to_owned());
+                continue;
+            }
+        };
+        if let Err(error) = state.mail_transport.send(&delivery, &mail) {
+            latest_error = Some(error.sanitized_message().to_owned());
+        }
+    }
+
+    let status = if latest_error.is_some() {
+        EmailTestStatus::Failed
+    } else {
+        EmailTestStatus::Success
+    };
+    persist_test_result(state, status, latest_error)
+}
+
+fn persist_test_result(
+    state: &Api<'_>,
+    status: EmailTestStatus,
+    error: Option<String>,
+) -> HttpResponse {
+    let result = EmailTestResult {
+        status,
+        tested_at: state.clock.now().to_rfc3339(),
+        error,
+    };
+    match state.email_alerts.record_test_result(&result) {
+        Ok(()) => json_response(200, &result),
+        Err(error) => internal_error(error),
+    }
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 fn handle_start_run(request: &Request, state: &Api<'_>) -> HttpResponse {
