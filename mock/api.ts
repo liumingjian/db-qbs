@@ -947,6 +947,18 @@ const ROUTES: Route[] = [
     handler: ({ id }) => {
       const row = findTask(id);
       if (row === undefined) return fail(404, "任务不存在");
+      // 还有运行没结束就拒（#270）：删除不可逆，不替用户顺手终止一次在写数据的运行。
+      runs.forEach(advance);
+      const flying = runs
+        .filter((r) => r.task_id === id && inFlight(r))
+        .map((r) => String(r.run_record_id));
+      if (flying.length > 0) {
+        return fail(
+          409,
+          `任务还有运行没结束（${flying.join("、")}）；请先停止这次运行，等它收尾后再删除任务`,
+          { runs: flying },
+        );
+      }
       tasks = tasks.filter((t) => t.task_id !== id);
       return ok(row);
     },

@@ -65,6 +65,18 @@ impl RunState {
         self.active_runs.values().any(|run| run.task_id == task_id)
     }
 
+    /// 这个任务此刻没结束的那几次运行，点名到 `run_record_id`（#270）。
+    ///
+    /// 与 [`Self::has_active_run`] 同一本账，只是拒绝删除时要把 ID 说出来——
+    /// 只说「有运行在飞」，用户还得自己回列表里找是哪一次。
+    pub fn active_run_ids(&self, task_id: &str) -> Vec<String> {
+        self.active_runs
+            .iter()
+            .filter(|(_, run)| run.task_id == task_id)
+            .map(|(run_record_id, _)| run_record_id.clone())
+            .collect()
+    }
+
     /// 这台 agent 上此刻有几次**由本进程发起**的运行在飞（#266）。
     ///
     /// 它是并发额度那笔账的分子。分母（额度）由 agent 自报；分子在这里数，
@@ -553,7 +565,7 @@ pub fn routes() -> &'static [Route] {
                 handle_update_task(request, state.tasks, id)
             }),
             Route::new(Delete, "/api/tasks/{}", |state, _request, id| {
-                handle_delete_task(state.tasks, id)
+                handle_delete_task(state, id)
             }),
         ]
     })
@@ -1622,8 +1634,36 @@ fn handle_update_task(request: &Request, store: &TaskStore, task_id: &str) -> Ht
     }
 }
 
-fn handle_delete_task(store: &TaskStore, task_id: &str) -> HttpResponse {
-    match store.delete(task_id) {
+/// 删任务：还有运行没结束就拒（#270），与删数据源 / 删 agent 同一形态的 409。
+///
+/// 不做「自动停止再删除」：删除不可逆，让它顺手终止一次可能正在往目标库写数据的运行，
+/// 风险大于便利。正确的顺序是用户先停止、等这次运行收尾，再删任务。
+///
+/// 「还没结束」的判据就是 `has_active_run` 那把互斥键（任务本身）——与「能不能再发起
+/// 一次」完全同一个判据，所以「停完了就删得掉」和「停完了就能再跑」在同一刻成立，
+/// 用户不会看见两处互相矛盾的说法。
+fn handle_delete_task(state: &Api<'_>, task_id: &str) -> HttpResponse {
+    let active = match state.runs.lock() {
+        Ok(registry) => registry.active_run_ids(task_id),
+        Err(_) => return internal_error("run 控制锁已损坏".to_owned()),
+    };
+    if !active.is_empty() {
+        // 点名到 run_record_id：一个任务至多一次在飞，但报文形状跟着删数据源那条走
+        // （复数名词的数组 + 一句自己就能读懂的 message），前端拿不到数组时原样显示它。
+        return json_response(
+            409,
+            &json!({
+                "error": {
+                    "message": format!(
+                        "任务还有运行没结束（{}）；请先停止这次运行，等它收尾后再删除任务",
+                        active.join("、")
+                    ),
+                    "runs": active,
+                }
+            }),
+        );
+    }
+    match state.tasks.delete(task_id) {
         Ok(Some(task)) => json_response(200, &task),
         Ok(None) => not_found(),
         Err(error) => internal_error(error),

@@ -271,6 +271,11 @@ branches on the version.
    no input beyond the task's identity** — clicking start runs it; there is no dialog and there are no
    parameters. A re-run produces a new `run_id` and never reuses the old one. The mutual-exclusion key
    is the task: **one task may not have two runs in flight**, and the 409 says exactly that.
+   The same key guards deletion: **a task with a run in flight cannot be deleted**, and that 409
+   names the run and asks the user to stop it first — deletion is irreversible, so it never stops a
+   run that may be writing data on the user's behalf. A run stays in flight until the parent has
+   reaped the child **and** sent the abort on its behalf (see **Abort**), so for that short window
+   after a stop the task is still un-deletable and un-re-runnable — one key, one answer, both places.
    **The state lives only in `source`, and only in process memory** — see **Run Stage**. `sink`
    holds no run state, only the resource lifetime of the staging table. When the source process dies,
    the run ceases to exist.
