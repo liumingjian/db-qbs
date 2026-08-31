@@ -23,6 +23,7 @@ import {
   cancelRun,
   releaseTargetHold,
   fetchRun,
+  fetchEmailAlertSettings,
   fetchOperatorAccount,
   fetchSession,
   isForbidden,
@@ -32,6 +33,7 @@ import {
   onSessionLost,
   taskInputFrom,
   updateOperatorAccount,
+  updateEmailAlertSettings,
   updateTask,
 } from "./api";
 import type { TaskInput, TaskSpec } from "./api";
@@ -98,6 +100,39 @@ describe("role-aware session and account API", () => {
       body: JSON.stringify({ enabled: true, password: "new-secret" }),
     });
     expect(JSON.stringify(account)).not.toContain("new-secret");
+  });
+
+  it("reads and updates write-only Email Alert settings", async () => {
+    const settings = {
+      enabled: false,
+      provider_preset: "TENCENT_EXMAIL" as const,
+      smtp_host: "smtp.exmail.qq.com",
+      smtp_port: 465,
+      smtp_security: "IMPLICIT_TLS" as const,
+      smtp_username: "mailer",
+      has_smtp_secret: true,
+      sender_address: "alerts@example.com",
+      sender_name: "db-qbs",
+      recipients: ["ops@example.com"],
+      max_retry_hours: 24,
+      instance_name: "db-qbs",
+      external_base_url: null,
+    };
+    const { has_smtp_secret: _hasSecret, ...publicInput } = settings;
+    const input = { ...publicInput, smtp_secret: "" };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(settings), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(settings), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchEmailAlertSettings()).resolves.toEqual(settings);
+    await expect(updateEmailAlertSettings(input)).resolves.toEqual(settings);
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/email-alert-settings", {
+      method: "PUT",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    expect(settings).not.toHaveProperty("smtp_secret");
   });
 });
 

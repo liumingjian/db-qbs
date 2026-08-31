@@ -19,9 +19,9 @@ use db_qbs_source::http::{
     RunState,
 };
 use db_qbs_source::{
-    AgentStore, AuthStore, Clock, DatasourceStore, HistoryStore, MailTransport, OracleAccess,
-    OracleRowSource, OutgoingMail, RunLogStore, ScheduleState, SourceColumn, SourceConfig,
-    SourceReadError, TaskSpec, TaskStore, SESSION_COOKIE,
+    AgentStore, AuthStore, Clock, DatasourceStore, EmailAlertStore, HistoryStore, MailTransport,
+    OracleAccess, OracleRowSource, OutgoingMail, RunLogStore, ScheduleState, SourceColumn,
+    SourceConfig, SourceReadError, TaskSpec, TaskStore, SESSION_COOKIE,
 };
 use serde_json::Value;
 
@@ -218,6 +218,7 @@ struct Rig {
     runs: Arc<Mutex<RunState>>,
     schedule: db_qbs_source::ScheduleRegistry,
     auth: AuthStore,
+    email_alerts: EmailAlertStore,
     clock: Arc<TestClock>,
     mail_transport: Arc<FakeMailTransport>,
     /// 这台 rig 的会话票据。**每条请求默认都带着它**——`/api/*` 现在整片要求登录，
@@ -267,6 +268,7 @@ impl Rig {
             runs: Arc::new(Mutex::new(RunState::default())),
             schedule: Arc::new(Mutex::new(ScheduleState::default())),
             auth,
+            email_alerts: EmailAlertStore::open(&directory).unwrap(),
             clock,
             mail_transport: Arc::new(FakeMailTransport::default()),
             session,
@@ -297,6 +299,7 @@ impl Rig {
             runs: &self.runs,
             schedule: &self.schedule,
             auth: &self.auth,
+            email_alerts: &self.email_alerts,
             clock: self.clock.clone(),
             mail_transport: self.mail_transport.clone(),
             describe_source,
@@ -322,6 +325,7 @@ impl Rig {
             runs: Arc::new(Mutex::new(RunState::default())),
             schedule: Arc::new(Mutex::new(ScheduleState::default())),
             auth: AuthStore::open(&directory).unwrap(),
+            email_alerts: EmailAlertStore::open(&directory).unwrap(),
             clock: self.clock.clone(),
             mail_transport: self.mail_transport.clone(),
             session: self.session.clone(),
@@ -792,6 +796,20 @@ fn every_route_reaches_its_handler() {
             "/api/operator-account",
             "/api/operator-account".into(),
             r#"{"enabled":false}"#.into(),
+            200,
+        ),
+        (
+            Method::Get,
+            "/api/email-alert-settings",
+            "/api/email-alert-settings".into(),
+            String::new(),
+            200,
+        ),
+        (
+            Method::Put,
+            "/api/email-alert-settings",
+            "/api/email-alert-settings".into(),
+            email_alert_settings_json(false, "", 24),
             200,
         ),
         // 会话那三条**排在最末，而且退出排最后**：`DELETE /api/session` 会把 rig
@@ -3184,9 +3202,11 @@ fn every_route_declares_its_access() {
             "{method:?} {pattern} 应当是公开的"
         );
     }
-    let administrator: [(Method, &str); 11] = [
+    let administrator: [(Method, &str); 13] = [
         (Method::Get, "/api/operator-account"),
         (Method::Put, "/api/operator-account"),
+        (Method::Get, "/api/email-alert-settings"),
+        (Method::Put, "/api/email-alert-settings"),
         (Method::Post, "/api/agents"),
         (Method::Post, "/api/agents/{}/probe"),
         (Method::Put, "/api/agents/{}"),
@@ -3450,6 +3470,115 @@ fn operator_can_use_daily_work_routes_but_admin_routes_return_stable_403() {
             assert_ne!(response.status, 403, "{:?} {}", route.method, route.pattern);
         }
     }
+}
+
+#[test]
+fn email_alert_settings_default_to_editable_tencent_values() {
+    let rig = Rig::new();
+
+    let response = rig.get("/api/email-alert-settings");
+
+    assert_eq!(response.status, 200, "{}", response.body_text());
+    assert_eq!(
+        rig.json(&response),
+        serde_json::json!({
+            "enabled": false,
+            "provider_preset": "TENCENT_EXMAIL",
+            "smtp_host": "smtp.exmail.qq.com",
+            "smtp_port": 465,
+            "smtp_security": "IMPLICIT_TLS",
+            "smtp_username": "",
+            "has_smtp_secret": false,
+            "sender_address": "",
+            "sender_name": "",
+            "recipients": [],
+            "max_retry_hours": 24,
+            "instance_name": "db-qbs",
+            "external_base_url": null,
+        })
+    );
+}
+
+#[test]
+fn email_alert_settings_persist_encrypted_with_write_only_blank_preserve() {
+    let rig = Rig::new();
+    let saved = rig.put(
+        "/api/email-alert-settings",
+        &email_alert_settings_json(false, "SMTP-secret-marker", 12),
+    );
+    assert_eq!(saved.status, 200, "{}", saved.body_text());
+    let saved_json = rig.json(&saved);
+    assert_eq!(saved_json["provider_preset"], "GENERIC");
+    assert_eq!(saved_json["smtp_security"], "STARTTLS");
+    assert_eq!(saved_json["recipients"], serde_json::json!(["Ops@example.com", "audit@example.org"]));
+    assert_eq!(saved_json["external_base_url"], "https://qbs.example.com");
+    assert_eq!(saved_json["has_smtp_secret"], true);
+    assert!(saved_json.get("smtp_secret").is_none());
+    assert!(rig.mail_transport.0.lock().unwrap().is_empty());
+
+    let database = fs::read(rig.directory.join("db-qbs.sqlite3")).unwrap();
+    assert!(!String::from_utf8_lossy(&database).contains("SMTP-secret-marker"));
+
+    let reopened = rig.second_life();
+    let reopened_json = reopened.json(&reopened.get("/api/email-alert-settings"));
+    assert_eq!(reopened_json, saved_json);
+    let preserved = reopened.put(
+        "/api/email-alert-settings",
+        &email_alert_settings_json(true, "", 12),
+    );
+    assert_eq!(preserved.status, 200, "{}", preserved.body_text());
+    assert_eq!(reopened.json(&preserved)["has_smtp_secret"], true);
+    let delivery = reopened.email_alerts.delivery_settings().unwrap().unwrap();
+    assert_eq!(delivery.secret, "SMTP-secret-marker");
+    assert_eq!(delivery.host, "mail.example.com");
+}
+
+#[test]
+fn email_alert_settings_validate_shape_without_smtp_io() {
+    let rig = Rig::new();
+
+    for (name, body) in [
+        ("plaintext security", email_alert_settings_json(false, "secret", 24).replace("STARTTLS", "PLAINTEXT")),
+        ("invalid recipient", email_alert_settings_json(false, "secret", 24).replace("audit@example.org", "not-an-email")),
+        ("retry too long", email_alert_settings_json(false, "secret", 169)),
+        ("URL path", email_alert_settings_json(false, "secret", 24).replace("https://qbs.example.com", "https://qbs.example.com/app")),
+    ] {
+        let response = rig.put("/api/email-alert-settings", &body);
+        assert_eq!(response.status, 400, "{name}: {}", response.body_text());
+    }
+
+    let recipients: Vec<_> = (0..51).map(|index| format!("ops{index}@example.com")).collect();
+    let too_many = email_alert_settings_json(false, "secret", 24)
+        .replace(
+            r#"["Ops@example.com"," ops@example.com ","audit@example.org"]"#,
+            &serde_json::to_string(&recipients).unwrap(),
+        );
+    let response = rig.put("/api/email-alert-settings", &too_many);
+    assert_eq!(response.status, 400, "{}", response.body_text());
+
+    let incomplete = email_alert_settings_json(true, "", 24).replace("mail.example.com", "");
+    let response = rig.put("/api/email-alert-settings", &incomplete);
+    assert_eq!(response.status, 400, "{}", response.body_text());
+    assert!(rig.mail_transport.0.lock().unwrap().is_empty());
+}
+
+fn email_alert_settings_json(enabled: bool, secret: &str, retry_hours: u8) -> String {
+    serde_json::json!({
+        "enabled": enabled,
+        "provider_preset": "GENERIC",
+        "smtp_host": "mail.example.com",
+        "smtp_port": 587,
+        "smtp_security": "STARTTLS",
+        "smtp_username": "mailer",
+        "smtp_secret": secret,
+        "sender_address": "alerts@example.com",
+        "sender_name": "db-qbs alerts",
+        "recipients": ["Ops@example.com", " ops@example.com ", "audit@example.org"],
+        "max_retry_hours": retry_hours,
+        "instance_name": "production",
+        "external_base_url": "https://qbs.example.com",
+    })
+    .to_string()
 }
 
 #[test]

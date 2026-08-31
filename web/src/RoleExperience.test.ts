@@ -5,8 +5,8 @@ import { describe, expect, it } from "vitest";
 import { AgentScreen } from "./AgentScreen";
 import { navigationItemsFor } from "./App";
 import { DatasourceScreen } from "./DatasourceScreen";
-import { OperatorAccountView } from "./SystemSettingsScreen";
-import type { Agent, Datasource, OperatorAccount } from "./api";
+import { EmailAlertSettingsView, OperatorAccountView, SystemSettingsScreen } from "./SystemSettingsScreen";
+import type { Agent, Datasource, EmailAlertSettings, OperatorAccount } from "./api";
 
 const AGENT: Agent = {
   agent_id: "agent-1",
@@ -36,6 +36,26 @@ const OPERATOR: OperatorAccount = {
   enabled: true,
   has_password: true,
 };
+
+const EMAIL_SETTINGS: EmailAlertSettings = {
+  enabled: false,
+  provider_preset: "TENCENT_EXMAIL",
+  smtp_host: "smtp.exmail.qq.com",
+  smtp_port: 465,
+  smtp_security: "IMPLICIT_TLS",
+  smtp_username: "",
+  has_smtp_secret: false,
+  sender_address: "",
+  sender_name: "",
+  recipients: [],
+  max_retry_hours: 24,
+  instance_name: "db-qbs",
+  external_base_url: null,
+};
+const {
+  has_smtp_secret: _hasSmtpSecret,
+  ...EMAIL_SETTINGS_INPUT
+} = EMAIL_SETTINGS;
 
 const noChange = async () => undefined;
 
@@ -102,5 +122,28 @@ describe("role-specific rendering", () => {
     expect(fresh).toContain("设置口令");
     expect(fresh).toContain("启用账号");
     expect(fresh).toContain("先设置口令，再启用账号");
+  });
+
+  it("keeps Email Alert and Operator Account as separate System Settings views", () => {
+    const shell = renderToStaticMarkup(createElement(SystemSettingsScreen));
+    expect(shell).toContain("邮件告警");
+    expect(shell).toContain("操作员账号");
+    expect(shell).toContain("正在读取邮件告警设置");
+    expect(shell).not.toContain("正在读取操作员账号");
+
+    const email = renderToStaticMarkup(createElement(EmailAlertSettingsView, {
+      settings: EMAIL_SETTINGS,
+      draft: { ...EMAIL_SETTINGS_INPUT, smtp_secret: "" },
+      busy: false,
+      error: null,
+      saved: null,
+      onChange: () => undefined,
+      onSubmit: () => undefined,
+    }));
+    expect(email).toContain("smtp.exmail.qq.com");
+    expect(email).toContain("隐式 SSL/TLS");
+    expect(email).toContain("STARTTLS");
+    expect(email).toContain("最大重试小时数");
+    expect(email).not.toContain("测试邮件");
   });
 });

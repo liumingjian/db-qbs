@@ -540,6 +540,29 @@ export interface OperatorAccount {
   has_password: boolean;
 }
 
+export type EmailProviderPreset = "TENCENT_EXMAIL" | "GENERIC";
+export type SmtpSecurity = "IMPLICIT_TLS" | "STARTTLS";
+
+export interface EmailAlertSettings {
+  enabled: boolean;
+  provider_preset: EmailProviderPreset;
+  smtp_host: string;
+  smtp_port: number;
+  smtp_security: SmtpSecurity;
+  smtp_username: string;
+  has_smtp_secret: boolean;
+  sender_address: string;
+  sender_name: string;
+  recipients: string[];
+  max_retry_hours: number;
+  instance_name: string;
+  external_base_url: string | null;
+}
+
+export type EmailAlertSettingsInput = Omit<EmailAlertSettings, "has_smtp_secret"> & {
+  smtp_secret: string;
+};
+
 type SessionLostListener = () => void;
 
 let sessionLostListener: SessionLostListener | null = null;
@@ -631,6 +654,24 @@ export async function updateOperatorAccount(input: {
     body: JSON.stringify(input),
   });
   return readJson<OperatorAccount>(response, "更新操作员账号失败");
+}
+
+export async function fetchEmailAlertSettings(): Promise<EmailAlertSettings> {
+  const response = await fetch("/api/email-alert-settings", {
+    headers: { Accept: "application/json" },
+  });
+  return readJson<EmailAlertSettings>(response, "读取邮件告警设置失败");
+}
+
+export async function updateEmailAlertSettings(
+  input: EmailAlertSettingsInput,
+): Promise<EmailAlertSettings> {
+  const response = await fetch("/api/email-alert-settings", {
+    method: "PUT",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return readJson<EmailAlertSettings>(response, "更新邮件告警设置失败");
 }
 
 export function emptySpec(): TaskSpec {

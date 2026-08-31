@@ -440,6 +440,7 @@ pub struct Api<'a> {
     pub schedule: &'a ScheduleRegistry,
     /// 登录、会话与口令。**只护得到这个进程的 HTTP 面**——sink 那半边仍然没有鉴权。
     pub auth: &'a AuthStore,
+    pub email_alerts: &'a crate::EmailAlertStore,
     pub clock: Arc<dyn Clock>,
     pub mail_transport: Arc<dyn MailTransport>,
     pub describe_source: fn(&OracleAccess, &TaskSpec) -> Result<Vec<SourceColumn>, SourceReadError>,
@@ -636,6 +637,12 @@ pub fn routes() -> &'static [Route] {
             }),
             Route::administrator(Put, "/api/operator-account", |state, request, _id| {
                 handle_update_operator_account(request, state)
+            }),
+            Route::administrator(Get, "/api/email-alert-settings", |state, _request, _id| {
+                handle_get_email_alert_settings(state)
+            }),
+            Route::administrator(Put, "/api/email-alert-settings", |state, request, _id| {
+                handle_update_email_alert_settings(request, state)
             }),
             Route::new(Post, "/api/columns", |state, request, _id| {
                 handle_column_fetch(request, state)
@@ -988,6 +995,24 @@ fn handle_update_operator_account(request: &Request, state: &Api<'_>) -> HttpRes
     };
     match state.auth.update_operator(input.enabled, input.password.as_deref()) {
         Ok(()) => handle_get_operator_account(state),
+        Err(error) => bad_request(error),
+    }
+}
+
+fn handle_get_email_alert_settings(state: &Api<'_>) -> HttpResponse {
+    match state.email_alerts.get() {
+        Ok(settings) => json_response(200, &settings),
+        Err(error) => internal_error(error),
+    }
+}
+
+fn handle_update_email_alert_settings(request: &Request, state: &Api<'_>) -> HttpResponse {
+    let input: crate::EmailAlertSettingsInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    match state.email_alerts.update(input) {
+        Ok(settings) => json_response(200, &settings),
         Err(error) => bad_request(error),
     }
 }

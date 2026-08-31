@@ -46,6 +46,7 @@ pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
     // 会话与口令跟任务、数据源同一个库、同一份 0600。**开在监听之前**：
     // 端口一开就得有一道门，不能有一个「表还没建好、于是先放行」的窗口。
     let auth_store = AuthStore::open(&config.data_dir)?;
+    let email_alert_store = crate::EmailAlertStore::open(&config.data_dir)?;
     let runs = Arc::new(Mutex::new(RunState::default()));
     let clock = Arc::new(SystemClock);
     let mail_transport = Arc::new(UnconfiguredMailTransport);
@@ -114,6 +115,7 @@ pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
         runs: &runs,
         schedule: &schedule,
         auth: &auth_store,
+        email_alerts: &email_alert_store,
         clock: clock.clone(),
         mail_transport,
         describe_source: crate::OracleRowSource::describe,
