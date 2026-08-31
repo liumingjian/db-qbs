@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -60,18 +60,32 @@ fn agent_stub_url() -> &'static str {
                 } else {
                     "503 Service Unavailable"
                 };
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
-                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.flush();
+                respond_and_close(stream, status, &body);
             }
         });
         url
     })
     .as_str()
+}
+
+/// 回一条响应，然后**体面地**关掉这条连接。
+///
+/// 写完就 drop 会在客户端还没写完请求时发出 RST，客户端于是连状态行都读不到
+/// （macOS 上是 `Error encountered in the status line: Invalid argument (os error 22)`）——
+/// 一条与被测行为毫无关系的偶发失败。所以：写完先半关，再把对端剩下的字节读干净，
+/// 让四次挥手走完。读超时兜底，免得一条赖着不走的连接把这条单线程 accept 循环堵死。
+fn respond_and_close(mut stream: TcpStream, status: &str, body: &str) {
+    let _ = write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.flush();
+    let _ = stream.shutdown(Shutdown::Write);
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let mut drained = Vec::new();
+    let _ = stream.read_to_end(&mut drained);
 }
 
 /// `POST /v1/runs/<run_id>/abort` 里的那个 run id，不是这条路就是 `None`。
@@ -141,13 +155,7 @@ fn switchable_abort_agent(
                     r#"{"error":{"code":"BAD_REQUEST","message":"桩只认 /v1/agent/info","run_id":null,"details":{}}}"#.to_owned(),
                 )
             };
-            let _ = write!(
-                stream,
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
-                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.flush();
+            respond_and_close(stream, status, &body);
         }
     });
     (url, aborts, switch)
@@ -1282,6 +1290,9 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
             "ms": 22,
             "last_ts": "2026-08-15T10:00:05.000Z",
             "live": true,
+            // 在飞的这一行也报占用（#271）：没人按停止，所以两格都是空的。
+            "target_hold": null,
+            "target_hold_message": null,
         })
     );
     let live_list = rig.json(&rig.get(&format!("/api/runs?task_id={task_id}")));
@@ -1881,6 +1892,11 @@ while :; do sleep 0.02; done
         .as_str()
         .unwrap()
         .to_owned();
+    // 收摊前先等它报出阶段：没报阶段的 run 停不了（「尚未进入可取消阶段」），
+    // 那一句 409 与这条用例要证的事毫无关系。
+    wait_for_json(&rig, &format!("/api/runs/{again_id}"), |body| {
+        body["stage"] == "STREAMING"
+    });
     assert_eq!(
         rig.post(&format!("/api/runs/{again_id}/cancel"), "").status,
         202
@@ -2053,6 +2069,10 @@ while :; do sleep 0.02; done
         .as_str()
         .unwrap()
         .to_owned();
+    // 同上：先等它报出阶段，再收摊。
+    wait_for_json(&rig, &format!("/api/runs/{again_id}"), |body| {
+        body["stage"] == "STREAMING"
+    });
     assert_eq!(
         rig.post(&format!("/api/runs/{again_id}/cancel"), "").status,
         202
