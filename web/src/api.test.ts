@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   ApiError,
+  blockingRunsFrom,
   copyTaskCurl,
   createTask,
   deleteTask,
@@ -185,6 +186,36 @@ describe("task API", () => {
     );
 
     await expect(fetchColumns("ds-oracle", emptySpec())).rejects.toThrow("取列失败");
+  });
+
+  // 删任务撞上还没结束的运行（#270）：服务端 409 那句话要原样到界面，
+  // 点名的 run_record_id 另有一份数组，界面把它摆成列表。
+  it("surfaces the in-flight refusal when a task still has a run", async () => {
+    const body = {
+      error: {
+        message:
+          "任务还有运行没结束（record-01）；请先停止这次运行，等它收尾后再删除任务",
+        runs: ["record-01"],
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 409 })),
+    );
+
+    const failure = await deleteTask("task-01").catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).message).toBe(body.error.message);
+    expect((failure as ApiError).status).toBe(409);
+    expect(blockingRunsFrom(failure)).toEqual(["record-01"]);
+  });
+
+  it("only reads the run list out of a 409 shaped like the delete refusal", () => {
+    expect(
+      blockingRunsFrom(new ApiError("坏了", 500, { error: { message: "x", runs: ["r"] } })),
+    ).toEqual([]);
+    expect(blockingRunsFrom(new ApiError("坏了", 409, { error: { message: "x" } }))).toEqual([]);
+    expect(blockingRunsFrom(new Error("网络断了"))).toEqual([]);
   });
 
   it("projects a stored task to name plus spec without its identity", () => {

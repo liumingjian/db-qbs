@@ -905,6 +905,15 @@ export async function updateTask(taskId: string, input: TaskInput): Promise<Task
   return readJson<Task>(response, "更新任务失败");
 }
 
+/**
+ * 删任务被拒（409）时，服务端点名的那几次还没结束的运行（#270）。
+ *
+ * 与 [`referencedTasksFrom`] 同一形态：拿不到就返回空数组——报文正文里本来就带着同一句话。
+ */
+export function blockingRunsFrom(error: unknown): string[] {
+  return namesFromConflict(error, "runs");
+}
+
 export async function deleteTask(taskId: string): Promise<Task> {
   const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`, {
     method: "DELETE",

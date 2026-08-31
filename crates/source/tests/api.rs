@@ -373,6 +373,10 @@ fn every_route_reaches_its_handler() {
     let target_id = rig.create_mysql_datasource("目标库", &agent_id);
     let doomed_id = rig.create_mysql_datasource("待删数据源", &agent_id);
     let task_id = rig.create_task("搬一次", "HOLDINGS", &(source_id.clone(), target_id.clone()));
+    // 删任务那一格另开一个任务：`task_id` 下面要起一次运行、而且这条假子进程会一直睡到
+    // 这条用例跑完，删它只会被 #270 那道拒绝挡回来（409），走不到 handler 的 200 分支。
+    let doomed_task_id =
+        rig.create_task("待删任务", "HOLDINGS_DOOMED", &(source_id.clone(), target_id.clone()));
 
     let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
     assert_eq!(started.status, 202, "{}", started.body_text());
@@ -564,7 +568,7 @@ fn every_route_reaches_its_handler() {
         (
             Method::Delete,
             "/api/tasks/{}",
-            format!("/api/tasks/{task_id}"),
+            format!("/api/tasks/{doomed_task_id}"),
             String::new(),
             200,
         ),
@@ -1510,6 +1514,68 @@ fi
     });
 
     let _ = fs::remove_dir_all(directory);
+}
+
+/// 任务还有运行没结束时删任务被拒（#270）；停止之后再删同一个任务就成功。
+///
+/// 拒绝而不是「自动停止再删除」：删除不可逆，顺手终止一次可能正在写数据的运行，
+/// 风险大于便利。
+#[test]
+fn delete_task_is_refused_while_a_run_is_in_flight_and_succeeds_after_the_stop() {
+    let rig = Rig::with_child(
+        r#"trap 'exit 0' TERM
+printf '%s\n' "{\"ts\":\"2026-08-15T13:00:00.000Z\",\"level\":\"info\",\"event\":\"stage_changed\",\"run_id\":\"run-1\",\"task\":null,\"stage\":\"STREAMING\"}"
+while :; do sleep 0.02; done
+"#,
+    );
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let task_id = rig.create_task("holdings", "HOLDINGS", &(source_id, target_id));
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["stage"] == "STREAMING"
+    });
+
+    let refused = rig.delete(&format!("/api/tasks/{task_id}"));
+    assert_eq!(refused.status, 409, "{}", refused.body_text());
+    let refused_body = rig.json(&refused);
+    let message = refused_body["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("请先停止") && message.contains(&run_record_id),
+        "{message}"
+    );
+    assert_eq!(
+        refused_body["error"]["runs"],
+        serde_json::json!([run_record_id])
+    );
+    // 拒了就是一个字节都没删：任务还在，运行也还在飞。
+    assert_eq!(rig.get(&format!("/api/tasks/{task_id}")).status, 200);
+    assert_eq!(
+        rig.json(&rig.get(&format!("/api/runs/{run_record_id}")))["live"],
+        true
+    );
+
+    let canceled = rig.post(&format!("/api/runs/{run_record_id}/cancel"), "");
+    assert_eq!(canceled.status, 202, "{}", canceled.body_text());
+
+    // 「在飞」的账在监督线程里销，销账比 `live` 转 false 稍晚一点点，所以这里重试到
+    // 成功为止——判据是「停完了终究删得掉」，不是「下一个请求就删得掉」。
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let deleted = loop {
+        let response = rig.delete(&format!("/api/tasks/{task_id}"));
+        if response.status != 409 {
+            break response;
+        }
+        assert!(Instant::now() < deadline, "等停止后删除超时");
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(deleted.status, 200, "{}", deleted.body_text());
+    assert_eq!(rig.get(&format!("/api/tasks/{task_id}")).status, 404);
 }
 
 /// 一台**记账的** agent 桩：照常应答 `/v1/agent/info`，别的 503，

@@ -11,6 +11,7 @@ import { ICON } from "./components/DesignSystem";
 import type { FormEvent } from "react";
 
 import {
+  blockingRunsFrom,
   createTask,
   cancelRun,
   deleteTask,
@@ -1091,16 +1092,21 @@ function DeleteDialog({
   onDelete: () => Promise<void>;
 }) {
   const [error, setError] = useState<string | null>(null);
+  // 被拦下时服务端点名的那几次运行（#270）。红底那句话已经把该做什么说清楚了，
+  // 这份列表只是把 run_record_id 摆成可扫、可复制的形状——照删数据源那屏的样子。
+  const [blockedBy, setBlockedBy] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
   async function handleDelete() {
     setSubmitting(true);
     setError(null);
+    setBlockedBy([]);
     try {
       await onDelete();
       onClose();
     } catch (deleteError) {
       setError(messageFrom(deleteError));
+      setBlockedBy(blockingRunsFrom(deleteError));
     } finally {
       setSubmitting(false);
     }
@@ -1117,6 +1123,13 @@ function DeleteDialog({
           <div className="form-error" role="alert">
             {error}
           </div>
+        )}
+        {blockedBy.length > 0 && (
+          <ul>
+            {blockedBy.map((runRecordId) => (
+              <li key={runRecordId}>{runRecordId}</li>
+            ))}
+          </ul>
         )}
       </div>
       <footer className="modal-footer">
