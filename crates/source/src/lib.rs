@@ -16,6 +16,7 @@ mod oracle_source;
 mod protocol;
 mod run_history;
 mod run_log_store;
+mod runtime;
 mod scheduler;
 pub mod server;
 mod secret;
@@ -60,9 +61,9 @@ pub use protocol::{
     HttpSinkClient, OpenFailure, OpenedRun, SinkClient, SinkError, SinkErrorKind, SinkGateDetails,
 };
 pub use run_history::{
-    expired_history_indices, fold_history_lines, AgentEvidence, HistoryChange, HistoryStore,
-    RunEvidence, RunHistory, RunParametersEvidence, RunTrigger, SourceEvidence, TargetEvidence,
-    UnknownReason,
+    expired_history_indices, fold_history_lines, AgentEvidence, FinalizeOutcome, HistoryChange,
+    HistoryStore, RunEvidence, RunHistory, RunParametersEvidence, RunTrigger, SourceEvidence,
+    TargetEvidence, UnknownReason,
 };
 // 到点派活的那条常驻线程（#266）。行为定义在 `scheduler.rs` 模块头。
 pub use scheduler::{
@@ -73,6 +74,7 @@ pub use run_log_store::{
     truncate_business_values, RunLogLine, RunLogStore, RunLogWriter, BUSINESS_VALUE_MAX_CHARS,
     RUN_LOG_PAGE_LIMIT, RUN_LOG_RETENTION_DAYS, RUN_LOG_RETENTION_RUNS_PER_TASK,
 };
+pub use runtime::{Clock, MailTransport, OutgoingMail, SystemClock, UnconfiguredMailTransport};
 pub use sql_builder::{
     builder_column_query, builder_dblink_query, builder_table_query, validate_builder_dblink,
     BuilderColumn, BuilderTable,

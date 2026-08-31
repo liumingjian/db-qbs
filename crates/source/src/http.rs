@@ -32,7 +32,7 @@ use url::Url;
 use crate::scheduler::SCHEDULE_TIME_FORMAT;
 use crate::{
     cleared_cookie_header, embedded_web_asset, fetch_agent_info, generate_target_ddl,
-    CronSchedule, HttpSinkClient, SinkClient,
+    Clock, CronSchedule, HttpSinkClient, MailTransport, SinkClient,
     session_cookie_header, session_token_from_cookie_header, validate_builder_dblink,
     validate_source_sql, Agent, AgentEndpoint, AgentEvidence, AgentInput, AgentStore, AuthStore,
     ColumnPrecision, DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess,
@@ -440,6 +440,8 @@ pub struct Api<'a> {
     pub schedule: &'a ScheduleRegistry,
     /// 登录、会话与口令。**只护得到这个进程的 HTTP 面**——sink 那半边仍然没有鉴权。
     pub auth: &'a AuthStore,
+    pub clock: Arc<dyn Clock>,
+    pub mail_transport: Arc<dyn MailTransport>,
     pub describe_source: fn(&OracleAccess, &TaskSpec) -> Result<Vec<SourceColumn>, SourceReadError>,
 }
 
@@ -774,7 +776,7 @@ impl Api<'_> {
             .and_then(session_token_from_cookie_header);
         // 认一次就顺手把滑动窗口往前推了，所以它必须只发生一次，不能每个 handler 各来一遍。
         let session = match token {
-            Some(token) => match self.auth.authenticate(token, Utc::now()) {
+            Some(token) => match self.auth.authenticate(token, self.clock.now()) {
                 Ok(true) => Some(token),
                 Ok(false) => None,
                 Err(error) => return internal_error(error),
@@ -839,7 +841,7 @@ fn handle_session_state(request: &Request, state: &Api<'_>) -> HttpResponse {
         .header("Cookie")
         .and_then(session_token_from_cookie_header)
     {
-        Some(token) => match state.auth.authenticate(token, Utc::now()) {
+        Some(token) => match state.auth.authenticate(token, state.clock.now()) {
             Ok(live) => live,
             Err(error) => return internal_error(error),
         },
@@ -870,7 +872,7 @@ fn handle_login(request: &Request, state: &Api<'_>) -> HttpResponse {
         }
         Err(error) => return internal_error(error),
     }
-    let issued = match state.auth.issue_session(Utc::now()) {
+    let issued = match state.auth.issue_session(state.clock.now()) {
         Ok(issued) => issued,
         Err(error) => return internal_error(error),
     };
@@ -963,6 +965,7 @@ fn handle_start_run(request: &Request, state: &Api<'_>) -> HttpResponse {
         state.history,
         state.run_logs,
         state.runs,
+        Arc::clone(&state.clock),
         RunTrigger::Manual,
     ) {
         Ok(run_record_id) => json_response(202, &json!({ "run_record_id": run_record_id })),
@@ -1428,6 +1431,7 @@ pub(crate) fn dispatch_scheduled_run(state: &Api<'_>, task: &Task) -> DispatchOu
         state.history,
         state.run_logs,
         state.runs,
+        Arc::clone(&state.clock),
         RunTrigger::Scheduled,
     ) {
         Ok(run_record_id) => DispatchOutcome::Started(run_record_id),
@@ -1454,6 +1458,7 @@ fn start_run(
     history_store: &HistoryStore,
     run_log_store: &RunLogStore,
     runs: &RunRegistry,
+    clock: Arc<dyn Clock>,
     trigger: RunTrigger,
 ) -> Result<String, StartRunError> {
     let run_record_id = generate_run_record_id();
@@ -1462,7 +1467,7 @@ fn start_run(
         &run_record_id,
         &task.task_id,
         &task.spec.source_sql(),
-        Utc::now(),
+        clock.now(),
     );
     // 名字也钉在这一行上：它是展示标签，改名随时可能发生，而这条记录说的是
     // 「当时那次运行」。回头去任务表现取，改一次名就会把过去所有运行记录的名字
@@ -1504,7 +1509,7 @@ fn start_run(
     let target_table =
         TargetTable::new(&agent.agent_id, &target.database, &task.spec.target_table);
     register_active_run(runs, &run_record_id, &task.task_id, &agent.agent_id, target_table)?;
-    if let Err(error) = history_store.insert(&history, Utc::now(), config.history_retention_days) {
+    if let Err(error) = history_store.insert(&history, clock.now(), config.history_retention_days) {
         remove_active_run(runs, &run_record_id);
         return Err(StartRunError::Internal(error));
     }
@@ -1516,8 +1521,9 @@ fn start_run(
     let task_path = match materialize_task(config, task, access, target, agent, &run_record_id) {
         Ok(path) => path,
         Err(error) => {
-            history.mark_parent_failure(error.clone(), Utc::now());
-            let _ = history_store.save(&history, Utc::now(), config.history_retention_days);
+            let now = clock.now();
+            history.mark_parent_failure(error.clone(), now);
+            let _ = history_store.finalize(&history, now, config.history_retention_days);
             remove_live_history(runs, &run_record_id);
             remove_active_run(runs, &run_record_id);
             return Err(StartRunError::Internal(error));
@@ -1536,8 +1542,9 @@ fn start_run(
         Err(error) => {
             let _ = fs::remove_file(&task_path);
             let message = format!("启动 run 子进程失败：{error}");
-            history.mark_parent_failure(message.clone(), Utc::now());
-            let _ = history_store.save(&history, Utc::now(), config.history_retention_days);
+            let now = clock.now();
+            history.mark_parent_failure(message.clone(), now);
+            let _ = history_store.finalize(&history, now, config.history_retention_days);
             remove_live_history(runs, &run_record_id);
             remove_active_run(runs, &run_record_id);
             return Err(StartRunError::Internal(message));
@@ -1564,6 +1571,7 @@ fn start_run(
         history.started_at_ms(),
     );
     let retention_days = config.history_retention_days;
+    let worker_clock = Arc::clone(&clock);
     thread::spawn(move || {
         supervise_run(
             child,
@@ -1574,6 +1582,7 @@ fn start_run(
             run_log_writer,
             retention_days,
             worker_runs,
+            worker_clock,
         )
     });
     Ok(run_record_id)
@@ -1631,6 +1640,7 @@ fn supervise_run(
     mut run_log: RunLogWriter,
     retention_days: u64,
     runs: RunRegistry,
+    clock: Arc<dyn Clock>,
 ) {
     let mut terminal_observed = false;
     // 子进程自己那一刀 abort 也可能没砍下去（#271）。砍不下去时它写一行 `abort_failed`，
@@ -1668,12 +1678,17 @@ fn supervise_run(
         let is_terminal = change == HistoryChange::Terminal;
         let requires_persistence = change != HistoryChange::MemoryOnly;
         terminal_observed |= is_terminal;
-        if requires_persistence
-            && history_store
-                .save(&history, Utc::now(), retention_days)
-                .is_err()
-        {
-            continue;
+        if requires_persistence {
+            let persisted = if is_terminal {
+                history_store
+                    .finalize(&history, clock.now(), retention_days)
+                    .map(|_| ())
+            } else {
+                history_store.save(&history, clock.now(), retention_days)
+            };
+            if persisted.is_err() {
+                continue;
+            }
         }
         if is_terminal {
             remove_live_history(&runs, &run_record_id);
@@ -1691,11 +1706,11 @@ fn supervise_run(
             .unwrap_or(UnknownReason::ProcessDisappeared);
         let history = runs.lock().ok().and_then(|mut registry| {
             let history = registry.live_histories.get_mut(&run_record_id)?;
-            history.mark_unknown(reason, Utc::now());
+            history.mark_unknown(reason, clock.now());
             Some(history.clone())
         });
         if let Some(history) = history {
-            let _ = history_store.save(&history, Utc::now(), retention_days);
+            let _ = history_store.finalize(&history, clock.now(), retention_days);
         }
         // 子进程没来得及说完的那句 abort，父进程替它说（#269）。**必须在 `child.wait()`
         // 之后**：暂存表要等发起写入的那个进程死透了才动得。
@@ -1838,13 +1853,14 @@ pub fn reclaim_after_restart(
     run_logs: &RunLogStore,
     runs: &RunRegistry,
     retention_days: u64,
+    clock: &dyn Clock,
 ) -> Result<(), String> {
     // 抄在封口**之前**：封口把这几行的 `outcome` 全填上，之后就再也认不出
     // 哪几次运行可能还在目标端占着表。
     let incomplete = history_store.list_incomplete()?;
     history_store.seal_incomplete(
         UnknownReason::ProcessDisappeared,
-        Utc::now(),
+        clock.now(),
         retention_days,
     )?;
     let mut pending = Vec::new();

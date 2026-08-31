@@ -24,8 +24,9 @@ use crate::http::{
 };
 use crate::scheduler::scheduler_loop;
 use crate::{
-    fetch_agent_info, AgentStore, AuthStore, DatasourceStore, HistoryStore, RunLogStore,
-    ScheduleRegistry, ScheduleState, SourceConfig, TaskStore, UnknownReason,
+    fetch_agent_info, AgentStore, AuthStore, Clock, DatasourceStore, HistoryStore, RunLogStore,
+    ScheduleRegistry, ScheduleState, SourceConfig, SystemClock, TaskStore,
+    UnconfiguredMailTransport, UnknownReason,
 };
 
 pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
@@ -46,6 +47,8 @@ pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
     // 端口一开就得有一道门，不能有一个「表还没建好、于是先放行」的窗口。
     let auth_store = AuthStore::open(&config.data_dir)?;
     let runs = Arc::new(Mutex::new(RunState::default()));
+    let clock = Arc::new(SystemClock);
+    let mail_transport = Arc::new(UnconfiguredMailTransport);
     // 上一条命的收尾（#272）：没走完的那几行封口，它们留在目标端的目标表占用记上账、
     // 后台补发 abort。**在开门之前**做完记账那一半，那几张表因此从第一秒起就拦得住
     // 新运行——子进程随父进程一起没了，那一刀 abort 谁也没替它砍。
@@ -54,6 +57,7 @@ pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
         &run_log_store,
         &runs,
         config.history_retention_days,
+        clock.as_ref(),
     )?;
     clean_run_tasks(&config.data_dir)?;
     // 调度器的状态开在这里、由 `Api` 借着：写它的是那条调度线程，读它的是 HTTP 面
@@ -110,6 +114,8 @@ pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
         runs: &runs,
         schedule: &schedule,
         auth: &auth_store,
+        clock: clock.clone(),
+        mail_transport,
         describe_source: crate::OracleRowSource::describe,
     };
 
@@ -155,7 +161,7 @@ pub fn serve(config: SourceConfig, config_path: PathBuf) -> Result<(), String> {
     }
     history_store.seal_incomplete(
         UnknownReason::ServiceRestarted,
-        Utc::now(),
+        clock.now(),
         config.history_retention_days,
     )?;
     clean_run_tasks(&config.data_dir)?;
