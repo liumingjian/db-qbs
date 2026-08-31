@@ -429,6 +429,8 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .operator-password-form { max-width: 520px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; }
 .email-settings-form { display: flex; flex-direction: column; gap: 18px; }
 .email-enabled { width: fit-content; }
+.email-disable-warning { display: grid; gap: 8px; }
+.email-disable-warning label { display: flex; align-items: flex-start; gap: 8px; color: var(--ink); }
 .settings-fieldset { margin: 0; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius); }
 .settings-fieldset legend { padding: 0 6px; color: var(--dim); font-size: var(--size-meta); font-weight: var(--weight-em); }
 .email-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }

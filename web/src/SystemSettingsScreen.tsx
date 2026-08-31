@@ -47,6 +47,7 @@ function EmailAlertSettingsPane() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
+  const [disableConfirmed, setDisableConfirmed] = useState(false);
 
   useEffect(() => {
     void Promise.all([fetchEmailAlertSettings(), fetchEmailDeliveries()]).then(([loaded, history]) => {
@@ -59,6 +60,7 @@ function EmailAlertSettingsPane() {
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (draft === null) return;
+    if (settings?.enabled && !draft.enabled && !disableConfirmed) return;
     setBusy(true);
     setError(null);
     setSaved(null);
@@ -66,6 +68,7 @@ function EmailAlertSettingsPane() {
       const updated = await updateEmailAlertSettings(draft);
       setSettings(updated);
       setDraft(inputFrom(updated));
+      setDisableConfirmed(false);
       setSaved("邮件告警设置已保存。");
     } catch (updateError) {
       setError(messageFrom(updateError));
@@ -112,16 +115,18 @@ function EmailAlertSettingsPane() {
   if (draft === null && error === null) {
     return <div className="loading-state" aria-live="polite">正在读取邮件告警设置...</div>;
   }
-  return <EmailAlertSettingsView settings={settings} draft={draft} deliveries={deliveries} busy={busy} error={error} saved={saved} onChange={setDraft} onSubmit={(event) => void submit(event)} onTest={() => void testEmail()} onRetry={(deliveryId) => void retryDelivery(deliveryId)} />;
+  return <EmailAlertSettingsView settings={settings} draft={draft} deliveries={deliveries} busy={busy} error={error} saved={saved} disableConfirmed={disableConfirmed} onDisableConfirmationChange={setDisableConfirmed} onChange={(next) => { setDraft(next); if (next.enabled) setDisableConfirmed(false); }} onSubmit={(event) => void submit(event)} onTest={() => void testEmail()} onRetry={(deliveryId) => void retryDelivery(deliveryId)} />;
 }
 
-export function EmailAlertSettingsView({ settings, draft, deliveries = [], busy, error, saved, onChange, onSubmit, onTest, onRetry = () => undefined }: {
+export function EmailAlertSettingsView({ settings, draft, deliveries = [], busy, error, saved, disableConfirmed = false, onDisableConfirmationChange = () => undefined, onChange, onSubmit, onTest, onRetry = () => undefined }: {
   settings: EmailAlertSettings | null;
   draft: EmailAlertSettingsInput | null;
   deliveries?: EmailDeliveryHistory[];
   busy: boolean;
   error: string | null;
   saved: string | null;
+  disableConfirmed?: boolean;
+  onDisableConfirmationChange?: (confirmed: boolean) => void;
   onChange: (draft: EmailAlertSettingsInput) => void;
   onSubmit: (event: FormEvent) => void;
   onTest: () => void;
@@ -144,6 +149,15 @@ export function EmailAlertSettingsView({ settings, draft, deliveries = [], busy,
             <input type="checkbox" checked={draft.enabled} onChange={(event) => patch({ enabled: event.target.checked })} />
             <span>{draft.enabled ? "启用失败邮件告警" : "邮件告警已停用"}</span>
           </label>
+          {settings?.enabled && !draft.enabled && (
+            <div className="form-error email-disable-warning" role="alert">
+              <strong>停用会立即终止所有待发送和重试中的邮件。</strong>
+              <label>
+                <input type="checkbox" checked={disableConfirmed} onChange={(event) => onDisableConfirmationChange(event.target.checked)} />
+                我确认终止这些投递；以后重新启用也不会补发。
+              </label>
+            </div>
+          )}
           <fieldset className="settings-fieldset">
             <legend>SMTP 连接</legend>
             <div className="email-settings-grid">
@@ -194,7 +208,7 @@ export function EmailAlertSettingsView({ settings, draft, deliveries = [], busy,
             </div>
           </fieldset>
           <div className="settings-actions">
-            <button className="button is-primary" type="submit" disabled={busy}><Save size={ICON.sm} aria-hidden="true" />保存设置</button>
+            <button className="button is-primary" type="submit" disabled={busy || Boolean(settings?.enabled && !draft.enabled && !disableConfirmed)}><Save size={ICON.sm} aria-hidden="true" />保存设置</button>
             <button className="button" type="button" disabled={busy} onClick={onTest}><Send size={ICON.sm} aria-hidden="true" />发送测试邮件</button>
             <span className="card-subtitle">保存只校验配置，不会连接 SMTP 服务器。</span>
           </div>

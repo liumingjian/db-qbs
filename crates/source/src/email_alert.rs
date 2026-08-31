@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -13,6 +13,7 @@ use crate::secret::SecretBox;
 
 const DATABASE_FILE: &str = "db-qbs.sqlite3";
 const MAX_RECIPIENTS: usize = 50;
+pub const ADMIN_DISABLED_REASON: &str = "管理员已停用邮件告警";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -165,18 +166,29 @@ impl EmailAlertStore {
 
     pub fn update(&self, mut input: EmailAlertSettingsInput) -> Result<EmailAlertSettings, String> {
         normalize_and_validate(&mut input)?;
-        let existing = self.stored()?;
-        let sealed_secret = if input.smtp_secret.is_empty() {
-            existing.sealed_secret
+        let replacement_secret = if input.smtp_secret.is_empty() {
+            None
         } else {
-            self.secrets.seal(&input.smtp_secret)?
+            Some(self.secrets.seal(&input.smtp_secret)?)
         };
+        let recipients = serde_json::to_string(&input.recipients)
+            .map_err(|error| format!("序列化告警收件人失败：{error}"))?;
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("开始 SQLite 邮件告警设置事务失败：{error}"))?;
+        let (was_enabled, existing_secret): (bool, String) = transaction
+            .query_row(
+                "SELECT enabled, smtp_secret FROM email_alert_settings WHERE singleton_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| format!("读取 SQLite 邮件告警设置失败：{error}"))?;
+        let sealed_secret = replacement_secret.unwrap_or(existing_secret);
         if input.enabled {
             validate_complete(&input, !sealed_secret.is_empty())?;
         }
-        let recipients = serde_json::to_string(&input.recipients)
-            .map_err(|error| format!("序列化告警收件人失败：{error}"))?;
-        self.connection()?
+        transaction
             .execute(
                 "UPDATE email_alert_settings SET
                     enabled = ?1, provider_preset = ?2, smtp_host = ?3, smtp_port = ?4,
@@ -201,6 +213,30 @@ impl EmailAlertStore {
                 ],
             )
             .map_err(|error| format!("更新 SQLite 邮件告警设置失败：{error}"))?;
+        if was_enabled && !input.enabled {
+            let has_deliveries: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                                      WHERE type = 'table' AND name = 'email_deliveries')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| format!("检查 SQLite 告警投递表失败：{error}"))?;
+            if has_deliveries {
+                transaction
+                    .execute(
+                        "UPDATE email_deliveries
+                            SET state = 'NOT_SENT', next_attempt_at = NULL, last_error = ?1
+                          WHERE state = 'PENDING'",
+                        [ADMIN_DISABLED_REASON],
+                    )
+                    .map_err(|error| format!("终止 SQLite 待发送告警失败：{error}"))?;
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("提交 SQLite 邮件告警设置失败：{error}"))?;
+        drop(connection);
         self.get()
     }
 
