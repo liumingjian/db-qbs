@@ -53,17 +53,3 @@ pub trait MailTransport: Send + Sync {
         mail: &OutgoingMail,
     ) -> Result<(), MailTransportError>;
 }
-
-/// Runtime placeholder until email delivery is configured.
-#[derive(Debug, Default)]
-pub struct UnconfiguredMailTransport;
-
-impl MailTransport for UnconfiguredMailTransport {
-    fn send(
-        &self,
-        _settings: &EmailDeliverySettings,
-        _mail: &OutgoingMail,
-    ) -> Result<(), MailTransportError> {
-        Err(MailTransportError::Network)
-    }
-}

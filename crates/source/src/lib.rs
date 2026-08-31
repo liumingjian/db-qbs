@@ -86,9 +86,7 @@ pub use run_log_store::{
     truncate_business_values, RunLogLine, RunLogStore, RunLogWriter, BUSINESS_VALUE_MAX_CHARS,
     RUN_LOG_PAGE_LIMIT, RUN_LOG_RETENTION_DAYS, RUN_LOG_RETENTION_RUNS_PER_TASK,
 };
-pub use runtime::{
-    Clock, MailTransport, MailTransportError, OutgoingMail, SystemClock, UnconfiguredMailTransport,
-};
+pub use runtime::{Clock, MailTransport, MailTransportError, OutgoingMail, SystemClock};
 pub use sql_builder::{
     builder_column_query, builder_dblink_query, builder_table_query, validate_builder_dblink,
     BuilderColumn, BuilderTable,

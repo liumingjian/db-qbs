@@ -3975,6 +3975,78 @@ fn only_administrators_can_diagnose_and_retry_exhausted_email_deliveries() {
 
     rig.clock.set(now + chrono::Duration::hours(1));
     let retry_path = format!("/api/email-deliveries/{delivery_id}/retry");
+
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(false, "", 0),
+        )
+        .status,
+        200
+    );
+    let disabled_retry = rig.post(&retry_path, "");
+    assert_eq!(disabled_retry.status, 400);
+    assert_eq!(rig.json(&disabled_retry)["error"]["kind"], "request");
+    assert_eq!(
+        rig.json(&disabled_retry)["error"]["message"],
+        "只有已耗尽重试窗口的失败投递才能手动重试"
+    );
+    assert_eq!(
+        rig.alert_outbox
+            .run_due_attempts(
+                &rig.email_alerts,
+                rig.mail_transport.as_ref(),
+                rig.clock.as_ref(),
+            )
+            .unwrap(),
+        0,
+        "disabled delivery must not revive an exhausted delivery"
+    );
+
+    rusqlite::Connection::open(rig.directory.join("db-qbs.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE email_alert_settings SET enabled = 1, smtp_host = '' WHERE singleton_id = 1",
+            [],
+        )
+        .unwrap();
+    let incomplete_retry = rig.post(&retry_path, "");
+    assert_eq!(incomplete_retry.status, 400);
+    assert_eq!(
+        rig.json(&incomplete_retry)["error"],
+        rig.json(&disabled_retry)["error"],
+        "disabled and incomplete settings expose the same stable rejection"
+    );
+    assert_eq!(
+        rig.alert_outbox
+            .delivery_history(Some("delivery-diagnostics"))
+            .unwrap()[0]
+            .state,
+        db_qbs_source::EmailDeliveryState::Failed,
+        "incomplete settings must leave exhausted delivery final"
+    );
+
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(true, "", 0),
+        )
+        .status,
+        200
+    );
+    *rig.mail_transport.failure.lock().unwrap() = None;
+    assert_eq!(
+        rig.alert_outbox
+            .run_due_attempts(
+                &rig.email_alerts,
+                rig.mail_transport.as_ref(),
+                rig.clock.as_ref(),
+            )
+            .unwrap(),
+        0,
+        "re-enabling delivery must not backfill a rejected manual retry"
+    );
+
     let retried = rig.post(&retry_path, "");
     assert_eq!(retried.status, 200, "{}", retried.body_text());
     let retried = rig.json(&retried);
@@ -4023,7 +4095,7 @@ fn accepted_run_failure_finishes_before_the_outbox_first_attempt() {
 
     assert_eq!(
         rig.alert_outbox
-            .run_first_attempts(
+            .run_due_attempts(
                 &rig.email_alerts,
                 rig.mail_transport.as_ref(),
                 rig.clock.as_ref(),
@@ -4796,7 +4868,8 @@ fn repeated_busy_schedule_alerts_expose_fixed_window_suppression() {
             .iter()
             .map(|row| row["alert"]["delivery_state"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec!["PENDING", "SUPPRESSED", "SUPPRESSED", "PENDING"]
+        vec!["PENDING", "SUPPRESSED", "PENDING", "SUPPRESSED"],
+        "a candidate exactly one hour later is deliverable and starts a new window"
     );
     let alert_ids = skipped
         .iter()
