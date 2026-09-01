@@ -449,6 +449,7 @@ export interface RunHistory {
    * 读到 `null` 不是错误。
    */
   failure_kind: string | null;
+  scheduled_refusal_reason?: string | null;
   /**
    * 没有终态日志时，服务端替这次运行写下的「为什么说不清」（source 侧 `UnknownReason`）。
    * `STOPPED_BY_USER` 是有人按了停止运行——它和进程被 OOM 杀掉分得开，是故意的。
@@ -474,6 +475,17 @@ export interface RunHistory {
    * **纯内存的事实**，不落库：服务端重启后一律读回 `null`。
    */
   target_hold?: "RELEASING" | "HELD" | null;
+  /** Aggregate alert state only. Recipient addresses and SMTP diagnostics are administrator data. */
+  alert?: {
+    alert_id: string;
+    delivery_state:
+      | "PENDING"
+      | "SENT"
+      | "PARTIALLY_FAILED"
+      | "FAILED"
+      | "NOT_SENT"
+      | "SUPPRESSED";
+  } | null;
   /** `HELD` 时没能释放掉的原因，目标端原话。其余情况是 `null`。 */
   target_hold_message?: string | null;
 }
@@ -534,6 +546,65 @@ export class ApiError extends Error {
 export interface SessionState {
   authenticated: boolean;
   username: string | null;
+  role: Role | null;
+}
+
+export type Role = "ADMIN" | "OPERATOR";
+
+export interface OperatorAccount {
+  username: "operator";
+  role: "OPERATOR";
+  enabled: boolean;
+  has_password: boolean;
+}
+
+export type EmailProviderPreset = "TENCENT_EXMAIL" | "GENERIC";
+export type SmtpSecurity = "IMPLICIT_TLS" | "STARTTLS";
+export type EmailTestStatus = "SUCCESS" | "FAILED";
+
+export interface EmailTestResult {
+  status: EmailTestStatus;
+  tested_at: string;
+  error: string | null;
+}
+
+export interface EmailAlertSettings {
+  enabled: boolean;
+  provider_preset: EmailProviderPreset;
+  smtp_host: string;
+  smtp_port: number;
+  smtp_security: SmtpSecurity;
+  smtp_username: string;
+  has_smtp_secret: boolean;
+  sender_address: string;
+  sender_name: string;
+  recipients: string[];
+  max_retry_hours: number;
+  instance_name: string;
+  external_base_url: string | null;
+  latest_test_result: EmailTestResult | null;
+}
+
+export type EmailAlertSettingsInput = Omit<EmailAlertSettings, "has_smtp_secret" | "latest_test_result"> & {
+  smtp_secret: string;
+};
+
+export interface EmailDeliveryHistory {
+  delivery_id: string;
+  alert_id: string;
+  run_record_id: string;
+  task_id: string;
+  task_name: string;
+  failed_at: string;
+  recipient: string;
+  state: "PENDING" | "SENT" | "FAILED" | "NOT_SENT" | "SUPPRESSED";
+  attempt_count: number;
+  first_attempt_at: string | null;
+  last_attempt_at: string | null;
+  next_attempt_at: string | null;
+  retry_window_started_at: string;
+  retry_deadline_at: string;
+  last_error: string | null;
 }
 
 type SessionLostListener = () => void;
@@ -608,6 +679,73 @@ export async function changePassword(
     }),
   });
   await readJson<unknown>(response, "修改口令失败");
+}
+
+export async function fetchOperatorAccount(): Promise<OperatorAccount> {
+  const response = await fetch("/api/operator-account", {
+    headers: { Accept: "application/json" },
+  });
+  return readJson<OperatorAccount>(response, "读取操作员账号失败");
+}
+
+export async function updateOperatorAccount(input: {
+  enabled: boolean;
+  password?: string;
+}): Promise<OperatorAccount> {
+  const response = await fetch("/api/operator-account", {
+    method: "PUT",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return readJson<OperatorAccount>(response, "更新操作员账号失败");
+}
+
+export async function fetchEmailAlertSettings(): Promise<EmailAlertSettings> {
+  const response = await fetch("/api/email-alert-settings", {
+    headers: { Accept: "application/json" },
+  });
+  return readJson<EmailAlertSettings>(response, "读取邮件告警设置失败");
+}
+
+export async function updateEmailAlertSettings(
+  input: EmailAlertSettingsInput,
+): Promise<EmailAlertSettings> {
+  const response = await fetch("/api/email-alert-settings", {
+    method: "PUT",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return readJson<EmailAlertSettings>(response, "更新邮件告警设置失败");
+}
+
+export async function sendTestEmail(): Promise<EmailTestResult> {
+  const response = await fetch("/api/email-alert-settings/test", {
+    method: "POST",
+    headers: { Accept: "application/json" },
+  });
+  return readJson<EmailTestResult>(response, "发送测试邮件失败");
+}
+
+export async function fetchEmailDeliveries(
+  runRecordId?: string,
+): Promise<EmailDeliveryHistory[]> {
+  const query = runRecordId === undefined
+    ? ""
+    : `?run_record_id=${encodeURIComponent(runRecordId)}`;
+  const response = await fetch(`/api/email-deliveries${query}`, {
+    headers: { Accept: "application/json" },
+  });
+  return readJson<EmailDeliveryHistory[]>(response, "读取邮件投递历史失败");
+}
+
+export async function retryEmailDelivery(
+  deliveryId: string,
+): Promise<EmailDeliveryHistory> {
+  const response = await fetch(`/api/email-deliveries/${encodeURIComponent(deliveryId)}/retry`, {
+    method: "POST",
+    headers: { Accept: "application/json" },
+  });
+  return readJson<EmailDeliveryHistory>(response, "重新发送邮件失败");
 }
 
 export function emptySpec(): TaskSpec {
@@ -1192,6 +1330,13 @@ export function errorDetail(body: unknown): Record<string, unknown> | undefined 
   return typeof detail === "object" && detail !== null
     ? (detail as Record<string, unknown>)
     : undefined;
+}
+
+/** 只认服务端稳定的授权错误码，不靠中文消息判断权限失败。 */
+export function isForbidden(error: unknown): boolean {
+  return error instanceof ApiError &&
+    error.status === 403 &&
+    errorDetail(error.body)?.code === "FORBIDDEN";
 }
 
 function errorMessage(body: unknown): string | undefined {

@@ -32,11 +32,12 @@ use url::Url;
 use crate::scheduler::SCHEDULE_TIME_FORMAT;
 use crate::{
     cleared_cookie_header, embedded_web_asset, fetch_agent_info, generate_target_ddl,
-    CronSchedule, HttpSinkClient, SinkClient,
+    multipart_mail, Clock, CronSchedule, EmailTestResult, EmailTestStatus, HttpSinkClient,
+    MailTransport, SinkClient,
     session_cookie_header, session_token_from_cookie_header, validate_builder_dblink,
     validate_source_sql, Agent, AgentEndpoint, AgentEvidence, AgentInput, AgentStore, AuthStore,
     ColumnPrecision, DatasourceInput, DatasourceStore, HistoryChange, HistoryStore, OracleAccess,
-    OracleRowSource, RowSource, RunEvidence, RunHistory, RunLogStore, RunLogWriter,
+    OracleRowSource, Role, RowSource, RunEvidence, RunHistory, RunLogStore, RunLogWriter,
     RunParametersEvidence, RunTrigger, ScheduleRegistry,
     SourceColumn, SourceConfig, SourceEvidence, SourceReadError, TargetCheckRequest,
     TargetCheckResult, TargetConnection, TargetEvidence, Task, TaskConfig, TaskInput, TaskSpec,
@@ -293,7 +294,7 @@ enum StartRunError {
 pub(crate) enum DispatchOutcome {
     Started(String),
     Waiting(String),
-    Refused(String),
+    Refused(crate::ScheduledRefusalReason, String),
 }
 /// agent 注册表被后台探测线程与请求线程共用，所以它是 `Arc<Mutex<...>>`——
 /// 底下是一条 SQLite 连接，`rusqlite::Connection` 不是 `Sync`。
@@ -440,6 +441,10 @@ pub struct Api<'a> {
     pub schedule: &'a ScheduleRegistry,
     /// 登录、会话与口令。**只护得到这个进程的 HTTP 面**——sink 那半边仍然没有鉴权。
     pub auth: &'a AuthStore,
+    pub email_alerts: &'a crate::EmailAlertStore,
+    pub alert_outbox: &'a crate::AlertOutboxStore,
+    pub clock: Arc<dyn Clock>,
+    pub mail_transport: Arc<dyn MailTransport>,
     pub describe_source: fn(&OracleAccess, &TaskSpec) -> Result<Vec<SourceColumn>, SourceReadError>,
 }
 
@@ -550,6 +555,8 @@ pub enum Access {
     Public,
     /// 要一张活着的会话票据，没有就是 401。
     Session,
+    /// 只有管理员能进；操作员带着有效票据也只会得到稳定的 403。
+    Administrator,
 }
 
 /// 一条路由。`pattern` 里最多有一个 `{}`，代表一段资源 id。
@@ -579,6 +586,10 @@ impl Route {
             access: Access::Public,
             handler,
         }
+    }
+
+    fn administrator(method: Method, pattern: &'static str, handler: Handler) -> Self {
+        Self { method, pattern, access: Access::Administrator, handler }
     }
 
     /// 带占位的样式比字面量样式**后**匹配，见 `route_api`。
@@ -623,6 +634,29 @@ pub fn routes() -> &'static [Route] {
             Route::new(Put, "/api/password", |state, request, _id| {
                 handle_change_password(request, state)
             }),
+            Route::administrator(Get, "/api/operator-account", |state, _request, _id| {
+                handle_get_operator_account(state)
+            }),
+            Route::administrator(Put, "/api/operator-account", |state, request, _id| {
+                handle_update_operator_account(request, state)
+            }),
+            Route::administrator(Get, "/api/email-alert-settings", |state, _request, _id| {
+                handle_get_email_alert_settings(state)
+            }),
+            Route::administrator(Put, "/api/email-alert-settings", |state, request, _id| {
+                handle_update_email_alert_settings(request, state)
+            }),
+            Route::administrator(Post, "/api/email-alert-settings/test", |state, _request, _id| {
+                handle_test_email_alert_settings(state)
+            }),
+            Route::administrator(Get, "/api/email-deliveries", |state, request, _id| {
+                handle_list_email_deliveries(state, request.query())
+            }),
+            Route::administrator(
+                Post,
+                "/api/email-deliveries/{}/retry",
+                |state, _request, id| handle_retry_email_delivery(state, id),
+            ),
             Route::new(Post, "/api/columns", |state, request, _id| {
                 handle_column_fetch(request, state)
             }),
@@ -656,28 +690,28 @@ pub fn routes() -> &'static [Route] {
             Route::new(Get, "/api/agents", |state, _request, _id| {
                 handle_list_agents(state)
             }),
-            Route::new(Post, "/api/agents", |state, request, _id| {
+            Route::administrator(Post, "/api/agents", |state, request, _id| {
                 handle_register_agent(request, state)
             }),
-            Route::new(Post, "/api/agents/{}/probe", |state, _request, id| {
+            Route::administrator(Post, "/api/agents/{}/probe", |state, _request, id| {
                 handle_probe_agent(state, id)
             }),
-            Route::new(Put, "/api/agents/{}", |state, request, id| {
+            Route::administrator(Put, "/api/agents/{}", |state, request, id| {
                 handle_update_agent(request, state, id)
             }),
-            Route::new(Delete, "/api/agents/{}", |state, _request, id| {
+            Route::administrator(Delete, "/api/agents/{}", |state, _request, id| {
                 handle_delete_agent(state, id)
             }),
             Route::new(Get, "/api/datasources", |state, _request, _id| {
                 handle_list_datasources(state.datasources)
             }),
-            Route::new(Post, "/api/datasources", |state, request, _id| {
+            Route::administrator(Post, "/api/datasources", |state, request, _id| {
                 handle_create_datasource(request, state)
             }),
-            Route::new(Post, "/api/datasources/test-connection", |state, request, _id| {
+            Route::administrator(Post, "/api/datasources/test-connection", |state, request, _id| {
                 handle_test_datasource_draft(request, state)
             }),
-            Route::new(
+            Route::administrator(
                 Post,
                 "/api/datasources/{}/test-connection",
                 |state, _request, id| handle_test_datasource(state, id),
@@ -685,10 +719,10 @@ pub fn routes() -> &'static [Route] {
             Route::new(Get, "/api/datasources/{}", |state, _request, id| {
                 handle_get_datasource(state.datasources, id)
             }),
-            Route::new(Put, "/api/datasources/{}", |state, request, id| {
+            Route::administrator(Put, "/api/datasources/{}", |state, request, id| {
                 handle_update_datasource(request, state, id)
             }),
-            Route::new(Delete, "/api/datasources/{}", |state, _request, id| {
+            Route::administrator(Delete, "/api/datasources/{}", |state, _request, id| {
                 handle_delete_datasource(state, id)
             }),
             Route::new(Post, "/api/target/tables", |state, request, _id| {
@@ -712,10 +746,10 @@ pub fn routes() -> &'static [Route] {
                 handle_release_target(state, id)
             }),
             Route::new(Get, "/api/runs", |state, request, _id| {
-                handle_list_history(state.runs, state.history, request.query())
+                handle_list_history(state.runs, state.history, state.alert_outbox, request.query())
             }),
             Route::new(Get, "/api/runs/{}", |state, _request, id| {
-                handle_get_run(state.runs, state.history, id)
+                handle_get_run(state.runs, state.history, state.alert_outbox, id)
             }),
             // 原始日志行的**游标增量**取用。放在 `/api/runs/{}` 之后不承重：
             // 两条的段数不同（4 段 vs 3 段），匹配上互不干扰。
@@ -774,9 +808,9 @@ impl Api<'_> {
             .and_then(session_token_from_cookie_header);
         // 认一次就顺手把滑动窗口往前推了，所以它必须只发生一次，不能每个 handler 各来一遍。
         let session = match token {
-            Some(token) => match self.auth.authenticate(token, Utc::now()) {
-                Ok(true) => Some(token),
-                Ok(false) => None,
+            Some(token) => match self.auth.resolve_session(token, self.clock.now()) {
+                Ok(Some(identity)) => Some((token, identity)),
+                Ok(None) => None,
                 Err(error) => return internal_error(error),
             },
             None => None,
@@ -792,9 +826,17 @@ impl Api<'_> {
                 if route.access == Access::Public {
                     return (route.handler)(self, request, resource_id);
                 }
-                let Some(token) = session else {
+                let Some((token, identity)) = &session else {
                     return unauthorized();
                 };
+                if route.access == Access::Administrator && identity.role != Role::Admin {
+                    let mut response = forbidden();
+                    response.headers.push((
+                        "Set-Cookie".to_owned(),
+                        session_cookie_header(token, SESSION_IDLE_SECONDS),
+                    ));
+                    return response;
+                }
                 let mut response = (route.handler)(self, request, resource_id);
                 // 服务端那份窗口刚被推过了，cookie 也得跟着续期——否则浏览器会在
                 // **登录满 8 小时**那一刻把票据丢掉，而服务端那一份其实还活着，
@@ -832,24 +874,33 @@ struct PasswordChangeInput {
     new_password: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperatorAccountInput {
+    enabled: bool,
+    #[serde(default)]
+    password: Option<String>,
+}
+
 /// 「我登着吗」。**它是公开的**：让还没登录的人问这一句，前端才能在首屏决定
 /// 摆登录页还是摆应用，而不必先撞一个 401 再从错误里反推。
 fn handle_session_state(request: &Request, state: &Api<'_>) -> HttpResponse {
-    let authenticated = match request
+    let account = match request
         .header("Cookie")
         .and_then(session_token_from_cookie_header)
     {
-        Some(token) => match state.auth.authenticate(token, Utc::now()) {
-            Ok(live) => live,
+        Some(token) => match state.auth.resolve_session(token, state.clock.now()) {
+            Ok(account) => account,
             Err(error) => return internal_error(error),
         },
-        None => false,
+        None => None,
     };
     json_response(
         200,
         &json!({
-            "authenticated": authenticated,
-            "username": if authenticated { Some(USERNAME) } else { None },
+            "authenticated": account.is_some(),
+            "username": account.as_ref().map(|account| account.username.as_str()),
+            "role": account.as_ref().map(|account| account.role),
         }),
     )
 }
@@ -865,21 +916,33 @@ fn handle_login(request: &Request, state: &Api<'_>) -> HttpResponse {
     match state.auth.verify_password(&input.username, &input.password) {
         Ok(true) => {}
         // 账号错与口令错**回同一句话**：分开报只会告诉试口令的人账号叫什么。
-        Ok(false) => {
-            return json_response(401, &json!({ "error": { "message": "账号或口令不正确" } }))
-        }
+        Ok(false) => return login_refused(),
         Err(error) => return internal_error(error),
     }
-    let issued = match state.auth.issue_session(Utc::now()) {
+    let issued = match state
+        .auth
+        .issue_session(&input.username, state.clock.now())
+    {
         Ok(issued) => issued,
+        // 校验通过到发票之间若管理员恰好禁用了操作员，对外仍是同一种登录失败。
+        Err(error) if error == "账号未启用" => return login_refused(),
         Err(error) => return internal_error(error),
     };
-    let mut response = json_response(200, &json!({ "authenticated": true, "username": USERNAME }));
+    let role = if input.username == USERNAME { Role::Admin } else { Role::Operator };
+    let mut response = json_response(200, &json!({
+        "authenticated": true,
+        "username": input.username,
+        "role": role,
+    }));
     response.headers.push((
         "Set-Cookie".to_owned(),
         session_cookie_header(&issued.token, issued.max_age_seconds),
     ));
     response
+}
+
+fn login_refused() -> HttpResponse {
+    json_response(401, &json!({ "error": { "message": "账号或口令不正确" } }))
 }
 
 /// 退出登录。**销的只有这一张票**——别处登着的同一个账号不受影响。
@@ -914,13 +977,158 @@ fn handle_change_password(request: &Request, state: &Api<'_>) -> HttpResponse {
         .header("Cookie")
         .and_then(session_token_from_cookie_header)
         .unwrap_or_default();
-    match state
-        .auth
-        .change_password(&input.current_password, &input.new_password, keep)
+    let account = match state.auth.session_identity(keep) {
+        Ok(Some(account)) => account,
+        Ok(None) => return unauthorized(),
+        Err(error) => return internal_error(error),
+    };
+    match state.auth.change_password(
+        &account.username,
+        &input.current_password,
+        &input.new_password,
+        keep,
+    )
     {
         Ok(()) => json_response(200, &json!({ "message": "口令已修改" })),
         Err(error) => bad_request(error),
     }
+}
+
+fn handle_get_operator_account(state: &Api<'_>) -> HttpResponse {
+    match state.auth.operator_account() {
+        Ok(account) => json_response(200, &account),
+        Err(error) => internal_error(error),
+    }
+}
+
+fn handle_update_operator_account(request: &Request, state: &Api<'_>) -> HttpResponse {
+    let input: OperatorAccountInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    match state.auth.update_operator(input.enabled, input.password.as_deref()) {
+        Ok(()) => handle_get_operator_account(state),
+        Err(error) => bad_request(error),
+    }
+}
+
+fn handle_get_email_alert_settings(state: &Api<'_>) -> HttpResponse {
+    match state.email_alerts.get() {
+        Ok(settings) => json_response(200, &settings),
+        Err(error) => internal_error(error),
+    }
+}
+
+fn handle_update_email_alert_settings(request: &Request, state: &Api<'_>) -> HttpResponse {
+    let input: crate::EmailAlertSettingsInput = match read_json_body(request) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
+    };
+    match state.email_alerts.update(input) {
+        Ok(settings) => json_response(200, &settings),
+        Err(error) => bad_request(error),
+    }
+}
+
+fn handle_test_email_alert_settings(state: &Api<'_>) -> HttpResponse {
+    let settings = match state.email_alerts.get() {
+        Ok(settings) => settings,
+        Err(error) => return internal_error(error),
+    };
+    let delivery = match state.email_alerts.test_delivery_settings() {
+        Ok(delivery) => delivery,
+        Err(error) => return persist_test_result(state, EmailTestStatus::Failed, Some(error)),
+    };
+
+    let subject = format!("[db-qbs][{}][测试] 邮件配置验证", settings.instance_name);
+    let mut latest_error = None;
+    for recipient in &settings.recipients {
+        let plain = format!(
+            "db-qbs 测试邮件\n\n实例：{}\n收件人：{}\n\n收到此邮件表示已保存的 SMTP 配置可以发送邮件。",
+            settings.instance_name, recipient
+        );
+        let html = format!(
+            "<!doctype html><html><body><h1>db-qbs 测试邮件</h1><p>实例：{}</p><p>收件人：{}</p><p>收到此邮件表示已保存的 SMTP 配置可以发送邮件。</p></body></html>",
+            escape_html(&settings.instance_name),
+            escape_html(recipient),
+        );
+        let mail = match multipart_mail(
+            &delivery.sender_address,
+            &delivery.sender_name,
+            recipient,
+            &subject,
+            plain,
+            html,
+        ) {
+            Ok(mail) => mail,
+            Err(_) => {
+                latest_error = Some("生成测试邮件失败".to_owned());
+                continue;
+            }
+        };
+        if let Err(error) = state.mail_transport.send(&delivery, &mail) {
+            latest_error = Some(error.sanitized_message().to_owned());
+        }
+    }
+
+    let status = if latest_error.is_some() {
+        EmailTestStatus::Failed
+    } else {
+        EmailTestStatus::Success
+    };
+    persist_test_result(state, status, latest_error)
+}
+
+fn handle_list_email_deliveries(state: &Api<'_>, query: Option<&str>) -> HttpResponse {
+    let run_record_id = url::form_urlencoded::parse(query.unwrap_or_default().as_bytes())
+        .find(|(key, _)| key == "run_record_id")
+        .map(|(_, value)| value.into_owned());
+    match state
+        .alert_outbox
+        .delivery_history(run_record_id.as_deref())
+    {
+        Ok(deliveries) => json_response(200, &deliveries),
+        Err(error) => internal_error(error),
+    }
+}
+
+fn handle_retry_email_delivery(state: &Api<'_>, delivery_id: &str) -> HttpResponse {
+    match state
+        .alert_outbox
+        .manual_retry(delivery_id, state.clock.now(), &state.email_alerts)
+    {
+        Ok(crate::ManualRetryOutcome::Retried(delivery)) => json_response(200, &delivery),
+        Ok(crate::ManualRetryOutcome::NotFound) => not_found(),
+        Ok(crate::ManualRetryOutcome::Ineligible) => {
+            bad_request("只有已耗尽重试窗口的失败投递才能手动重试".to_owned())
+        }
+        Err(error) => internal_error(error),
+    }
+}
+
+fn persist_test_result(
+    state: &Api<'_>,
+    status: EmailTestStatus,
+    error: Option<String>,
+) -> HttpResponse {
+    let result = EmailTestResult {
+        status,
+        tested_at: state.clock.now().to_rfc3339(),
+        error,
+    };
+    match state.email_alerts.record_test_result(&result) {
+        Ok(()) => json_response(200, &result),
+        Err(error) => internal_error(error),
+    }
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 fn handle_start_run(request: &Request, state: &Api<'_>) -> HttpResponse {
@@ -963,6 +1171,7 @@ fn handle_start_run(request: &Request, state: &Api<'_>) -> HttpResponse {
         state.history,
         state.run_logs,
         state.runs,
+        Arc::clone(&state.clock),
         RunTrigger::Manual,
     ) {
         Ok(run_record_id) => json_response(202, &json!({ "run_record_id": run_record_id })),
@@ -1147,6 +1356,7 @@ fn send_sigterm(pid: u32) -> Result<(), String> {
 fn handle_get_run(
     runs: &RunRegistry,
     history_store: &HistoryStore,
+    alert_outbox: &crate::AlertOutboxStore,
     run_record_id: &str,
 ) -> HttpResponse {
     // 「在飞投影」与「占用处境」**一把锁读完**：分两次拿锁，答出来的会是两个时刻的
@@ -1204,7 +1414,11 @@ fn handle_get_run(
                 Ok(registry) => registry.target_hold(TargetTable::from_history(&history).as_ref()),
                 Err(_) => return internal_error("run 投影锁已损坏".to_owned()),
             };
-            history_response(&history, hold.as_ref())
+            let alert = match alert_outbox.summary_for_run(run_record_id) {
+                Ok(alert) => alert,
+                Err(error) => return internal_error(error),
+            };
+            history_response(&history, hold.as_ref(), alert)
         }
         Ok(None) => not_found(),
         Err(error) => internal_error(error),
@@ -1275,6 +1489,7 @@ fn handle_run_logs(state: &Api<'_>, run_record_id: &str, query: Option<&str>) ->
 fn handle_list_history(
     runs: &RunRegistry,
     history_store: &HistoryStore,
+    alert_outbox: &crate::AlertOutboxStore,
     query: Option<&str>,
 ) -> HttpResponse {
     let mut task_id = None;
@@ -1298,8 +1513,16 @@ fn handle_list_history(
                 let values = merged
                     .iter()
                     .zip(&holds)
-                    .map(|(history, hold)| history_value(history, hold.as_ref()))
-                    .collect::<Vec<_>>();
+                    .map(|(history, hold)| {
+                        alert_outbox
+                            .summary_for_run(&history.run_record_id)
+                            .map(|alert| history_value(history, hold.as_ref(), alert))
+                    })
+                    .collect::<Result<Vec<_>, _>>();
+                let values = match values {
+                    Ok(values) => values,
+                    Err(error) => return internal_error(error),
+                };
                 json_response(200, &values)
             }
             Err(error) => internal_error(error),
@@ -1339,14 +1562,22 @@ fn merge_live_history(
     Ok(history)
 }
 
-fn history_response(history: &RunHistory, hold: Option<&HoldReport>) -> HttpResponse {
-    json_response(200, &history_value(history, hold))
+fn history_response(
+    history: &RunHistory,
+    hold: Option<&HoldReport>,
+    alert: Option<crate::RunAlertSummary>,
+) -> HttpResponse {
+    json_response(200, &history_value(history, hold, alert))
 }
 
 /// 落库的那一行，加上**只有内存里才知道**的两件事：这条运行还活着没有，
 /// 以及它占的目标表还回来了没有（#271）。两者都不进 SQLite——
 /// 进程一死它们就不成立了，存下来只会在重启之后骗人。
-fn history_value(history: &RunHistory, hold: Option<&HoldReport>) -> Value {
+fn history_value(
+    history: &RunHistory,
+    hold: Option<&HoldReport>,
+    alert: Option<crate::RunAlertSummary>,
+) -> Value {
     let mut value =
         serde_json::to_value(history).expect("serializing a run history response must succeed");
     let object = value
@@ -1361,6 +1592,10 @@ fn history_value(history: &RunHistory, hold: Option<&HoldReport>) -> Value {
         "target_hold_message".to_owned(),
         hold.and_then(|report| report.message.clone())
             .map_or(Value::Null, Value::String),
+    );
+    object.insert(
+        "alert".to_owned(),
+        serde_json::to_value(alert).expect("serializing alert summary must succeed"),
     );
     value
 }
@@ -1388,18 +1623,33 @@ fn agent_endpoint(agent: &Agent) -> AgentEndpoint {
 pub(crate) fn dispatch_scheduled_run(state: &Api<'_>, task: &Task) -> DispatchOutcome {
     let access = match oracle_access(state, &task.source_datasource_id) {
         Ok(access) => access,
-        Err(error) => return DispatchOutcome::Refused(error),
+        Err(error) => {
+            return DispatchOutcome::Refused(
+                crate::ScheduledRefusalReason::SourceDatasourceUnavailable,
+                error,
+            );
+        }
     };
     let target = match state
         .datasources
         .target_connection(&task.target_datasource_id)
     {
         Ok(target) => target,
-        Err(error) => return DispatchOutcome::Refused(error),
+        Err(error) => {
+            return DispatchOutcome::Refused(
+                crate::ScheduledRefusalReason::TargetDatasourceUnavailable,
+                error,
+            );
+        }
     };
     let agent = match resolve_target_agent(state, &task.target_datasource_id) {
         Ok(agent) => agent,
-        Err(error) => return DispatchOutcome::Refused(error),
+        Err(error) => {
+            return DispatchOutcome::Refused(
+                crate::ScheduledRefusalReason::TargetAgentUnavailable,
+                error,
+            );
+        }
     };
     // 没自报额度的 agent 按**一次一个**算，而这 1 不是保守的猜测，是那台 agent 的实情：
     // #260 之前的 sink 是 `for request in server.incoming_requests()`，一个请求一个请求地
@@ -1410,7 +1660,12 @@ pub(crate) fn dispatch_scheduled_run(state: &Api<'_>, task: &Task) -> DispatchOu
     let quota = agent.max_concurrent_runs.unwrap_or(1) as usize;
     let in_flight = match state.runs.lock() {
         Ok(runs) => runs.in_flight_for_agent(&agent.agent_id),
-        Err(_) => return DispatchOutcome::Refused("run 控制锁已损坏".to_owned()),
+        Err(_) => {
+            return DispatchOutcome::Refused(
+                crate::ScheduledRefusalReason::Internal,
+                "run 控制锁已损坏".to_owned(),
+            );
+        }
     };
     if in_flight >= quota {
         return DispatchOutcome::Waiting(format!(
@@ -1428,19 +1683,25 @@ pub(crate) fn dispatch_scheduled_run(state: &Api<'_>, task: &Task) -> DispatchOu
         state.history,
         state.run_logs,
         state.runs,
+        Arc::clone(&state.clock),
         RunTrigger::Scheduled,
     ) {
         Ok(run_record_id) => DispatchOutcome::Started(run_record_id),
-        Err(StartRunError::AlreadyRunning) => {
-            DispatchOutcome::Refused("上次尚未结束，本次跳过".to_owned())
+        Err(StartRunError::AlreadyRunning) => DispatchOutcome::Refused(
+            crate::ScheduledRefusalReason::PreviousRunActive,
+            "上次尚未结束，本次跳过".to_owned(),
+        ),
+        Err(StartRunError::Stopping) => DispatchOutcome::Refused(
+            crate::ScheduledRefusalReason::PreviousRunStopping,
+            "上次正在停止，本次跳过".to_owned(),
+        ),
+        Err(StartRunError::TargetHeld) => DispatchOutcome::Refused(
+            crate::ScheduledRefusalReason::TargetHeld,
+            "目标表的占用还没释放，本次跳过".to_owned(),
+        ),
+        Err(StartRunError::Internal(error)) => {
+            DispatchOutcome::Refused(crate::ScheduledRefusalReason::Internal, error)
         }
-        Err(StartRunError::Stopping) => {
-            DispatchOutcome::Refused("上次正在停止，本次跳过".to_owned())
-        }
-        Err(StartRunError::TargetHeld) => {
-            DispatchOutcome::Refused("目标表的占用还没释放，本次跳过".to_owned())
-        }
-        Err(StartRunError::Internal(error)) => DispatchOutcome::Refused(error),
     }
 }
 
@@ -1454,6 +1715,7 @@ fn start_run(
     history_store: &HistoryStore,
     run_log_store: &RunLogStore,
     runs: &RunRegistry,
+    clock: Arc<dyn Clock>,
     trigger: RunTrigger,
 ) -> Result<String, StartRunError> {
     let run_record_id = generate_run_record_id();
@@ -1462,7 +1724,7 @@ fn start_run(
         &run_record_id,
         &task.task_id,
         &task.spec.source_sql(),
-        Utc::now(),
+        clock.now(),
     );
     // 名字也钉在这一行上：它是展示标签，改名随时可能发生，而这条记录说的是
     // 「当时那次运行」。回头去任务表现取，改一次名就会把过去所有运行记录的名字
@@ -1505,7 +1767,7 @@ fn start_run(
     let target_table =
         TargetTable::new(&agent.agent_id, &target.database, &task.spec.target_table);
     register_active_run(runs, &run_record_id, &task.task_id, &agent.agent_id, target_table)?;
-    if let Err(error) = history_store.insert(&history, Utc::now(), config.history_retention_days) {
+    if let Err(error) = history_store.insert(&history, clock.now(), config.history_retention_days) {
         remove_active_run(runs, &run_record_id);
         return Err(StartRunError::Internal(error));
     }
@@ -1517,8 +1779,9 @@ fn start_run(
     let task_path = match materialize_task(config, task, access, target, agent, &run_record_id) {
         Ok(path) => path,
         Err(error) => {
-            history.mark_parent_failure(error.clone(), Utc::now());
-            let _ = history_store.save(&history, Utc::now(), config.history_retention_days);
+            let now = clock.now();
+            history.mark_parent_failure(error.clone(), now);
+            let _ = history_store.finalize(&history, now, config.history_retention_days);
             remove_live_history(runs, &run_record_id);
             remove_active_run(runs, &run_record_id);
             return Err(StartRunError::Internal(error));
@@ -1537,8 +1800,9 @@ fn start_run(
         Err(error) => {
             let _ = fs::remove_file(&task_path);
             let message = format!("启动 run 子进程失败：{error}");
-            history.mark_parent_failure(message.clone(), Utc::now());
-            let _ = history_store.save(&history, Utc::now(), config.history_retention_days);
+            let now = clock.now();
+            history.mark_parent_failure(message.clone(), now);
+            let _ = history_store.finalize(&history, now, config.history_retention_days);
             remove_live_history(runs, &run_record_id);
             remove_active_run(runs, &run_record_id);
             return Err(StartRunError::Internal(message));
@@ -1565,6 +1829,7 @@ fn start_run(
         history.started_at_ms(),
     );
     let retention_days = config.history_retention_days;
+    let worker_clock = Arc::clone(&clock);
     thread::spawn(move || {
         supervise_run(
             child,
@@ -1575,6 +1840,7 @@ fn start_run(
             run_log_writer,
             retention_days,
             worker_runs,
+            worker_clock,
         )
     });
     Ok(run_record_id)
@@ -1632,6 +1898,7 @@ fn supervise_run(
     mut run_log: RunLogWriter,
     retention_days: u64,
     runs: RunRegistry,
+    clock: Arc<dyn Clock>,
 ) {
     let mut terminal_observed = false;
     // 子进程自己那一刀 abort 也可能没砍下去（#271）。砍不下去时它写一行 `abort_failed`，
@@ -1669,12 +1936,17 @@ fn supervise_run(
         let is_terminal = change == HistoryChange::Terminal;
         let requires_persistence = change != HistoryChange::MemoryOnly;
         terminal_observed |= is_terminal;
-        if requires_persistence
-            && history_store
-                .save(&history, Utc::now(), retention_days)
-                .is_err()
-        {
-            continue;
+        if requires_persistence {
+            let persisted = if is_terminal {
+                history_store
+                    .finalize(&history, clock.now(), retention_days)
+                    .map(|_| ())
+            } else {
+                history_store.save(&history, clock.now(), retention_days)
+            };
+            if persisted.is_err() {
+                continue;
+            }
         }
         if is_terminal {
             remove_live_history(&runs, &run_record_id);
@@ -1692,11 +1964,11 @@ fn supervise_run(
             .unwrap_or(UnknownReason::ProcessDisappeared);
         let history = runs.lock().ok().and_then(|mut registry| {
             let history = registry.live_histories.get_mut(&run_record_id)?;
-            history.mark_unknown(reason, Utc::now());
+            history.mark_unknown(reason, clock.now());
             Some(history.clone())
         });
         if let Some(history) = history {
-            let _ = history_store.save(&history, Utc::now(), retention_days);
+            let _ = history_store.finalize(&history, clock.now(), retention_days);
         }
         // 子进程没来得及说完的那句 abort，父进程替它说（#269）。**必须在 `child.wait()`
         // 之后**：暂存表要等发起写入的那个进程死透了才动得。
@@ -1839,13 +2111,14 @@ pub fn reclaim_after_restart(
     run_logs: &RunLogStore,
     runs: &RunRegistry,
     retention_days: u64,
+    clock: &dyn Clock,
 ) -> Result<(), String> {
     // 抄在封口**之前**：封口把这几行的 `outcome` 全填上，之后就再也认不出
     // 哪几次运行可能还在目标端占着表。
     let incomplete = history_store.list_incomplete()?;
     history_store.seal_incomplete(
         UnknownReason::ProcessDisappeared,
-        Utc::now(),
+        clock.now(),
         retention_days,
     )?;
     let mut pending = Vec::new();
@@ -2211,10 +2484,22 @@ fn handle_task_curl(request: &Request, state: &Api<'_>, task_id: &str) -> HttpRe
     };
     let body = serde_json::to_string(&json!({ "task_id": task_id }))
         .expect("serializing a task identity must succeed");
+    let token = request
+        .header("Cookie")
+        .and_then(session_token_from_cookie_header)
+        .unwrap_or_default();
+    let account = match state.auth.session_identity(token) {
+        Ok(Some(account)) => account,
+        Ok(None) => return unauthorized(),
+        Err(error) => return internal_error(error),
+    };
     // 手拼而不是走 `json!`：`serde_json` 的 map 是有序的**字典序**，于是
     // `password` 会排到 `username` 前面——功能上无所谓，但这段命令是给人读的。
-    // 两个值都是常量，都不含引号，没有转义面。
-    let credentials = format!(r#"{{"username":"{USERNAME}","password":"改成你的口令"}}"#);
+    // 用户名来自两个固定账号之一，不含引号，没有转义面。
+    let credentials = format!(
+        r#"{{"username":"{}","password":"改成你的口令"}}"#,
+        account.username
+    );
     // **两条命令，不是一条。** `/api/runs` 现在要一张会话票据，所以先登录换 cookie、
     // 再拿着 cookie 发起。少了前半条，这段命令会稳定地撞回 401——
     // 那不是「脚本写错了」，是这段命令自己不完整。
@@ -2947,6 +3232,13 @@ fn not_found() -> HttpResponse {
 /// ——回登录页去。
 fn unauthorized() -> HttpResponse {
     json_response(401, &json!({ "error": { "message": "请先登录" } }))
+}
+
+fn forbidden() -> HttpResponse {
+    json_response(
+        403,
+        &json!({ "error": { "code": "FORBIDDEN", "message": "需要管理员权限" } }),
+    )
 }
 
 /// **失败的正文只有一种壳**（#199）：`{"error": {"message": ...}}`，`kind` 是壳里的

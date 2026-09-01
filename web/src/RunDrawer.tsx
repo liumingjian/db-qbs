@@ -148,6 +148,11 @@ export function RunDrawer({
                 {presentation.kind === "live" && (
                   <div className="drawer-note">{presentation.conclusion}</div>
                 )}
+                {run.alert !== null && run.alert !== undefined && (
+                  <div className="drawer-note" data-testid="run-alert-state">
+                    告警邮件：{alertStateLabel(run.alert.delivery_state)}
+                  </div>
+                )}
               </div>
             )}
           </section>
@@ -293,6 +298,17 @@ export function RunDrawer({
       </aside>
     </>
   );
+}
+
+function alertStateLabel(state: NonNullable<RunHistory["alert"]>["delivery_state"]): string {
+  return {
+    PENDING: "待发送",
+    SENT: "已发送",
+    PARTIALLY_FAILED: "部分失败",
+    FAILED: "发送失败",
+    NOT_SENT: "未发送",
+    SUPPRESSED: "已抑制",
+  }[state];
 }
 
 function Value({

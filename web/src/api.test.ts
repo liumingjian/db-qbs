@@ -23,13 +23,174 @@ import {
   cancelRun,
   releaseTargetHold,
   fetchRun,
+  fetchEmailAlertSettings,
+  fetchEmailDeliveries,
+  fetchOperatorAccount,
+  fetchSession,
+  isForbidden,
   listRunHistory,
   listTasks,
   startRun,
+  sendTestEmail,
+  retryEmailDelivery,
+  onSessionLost,
   taskInputFrom,
+  updateOperatorAccount,
+  updateEmailAlertSettings,
   updateTask,
 } from "./api";
 import type { TaskInput, TaskSpec } from "./api";
+
+describe("role-aware session and account API", () => {
+  afterEach(() => {
+    onSessionLost(null);
+    vi.unstubAllGlobals();
+  });
+
+  it("decodes the authenticated username and role", async () => {
+    const session = { authenticated: true, username: "operator", role: "OPERATOR" };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(session), { status: 200 }),
+    ));
+
+    await expect(fetchSession()).resolves.toEqual(session);
+  });
+
+  it("broadcasts session invalidation on 401", async () => {
+    const lost = vi.fn();
+    onSessionLost(lost);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: { message: "请先登录" } }), { status: 401 }),
+    ));
+
+    await expect(fetchOperatorAccount()).rejects.toMatchObject({ status: 401 });
+    expect(lost).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the stable forbidden code without treating it as session loss", async () => {
+    const lost = vi.fn();
+    onSessionLost(lost);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { code: "FORBIDDEN", message: "需要管理员权限" } }),
+        { status: 403 },
+      ),
+    ));
+
+    const failure = await fetchOperatorAccount().catch((error: unknown) => error);
+    expect(isForbidden(failure)).toBe(true);
+    expect(failure).toMatchObject({ status: 403, message: "需要管理员权限" });
+    expect(lost).not.toHaveBeenCalled();
+  });
+
+  it("reads and updates the fixed Operator account without returning a password", async () => {
+    const account = {
+      username: "operator",
+      role: "OPERATOR",
+      enabled: true,
+      has_password: true,
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(account), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(account), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchOperatorAccount()).resolves.toEqual(account);
+    await expect(updateOperatorAccount({ enabled: true, password: "new-secret" })).resolves.toEqual(account);
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/operator-account", {
+      method: "PUT",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: true, password: "new-secret" }),
+    });
+    expect(JSON.stringify(account)).not.toContain("new-secret");
+  });
+
+  it("reads and updates write-only Email Alert settings", async () => {
+    const settings = {
+      enabled: false,
+      provider_preset: "TENCENT_EXMAIL" as const,
+      smtp_host: "smtp.exmail.qq.com",
+      smtp_port: 465,
+      smtp_security: "IMPLICIT_TLS" as const,
+      smtp_username: "mailer",
+      has_smtp_secret: true,
+      sender_address: "alerts@example.com",
+      sender_name: "db-qbs",
+      recipients: ["ops@example.com"],
+      max_retry_hours: 24,
+      instance_name: "db-qbs",
+      external_base_url: null,
+      latest_test_result: null,
+    };
+    const { has_smtp_secret: _hasSecret, latest_test_result: _latestTest, ...publicInput } = settings;
+    const input = { ...publicInput, smtp_secret: "" };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(settings), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(settings), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchEmailAlertSettings()).resolves.toEqual(settings);
+    await expect(updateEmailAlertSettings(input)).resolves.toEqual(settings);
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/email-alert-settings", {
+      method: "PUT",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    expect(settings).not.toHaveProperty("smtp_secret");
+  });
+
+  it("sends a test using the saved Email Alert settings", async () => {
+    const result = {
+      status: "FAILED" as const,
+      tested_at: "2026-08-31T10:00:00+00:00",
+      error: "SMTP 连接或响应超时",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(result), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(sendTestEmail()).resolves.toEqual(result);
+    expect(fetchMock).toHaveBeenCalledWith("/api/email-alert-settings/test", {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    });
+  });
+
+  it("reads Administrator delivery diagnostics and retries by stable delivery ID", async () => {
+    const delivery = {
+      delivery_id: "delivery-1",
+      alert_id: "alert-record-1",
+      run_record_id: "record-1",
+      task_id: "task-1",
+      task_name: "同步任务",
+      failed_at: "2026-08-31T10:00:00+00:00",
+      recipient: "ops@example.com",
+      state: "FAILED" as const,
+      attempt_count: 4,
+      first_attempt_at: "2026-08-31T10:00:00+00:00",
+      last_attempt_at: "2026-08-31T10:07:00+00:00",
+      next_attempt_at: null,
+      retry_window_started_at: "2026-08-31T10:00:00+00:00",
+      retry_deadline_at: "2026-08-31T10:10:00+00:00",
+      last_error: "SMTP 服务器暂时拒绝请求",
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify([delivery]), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...delivery, state: "PENDING" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchEmailDeliveries("record 1")).resolves.toEqual([delivery]);
+    await expect(retryEmailDelivery("delivery/1")).resolves.toMatchObject({ state: "PENDING" });
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/email-deliveries?run_record_id=record%201", {
+      headers: { Accept: "application/json" },
+    });
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/email-deliveries/delivery%2F1/retry", {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    });
+  });
+});
 
 /** 两个数据源 id 是绑定、不是规格（ADR-0037 §8），但它们跟 `name` 一样属于任务定义。 */
 function taskInput(overrides: Partial<TaskInput> = {}): TaskInput {

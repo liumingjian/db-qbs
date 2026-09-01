@@ -30,6 +30,7 @@ in the decision tickets. Do not write it back in here.
 │  ├─ web UI               │  ───────────────▶│  ├─ bulk write MySQL  │
 │  ├─ SQL builder          │                  │  ├─ target metadata   │
 │  ├─ agent registry       │                  │  └─ /v1/agent/info    │
+│  ├─ run-alert outbox     │                  │                       │
 │  ├─ streaming Oracle read│                  │  listen               │
 │  └─ orchestration/verify │                  └──────────┬───────────┘
 │  listen (inbound face)    │                            ▼
@@ -42,8 +43,9 @@ in the decision tickets. Do not write it back in here.
 live **Session** — see the glossary entry for what that door is and is not. It covers **one HTTP
 face out of two**: anyone who can connect to the `sink` port still holds `DELETE` on the target
 database and can truncate and rewrite any staging or target table, bypassing `source` entirely.
-The single account's password also defaults to `admin` and never expires, so on an untouched
-deployment "can reach the `source` port" and "is inside" are two keystrokes apart.
+There are exactly two shared identities: the Administrator `admin`, whose initial password is
+`admin`, and the initially disabled Operator `operator`, which has no password until an
+Administrator sets one.
 
 **Deployment premise, unchanged by the login**: both `listen` addresses bind loopback only by
 default. When several people need access, the deployer puts a reverse proxy in front and terminates
@@ -478,10 +480,58 @@ branches on the version.
    killer took must not read the same on screen.
    Its identity is the **`run_record_id`** minted when the parent accepts the submission; `run_id` is
    a **nullable field** on the row, and `null` means the submission **never reached sink** (the
-   precheck rejected it). Retention is by age, defaulting to 90 days.
+   precheck rejected it). Retention is by age, defaulting to 90 days. An associated **Alert** and
+   all of its **Email Deliveries** are deleted in the same cleanup transaction as this row; neither
+   has an independent retention setting.
    **Because it carries the `column` and `value` of failures, this SQLite file holds real business
    values sampled from the source database for 90 days. It ranks alongside the credential files and
    is held to 0600.**
+
+**Alert**
+   The durable evidence that one accepted Run reached an alertable outcome. It is keyed by the Run
+   History row, so replaying the same terminal evidence creates neither a second Alert nor duplicate
+   recipient rows. Actual execution failures, scheduled occurrences that cannot start, and Runs
+   whose outcome becomes unknown after interruption are alertable. Success and a deliberate user
+   stop are not; a standalone CLI run never has Run History and therefore never has an Alert.
+
+   Alert creation and the terminal Run History transition commit in one SQLite transaction. The
+   Alert snapshots only safe operational facts: its stable Alert ID, task and Run identifiers,
+   trigger, failure time and category, and a category-selected explanation. It does not copy source
+   SQL, credentials, sampled values, or arbitrary failure text. The Run-detail API exposes the Alert
+   ID and one aggregate delivery state: `PENDING`, `SENT`, `PARTIALLY_FAILED`, `FAILED`,
+   `SUPPRESSED`, or `NOT_SENT`.
+
+**Email Delivery**
+   One recipient's durable delivery lifecycle for an Alert. Recipient membership is snapshotted
+   when the Alert is created; each attempt reloads the current SMTP connection, authentication, and
+   sender settings. A resident outbox worker sends outside the Run-finalization path, retries each
+   recipient independently on a fixed exponential schedule, and resumes persisted work after a
+   restart. Its guarantee is **at least once**: a crash after SMTP accepts a message but before the
+   success write can produce a duplicate, so every message carries the stable Alert ID.
+
+   Delivery uses implicit TLS or required STARTTLS; plaintext SMTP does not exist. The configured
+   retry window is a whole number of hours from 0 through 168, defaults to 24, and zero permits only
+   the immediate attempt. Only a terminal `FAILED` delivery can be retried manually, and doing so
+   starts a new window while preserving its original recipient and lifetime attempt count.
+   Administrator delivery history contains recipient, attempts, timestamps, and the latest
+   sanitized error. Run details contain only the aggregate and expose none of those diagnostics.
+
+   Creating an Alert while email is disabled or incomplete records final `NOT_SENT` evidence;
+   enabling email later does not backfill it. Disabling email atomically turns pending deliveries
+   into `NOT_SENT`, and re-enabling does not revive them. Repeated `PREVIOUS_RUN_ACTIVE` schedule
+   refusals still create distinct Alerts, but after the first delivery candidate for the same task
+   and reason, candidates in the fixed one-hour window are `SUPPRESSED`.
+
+**Email Alert Settings**
+   Administrator-only system configuration stored in source-side SQLite. It holds the editable
+   Tencent Exmail preset or generic SMTP connection, sender, up to 50 deduplicated recipients, retry
+   window, instance name, and optional external origin. Saving validates shape without network IO;
+   a separate test-email action records its latest sanitized result and creates no Alert.
+
+   The SMTP secret is write-only through the API: responses expose only whether one is present, and
+   an empty value on update preserves it. It is encrypted at rest with the same local SecretBox
+   boundary as datasource passwords. Neither the secret nor raw SMTP diagnostics enter API output,
+   Alert content, generated message bodies, or source logs.
 
 **`run_record_id`**
    The identifier minted the moment the parent process accepts a submission; it is the primary key of
@@ -594,19 +644,24 @@ branches on the version.
    from the target table and generated by `sink`.
 
 **Session**
-   The ticket that lets a request through `source`'s HTTP face. There is **one account**, `admin`,
-   with **no registration and no second administrator**; its password ships as `admin` and changes
-   only when a person changes it. Failed logins are **not** rate-limited, cooled down, or locked
-   out, and the interface never says that the factory password is still in use — all three are
-   deliberate.
+   The ticket that lets a request through `source`'s HTTP face. There are exactly two fixed shared
+   accounts and no registration, account creation, role assignment, or second Administrator:
+   `admin` has role `ADMIN`, and `operator` has role `OPERATOR`. Existing Administrator credentials
+   migrate without changing their hash. Operator starts disabled without a password and becomes
+   usable only after Administrator configuration. Failed logins are **not** rate-limited, cooled
+   down, or locked out.
 
    The ticket is an opaque random token in an `HttpOnly; SameSite=Strict` cookie, stored in the
    same SQLite database as the tasks. It **survives a restart of `source`** — unlike run state,
    which lives only in process memory — so an upgrade does not sign everyone out. Expiry is
    **sliding**: a session dies after 8 idle hours, counted from its last request, not from login.
-   Every authenticated response re-issues the cookie so the browser's copy slides with it.
+   Every authenticated response re-issues the cookie so the browser's copy slides with it. Each
+   request resolves the account's current enabled state and role; disabling or resetting Operator
+   therefore invalidates all of its sessions immediately. Missing or invalid authentication is
+   `401`, while an authenticated role crossing an Administrator-only boundary is `403` with the
+   stable `FORBIDDEN` code.
 
-   **Concurrent sessions are allowed**: the same account may be logged in from several browsers,
+   **Concurrent sessions are allowed**: either account may be logged in from several browsers,
    and a new login evicts none of them. Two things do evict: signing out kills exactly the one
    ticket that asked, and **changing the password kills every session but the one that changed it**.
    The password is stored as an Argon2id hash; the session token is stored **as-is**, because read
@@ -616,17 +671,25 @@ branches on the version.
    `db-qbs-source reset-password --config <source.toml>`, which returns the password to `admin`
    and voids every session.
 
+   Both roles manage shared Task Definitions, start and control Runs, inspect Run History and logs,
+   change their own password, and read datasource and Target Agent state needed for task work. Only
+   Administrator mutates, probes, or configures datasources and Target Agents, manages Operator, and
+   reads or changes Email Alert settings and recipient-level delivery history. Operator sees no
+   System Settings destination and no infrastructure mutation controls; backend authorization is
+   the boundary. Tasks remain shared and have no owner or per-account visibility.
+
 **Source API**
    Every HTTP request `source` answers goes through one function: `Api::handle(&Request) -> Response`
    in `crates/source/src/http.rs`. It lives in the **library, not the binary** — `server_main.rs` is
-   under twenty lines and owns nothing but the process entry point. Tests therefore drive the whole
-   API in-process; none of them spawns a process or opens a socket.
+   under twenty lines and owns nothing but the process entry point. Tests drive ordinary API behavior
+   in-process through explicit seams; focused integration tests use real processes and loopback sockets
+   where restart recovery, SMTP delivery, and bounded shutdown behavior require those boundaries.
 
-   **Authentication is a column on the route table, not a line in any handler**, and it is checked
-   before dispatch. Exactly three routes are public — `GET`, `POST` and `DELETE` on `/api/session` —
-   and everything else answers `401` without a session. A request that matches no route at all also
-   answers `401` when unauthenticated rather than `404`, because the difference between the two is
-   enough to enumerate the table from outside. Static assets stay public; the login page has to load.
+   **Authentication and required role are columns on the route table, not lines in handlers**, and
+   they are checked before dispatch. Exactly three routes are public — `GET`, `POST` and `DELETE`
+   on `/api/session` — and everything else answers `401` without a session. A request that matches
+   no route at all also answers `401` when unauthenticated rather than `404`, because the difference
+   between the two is enough to enumerate the table from outside. Static assets stay public; the login page has to load.
 
    Routes are **data** (`routes()`), matched in two passes: literal patterns first, patterns carrying a
    `{}` placeholder second. **Declaration order in the table means nothing** —
@@ -709,10 +772,9 @@ branches on the version.
    (`TARGET_TABLE_BUSY`) names **which target table is held by which run**, and the comparison
    ignores letter case, because whether MySQL table names are case-sensitive depends on the host.
 
-   **Multiple users are explicitly out of scope**: there is exactly one account, tasks have no
-   owner, and there is no per-user visibility, sharing or audit trail. Everyone who logs in sees and
-   can change everything. Concurrency here is about **not making one person wait for themselves**;
-   reading it as a step toward multi-tenancy would be a mistake.
+   **Named users are explicitly out of scope**: the two identities are shared operational roles,
+   tasks have no owner, and there is no per-person visibility, sharing, role editing, or audit trail.
+   Reading the fixed role split as a step toward multi-tenancy would be a mistake.
 
 ## Standing limits
 
@@ -723,19 +785,20 @@ gets paid off and when lives in the issue tracker, not here.
    `sink` is the end that holds `DELETE` on the target database. Whoever can reach the `sink` port
    can truncate and rewrite any staging or target table without touching `source`. The mitigation
    is the **deployment shape** (loopback / reverse proxy), not the product.
-2. **The single account's password defaults to `admin` and never expires.** Nothing forces a change,
+2. **The Administrator password defaults to `admin` and never expires.** Nothing forces a change,
    nothing rate-limits a guess, and the interface never mentions it. On an untouched deployment the
-   login is two keystrokes, and behind it sit the credentials and write access of **every configured
-   datasource**: arbitrary SQL against any source database (including whatever dblink reaches) and a
-   full rewrite of any target table.
+   Administrator login is two keystrokes, and behind it sit the credentials and write access of
+   **every configured datasource**. Operator adds no second factory credential: it begins disabled
+   and passwordless.
 3. **The target password crosses the wire in cleartext** (source → sink), as do the login password
    and the session cookie on any deployment that is not behind TLS. The mitigation is a deployment
    premise; see the deployment-shape section.
-4. **Datasource passwords are encrypted at rest** (ChaCha20-Poly1305 with `data_dir/datasource.key`),
+4. **Datasource passwords and the SMTP secret are encrypted at rest** (ChaCha20-Poly1305 with
+   `data_dir/datasource.key`),
    which **only defends against a bare read of the database file once it leaves the host** (backups,
    snapshots). It does **not** defend against anyone holding read access to `data_dir` — the key sits
    in the same directory under the same 0600, and so does the session table. Accompanying negative
-   clause: **`/api/*` never returns a password, not even the ciphertext.**
+   clause: **`/api/*` never returns a password or SMTP secret, not even the ciphertext.**
 5. **Logs contain business values** — failure lines carry `column` and `value`. The mitigation is the
    host boundary and the file permissions, not the login: the logs go to stdout, which no session
    guards. The parent's stored copy of those raw lines is the one exception — it sits behind the

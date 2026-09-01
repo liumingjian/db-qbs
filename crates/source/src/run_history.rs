@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{DateTime, TimeDelta, Utc};
-use rusqlite::{named_params, params, Connection, OptionalExtension};
+use rusqlite::{named_params, params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -47,6 +47,7 @@ macro_rules! history_params {
             ":message": $history.message,
             ":unknown_reason": $history.unknown_reason,
             ":failure_kind": $history.failure_kind,
+            ":scheduled_refusal_reason": $history.scheduled_refusal_reason,
             ":seq": $history.seq,
             ":rows_pushed": $history.rows_pushed,
             ":bytes": $history.bytes,
@@ -127,6 +128,12 @@ pub enum HistoryChange {
     Terminal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalizeOutcome {
+    Finalized,
+    Replayed,
+}
+
 /// 一次运行是**谁发起的**：人按的，还是到点了调度器发的（#266）。
 ///
 /// 两者在运行历史里必须分得开：夜里两点那次是不是自动跑的、还是有人手动补的一次，
@@ -177,6 +184,33 @@ impl UnknownReason {
             Self::ProcessDisappeared => "进程消失，无终态日志",
             Self::ServiceRestarted => "服务重启，结局未知",
             Self::StoppedByUser => "已由用户停止",
+        }
+    }
+}
+
+/// Stable classification for a scheduled occurrence that could not start.
+/// Human-readable wording remains in [`RunHistory::message`] and is not used for decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduledRefusalReason {
+    PreviousRunActive,
+    PreviousRunStopping,
+    SourceDatasourceUnavailable,
+    TargetDatasourceUnavailable,
+    TargetAgentUnavailable,
+    TargetHeld,
+    Internal,
+}
+
+impl ScheduledRefusalReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PreviousRunActive => "PREVIOUS_RUN_ACTIVE",
+            Self::PreviousRunStopping => "PREVIOUS_RUN_STOPPING",
+            Self::SourceDatasourceUnavailable => "SOURCE_DATASOURCE_UNAVAILABLE",
+            Self::TargetDatasourceUnavailable => "TARGET_DATASOURCE_UNAVAILABLE",
+            Self::TargetAgentUnavailable => "TARGET_AGENT_UNAVAILABLE",
+            Self::TargetHeld => "TARGET_HELD",
+            Self::Internal => "INTERNAL",
         }
     }
 }
@@ -253,6 +287,7 @@ pub struct RunHistory {
     /// 失败分类（[`crate::FailureKind`] 的 `as_str`）。成功、进行中、以及 M2 之前落盘的
     /// 老历史行都是 `None`——消费者读到缺席不得报错（与 ADR-0017 §2 `component` 同一口径）。
     pub failure_kind: Option<String>,
+    pub scheduled_refusal_reason: Option<String>,
     pub seq: u64,
     pub rows_pushed: u64,
     pub bytes: u64,
@@ -304,6 +339,7 @@ impl RunHistory {
             message: None,
             unknown_reason: None,
             failure_kind: None,
+            scheduled_refusal_reason: None,
             seq: 0,
             rows_pushed: 0,
             bytes: 0,
@@ -440,6 +476,16 @@ impl RunHistory {
         self.failure_kind = Some(FailureKind::Skipped.as_str().to_owned());
     }
 
+    pub fn mark_scheduled_refusal(
+        &mut self,
+        reason: ScheduledRefusalReason,
+        message: String,
+        at: DateTime<Utc>,
+    ) {
+        self.mark_skipped(message, at);
+        self.scheduled_refusal_reason = Some(reason.as_str().to_owned());
+    }
+
     pub fn started_at_ms(&self) -> i64 {
         self.started_at_ms
     }
@@ -543,6 +589,7 @@ impl HistoryStore {
                     message             TEXT,
                     unknown_reason      TEXT,
                     failure_kind        TEXT,
+                    scheduled_refusal_reason TEXT,
                     seq                 INTEGER NOT NULL,
                     rows_pushed         INTEGER NOT NULL,
                     bytes               INTEGER NOT NULL,
@@ -565,8 +612,10 @@ impl HistoryStore {
         ensure_json_column(&connection, "mapping_issues", "[]")?;
         ensure_json_column(&connection, "evidence", "{}")?;
         ensure_nullable_text_column(&connection, "failure_kind")?;
+        ensure_nullable_text_column(&connection, "scheduled_refusal_reason")?;
         ensure_nullable_integer_column(&connection, "total_rows")?;
         ensure_nullable_integer_column(&connection, "precount_ms")?;
+        crate::alert_outbox::initialize_alert_tables(&connection)?;
         Ok(store)
     }
 
@@ -591,7 +640,8 @@ impl HistoryStore {
                     received_batches, total_rows, precount_ms,
                     fetch_ms, push_ms, commit_ms, count_ms, cursor_ms,
                     source_code, sink_code, [column], [value], message, unknown_reason,
-                    failure_kind, seq, rows_pushed, bytes, ms, last_ts, mapping_issues, evidence
+                    failure_kind, scheduled_refusal_reason, seq, rows_pushed, bytes, ms, last_ts,
+                    mapping_issues, evidence
                  ) VALUES (
                     :run_record_id, :run_id, :run_trigger, :task_id, :task_name, :source_sql, :staging_table,
                     :started_at, :started_at_ms, :finished_at, :outcome, :target_table_effect,
@@ -599,7 +649,8 @@ impl HistoryStore {
                     :source_batches, :received_batches, :total_rows, :precount_ms,
                     :fetch_ms, :push_ms, :commit_ms,
                     :count_ms, :cursor_ms, :source_code, :sink_code, :column, :value,
-                    :message, :unknown_reason, :failure_kind, :seq, :rows_pushed, :bytes, :ms,
+                    :message, :unknown_reason, :failure_kind, :scheduled_refusal_reason,
+                    :seq, :rows_pushed, :bytes, :ms,
                     :last_ts, :mapping_issues, :evidence
                  )",
                 history_params!(history, mapping_issues, evidence),
@@ -638,7 +689,8 @@ impl HistoryStore {
                     fetch_ms=:fetch_ms, push_ms=:push_ms, commit_ms=:commit_ms,
                     count_ms=:count_ms, cursor_ms=:cursor_ms, source_code=:source_code,
                     sink_code=:sink_code, [column]=:column, [value]=:value, message=:message,
-                    unknown_reason=:unknown_reason, failure_kind=:failure_kind, seq=:seq,
+                    unknown_reason=:unknown_reason, failure_kind=:failure_kind,
+                    scheduled_refusal_reason=:scheduled_refusal_reason, seq=:seq,
                     rows_pushed=:rows_pushed,
                     bytes=:bytes, ms=:ms, last_ts=:last_ts,
                     mapping_issues=:mapping_issues, evidence=:evidence
@@ -650,6 +702,95 @@ impl HistoryStore {
         transaction
             .commit()
             .map_err(|error| format!("提交 SQLite 运行历史事务失败：{error}"))
+    }
+
+    /// Persist one terminal transition. Alert and delivery records join this transaction.
+    pub fn finalize(
+        &self,
+        history: &RunHistory,
+        now: DateTime<Utc>,
+        retention_days: u64,
+    ) -> Result<FinalizeOutcome, String> {
+        if history.outcome.is_none() {
+            return Err("不能封口没有结局的运行历史".to_owned());
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("开启 SQLite 运行封口事务失败：{error}"))?;
+        let stored_outcome = transaction
+            .query_row(
+                "SELECT outcome FROM run_history WHERE run_record_id = ?1",
+                [&history.run_record_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(|error| format!("查询 SQLite 运行封口状态失败：{error}"))?;
+        if stored_outcome.flatten().is_some() {
+            transaction
+                .commit()
+                .map_err(|error| format!("提交 SQLite 运行封口事务失败：{error}"))?;
+            return Ok(FinalizeOutcome::Replayed);
+        }
+
+        let mapping_issues = json_array_text(&history.mapping_issues)?;
+        let evidence = json_object_text(&history.evidence)?;
+        let changed = transaction
+            .execute(
+                "UPDATE run_history SET
+                    run_id=:run_id, run_trigger=:run_trigger, task_id=:task_id, task_name=:task_name,
+                    source_sql=:source_sql, staging_table=:staging_table,
+                    started_at=:started_at, started_at_ms=:started_at_ms,
+                    finished_at=:finished_at, outcome=:outcome,
+                    target_table_effect=:target_table_effect, stage=:stage,
+                    source_rows=:source_rows, staged_rows=:staged_rows,
+                    sink_reported_rows=:sink_reported_rows, purged_rows=:purged_rows,
+                    source_batches=:source_batches, received_batches=:received_batches,
+                    total_rows=:total_rows, precount_ms=:precount_ms,
+                    fetch_ms=:fetch_ms, push_ms=:push_ms, commit_ms=:commit_ms,
+                    count_ms=:count_ms, cursor_ms=:cursor_ms, source_code=:source_code,
+                    sink_code=:sink_code, [column]=:column, [value]=:value, message=:message,
+                    unknown_reason=:unknown_reason, failure_kind=:failure_kind,
+                    scheduled_refusal_reason=:scheduled_refusal_reason, seq=:seq,
+                    rows_pushed=:rows_pushed, bytes=:bytes, ms=:ms, last_ts=:last_ts,
+                    mapping_issues=:mapping_issues, evidence=:evidence
+                  WHERE run_record_id=:run_record_id AND outcome IS NULL",
+                history_params!(history, mapping_issues, evidence),
+            )
+            .map_err(|error| format!("封口 SQLite 运行历史失败：{error}"))?;
+        if changed == 0 {
+            transaction
+                .execute(
+                    "INSERT INTO run_history (
+                        run_record_id, run_id, run_trigger, task_id, task_name, source_sql,
+                        staging_table, started_at, started_at_ms, finished_at, outcome,
+                        target_table_effect, stage, source_rows, staged_rows, sink_reported_rows,
+                        purged_rows, source_batches, received_batches, total_rows, precount_ms,
+                        fetch_ms, push_ms, commit_ms, count_ms, cursor_ms, source_code, sink_code,
+                        [column], [value], message, unknown_reason, failure_kind,
+                        scheduled_refusal_reason, seq, rows_pushed,
+                        bytes, ms, last_ts, mapping_issues, evidence
+                     ) VALUES (
+                        :run_record_id, :run_id, :run_trigger, :task_id, :task_name, :source_sql,
+                        :staging_table, :started_at, :started_at_ms, :finished_at, :outcome,
+                        :target_table_effect, :stage, :source_rows, :staged_rows,
+                        :sink_reported_rows, :purged_rows, :source_batches, :received_batches,
+                        :total_rows, :precount_ms, :fetch_ms, :push_ms, :commit_ms, :count_ms,
+                        :cursor_ms, :source_code, :sink_code, :column, :value, :message,
+                        :unknown_reason, :failure_kind, :scheduled_refusal_reason, :seq,
+                        :rows_pushed, :bytes, :ms,
+                        :last_ts, :mapping_issues, :evidence
+                     )",
+                    history_params!(history, mapping_issues, evidence),
+                )
+                .map_err(|error| format!("插入 SQLite 终态运行历史失败：{error}"))?;
+        }
+        crate::alert_outbox::insert_alert_in_transaction(&transaction, history)?;
+        cleanup_transaction(&transaction, now, retention_days)?;
+        transaction
+            .commit()
+            .map_err(|error| format!("提交 SQLite 运行封口事务失败：{error}"))?;
+        Ok(FinalizeOutcome::Finalized)
     }
 
     pub fn get(&self, run_record_id: &str) -> Result<Option<RunHistory>, String> {
@@ -711,31 +852,11 @@ impl HistoryStore {
         now: DateTime<Utc>,
         retention_days: u64,
     ) -> Result<(), String> {
-        let mut connection = self.connection()?;
-        let transaction = connection
-            .transaction()
-            .map_err(|error| format!("开启 SQLite 启动清扫事务失败：{error}"))?;
-        let finished_at = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        transaction
-            .execute(
-                "UPDATE run_history
-                    SET outcome = 'FAILED', target_table_effect = NULL, finished_at = ?1,
-                        source_code = NULL, sink_code = NULL, [column] = NULL,
-                        [value] = NULL, message = ?2, unknown_reason = ?3,
-                        failure_kind = ?4
-                  WHERE outcome IS NULL",
-                params![
-                    finished_at,
-                    reason.message(),
-                    reason.as_str(),
-                    FailureKind::Unknown.as_str()
-                ],
-            )
-            .map_err(|error| format!("封口 SQLite 非终态运行历史失败：{error}"))?;
-        cleanup_transaction(&transaction, now, retention_days)?;
-        transaction
-            .commit()
-            .map_err(|error| format!("提交 SQLite 启动清扫事务失败：{error}"))
+        for mut history in self.list_incomplete()? {
+            history.mark_unknown(reason, now);
+            self.finalize(&history, now, retention_days)?;
+        }
+        Ok(())
     }
 
     fn connection(&self) -> Result<Connection, String> {
@@ -787,6 +908,24 @@ fn cleanup_transaction(
     let Some(cutoff) = retention_cutoff(now, retention_days) else {
         return Ok(());
     };
+    transaction
+        .execute(
+            "DELETE FROM email_deliveries WHERE alert_id IN (
+                SELECT alert_id FROM alerts WHERE run_record_id IN (
+                    SELECT run_record_id FROM run_history WHERE started_at_ms < ?1
+                )
+             )",
+            [cutoff.timestamp_millis()],
+        )
+        .map_err(|error| format!("清理过期 SQLite 告警投递失败：{error}"))?;
+    transaction
+        .execute(
+            "DELETE FROM alerts WHERE run_record_id IN (
+                SELECT run_record_id FROM run_history WHERE started_at_ms < ?1
+             )",
+            [cutoff.timestamp_millis()],
+        )
+        .map_err(|error| format!("清理过期 SQLite 运行告警失败：{error}"))?;
     transaction
         .execute(
             "DELETE FROM run_history WHERE started_at_ms < ?1",
@@ -933,7 +1072,8 @@ const HISTORY_SELECT: &str = "SELECT
     sink_reported_rows, purged_rows, source_batches, received_batches, fetch_ms, push_ms,
     total_rows, precount_ms,
     commit_ms, count_ms, cursor_ms, source_code, sink_code, [column], [value],
-    message, unknown_reason, failure_kind, seq, rows_pushed, bytes, ms, last_ts,
+    message, unknown_reason, failure_kind, scheduled_refusal_reason, seq, rows_pushed, bytes, ms,
+    last_ts,
     mapping_issues, evidence
   FROM run_history";
 
@@ -973,6 +1113,7 @@ fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunHistory> {
         message: row.get("message")?,
         unknown_reason: row.get("unknown_reason")?,
         failure_kind: row.get("failure_kind")?,
+        scheduled_refusal_reason: row.get("scheduled_refusal_reason")?,
         seq: row.get("seq")?,
         rows_pushed: row.get("rows_pushed")?,
         bytes: row.get("bytes")?,

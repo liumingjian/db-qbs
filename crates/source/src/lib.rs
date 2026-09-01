@@ -7,18 +7,22 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 mod agent;
+mod alert_outbox;
 mod auth;
 mod cron;
 mod datasource;
+mod email_alert;
 mod failure_kind;
 pub mod http;
 mod oracle_source;
 mod protocol;
 mod run_history;
 mod run_log_store;
+mod runtime;
 mod scheduler;
 pub mod server;
 mod secret;
+mod smtp;
 mod sql_builder;
 mod target_ddl;
 mod task_spec;
@@ -27,11 +31,15 @@ mod transfer;
 mod web_assets;
 
 pub use agent::{fetch_agent_info, normalize_base_url, Agent, AgentInput, AgentStatus, AgentStore};
+pub use alert_outbox::{
+    spawn_outbox_worker, AlertDeliveryState, AlertOutboxStore, EmailDeliveryHistory,
+    EmailDeliveryState, ManualRetryOutcome, RunAlertSummary, RETRY_BASE_SECONDS, RETRY_CAP_SECONDS,
+};
 // 登录、会话与口令（source 的 HTTP 面）。**它护不到 sink**——那半边仍然没有鉴权。
 pub use auth::{
     cleared_cookie_header, session_cookie_header, session_token_from_cookie_header,
-    validate_new_password, AuthStore, IssuedSession, DEFAULT_PASSWORD, SESSION_COOKIE,
-    SESSION_IDLE_SECONDS, USERNAME,
+    validate_new_password, AccountIdentity, AuthStore, IssuedSession, OperatorAccount, Role,
+    DEFAULT_PASSWORD, OPERATOR_USERNAME, SESSION_COOKIE, SESSION_IDLE_SECONDS, USERNAME,
 };
 // 五字段 cron 的解析与推算（#265）。手写、无依赖，见 `cron.rs` 模块头。
 pub use cron::CronSchedule;
@@ -48,6 +56,11 @@ pub use datasource::{
     Datasource, DatasourceInput, DatasourceSettings, DatasourceSettingsView, DatasourceStore,
     DatasourceView,
 };
+pub use email_alert::{
+    EmailAlertSettings, EmailAlertSettingsInput, EmailAlertStore, EmailDeliverySettings,
+    EmailProviderPreset, EmailTestResult, EmailTestStatus, SmtpSecurity,
+};
+pub use smtp::{multipart_mail, SmtpMailTransport};
 pub use db_qbs_shared::{
     classify_column, column_support, derive_number_shape, is_business_date_column,
     is_supported_decimal_shape, ColumnShape, ShapeRejection, TargetShape,
@@ -60,9 +73,9 @@ pub use protocol::{
     HttpSinkClient, OpenFailure, OpenedRun, SinkClient, SinkError, SinkErrorKind, SinkGateDetails,
 };
 pub use run_history::{
-    expired_history_indices, fold_history_lines, AgentEvidence, HistoryChange, HistoryStore,
-    RunEvidence, RunHistory, RunParametersEvidence, RunTrigger, SourceEvidence, TargetEvidence,
-    UnknownReason,
+    expired_history_indices, fold_history_lines, AgentEvidence, FinalizeOutcome, HistoryChange,
+    HistoryStore, RunEvidence, RunHistory, RunParametersEvidence, RunTrigger, SourceEvidence,
+    ScheduledRefusalReason, TargetEvidence, UnknownReason,
 };
 // 到点派活的那条常驻线程（#266）。行为定义在 `scheduler.rs` 模块头。
 pub use scheduler::{
@@ -73,6 +86,7 @@ pub use run_log_store::{
     truncate_business_values, RunLogLine, RunLogStore, RunLogWriter, BUSINESS_VALUE_MAX_CHARS,
     RUN_LOG_PAGE_LIMIT, RUN_LOG_RETENTION_DAYS, RUN_LOG_RETENTION_RUNS_PER_TASK,
 };
+pub use runtime::{Clock, MailTransport, MailTransportError, OutgoingMail, SystemClock};
 pub use sql_builder::{
     builder_column_query, builder_dblink_query, builder_table_query, validate_builder_dblink,
     BuilderColumn, BuilderTable,

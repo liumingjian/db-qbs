@@ -19,13 +19,71 @@ use db_qbs_source::http::{
     RunState,
 };
 use db_qbs_source::{
-    load_task_config, AgentStore, AuthStore, DatasourceStore, HistoryStore, OracleAccess,
-    OracleRowSource, RunLogStore, ScheduleState, SourceColumn, SourceConfig, SourceReadError,
-    TaskSpec, TaskStore, SESSION_COOKIE,
+    load_task_config, AgentStore, AlertOutboxStore, AuthStore, Clock, DatasourceStore,
+    EmailAlertStore, HistoryStore, MailTransport, MailTransportError, OracleAccess,
+    OracleRowSource, OutgoingMail, RunHistory, RunLogStore, ScheduleState, SourceColumn,
+    SourceConfig, SourceReadError, TaskInput, TaskSpec, TaskStore, SESSION_COOKIE,
 };
 use serde_json::Value;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+struct TestClock(Mutex<chrono::DateTime<chrono::Utc>>);
+
+impl TestClock {
+    fn new(now: chrono::DateTime<chrono::Utc>) -> Self {
+        Self(Mutex::new(now))
+    }
+
+    fn set(&self, now: chrono::DateTime<chrono::Utc>) {
+        *self.0.lock().unwrap() = now;
+    }
+}
+
+impl Clock for TestClock {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        *self.0.lock().unwrap()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RecordedMail {
+    host: String,
+    port: u16,
+    security: db_qbs_source::SmtpSecurity,
+    username: String,
+    secret: String,
+    sender_name: String,
+    mail: OutgoingMail,
+}
+
+#[derive(Default)]
+struct FakeMailTransport {
+    sent: Mutex<Vec<RecordedMail>>,
+    failure: Mutex<Option<MailTransportError>>,
+}
+
+impl MailTransport for FakeMailTransport {
+    fn send(
+        &self,
+        settings: &db_qbs_source::EmailDeliverySettings,
+        mail: &OutgoingMail,
+    ) -> Result<(), MailTransportError> {
+        self.sent.lock().unwrap().push(RecordedMail {
+            host: settings.host.clone(),
+            port: settings.port,
+            security: settings.security,
+            username: settings.username.clone(),
+            secret: settings.secret.clone(),
+            sender_name: settings.sender_name.clone(),
+            mail: mail.clone(),
+        });
+        match *self.failure.lock().unwrap() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
 
 /// 一台**在应答**的目标端 agent 桩：认 `/v1/agent/info` 与 `/v1/runs/{id}/abort`，别的一律 503。
 ///
@@ -190,6 +248,10 @@ struct Rig {
     runs: Arc<Mutex<RunState>>,
     schedule: db_qbs_source::ScheduleRegistry,
     auth: AuthStore,
+    email_alerts: EmailAlertStore,
+    alert_outbox: AlertOutboxStore,
+    clock: Arc<TestClock>,
+    mail_transport: Arc<FakeMailTransport>,
     /// 这台 rig 的会话票据。**每条请求默认都带着它**——`/api/*` 现在整片要求登录，
     /// 不带就是 401，而这个文件里的用例问的几乎都不是「没登录会怎样」。
     /// 真要问那一句的用例走 [`Rig::send_anonymous`]。
@@ -220,8 +282,13 @@ impl Rig {
             history_retention_days: 90,
             run_executable,
         };
+        let clock = Arc::new(TestClock::new(
+            chrono::DateTime::parse_from_rfc3339("2026-08-31T10:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        ));
         let auth = AuthStore::open(&directory).unwrap();
-        let session = auth.issue_session(chrono::Utc::now()).unwrap().token;
+        let session = auth.issue_session("admin", clock.now()).unwrap().token;
         Self {
             config_path: directory.join("source.toml"),
             tasks: TaskStore::open(&directory).unwrap(),
@@ -232,6 +299,10 @@ impl Rig {
             runs: Arc::new(Mutex::new(RunState::default())),
             schedule: Arc::new(Mutex::new(ScheduleState::default())),
             auth,
+            email_alerts: EmailAlertStore::open(&directory).unwrap(),
+            alert_outbox: AlertOutboxStore::open(&directory).unwrap(),
+            clock,
+            mail_transport: Arc::new(FakeMailTransport::default()),
             session,
             config,
             directory,
@@ -260,6 +331,10 @@ impl Rig {
             runs: &self.runs,
             schedule: &self.schedule,
             auth: &self.auth,
+            email_alerts: &self.email_alerts,
+            alert_outbox: &self.alert_outbox,
+            clock: self.clock.clone(),
+            mail_transport: self.mail_transport.clone(),
             describe_source,
         }
     }
@@ -283,6 +358,10 @@ impl Rig {
             runs: Arc::new(Mutex::new(RunState::default())),
             schedule: Arc::new(Mutex::new(ScheduleState::default())),
             auth: AuthStore::open(&directory).unwrap(),
+            email_alerts: EmailAlertStore::open(&directory).unwrap(),
+            alert_outbox: AlertOutboxStore::open(&directory).unwrap(),
+            clock: self.clock.clone(),
+            mail_transport: self.mail_transport.clone(),
             session: self.session.clone(),
             directory,
         }
@@ -302,6 +381,13 @@ impl Rig {
     fn send_anonymous(&self, method: Method, url: &str, body: &str) -> Response {
         self.api()
             .handle(&Request::new(method, url, body.as_bytes().to_vec()))
+    }
+
+    fn send_with_session(&self, session: &str, method: Method, url: &str, body: &str) -> Response {
+        self.api().handle(
+            &Request::new(method, url, body.as_bytes().to_vec())
+                .with_header("Cookie", format!("{SESSION_COOKIE}={session}")),
+        )
     }
 
     fn get(&self, url: &str) -> Response {
@@ -557,6 +643,26 @@ fn every_route_reaches_its_handler() {
         .as_str()
         .unwrap()
         .to_owned();
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(true, "route-test-secret", 0),
+        )
+        .status,
+        200
+    );
+    let now = rig.clock.now();
+    let mut failed = RunHistory::accepted("route-alert", "route-task", "SELECT 1", now);
+    failed.outcome = Some("FAILED".to_owned());
+    failed.finished_at = Some(now.to_rfc3339());
+    failed.failure_kind = Some("NETWORK".to_owned());
+    rig.history.finalize(&failed, now, 90).unwrap();
+    let pending_delivery_id = rig
+        .alert_outbox
+        .delivery_history(Some("route-alert"))
+        .unwrap()[0]
+        .delivery_id
+        .clone();
 
     // (方法, 路由样式, 实打实的 URL, 请求体, 期望状态码)
     let checks: Vec<(Method, &str, String, String, u16)> = vec![
@@ -760,6 +866,55 @@ fn every_route_reaches_its_handler() {
             r#"{"current_password":"admin","new_password":"admin"}"#.into(),
             200,
         ),
+        (
+            Method::Get,
+            "/api/operator-account",
+            "/api/operator-account".into(),
+            String::new(),
+            200,
+        ),
+        (
+            Method::Put,
+            "/api/operator-account",
+            "/api/operator-account".into(),
+            r#"{"enabled":false}"#.into(),
+            200,
+        ),
+        (
+            Method::Get,
+            "/api/email-alert-settings",
+            "/api/email-alert-settings".into(),
+            String::new(),
+            200,
+        ),
+        (
+            Method::Put,
+            "/api/email-alert-settings",
+            "/api/email-alert-settings".into(),
+            email_alert_settings_json(false, "", 24),
+            200,
+        ),
+        (
+            Method::Post,
+            "/api/email-alert-settings/test",
+            "/api/email-alert-settings/test".into(),
+            String::new(),
+            200,
+        ),
+        (
+            Method::Get,
+            "/api/email-deliveries",
+            "/api/email-deliveries".into(),
+            String::new(),
+            200,
+        ),
+        (
+            Method::Post,
+            "/api/email-deliveries/{}/retry",
+            format!("/api/email-deliveries/{pending_delivery_id}/retry"),
+            String::new(),
+            400,
+        ),
         // 会话那三条**排在最末，而且退出排最后**：`DELETE /api/session` 会把 rig
         // 自己那张票销掉，排在中间会让它后面每一行都变成 401。
         (Method::Get, "/api/session", "/api/session".into(), String::new(), 200),
@@ -830,6 +985,28 @@ fn task_curl_is_complete_server_assembled_and_uses_the_public_request_origin() {
         format!(
             "curl --silent --show-error --cookie-jar '/tmp/db-qbs-session-{task_id}.cookie' --request POST 'https://qbs.example.test:8443/api/session' --header 'Content-Type: application/json' --data '{{\"username\":\"admin\",\"password\":\"改成你的口令\"}}' > /dev/null && curl --cookie '/tmp/db-qbs-session-{task_id}.cookie' --request POST 'https://qbs.example.test:8443/api/runs' --header 'Content-Type: application/json' --data '{{\"task_id\":\"{task_id}\"}}'; rm -f '/tmp/db-qbs-session-{task_id}.cookie'"
         )
+    );
+
+    rig.auth.update_operator(true, Some("operator-secret")).unwrap();
+    let operator = rig
+        .auth
+        .issue_session("operator", chrono::Utc::now())
+        .unwrap()
+        .token;
+    let operator_response = rig.api().handle(
+        &Request::new(
+            Method::Get,
+            &format!("/api/tasks/{task_id}/curl"),
+            Vec::new(),
+        )
+        .with_header("Cookie", format!("{SESSION_COOKIE}={operator}")),
+    );
+    assert_eq!(operator_response.status, 200);
+    assert!(
+        rig.json(&operator_response)["command"]
+            .as_str()
+            .unwrap()
+            .contains(r#""username":"operator""#)
     );
 }
 
@@ -1125,6 +1302,26 @@ fn renaming_a_task_leaves_earlier_runs_carrying_the_old_name() {
     assert_eq!(listed[0]["task_name"], "持仓明细");
     let detail = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
     assert_eq!(detail["task_name"], "持仓明细");
+}
+
+#[test]
+fn the_in_process_api_uses_the_rig_clock_when_accepting_a_run() {
+    let rig = Rig::new();
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let task_id = rig.create_task("clocked", "CLOCKED", &(source_id, target_id));
+    let now = chrono::DateTime::parse_from_rfc3339("2026-08-31T10:05:06.789Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    rig.clock.set(now);
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let detail = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(detail["started_at"], "2026-08-31T10:05:06.789Z");
 }
 
 #[test]
@@ -2307,7 +2504,14 @@ while :; do sleep 0.02; done
 
     // 进程在这一刻被 `kill -9`：没有收尾、没有 abort，磁盘上留下一行没走完的历史。
     let restarted = rig.second_life();
-    reclaim_after_restart(&restarted.history, &restarted.run_logs, &restarted.runs, 90).unwrap();
+    reclaim_after_restart(
+        &restarted.history,
+        &restarted.run_logs,
+        &restarted.runs,
+        90,
+        restarted.clock.as_ref(),
+    )
+    .unwrap();
 
     // 补发那一趟没成（目标端 drop 不掉暂存表），于是占用如实挂着，原话照抄。
     let held = wait_for_json(&restarted, &format!("/api/runs/{run_record_id}"), |body| {
@@ -2358,7 +2562,14 @@ while :; do sleep 0.02; done
     });
 
     let restarted = rig.second_life();
-    reclaim_after_restart(&restarted.history, &restarted.run_logs, &restarted.runs, 90).unwrap();
+    reclaim_after_restart(
+        &restarted.history,
+        &restarted.run_logs,
+        &restarted.runs,
+        90,
+        restarted.clock.as_ref(),
+    )
+    .unwrap();
 
     let released = wait_for_json(&restarted, &format!("/api/runs/{run_record_id}"), |body| {
         body["target_hold"] == Value::Null
@@ -3194,17 +3405,34 @@ fn every_route_declares_its_access() {
             "{method:?} {pattern} 应当是公开的"
         );
     }
+    let administrator: [(Method, &str); 16] = [
+        (Method::Get, "/api/operator-account"),
+        (Method::Put, "/api/operator-account"),
+        (Method::Get, "/api/email-alert-settings"),
+        (Method::Put, "/api/email-alert-settings"),
+        (Method::Post, "/api/email-alert-settings/test"),
+        (Method::Get, "/api/email-deliveries"),
+        (Method::Post, "/api/email-deliveries/{}/retry"),
+        (Method::Post, "/api/agents"),
+        (Method::Post, "/api/agents/{}/probe"),
+        (Method::Put, "/api/agents/{}"),
+        (Method::Delete, "/api/agents/{}"),
+        (Method::Post, "/api/datasources"),
+        (Method::Post, "/api/datasources/test-connection"),
+        (Method::Post, "/api/datasources/{}/test-connection"),
+        (Method::Put, "/api/datasources/{}"),
+        (Method::Delete, "/api/datasources/{}"),
+    ];
     for route in routes() {
         if public.contains(&(route.method, route.pattern)) {
             continue;
         }
-        assert_eq!(
-            route.access,
-            Access::Session,
-            "{:?} {} 不在公开清单里，就必须要求登录——新加路由请先想清楚它归哪一档",
-            route.method,
-            route.pattern
-        );
+        let expected = if administrator.contains(&(route.method, route.pattern)) {
+            Access::Administrator
+        } else {
+            Access::Session
+        };
+        assert_eq!(route.access, expected, "{:?} {} 权限档位不对", route.method, route.pattern);
     }
 }
 
@@ -3270,6 +3498,16 @@ fn the_default_credentials_open_the_door_and_a_wrong_one_does_not() {
         rig.json(&unknown_account)["error"]["message"],
         rig.json(&refused)["error"]["message"]
     );
+    let disabled_operator = rig.send_anonymous(
+        Method::Post,
+        "/api/session",
+        r#"{"username":"operator","password":"admin"}"#,
+    );
+    assert_eq!(disabled_operator.status, 401);
+    assert_eq!(
+        rig.json(&disabled_operator)["error"]["message"],
+        rig.json(&refused)["error"]["message"]
+    );
 
     let accepted = rig.send_anonymous(
         Method::Post,
@@ -3302,13 +3540,759 @@ fn the_session_probe_answers_from_outside_the_door() {
     assert_eq!(inside.status, 200);
     assert_eq!(rig.json(&inside)["authenticated"], true);
     assert_eq!(rig.json(&inside)["username"], "admin");
+    assert_eq!(rig.json(&inside)["role"], "ADMIN");
+}
+
+#[test]
+fn existing_admin_hash_migrates_unchanged_and_operator_starts_disabled() {
+    let bootstrap = temp_directory();
+    let first = AuthStore::open(&bootstrap).unwrap();
+    drop(first);
+    let bootstrap_database = rusqlite::Connection::open(bootstrap.join("db-qbs.sqlite3")).unwrap();
+    let legacy: String = bootstrap_database
+        .query_row("SELECT password_hash FROM credentials WHERE id = 1", [], |row| row.get(0))
+        .unwrap();
+    drop(bootstrap_database);
+    fs::remove_dir_all(bootstrap).unwrap();
+
+    let directory = temp_directory();
+    let database = rusqlite::Connection::open(directory.join("db-qbs.sqlite3")).unwrap();
+    database
+        .execute_batch(
+            "CREATE TABLE credentials (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                password_hash TEXT NOT NULL
+             );
+             CREATE TABLE sessions (
+                token TEXT PRIMARY KEY NOT NULL,
+                created_at INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+    database
+        .execute(
+            "INSERT INTO credentials (id, password_hash) VALUES (1, ?1)",
+            [&legacy],
+        )
+        .unwrap();
+    let now = chrono::Utc::now();
+    database
+        .execute(
+            "INSERT INTO sessions (token, created_at, last_seen_at) VALUES ('legacy-session', ?1, ?1)",
+            [now.timestamp()],
+        )
+        .unwrap();
+    drop(database);
+
+    let reopened = AuthStore::open(&directory).unwrap();
+    let database = rusqlite::Connection::open(directory.join("db-qbs.sqlite3")).unwrap();
+    let migrated: String = database
+        .query_row("SELECT password_hash FROM accounts WHERE username = 'admin'", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(migrated, legacy, "迁移不该重新散列管理员口令");
+    drop(database);
+
+    assert!(reopened.verify_password("admin", "admin").unwrap());
+    assert_eq!(
+        reopened
+            .resolve_session("legacy-session", now)
+            .unwrap()
+            .unwrap()
+            .username,
+        "admin"
+    );
+    assert!(!reopened.verify_password("operator", "admin").unwrap());
+    assert!(!reopened.verify_password("nobody", "admin").unwrap());
+    let operator = reopened.operator_account().unwrap();
+    assert!(!operator.enabled);
+    assert!(!operator.has_password);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn administrator_activates_operator_and_session_reports_the_fixed_identity() {
+    let rig = Rig::new();
+    let before = rig.get("/api/operator-account");
+    assert_eq!(before.status, 200);
+    assert_eq!(rig.json(&before)["enabled"], false);
+    assert_eq!(rig.json(&before)["has_password"], false);
+    assert_eq!(rig.json(&before)["role"], "OPERATOR");
+
+    let incomplete = rig.put("/api/operator-account", r#"{"enabled":true}"#);
+    assert_eq!(incomplete.status, 400);
+
+    let enabled = rig.put(
+        "/api/operator-account",
+        r#"{"enabled":true,"password":"operator-secret"}"#,
+    );
+    assert_eq!(enabled.status, 200, "{}", enabled.body_text());
+    assert_eq!(rig.json(&enabled)["enabled"], true);
+    assert_eq!(rig.json(&enabled)["has_password"], true);
+    assert!(!enabled.body_text().contains("operator-secret"));
+
+    let login = rig.send_anonymous(
+        Method::Post,
+        "/api/session",
+        r#"{"username":"operator","password":"operator-secret"}"#,
+    );
+    assert_eq!(login.status, 200, "{}", login.body_text());
+    assert_eq!(rig.json(&login)["username"], "operator");
+    assert_eq!(rig.json(&login)["role"], "OPERATOR");
+    let cookie = login.header("Set-Cookie").unwrap();
+    let token = cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .split_once('=')
+        .unwrap()
+        .1;
+    let state = rig.send_with_session(token, Method::Get, "/api/session", "");
+    assert_eq!(rig.json(&state)["username"], "operator");
+    assert_eq!(rig.json(&state)["role"], "OPERATOR");
+}
+
+#[test]
+fn operator_can_use_daily_work_routes_but_admin_routes_return_stable_403() {
+    let rig = Rig::new();
+    rig.auth.update_operator(true, Some("operator-secret")).unwrap();
+    let token = rig
+        .auth
+        .issue_session("operator", chrono::Utc::now())
+        .unwrap()
+        .token;
+
+    for route in routes() {
+        if route.access == Access::Public {
+            continue;
+        }
+        let url = route.pattern.replace("{}", "some-id");
+        let response = rig.send_with_session(&token, route.method, &url, "{}");
+        if route.access == Access::Administrator {
+            assert_eq!(response.status, 403, "{:?} {}", route.method, route.pattern);
+            assert_eq!(rig.json(&response)["error"]["code"], "FORBIDDEN");
+        } else {
+            assert_ne!(response.status, 401, "{:?} {}", route.method, route.pattern);
+            assert_ne!(response.status, 403, "{:?} {}", route.method, route.pattern);
+        }
+    }
+}
+
+#[test]
+fn email_alert_settings_default_to_editable_tencent_values() {
+    let rig = Rig::new();
+
+    let response = rig.get("/api/email-alert-settings");
+
+    assert_eq!(response.status, 200, "{}", response.body_text());
+    assert_eq!(
+        rig.json(&response),
+        serde_json::json!({
+            "enabled": false,
+            "provider_preset": "TENCENT_EXMAIL",
+            "smtp_host": "smtp.exmail.qq.com",
+            "smtp_port": 465,
+            "smtp_security": "IMPLICIT_TLS",
+            "smtp_username": "",
+            "has_smtp_secret": false,
+            "sender_address": "",
+            "sender_name": "",
+            "recipients": [],
+            "max_retry_hours": 24,
+            "instance_name": "db-qbs",
+            "external_base_url": null,
+            "latest_test_result": null,
+        })
+    );
+}
+
+#[test]
+fn email_alert_settings_persist_encrypted_with_write_only_blank_preserve() {
+    let rig = Rig::new();
+    let saved = rig.put(
+        "/api/email-alert-settings",
+        &email_alert_settings_json(false, "SMTP-secret-marker", 12),
+    );
+    assert_eq!(saved.status, 200, "{}", saved.body_text());
+    let saved_json = rig.json(&saved);
+    assert_eq!(saved_json["provider_preset"], "GENERIC");
+    assert_eq!(saved_json["smtp_security"], "STARTTLS");
+    assert_eq!(saved_json["recipients"], serde_json::json!(["Ops@example.com", "audit@example.org"]));
+    assert_eq!(saved_json["external_base_url"], "https://qbs.example.com");
+    assert_eq!(saved_json["has_smtp_secret"], true);
+    assert!(saved_json.get("smtp_secret").is_none());
+    assert!(rig.mail_transport.sent.lock().unwrap().is_empty());
+
+    let database = fs::read(rig.directory.join("db-qbs.sqlite3")).unwrap();
+    assert!(!String::from_utf8_lossy(&database).contains("SMTP-secret-marker"));
+
+    let reopened = rig.second_life();
+    let reopened_json = reopened.json(&reopened.get("/api/email-alert-settings"));
+    assert_eq!(reopened_json, saved_json);
+    let preserved = reopened.put(
+        "/api/email-alert-settings",
+        &email_alert_settings_json(true, "", 12),
+    );
+    assert_eq!(preserved.status, 200, "{}", preserved.body_text());
+    assert_eq!(reopened.json(&preserved)["has_smtp_secret"], true);
+    let delivery = reopened.email_alerts.delivery_settings().unwrap().unwrap();
+    assert_eq!(delivery.secret, "SMTP-secret-marker");
+    assert_eq!(delivery.host, "mail.example.com");
+}
+
+#[test]
+fn email_alert_settings_validate_shape_without_smtp_io() {
+    let rig = Rig::new();
+
+    for (name, body) in [
+        ("plaintext security", email_alert_settings_json(false, "secret", 24).replace("STARTTLS", "PLAINTEXT")),
+        ("invalid recipient", email_alert_settings_json(false, "secret", 24).replace("audit@example.org", "not-an-email")),
+        ("retry too long", email_alert_settings_json(false, "secret", 169)),
+        ("URL path", email_alert_settings_json(false, "secret", 24).replace("https://qbs.example.com", "https://qbs.example.com/app")),
+    ] {
+        let response = rig.put("/api/email-alert-settings", &body);
+        assert_eq!(response.status, 400, "{name}: {}", response.body_text());
+    }
+
+    let recipients: Vec<_> = (0..51).map(|index| format!("ops{index}@example.com")).collect();
+    let too_many = email_alert_settings_json(false, "secret", 24)
+        .replace(
+            r#"["Ops@example.com"," ops@example.com ","audit@example.org"]"#,
+            &serde_json::to_string(&recipients).unwrap(),
+        );
+    let response = rig.put("/api/email-alert-settings", &too_many);
+    assert_eq!(response.status, 400, "{}", response.body_text());
+
+    let incomplete = email_alert_settings_json(true, "", 24).replace("mail.example.com", "");
+    let response = rig.put("/api/email-alert-settings", &incomplete);
+    assert_eq!(response.status, 400, "{}", response.body_text());
+    assert!(rig.mail_transport.sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn test_email_uses_saved_settings_sends_each_recipient_and_persists_success() {
+    let rig = Rig::new();
+    let saved = rig.put(
+        "/api/email-alert-settings",
+        &email_alert_settings_json(false, "SMTP-secret-marker", 24),
+    );
+    assert_eq!(saved.status, 200, "{}", saved.body_text());
+
+    let response = rig.post("/api/email-alert-settings/test", "");
+
+    assert_eq!(response.status, 200, "{}", response.body_text());
+    assert_eq!(rig.json(&response)["status"], "SUCCESS");
+    assert_eq!(rig.json(&response)["tested_at"], "2026-08-31T10:00:00+00:00");
+    assert_eq!(rig.json(&response)["error"], Value::Null);
+    let sent = rig.mail_transport.sent.lock().unwrap();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].host, "mail.example.com");
+    assert_eq!(sent[0].port, 587);
+    assert_eq!(sent[0].security, db_qbs_source::SmtpSecurity::Starttls);
+    assert_eq!(sent[0].username, "mailer");
+    assert_eq!(sent[0].secret, "SMTP-secret-marker");
+    assert_eq!(sent[0].sender_name, "db-qbs alerts");
+    assert_eq!(sent[0].mail.envelope_from, "alerts@example.com");
+    assert_eq!(sent[0].mail.envelope_to, "Ops@example.com");
+    assert_eq!(sent[1].mail.envelope_to, "audit@example.org");
+    let message = String::from_utf8_lossy(&sent[0].mail.message);
+    assert!(message.contains("multipart/alternative"));
+    assert!(message.contains("text/plain"));
+    assert!(message.contains("text/html"));
+    assert!(message.contains("Subject:"));
+    drop(sent);
+
+    assert!(rig.history.list(None).unwrap().is_empty());
+    let reopened = rig.second_life();
+    let settings = reopened.json(&reopened.get("/api/email-alert-settings"));
+    assert_eq!(settings["latest_test_result"]["status"], "SUCCESS");
+    assert_eq!(
+        settings["latest_test_result"]["tested_at"],
+        "2026-08-31T10:00:00+00:00"
+    );
+}
+
+#[test]
+fn test_email_persists_only_a_sanitized_failure() {
+    let rig = Rig::new();
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(false, "SMTP-secret-marker", 24),
+        )
+        .status,
+        200
+    );
+    *rig.mail_transport.failure.lock().unwrap() = Some(MailTransportError::Timeout);
+
+    let response = rig.post("/api/email-alert-settings/test", "");
+
+    assert_eq!(response.status, 200, "{}", response.body_text());
+    assert_eq!(rig.json(&response)["status"], "FAILED");
+    assert_eq!(rig.json(&response)["error"], "SMTP 连接或响应超时");
+    assert!(!response.body_text().contains("SMTP-secret-marker"));
+    assert_eq!(rig.mail_transport.sent.lock().unwrap().len(), 2);
+
+    let reopened = rig.second_life();
+    let settings = reopened.json(&reopened.get("/api/email-alert-settings"));
+    assert_eq!(settings["latest_test_result"]["status"], "FAILED");
+    assert_eq!(settings["latest_test_result"]["error"], "SMTP 连接或响应超时");
+    assert!(!settings.to_string().contains("SMTP-secret-marker"));
+    assert!(reopened.history.list(None).unwrap().is_empty());
+}
+
+#[test]
+fn run_details_expose_only_the_same_aggregate_alert_state_to_both_roles() {
+    let rig = Rig::new();
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(true, "SMTP-secret-marker", 24),
+        )
+        .status,
+        200
+    );
+    let now = rig.clock.now();
+    let mut failed = RunHistory::accepted(
+        "aggregate-alert-run",
+        "task-aggregate",
+        "SELECT sensitive_sql FROM source",
+        now,
+    );
+    failed.task_name = "汇总状态".to_owned();
+    failed.outcome = Some("FAILED".to_owned());
+    failed.finished_at = Some(now.to_rfc3339());
+    failed.failure_kind = Some("NETWORK".to_owned());
+    failed.message = Some("raw SMTP server response".to_owned());
+    rig.history.finalize(&failed, now, 90).unwrap();
+
+    rig.auth
+        .update_operator(true, Some("operator-secret"))
+        .unwrap();
+    let operator = rig.auth.issue_session("operator", now).unwrap().token;
+    let path = "/api/runs/aggregate-alert-run";
+    let admin_response = rig.get(path);
+    let operator_response = rig.send_with_session(&operator, Method::Get, path, "");
+    assert_eq!(admin_response.status, 200);
+    assert_eq!(operator_response.status, 200);
+    let expected = serde_json::json!({
+        "alert_id": "alert-aggregate-alert-run",
+        "delivery_state": "PENDING",
+    });
+    assert_eq!(rig.json(&admin_response)["alert"], expected);
+    assert_eq!(rig.json(&operator_response)["alert"], expected);
+    for response in [admin_response, operator_response] {
+        let body = response.body_text();
+        for private in [
+            "Ops@example.com",
+            "audit@example.org",
+            "SMTP-secret-marker",
+            "attempt_count",
+            "last_error",
+        ] {
+            assert!(!body.contains(private), "run projection leaked {private}");
+        }
+    }
+}
+
+#[test]
+fn disabled_and_incomplete_alerts_are_final_not_sent_without_fake_recipients() {
+    let rig = Rig::new();
+    let now = rig.clock.now();
+    let mut failed = RunHistory::accepted("disabled-alert", "task-disabled", "SELECT secret", now);
+    failed.outcome = Some("FAILED".to_owned());
+    failed.finished_at = Some(now.to_rfc3339());
+    failed.failure_kind = Some("NETWORK".to_owned());
+    rig.history.finalize(&failed, now, 90).unwrap();
+
+    let run = rig.get("/api/runs/disabled-alert");
+    assert_eq!(run.status, 200);
+    assert_eq!(rig.json(&run)["alert"]["delivery_state"], "NOT_SENT");
+    for private in ["recipient", "attempt_count", "last_error", "retry_deadline_at"] {
+        assert!(!run.body_text().contains(private));
+    }
+    assert_eq!(
+        rig.json(&rig.get("/api/email-deliveries?run_record_id=disabled-alert")),
+        serde_json::json!([]),
+        "an Alert-level disposition represents zero recipients without a fake address"
+    );
+
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(false, "SMTP-secret-marker", 24),
+        )
+        .status,
+        200
+    );
+    let mut configured_disabled =
+        RunHistory::accepted("configured-disabled", "task-disabled", "SELECT secret", now);
+    configured_disabled.outcome = Some("FAILED".to_owned());
+    configured_disabled.finished_at = Some(now.to_rfc3339());
+    configured_disabled.failure_kind = Some("NETWORK".to_owned());
+    rig.history.finalize(&configured_disabled, now, 90).unwrap();
+    let deliveries = rig.json(
+        &rig.get("/api/email-deliveries?run_record_id=configured-disabled"),
+    );
+    assert_eq!(deliveries.as_array().unwrap().len(), 2);
+    assert!(deliveries
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|delivery| delivery["state"] == "NOT_SENT"));
+    let retry = format!(
+        "/api/email-deliveries/{}/retry",
+        deliveries[0]["delivery_id"].as_str().unwrap()
+    );
+    assert_eq!(rig.post(&retry, "").status, 400);
+    let suppressed_id = deliveries[1]["delivery_id"].as_str().unwrap();
+    rusqlite::Connection::open(rig.directory.join("db-qbs.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE email_deliveries SET state = 'SUPPRESSED' WHERE delivery_id = ?1",
+            [suppressed_id],
+        )
+        .unwrap();
+    assert_eq!(
+        rig.post(
+            &format!("/api/email-deliveries/{suppressed_id}/retry"),
+            "",
+        )
+        .status,
+        400
+    );
+}
+
+#[test]
+fn disabling_terminates_pending_work_and_reenabling_never_backfills_it() {
+    let rig = Rig::new();
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(true, "SMTP-secret-marker", 24),
+        )
+        .status,
+        200
+    );
+    let now = rig.clock.now();
+    let mut failed = RunHistory::accepted("terminated-alert", "task-disabled", "SELECT 1", now);
+    failed.outcome = Some("FAILED".to_owned());
+    failed.finished_at = Some(now.to_rfc3339());
+    failed.failure_kind = Some("NETWORK".to_owned());
+    rig.history.finalize(&failed, now, 90).unwrap();
+    *rig.mail_transport.failure.lock().unwrap() = Some(MailTransportError::Timeout);
+    assert_eq!(
+        rig.alert_outbox
+            .run_due_attempts(
+                &rig.email_alerts,
+                rig.mail_transport.as_ref(),
+                rig.clock.as_ref(),
+            )
+            .unwrap(),
+        2
+    );
+
+    let disabled = rig.put(
+        "/api/email-alert-settings",
+        &email_alert_settings_json(false, "", 24),
+    );
+    assert_eq!(disabled.status, 200, "{}", disabled.body_text());
+    let terminated = rig.json(
+        &rig.get("/api/email-deliveries?run_record_id=terminated-alert"),
+    );
+    assert!(terminated.as_array().unwrap().iter().all(|delivery| {
+        delivery["state"] == "NOT_SENT"
+            && delivery["last_error"] == "管理员已停用邮件告警"
+            && delivery["next_attempt_at"].is_null()
+    }));
+    assert_eq!(
+        rig.json(&rig.get("/api/runs/terminated-alert"))["alert"]["delivery_state"],
+        "NOT_SENT"
+    );
+
+    let enabled = rig.put(
+        "/api/email-alert-settings",
+        &email_alert_settings_json(true, "", 24),
+    );
+    assert_eq!(enabled.status, 200, "{}", enabled.body_text());
+    *rig.mail_transport.failure.lock().unwrap() = None;
+    assert_eq!(
+        rig.alert_outbox
+            .run_due_attempts(
+                &rig.email_alerts,
+                rig.mail_transport.as_ref(),
+                rig.clock.as_ref(),
+            )
+            .unwrap(),
+        0
+    );
+    let still_terminated = rig.json(
+        &rig.get("/api/email-deliveries?run_record_id=terminated-alert"),
+    );
+    assert!(still_terminated
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|delivery| delivery["state"] == "NOT_SENT"));
+    let retry = format!(
+        "/api/email-deliveries/{}/retry",
+        still_terminated[0]["delivery_id"].as_str().unwrap()
+    );
+    assert_eq!(rig.post(&retry, "").status, 400);
+}
+
+#[test]
+fn only_administrators_can_diagnose_and_retry_exhausted_email_deliveries() {
+    let rig = Rig::new();
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(true, "SMTP-secret-marker", 0),
+        )
+        .status,
+        200
+    );
+    let now = rig.clock.now();
+    let mut failed = RunHistory::accepted(
+        "delivery-diagnostics",
+        "task-delivery",
+        "SELECT private_marker FROM source",
+        now,
+    );
+    failed.task_name = "投递诊断".to_owned();
+    failed.outcome = Some("FAILED".to_owned());
+    failed.finished_at = Some(now.to_rfc3339());
+    failed.failure_kind = Some("NETWORK".to_owned());
+    rig.history.finalize(&failed, now, 90).unwrap();
+    *rig.mail_transport.failure.lock().unwrap() = Some(MailTransportError::Timeout);
+    assert_eq!(
+        rig.alert_outbox
+            .run_due_attempts(
+                &rig.email_alerts,
+                rig.mail_transport.as_ref(),
+                rig.clock.as_ref(),
+            )
+            .unwrap(),
+        2
+    );
+
+    rig.auth
+        .update_operator(true, Some("operator-secret"))
+        .unwrap();
+    let operator = rig
+        .auth
+        .issue_session("operator", now)
+        .unwrap()
+        .token;
+    let private_path = "/api/email-deliveries?run_record_id=delivery-diagnostics";
+    let refused = rig.send_with_session(&operator, Method::Get, private_path, "");
+    assert_eq!(refused.status, 403);
+    assert!(!refused.body_text().contains("Ops@example.com"));
+    assert!(!refused.body_text().contains("attempt_count"));
+
+    let history_response = rig.get(private_path);
+    assert_eq!(history_response.status, 200);
+    let history = rig.json(&history_response);
+    assert_eq!(history.as_array().unwrap().len(), 2);
+    assert_eq!(history[0]["state"], "FAILED");
+    assert_eq!(history[0]["attempt_count"], 1);
+    assert_eq!(history[0]["last_error"], "SMTP 连接或响应超时");
+    assert_eq!(history[0]["alert_id"], "alert-delivery-diagnostics");
+    assert!(history[0]["recipient"].is_string());
+    let delivery_id = history[0]["delivery_id"].as_str().unwrap();
+
+    rig.clock.set(now + chrono::Duration::hours(1));
+    let retry_path = format!("/api/email-deliveries/{delivery_id}/retry");
+
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(false, "", 0),
+        )
+        .status,
+        200
+    );
+    let disabled_retry = rig.post(&retry_path, "");
+    assert_eq!(disabled_retry.status, 400);
+    assert_eq!(rig.json(&disabled_retry)["error"]["kind"], "request");
+    assert_eq!(
+        rig.json(&disabled_retry)["error"]["message"],
+        "只有已耗尽重试窗口的失败投递才能手动重试"
+    );
+    assert_eq!(
+        rig.alert_outbox
+            .run_due_attempts(
+                &rig.email_alerts,
+                rig.mail_transport.as_ref(),
+                rig.clock.as_ref(),
+            )
+            .unwrap(),
+        0,
+        "disabled delivery must not revive an exhausted delivery"
+    );
+
+    rusqlite::Connection::open(rig.directory.join("db-qbs.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE email_alert_settings SET enabled = 1, smtp_host = '' WHERE singleton_id = 1",
+            [],
+        )
+        .unwrap();
+    let incomplete_retry = rig.post(&retry_path, "");
+    assert_eq!(incomplete_retry.status, 400);
+    assert_eq!(
+        rig.json(&incomplete_retry)["error"],
+        rig.json(&disabled_retry)["error"],
+        "disabled and incomplete settings expose the same stable rejection"
+    );
+    assert_eq!(
+        rig.alert_outbox
+            .delivery_history(Some("delivery-diagnostics"))
+            .unwrap()[0]
+            .state,
+        db_qbs_source::EmailDeliveryState::Failed,
+        "incomplete settings must leave exhausted delivery final"
+    );
+
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(true, "", 0),
+        )
+        .status,
+        200
+    );
+    *rig.mail_transport.failure.lock().unwrap() = None;
+    assert_eq!(
+        rig.alert_outbox
+            .run_due_attempts(
+                &rig.email_alerts,
+                rig.mail_transport.as_ref(),
+                rig.clock.as_ref(),
+            )
+            .unwrap(),
+        0,
+        "re-enabling delivery must not backfill a rejected manual retry"
+    );
+
+    let retried = rig.post(&retry_path, "");
+    assert_eq!(retried.status, 200, "{}", retried.body_text());
+    let retried = rig.json(&retried);
+    assert_eq!(retried["state"], "PENDING");
+    assert_eq!(
+        retried["attempt_count"], 1,
+        "manual retry keeps lifetime count"
+    );
+    assert_eq!(retried["next_attempt_at"], rig.clock.now().to_rfc3339());
+    assert_eq!(rig.post(&retry_path, "").status, 400);
+
+    let operator_retry = rig.send_with_session(&operator, Method::Post, &retry_path, "");
+    assert_eq!(operator_retry.status, 403);
+    assert!(!operator_retry.body_text().contains("Ops@example.com"));
+}
+
+#[test]
+fn accepted_run_failure_finishes_before_the_outbox_first_attempt() {
+    let rig = Rig::with_child(
+        r#"printf '%s\n' '{"ts":"2026-08-31T10:00:01.000Z","event":"run_finished","run_id":"run-alert","terminal":"FAILED","stage":"FAILED","message":"raw failure must stay local","failure_kind":"SOURCE_QUERY","source_code":"ORA-marker","sink_code":null,"column":null,"value":"sample-marker","source_rows":0,"source_batches":0,"staged_rows":0,"received_batches":0,"sink_reported_rows":0,"purged_rows":0,"fetch_ms":1,"push_ms":0,"commit_ms":0,"count_ms":0,"cursor_ms":0}'
+"#,
+    );
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(true, "SMTP-secret-marker", 24),
+        )
+        .status,
+        200
+    );
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let task_id = rig.create_task("源查询失败", "ALERT_TARGET", &(source_id, target_id));
+
+    let accepted = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(accepted.status, 202, "{}", accepted.body_text());
+    let run_record_id = rig.json(&accepted)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let finished = wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
+        body["live"] == false
+    });
+    assert_eq!(finished["outcome"], "FAILED");
+    assert_eq!(finished["alert"]["delivery_state"], "PENDING");
+    assert!(rig.mail_transport.sent.lock().unwrap().is_empty());
+
+    assert_eq!(
+        rig.alert_outbox
+            .run_due_attempts(
+                &rig.email_alerts,
+                rig.mail_transport.as_ref(),
+                rig.clock.as_ref(),
+            )
+            .unwrap(),
+        2
+    );
+    let sent = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(sent["outcome"], "FAILED");
+    assert_eq!(sent["alert"]["delivery_state"], "SENT");
+}
+
+fn email_alert_settings_json(enabled: bool, secret: &str, retry_hours: u8) -> String {
+    serde_json::json!({
+        "enabled": enabled,
+        "provider_preset": "GENERIC",
+        "smtp_host": "mail.example.com",
+        "smtp_port": 587,
+        "smtp_security": "STARTTLS",
+        "smtp_username": "mailer",
+        "smtp_secret": secret,
+        "sender_address": "alerts@example.com",
+        "sender_name": "db-qbs alerts",
+        "recipients": ["Ops@example.com", " ops@example.com ", "audit@example.org"],
+        "max_retry_hours": retry_hours,
+        "instance_name": "production",
+        "external_base_url": "https://qbs.example.com",
+    })
+    .to_string()
+}
+
+#[test]
+fn operator_password_reset_and_disable_invalidate_only_operator_sessions() {
+    let rig = Rig::new();
+    rig.auth.update_operator(true, Some("first")).unwrap();
+    let current = rig.auth.issue_session("operator", chrono::Utc::now()).unwrap().token;
+    let elsewhere = rig.auth.issue_session("operator", chrono::Utc::now()).unwrap().token;
+    let admin = rig.auth.issue_session("admin", chrono::Utc::now()).unwrap().token;
+
+    let changed = rig.send_with_session(
+        &current,
+        Method::Put,
+        "/api/password",
+        r#"{"current_password":"first","new_password":"second"}"#,
+    );
+    assert_eq!(changed.status, 200, "{}", changed.body_text());
+    assert_eq!(rig.send_with_session(&current, Method::Get, "/api/tasks", "").status, 200);
+    assert_eq!(rig.send_with_session(&elsewhere, Method::Get, "/api/tasks", "").status, 401);
+    assert_eq!(rig.send_with_session(&admin, Method::Get, "/api/tasks", "").status, 200);
+
+    let reset = rig.put(
+        "/api/operator-account",
+        r#"{"enabled":true,"password":"third"}"#,
+    );
+    assert_eq!(reset.status, 200);
+    assert_eq!(rig.send_with_session(&current, Method::Get, "/api/tasks", "").status, 401);
+    assert!(rig.auth.verify_password("operator", "third").unwrap());
+
+    let active = rig.auth.issue_session("operator", chrono::Utc::now()).unwrap().token;
+    assert_eq!(rig.put("/api/operator-account", r#"{"enabled":false}"#).status, 200);
+    assert_eq!(rig.send_with_session(&active, Method::Get, "/api/tasks", "").status, 401);
+    assert!(!rig.auth.verify_password("operator", "third").unwrap());
 }
 
 /// 退出销的是**这一张票**，别处登着的同一个账号不受影响。
 #[test]
 fn logging_out_burns_one_ticket_and_leaves_the_others_alone() {
     let rig = Rig::new();
-    let elsewhere = rig.auth.issue_session(chrono::Utc::now()).unwrap().token;
+    let elsewhere = rig.auth.issue_session("admin", chrono::Utc::now()).unwrap().token;
     let elsewhere_cookie = format!("db_qbs_session={elsewhere}");
 
     let goodbye = rig.delete("/api/session");
@@ -3348,7 +4332,13 @@ fn every_authenticated_request_slides_the_cookie_forward() {
 #[test]
 fn changing_the_password_keeps_this_session_and_burns_the_rest() {
     let rig = Rig::new();
-    let elsewhere = rig.auth.issue_session(chrono::Utc::now()).unwrap().token;
+    let elsewhere = rig.auth.issue_session("admin", chrono::Utc::now()).unwrap().token;
+    rig.auth.update_operator(true, Some("operator-secret")).unwrap();
+    let operator = rig
+        .auth
+        .issue_session("operator", chrono::Utc::now())
+        .unwrap()
+        .token;
 
     let wrong = rig.put(
         "/api/password",
@@ -3378,6 +4368,11 @@ fn changing_the_password_keeps_this_session_and_burns_the_rest() {
     assert_eq!(stale.status, 401, "改完口令，别处那张票还认");
     // 而**发起这次改密的这一张留着**：改完口令立刻被自己踢出去毫无道理。
     assert_eq!(rig.get("/api/tasks").status, 200);
+    assert_eq!(
+        rig.send_with_session(&operator, Method::Get, "/api/tasks", "").status,
+        200,
+        "管理员改密不该清掉操作员会话"
+    );
 
     assert_eq!(
         rig.send_anonymous(
@@ -3408,7 +4403,7 @@ fn changing_the_password_keeps_this_session_and_burns_the_rest() {
 fn a_session_expires_only_after_eight_idle_hours() {
     let rig = Rig::new();
     let start = chrono::Utc::now();
-    let token = rig.auth.issue_session(start).unwrap().token;
+    let token = rig.auth.issue_session("admin", start).unwrap().token;
     let hours = |n: i64| start + chrono::Duration::hours(n);
 
     assert!(rig.auth.authenticate(&token, hours(7)).unwrap(), "7 小时就被踢了");
@@ -3426,8 +4421,8 @@ fn a_session_expires_only_after_eight_idle_hours() {
 #[test]
 fn resetting_the_password_returns_to_the_factory_default_and_burns_every_session() {
     let rig = Rig::new();
-    rig.auth.change_password("admin", "新口令", "").unwrap();
-    let token = rig.auth.issue_session(chrono::Utc::now()).unwrap().token;
+    rig.auth.change_password("admin", "admin", "新口令", "").unwrap();
+    let token = rig.auth.issue_session("admin", chrono::Utc::now()).unwrap().token;
 
     rig.auth.reset_password().unwrap();
 
@@ -3913,6 +4908,14 @@ fn the_cron_instant_starts_a_run_that_history_marks_as_scheduled() {
 #[test]
 fn an_occurrence_that_collides_with_a_live_run_is_recorded_without_a_run_id() {
     let rig = Rig::new();
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(true, "schedule-secret", 24),
+        )
+        .status,
+        200
+    );
     let (_agent_id, source_id, target_id) = rig.seed();
     let datasources = (source_id, target_id);
     let task_id = create_scheduled_task(&rig, "每分钟", "HOLDINGS", &datasources, "* * * * *");
@@ -3938,11 +4941,120 @@ fn an_occurrence_that_collides_with_a_live_run_is_recorded_without_a_run_id() {
     assert_eq!(skipped["run_id"], Value::Null, "跳过的那一次没有运行标识");
     assert_eq!(skipped["trigger"], "SCHEDULED");
     assert_eq!(skipped["failure_kind"], "SKIPPED");
+    assert_eq!(skipped["scheduled_refusal_reason"], "PREVIOUS_RUN_ACTIVE");
     assert_eq!(skipped["message"], "上次尚未结束，本次跳过");
     assert_eq!(skipped["outcome"], "FAILED");
     assert_eq!(skipped["target_table_effect"], "DISCARDED");
     assert_eq!(skipped["task_name"], "每分钟");
     assert_eq!(skipped["live"], false);
+    assert_eq!(skipped["alert"]["delivery_state"], "PENDING");
+}
+
+#[test]
+fn a_scheduled_refusal_for_a_missing_datasource_is_alertable() {
+    let rig = Rig::new();
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(true, "schedule-secret", 24),
+        )
+        .status,
+        200
+    );
+    let input: TaskInput = serde_json::from_str(&scheduled_task_json(
+        "悬空源库",
+        "HOLDINGS",
+        &("missing-source".to_owned(), "missing-target".to_owned()),
+        "* * * * *",
+    ))
+    .unwrap();
+    let task = rig.tasks.create(input).unwrap();
+
+    scheduler_pass(&rig, "2026-08-28 03:10");
+    scheduler_pass(&rig, "2026-08-28 03:11");
+
+    let listed = rig.json(&rig.get(&format!("/api/runs?task_id={}", task.task_id)));
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(listed[0]["run_id"], Value::Null);
+    assert_eq!(listed[0]["trigger"], "SCHEDULED");
+    assert_eq!(listed[0]["outcome"], "FAILED");
+    assert_eq!(listed[0]["failure_kind"], "SKIPPED");
+    assert_eq!(
+        listed[0]["scheduled_refusal_reason"],
+        "SOURCE_DATASOURCE_UNAVAILABLE"
+    );
+    assert_eq!(listed[0]["alert"]["delivery_state"], "PENDING");
+}
+
+#[test]
+fn repeated_busy_schedule_alerts_expose_fixed_window_suppression() {
+    let rig = Rig::new();
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(true, "schedule-secret", 24),
+        )
+        .status,
+        200
+    );
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let datasources = (source_id, target_id);
+    let task_id = create_scheduled_task(&rig, "高频任务", "HOLDINGS", &datasources, "* * * * *");
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+
+    scheduler_pass(&rig, "2026-08-28 03:10");
+    let first_at = chrono::DateTime::parse_from_rfc3339("2026-08-31T10:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    for (minute, at) in [
+        (11, first_at),
+        (12, first_at + chrono::Duration::minutes(30)),
+        (13, first_at + chrono::Duration::hours(1)),
+        (
+            14,
+            first_at + chrono::Duration::hours(1) + chrono::Duration::seconds(1),
+        ),
+    ] {
+        rig.clock.set(at);
+        scheduler_pass(&rig, &format!("2026-08-28 03:{minute}"));
+    }
+
+    let listed = rig.json(&rig.get(&format!("/api/runs?task_id={task_id}")));
+    let mut skipped = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["scheduled_refusal_reason"] == "PREVIOUS_RUN_ACTIVE")
+        .collect::<Vec<_>>();
+    skipped.sort_by_key(|row| row["started_at"].as_str().unwrap());
+    assert_eq!(skipped.len(), 4, "{listed}");
+    assert_eq!(
+        skipped
+            .iter()
+            .map(|row| row["alert"]["delivery_state"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["PENDING", "SUPPRESSED", "PENDING", "SUPPRESSED"],
+        "a candidate exactly one hour later is deliverable and starts a new window"
+    );
+    let alert_ids = skipped
+        .iter()
+        .map(|row| row["alert"]["alert_id"].as_str().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(alert_ids.len(), 4, "each occurrence needs distinct Alert evidence");
+    assert!(skipped.iter().all(|row| row.get("recipient").is_none()));
+    assert_eq!(
+        rig.alert_outbox
+            .run_due_attempts(
+                &rig.email_alerts,
+                rig.mail_transport.as_ref(),
+                rig.clock.as_ref(),
+            )
+            .unwrap(),
+        4,
+        "only the two non-suppressed occurrences, each with two recipients, are mailed"
+    );
+    assert_eq!(rig.mail_transport.sent.lock().unwrap().len(), 4);
 }
 
 /// 额度满时**在 source 侧排队**，不推给代理去吃 `RUN_QUOTA_EXCEEDED`——

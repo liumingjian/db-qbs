@@ -31,13 +31,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use chrono::{Local, NaiveDateTime, Utc};
+use chrono::{Local, NaiveDateTime};
 use db_qbs_shared::{LogEvent, LogLevel};
 use serde::Serialize;
 use serde_json::json;
 
 use crate::http::{dispatch_scheduled_run, emit, Api, DispatchOutcome};
-use crate::{RunHistory, RunTrigger, Task};
+use crate::{RunHistory, RunTrigger, ScheduledRefusalReason, Task};
 
 /// 两次评估之间隔多久。cron 是分钟分辨率，5 秒足够按时触发，
 /// 而排队中的那些也靠它重试——额度腾出来之后最多 5 秒就会被派出去。
@@ -318,8 +318,8 @@ fn drain_queue(
                     state.note_waiting(&task.task_id, &reason);
                 }
             }
-            DispatchOutcome::Refused(message) => {
-                record_history(state, task, message);
+            DispatchOutcome::Refused(reason, message) => {
+                record_history(state, task, reason, message);
                 if let Ok(mut state) = schedule.lock() {
                     state.remove_queued(&task.task_id);
                 }
@@ -337,13 +337,23 @@ fn task_has_active_run(state: &Api<'_>, task_id: &str) -> bool {
 }
 
 fn record_skipped(state: &Api<'_>, task: &Task) {
-    record_history(state, task, "上次尚未结束，本次跳过".to_owned());
+    record_history(
+        state,
+        task,
+        ScheduledRefusalReason::PreviousRunActive,
+        "上次尚未结束，本次跳过".to_owned(),
+    );
 }
 
 /// 落一行「到点了但没发起」的历史。**没有运行标识**（`run_id` 为空）：这一次
 /// 根本没走到向 sink 发请求那一步，与「预检拒绝、从未到达代理」同构。
-fn record_history(state: &Api<'_>, task: &Task, message: String) {
-    let now = Utc::now();
+fn record_history(
+    state: &Api<'_>,
+    task: &Task,
+    reason: ScheduledRefusalReason,
+    message: String,
+) {
+    let now = state.clock.now();
     let mut history = RunHistory::accepted(
         &crate::http::generate_run_record_id(),
         &task.task_id,
@@ -352,10 +362,10 @@ fn record_history(state: &Api<'_>, task: &Task, message: String) {
     );
     history.task_name = task.name.clone();
     history.trigger = RunTrigger::Scheduled.as_str().to_owned();
-    history.mark_skipped(message.clone(), now);
+    history.mark_scheduled_refusal(reason, message.clone(), now);
     if let Err(error) = state
         .history
-        .insert(&history, now, state.config.history_retention_days)
+        .finalize(&history, now, state.config.history_retention_days)
     {
         emit(
             LogLevel::Error,

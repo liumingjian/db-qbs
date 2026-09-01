@@ -55,11 +55,13 @@ export function AgentScreen({
   agents,
   datasources,
   loading,
+  canManage = true,
   onChanged,
 }: {
   agents: Agent[];
   datasources: Datasource[];
   loading: boolean;
+  canManage?: boolean;
   onChanged: () => Promise<void>;
 }) {
   const [dialog, setDialog] = useState<AgentDialogState>(null);
@@ -98,14 +100,16 @@ export function AgentScreen({
             {loading ? "正在读取" : `共 ${agents.length} 台`}
           </span>
         </div>
-        <button
-          className="button is-primary"
-          type="button"
-          onClick={() => setDialog({ kind: "register" })}
-        >
-          <Radio size={ICON.sm} aria-hidden="true" />
-          注册 Agent
-        </button>
+        {canManage && (
+          <button
+            className="button is-primary"
+            type="button"
+            onClick={() => setDialog({ kind: "register" })}
+          >
+            <Radio size={ICON.sm} aria-hidden="true" />
+            注册 Agent
+          </button>
+        )}
       </header>
 
       {loading && agents.length === 0 && (
@@ -124,14 +128,16 @@ export function AgentScreen({
             先在目标端主机上把 agent 起起来，再用它的地址在这里注册；
             MySQL 数据源只能经已注册的 agent 访问。
           </p>
-          <button
-            className="button is-primary"
-            type="button"
-            onClick={() => setDialog({ kind: "register" })}
-          >
-            <Radio size={ICON.sm} aria-hidden="true" />
-            注册 Agent
-          </button>
+          {canManage && (
+            <button
+              className="button is-primary"
+              type="button"
+              onClick={() => setDialog({ kind: "register" })}
+            >
+              <Radio size={ICON.sm} aria-hidden="true" />
+              注册 Agent
+            </button>
+          )}
         </div>
       )}
 
@@ -148,7 +154,7 @@ export function AgentScreen({
                 <th>MySQL</th>
                 <th>最近可见</th>
                 <th>被引用</th>
-                <th className="action-column">操作</th>
+                {canManage && <th className="action-column">操作</th>}
               </tr>
             </thead>
             <tbody>
@@ -206,7 +212,7 @@ export function AgentScreen({
                         : formatTimestamp(agent.last_seen_at, true)}
                     </td>
                     <td>{count === 0 ? "未被引用" : `${count} 条数据源`}</td>
-                    <td className="action-column">
+                    {canManage && <td className="action-column">
                       <div className="row-actions">
                         <ActionButton
                           label={
@@ -237,7 +243,7 @@ export function AgentScreen({
                           onClick={() => setDialog({ kind: "delete", agent })}
                         />
                       </div>
-                    </td>
+                    </td>}
                   </tr>
                 );
               })}
@@ -246,7 +252,7 @@ export function AgentScreen({
         </div>
       )}
 
-      {dialog?.kind === "register" && (
+      {canManage && dialog?.kind === "register" && (
         <AgentFormDialog
           title="注册目标端 Agent"
           existing={null}
@@ -254,7 +260,7 @@ export function AgentScreen({
           onChanged={onChanged}
         />
       )}
-      {dialog?.kind === "edit" && (
+      {canManage && dialog?.kind === "edit" && (
         <AgentFormDialog
           title={`编辑 · ${dialog.agent.name}`}
           existing={dialog.agent}
@@ -262,7 +268,7 @@ export function AgentScreen({
           onChanged={onChanged}
         />
       )}
-      {dialog?.kind === "delete" && (
+      {canManage && dialog?.kind === "delete" && (
         <AgentDeleteDialog
           agent={dialog.agent}
           onClose={() => setDialog(null)}
