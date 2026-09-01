@@ -1,0 +1,25 @@
+# 项目后端数据库连接的唯一配置来源。
+#
+# source.toml / sink.toml 仅保存服务监听与运行参数，不要在其中重复维护数据库凭据。
+# 本文件包含真实凭据；部署时应限制文件权限，并确保仓库访问范围符合内网安全要求。
+
+[oracle11g]
+host = "10.250.0.222"
+port = 1522
+sid = "xe"
+username = "system"
+password = "123456aB"
+
+[mysql8]
+host = "10.250.0.24"
+port = 3306
+username = "root"
+password = "ATT@2022"
+database = "mysql"
+
+[mysql5]
+host = "10.250.0.24"
+port = 33307
+username = "root"
+password = "root"
+database = "mysql"

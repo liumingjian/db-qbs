@@ -1,5 +1,6 @@
 /target/
 /config/*.toml
+!/config/database.toml
 node_modules/
 /web/dist/
 /docs/spikes/fixtures/local-rig/number-shapes-generated.sql
