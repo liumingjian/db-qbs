@@ -14,6 +14,7 @@ import {
 } from "./components/DesignSystem";
 import {
   runWriteSemantics,
+  writeModeLabel,
   writeStatementLabel,
   writeStatementOf,
 } from "./writeMode";
@@ -26,6 +27,7 @@ import {
 } from "./history";
 import { PrecheckReports } from "./PrecheckReports";
 import { RunLogPanel } from "./RunLogPanel";
+import { RunPreSqlPanel } from "./RunPreSqlPanel";
 import { HighlightedSql } from "./SqlEditor";
 import { rerunAction } from "./rerun";
 import { sourceSummary, whereSummary } from "./spec";
@@ -140,7 +142,7 @@ export function RunDrawer({
                     `knownTerminalEffect`：`DISCARDED` 不挂（目标表没被碰过），产品
                     不认识的那个词也不挂——原样透出是一回事，据它断言写入做了什么
                     是另一回事，后者这里没有资格做。 */}
-                {(knownEffect === "SWAPPED" || knownEffect === "REPLACED") && (
+                {(knownEffect === "SWAPPED" || knownEffect === "CLEANED_AND_SWAPPED" || knownEffect === "REPLACED") && (
                   <UpsertNote text={runWriteSemantics(run.evidence, task.spec)} />
                 )}
                 {presentation.kind === "live" && (
@@ -214,7 +216,7 @@ export function RunDrawer({
               />
               <Value
                 label="写入方式"
-                value={writeStatementLabel(writeStatementOf(task.spec.primary_key))}
+                value={`${writeModeLabel(task.spec.write_mode, task.spec.pre_sql)}（${writeStatementLabel(writeStatementOf(task.spec.primary_key))}）`}
               />
               <Value label="条件" value={whereSummary(task.spec)} />
             </div>
@@ -240,6 +242,8 @@ export function RunDrawer({
             <h3>当次执行的源端 SQL</h3>
             <pre className="drawer-sql"><HighlightedSql sql={run.source_sql} /></pre>
           </section>
+
+          <RunPreSqlPanel evidence={run.evidence} />
 
           {(run.column !== null || run.value !== null) &&
             presentation.kind !== "unknown" && (

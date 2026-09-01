@@ -19,10 +19,10 @@ use db_qbs_source::http::{
     RunState,
 };
 use db_qbs_source::{
-    AgentStore, AlertOutboxStore, AuthStore, Clock, DatasourceStore, EmailAlertStore, HistoryStore,
-    MailTransport, MailTransportError, OracleAccess, OracleRowSource, OutgoingMail, RunHistory,
-    RunLogStore, ScheduleState, SourceColumn, SourceConfig, SourceReadError, TaskInput, TaskSpec,
-    TaskStore, SESSION_COOKIE,
+    load_task_config, AgentStore, AlertOutboxStore, AuthStore, Clock, DatasourceStore,
+    EmailAlertStore, HistoryStore, MailTransport, MailTransportError, OracleAccess,
+    OracleRowSource, OutgoingMail, RunHistory, RunLogStore, ScheduleState, SourceColumn,
+    SourceConfig, SourceReadError, TaskInput, TaskSpec, TaskStore, SESSION_COOKIE,
 };
 use serde_json::Value;
 
@@ -515,6 +515,34 @@ fn task_json(name: &str, target_table: &str, datasources: &(String, String)) -> 
         r#"{{"name":"{name}","source_datasource_id":"{source_datasource_id}","target_datasource_id":"{target_datasource_id}","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"{target_table}","columns":[{{"source":"ID","target":"ID"}},{{"source":"D_BIZ","target":"D_BIZ"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"],"where_clause":"D_BIZ = DATE '2026-08-14'"}}}}"#
     )
 }
+
+fn task_json_with_pre_sql(
+    name: &str,
+    target_table: &str,
+    datasources: &(String, String),
+    pre_sql: &str,
+) -> String {
+    let mut task: Value = serde_json::from_str(&task_json(name, target_table, datasources)).unwrap();
+    task["spec"]["pre_sql"] = Value::String(pre_sql.to_owned());
+    serde_json::to_string(&task).unwrap()
+}
+
+fn custom_task_json_with_pre_sql(
+    name: &str,
+    target_table: &str,
+    datasources: &(String, String),
+    source_sql: &str,
+    pre_sql: &str,
+) -> String {
+    let mut task: Value =
+        serde_json::from_str(&task_json_with_pre_sql(name, target_table, datasources, pre_sql))
+            .unwrap();
+    task["spec"]["source_sql"] = Value::String(source_sql.to_owned());
+    task["spec"].as_object_mut().unwrap().remove("where_clause");
+    serde_json::to_string(&task).unwrap()
+}
+
+const REPRESENTATIVE_PRE_SQL: &str = "/* exact */\nDELETE FROM `qbs`.`HOLDINGS` WHERE DATE(D_BIZ) < CURRENT_DATE AND ID IN (SELECT ID FROM qbs.STALE_HOLDINGS);";
 
 /// 上面那份规格现算出来的源端 SQL。父子两端算的是同一份，历史里钉的也是它。
 const EXPECTED_SOURCE_SQL: &str = "SELECT a.ID AS ID,\n       a.D_BIZ AS D_BIZ\n  FROM APP.HOLDINGS a\n WHERE D_BIZ = DATE '2026-08-14'";
@@ -1343,6 +1371,98 @@ fn task_crud_persists_stable_identity_without_exposing_credentials() {
 }
 
 #[test]
+fn table_task_pre_sql_is_validated_persisted_and_updated_against_the_bound_target() {
+    let rig = Rig::new();
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let datasources = (source_id, target_id);
+    let original = REPRESENTATIVE_PRE_SQL;
+
+    let created = rig.post(
+        "/api/tasks",
+        &task_json_with_pre_sql("持仓清理", "HOLDINGS", &datasources, original),
+    );
+    assert_eq!(created.status, 201, "{}", created.body_text());
+    let created = rig.json(&created);
+    let task_id = created["task_id"].as_str().unwrap();
+    assert_eq!(created["spec"]["pre_sql"], original);
+    assert_eq!(
+        rig.json(&rig.get(&format!("/api/tasks/{task_id}")))["spec"]["pre_sql"],
+        original
+    );
+
+    let updated_sql = "DELETE FROM HOLDINGS WHERE D_BIZ = CURRENT_DATE";
+    let updated = rig.put(
+        &format!("/api/tasks/{task_id}"),
+        &task_json_with_pre_sql("持仓清理", "HOLDINGS", &datasources, updated_sql),
+    );
+    assert_eq!(updated.status, 200, "{}", updated.body_text());
+    assert_eq!(rig.json(&updated)["spec"]["pre_sql"], updated_sql);
+
+    let wrong_target = rig.post(
+        "/api/tasks",
+        &task_json_with_pre_sql(
+            "越界清理",
+            "HOLDINGS",
+            &datasources,
+            "DELETE FROM other.HOLDINGS WHERE ID = 1",
+        ),
+    );
+    assert_eq!(wrong_target.status, 400, "{}", wrong_target.body_text());
+    assert!(wrong_target.body_text().contains("当前任务的目标表"));
+}
+
+#[test]
+fn custom_source_task_preserves_pre_sql_through_save_and_manual_run() {
+    let rig = Rig::new();
+    let (_agent_id, source_id, target_id) = rig.seed();
+    let custom_source = "SELECT ID, D_BIZ FROM APP.HOLDINGS WHERE STATUS = 'READY'";
+    let created = rig.post(
+        "/api/tasks",
+        &custom_task_json_with_pre_sql(
+            "自定义源清理",
+            "HOLDINGS",
+            &(source_id, target_id),
+            custom_source,
+            REPRESENTATIVE_PRE_SQL,
+        ),
+    );
+    assert_eq!(created.status, 201, "{}", created.body_text());
+    let created = rig.json(&created);
+    let task_id = created["task_id"].as_str().unwrap();
+    assert_eq!(created["spec"]["source_sql"], custom_source);
+    assert_eq!(created["spec"]["pre_sql"], REPRESENTATIVE_PRE_SQL);
+    assert_eq!(
+        rig.json(&rig.get(&format!("/api/tasks/{task_id}")))["spec"]["pre_sql"],
+        REPRESENTATIVE_PRE_SQL
+    );
+
+    let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
+    assert_eq!(started.status, 202, "{}", started.body_text());
+    let run_record_id = rig.json(&started)["run_record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let accepted = rig.json(&rig.get(&format!("/api/runs/{run_record_id}")));
+    assert_eq!(accepted["trigger"], "MANUAL");
+    assert_eq!(
+        accepted["evidence"]["parameters"]["pre_sql"],
+        REPRESENTATIVE_PRE_SQL
+    );
+    assert!(accepted["source_sql"]
+        .as_str()
+        .is_some_and(|sql| sql.contains(custom_source)));
+
+    let task_files = directory_entries(&rig.directory.join("run-tasks"));
+    assert_eq!(task_files.len(), 1);
+    let materialized = load_task_config(&task_files[0]).unwrap();
+    assert_eq!(
+        materialized.spec.pre_sql.as_deref(),
+        Some(REPRESENTATIVE_PRE_SQL)
+    );
+    assert_eq!(materialized.spec.source_sql.as_deref(), Some(custom_source));
+}
+
+#[test]
 fn task_writes_reject_client_identity_and_incomplete_definitions() {
     let rig = Rig::new();
     let (_agent_id, source_id, target_id) = rig.seed();
@@ -1655,11 +1775,18 @@ while [ ! -f '{}' ]; do sleep 0.02; done
         release.display(),
     ));
     let (agent_id, source_id, target_id) = rig.seed();
-    let task_id = rig.create_task(
-        "holdings",
-        "HOLDINGS",
-        &(source_id.clone(), target_id.clone()),
+    let pre_sql = "/* snapshot */\nDELETE FROM qbs.HOLDINGS WHERE D_BIZ < CURRENT_DATE;";
+    let created = rig.post(
+        "/api/tasks",
+        &task_json_with_pre_sql(
+            "holdings",
+            "HOLDINGS",
+            &(source_id.clone(), target_id.clone()),
+            pre_sql,
+        ),
     );
+    assert_eq!(created.status, 201, "{}", created.body_text());
+    let task_id = rig.json(&created)["task_id"].as_str().unwrap().to_owned();
 
     let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
     assert_eq!(started.status, 202, "{}", started.body_text());
@@ -1693,6 +1820,7 @@ while [ ! -f '{}' ]; do sleep 0.02; done
     assert_eq!(accepted["evidence"]["parameters"]["target_table"], "HOLDINGS");
     assert_eq!(accepted["evidence"]["parameters"]["primary_key"], serde_json::json!(["ID"]));
     assert_eq!(accepted["evidence"]["parameters"]["source_sql"], EXPECTED_SOURCE_SQL);
+    assert_eq!(accepted["evidence"]["parameters"]["pre_sql"], pre_sql);
     assert!(!serde_json::to_string(&accepted).unwrap().contains("change-me"));
     assert!(!serde_json::to_string(&accepted).unwrap().contains("secret"));
     assert_eq!(accepted["seq"], 0);
@@ -4689,6 +4817,19 @@ fn scheduled_task_json(
     )
 }
 
+fn scheduled_task_json_with_pre_sql(
+    name: &str,
+    target_table: &str,
+    datasources: &(String, String),
+    cron: &str,
+    pre_sql: &str,
+) -> String {
+    let mut task: Value =
+        serde_json::from_str(&scheduled_task_json(name, target_table, datasources, cron)).unwrap();
+    task["spec"]["pre_sql"] = Value::String(pre_sql.to_owned());
+    serde_json::to_string(&task).unwrap()
+}
+
 fn create_scheduled_task(
     rig: &Rig,
     name: &str,
@@ -4712,7 +4853,18 @@ fn the_cron_instant_starts_a_run_that_history_marks_as_scheduled() {
     let rig = Rig::new();
     let (_agent_id, source_id, target_id) = rig.seed();
     let datasources = (source_id, target_id);
-    let task_id = create_scheduled_task(&rig, "每分钟", "HOLDINGS", &datasources, "* * * * *");
+    let created = rig.post(
+        "/api/tasks",
+        &scheduled_task_json_with_pre_sql(
+            "每分钟",
+            "HOLDINGS",
+            &datasources,
+            "* * * * *",
+            REPRESENTATIVE_PRE_SQL,
+        ),
+    );
+    assert_eq!(created.status, 201, "{}", created.body_text());
+    let task_id = rig.json(&created)["task_id"].as_str().unwrap().to_owned();
 
     scheduler_pass(&rig, "2026-08-28 03:10");
     let quiet = rig.json(&rig.get(&format!("/api/runs?task_id={task_id}")));
@@ -4726,8 +4878,22 @@ fn the_cron_instant_starts_a_run_that_history_marks_as_scheduled() {
     assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
     assert_eq!(listed[0]["trigger"], "SCHEDULED");
     assert_eq!(listed[0]["task_name"], "每分钟");
+    assert_eq!(
+        listed[0]["evidence"]["parameters"]["pre_sql"],
+        REPRESENTATIVE_PRE_SQL
+    );
     // 真发出去了：有运行标识那一半由子进程补，但临时任务文件此刻已经在磁盘上。
     assert!(listed[0]["run_record_id"].as_str().is_some_and(|id| !id.is_empty()));
+    let task_files = directory_entries(&rig.directory.join("run-tasks"));
+    assert_eq!(task_files.len(), 1);
+    assert_eq!(
+        load_task_config(&task_files[0])
+            .unwrap()
+            .spec
+            .pre_sql
+            .as_deref(),
+        Some(REPRESENTATIVE_PRE_SQL)
+    );
 
     // 同一分钟内再评估一次不会再触发一回（`next_after` 是严格之后）。
     scheduler_pass(&rig, "2026-08-28 03:11");

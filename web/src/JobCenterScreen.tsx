@@ -38,6 +38,7 @@ import { ScheduleCard } from "./ScheduleCard";
 import { sourceSummary } from "./spec";
 import { rowRunAction } from "./troubleshooting";
 import type { Step } from "./wizard";
+import { hasPreSql } from "./writeMode";
 import { ActionButton, Modal, ModalFooter, Pagination } from "./ui";
 
 /**
@@ -822,6 +823,9 @@ function JobResults({
                   <span className="task-name" title={`任务 ID ${task.task_id}`}>
                     {task.name}
                   </span>
+                  {task.spec.write_mode === "APPEND" && hasPreSql(task.spec.pre_sql) && (
+                    <span className="write-mark is-cleanup">追加写 + preSQL 清理</span>
+                  )}
                   {/* 写入方式那两枚标记（「纯追加写」/「先清空再导入」）撤了：它们是
                       任务**属性**，一天看一次就够，却在每一行的任务名后面各占一块，
                       清单最该一眼扫过的那一列因此再没法一眼扫过。两句话都还在——

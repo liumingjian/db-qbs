@@ -27,6 +27,7 @@ fn spec() -> TaskSpec {
         table: "T_R_FR_ASTSTAT".to_owned(),
         target_table: "T_POSITION".to_owned(),
         write_mode: WriteMode::Append,
+        pre_sql: None,
         schedule_cron: None,
         schedule_enabled: false,
         columns: vec![identity("N_VA_PRICE"), identity("D_BIZ")],

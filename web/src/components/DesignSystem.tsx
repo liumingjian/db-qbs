@@ -67,6 +67,7 @@ export function PhaseLine({ current }: { current: RunPhase | null }) {
  */
 const TERMINAL_COPY: Readonly<Record<string, string>> = {
   SWAPPED: "已按主键合并写入",
+  CLEANED_AND_SWAPPED: "preSQL 清理与导入已提交",
   REPLACED: "目标表已整表替换",
   DISCARDED: "目标表未被触碰",
   UNKNOWN: "目标表效果未知",

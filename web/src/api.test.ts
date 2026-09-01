@@ -274,6 +274,20 @@ describe("task API", () => {
     }));
   });
 
+  it("preserves the exact preSQL string in the task API payload", async () => {
+    const preSql = "/* exact spacing */\nDELETE  FROM HOLDINGS WHERE D_BIZ = CURRENT_DATE;\n";
+    const input = taskInput({ spec: spec({ pre_sql: preSql }) });
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ task_id: "task-01", ...input }), { status: 201 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createTask(input);
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1].body));
+    expect(body.spec.pre_sql).toBe(preSql);
+  });
+
   it("never sends a SQL string with the task definition", async () => {
     const input = taskInput({
       name: "持仓明细",

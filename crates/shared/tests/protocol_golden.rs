@@ -194,6 +194,7 @@ fn open_run_request_shape_with_range_check_results() {
             target_table: "ORDERS".to_owned(),
             target: target(),
             write_mode: WriteMode::Append,
+            pre_sql: None,
             primary_key: vec!["ID".to_owned()],
             source_columns: vec![column_minimal()],
             range_check_results: Some(vec![RangeCheckResult {
@@ -227,6 +228,7 @@ fn open_run_request_shape_omits_absent_range_check_results() {
             target_table: "ORDERS".to_owned(),
             target: target(),
             write_mode: WriteMode::Append,
+            pre_sql: None,
             primary_key: vec!["ID".to_owned()],
             source_columns: vec![],
             range_check_results: None,
@@ -236,6 +238,33 @@ fn open_run_request_shape_omits_absent_range_check_results() {
             "target_table": "ORDERS",
             "target": target_json(),
             "write_mode": "APPEND",
+            "primary_key": ["ID"],
+            "source_columns": []
+        }),
+    );
+}
+
+#[test]
+fn open_run_request_preserves_the_exact_pre_sql_text() {
+    round_trip(
+        OpenRunRequest {
+            run_id: "20260818120000_a1b2c3".to_owned(),
+            target_table: "ORDERS".to_owned(),
+            target: target(),
+            write_mode: WriteMode::Append,
+            pre_sql: Some(
+                "/* cleanup */\nDELETE FROM qbs.ORDERS WHERE DAY = CURRENT_DATE;".to_owned(),
+            ),
+            primary_key: vec!["ID".to_owned()],
+            source_columns: vec![],
+            range_check_results: None,
+        },
+        json!({
+            "run_id": "20260818120000_a1b2c3",
+            "target_table": "ORDERS",
+            "target": target_json(),
+            "write_mode": "APPEND",
+            "pre_sql": "/* cleanup */\nDELETE FROM qbs.ORDERS WHERE DAY = CURRENT_DATE;",
             "primary_key": ["ID"],
             "source_columns": []
         }),
@@ -255,6 +284,7 @@ fn open_run_request_shape_carries_an_empty_primary_key_as_an_empty_array() {
             target_table: "T_FLOW".to_owned(),
             target: target(),
             write_mode: WriteMode::Append,
+            pre_sql: None,
             primary_key: vec![],
             source_columns: vec![],
             range_check_results: None,
@@ -283,6 +313,7 @@ fn open_run_request_shape_carries_the_clear_then_import_mode() {
             target_table: "ORDERS".to_owned(),
             target: target(),
             write_mode: WriteMode::ClearThenImport,
+            pre_sql: None,
             primary_key: vec!["ID".to_owned()],
             source_columns: vec![],
             range_check_results: None,
@@ -486,9 +517,11 @@ fn abort_response_shape() {
 fn terminal_shape() {
     // 大写字面量与 `Terminal::as_str()` 必须一致——两处漂了，运行历史就对不上。
     round_trip(Terminal::Swapped, json!("SWAPPED"));
+    round_trip(Terminal::CleanedAndSwapped, json!("CLEANED_AND_SWAPPED"));
     round_trip(Terminal::Replaced, json!("REPLACED"));
     round_trip(Terminal::Discarded, json!("DISCARDED"));
     assert_eq!(Terminal::Swapped.as_str(), "SWAPPED");
+    assert_eq!(Terminal::CleanedAndSwapped.as_str(), "CLEANED_AND_SWAPPED");
     assert_eq!(Terminal::Replaced.as_str(), "REPLACED");
     assert_eq!(Terminal::Discarded.as_str(), "DISCARDED");
     // 三个值，各说各的事（#264）。`SWAPPED` 是「按主键合并」，`REPLACED` 是

@@ -14,5 +14,5 @@ ready for an AFK agent), `ready-for-human` (requires human implementation), `won
 
 ### Domain docs
 
-Single-context — `CONTEXT.md` at the repo root is the one domain document. There is no
-`docs/adr/`: the decision record lives in GitHub issues and in git history.
+Single-context — `CONTEXT.md` at the repo root is the one present-tense domain document.
+Accepted decision records may live in `docs/adr/`; GitHub issues and git remain the history.

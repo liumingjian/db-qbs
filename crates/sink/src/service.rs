@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use db_qbs_shared::{MysqlServerInfo, OpenOutcome, RowCounts, Verdict};
+use db_qbs_shared::{validate_pre_sql, MysqlServerInfo, OpenOutcome, RowCounts, Verdict};
 use regex::Regex;
 use serde_json::json;
 
@@ -214,6 +214,20 @@ impl<F: DestinationFactory> SinkService<F> {
             .connect(&request.target)
             .map_err(|message| target_connect_error(&request.run_id, message))?;
         let destination = connected.destination;
+        let pre_sql = validate_pre_sql(
+            request.pre_sql.as_deref(),
+            &connected.database,
+            &request.target_table,
+            request.write_mode,
+        )
+        .map_err(|error| ApiError {
+            status: 400,
+            code: "BAD_REQUEST",
+            message: error.to_string(),
+            run_id: Some(request.run_id.clone()),
+            details: json!({}),
+        })?
+        .map(str::to_owned);
         self.remember_mysql(destination.as_ref());
         // 受理点在**连上之后**：库名是工厂给的那一份（`ConnectedDestination::database`），
         // 请求里的那个字段只是它的原料。一次连接的代价换互斥键与运行时用的是同一个库名。
@@ -309,6 +323,7 @@ impl<F: DestinationFactory> SinkService<F> {
         let active_run = ActiveRun {
             run_id: request.run_id.clone(),
             write_mode: request.write_mode,
+            pre_sql,
             database: connected.database,
             staging_table: staging_table.clone(),
             max_rows_per_insert: MAX_PREPARED_STATEMENT_PLACEHOLDERS / source_columns.len(),
@@ -490,6 +505,7 @@ impl<F: DestinationFactory> SinkService<F> {
             staging_table: run.staging_table.clone(),
             target_table: run.target_table.clone(),
             write_mode: run.write_mode,
+            pre_sql: run.pre_sql.clone(),
             primary_key: run.primary_key.clone(),
             columns: run.swap_columns.clone(),
             source_rows: total_rows,
@@ -504,6 +520,8 @@ impl<F: DestinationFactory> SinkService<F> {
                 // 运行历史就会对着一次清空后导入说「已按主键合并」——那是假话。
                 let terminal = if run.write_mode.clears_target() {
                     Terminal::Replaced
+                } else if run.pre_sql.is_some() {
+                    Terminal::CleanedAndSwapped
                 } else {
                     Terminal::Swapped
                 };
@@ -540,12 +558,17 @@ impl<F: DestinationFactory> SinkService<F> {
             }
             Err(AtomicSwapError::TargetBusy { errno }) => {
                 self.finish_run(run_id, &run, Terminal::Discarded, 0, 0);
+                let rollback = if run.pre_sql.is_some() {
+                    "；事务已回滚，清理和导入的目标效果均已丢弃，未提交任何清理"
+                } else {
+                    ""
+                };
                 let mut error = ApiError {
                     status: 409,
                     code: "SWAP_TARGET_BUSY",
                     message: format!(
-                        "目标表 {} 当前被另一个切换事务占用，通常是同一张表上有另一个 run 正在切换；这不是数据错误，重跑即可",
-                        run.target_table
+                        "目标表 {} 当前被另一个切换事务占用，通常是同一张表上有另一个 run 正在切换；这不是数据错误{rollback}，重跑即可",
+                        run.target_table,
                     ),
                     run_id: Some(run_id.to_owned()),
                     details: json!({
@@ -558,12 +581,15 @@ impl<F: DestinationFactory> SinkService<F> {
             }
             Err(AtomicSwapError::Other(message)) => {
                 self.finish_run(run_id, &run, Terminal::Discarded, 0, 0);
+                let rollback = if run.pre_sql.is_some() {
+                    "清理和导入的目标效果均已丢弃，未提交任何清理，可直接重跑"
+                } else {
+                    "目标表未被触碰，可直接重跑"
+                };
                 let mut error = ApiError {
                     status: 500,
                     code: "SWAP_FAILED",
-                    message: format!(
-                        "切换目标表失败，事务已回滚：{message}。目标表未被触碰，可直接重跑"
-                    ),
+                    message: format!("切换目标表失败，事务已回滚：{message}。{rollback}"),
                     run_id: Some(run_id.to_owned()),
                     details: json!({}),
                 };

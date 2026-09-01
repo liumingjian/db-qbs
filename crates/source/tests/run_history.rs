@@ -153,6 +153,7 @@ fn evidence() -> RunEvidence {
             }],
             primary_key: vec!["ID".to_owned()],
             write_mode: WriteMode::Append,
+            pre_sql: None,
             source_sql: SOURCE_SQL.to_owned(),
         }),
     }

@@ -35,6 +35,7 @@ fn streams_rows_in_order_then_commits_the_fetch_accumulator() {
             target_table: "ORDERS".to_owned(),
             target: target(),
             write_mode: WriteMode::Append,
+            pre_sql: Some("DELETE FROM qbs.ORDERS WHERE ID < 0".to_owned()),
             primary_key: vec!["ID".to_owned()],
         },
         |_| {},
@@ -44,6 +45,10 @@ fn streams_rows_in_order_then_commits_the_fetch_accumulator() {
     assert_eq!(sink.calls, vec!["open", "batch:1", "batch:2", "commit"]);
     assert_eq!(sink.batch_rows, vec![5_000, 1]);
     assert_eq!(sink.commit_counts, Some((2, 5_001)));
+    assert_eq!(
+        sink.opened_pre_sql,
+        vec![Some("DELETE FROM qbs.ORDERS WHERE ID < 0".to_owned())]
+    );
     assert_eq!(summary.source_rows, 5_001);
     assert_eq!(summary.total_batches, 2);
 }
@@ -65,6 +70,7 @@ fn batch_events_include_the_cumulative_source_row_count() {
             target_table: "ORDERS".to_owned(),
             target: target(),
             write_mode: WriteMode::Append,
+            pre_sql: None,
             primary_key: vec!["ID".to_owned()],
         },
         |event| events.push(event),
@@ -106,6 +112,7 @@ fn open_failure_does_not_abort_before_staging_exists() {
             target_table: "ORDERS".to_owned(),
             target: target(),
             write_mode: WriteMode::Append,
+            pre_sql: None,
             primary_key: vec!["ID".to_owned()],
         },
         |event| events.push(event),
@@ -145,6 +152,7 @@ fn commit_transport_failure_gets_once_and_never_aborts() {
             target_table: "ORDERS".to_owned(),
             target: target(),
             write_mode: WriteMode::Append,
+            pre_sql: None,
             primary_key: vec!["ID".to_owned()],
         },
         |event| events.push(event),
@@ -180,6 +188,7 @@ fn empty_result_commits_without_sending_a_batch() {
             target_table: "ORDERS".to_owned(),
             target: target(),
             write_mode: WriteMode::Append,
+            pre_sql: None,
             primary_key: vec!["ID".to_owned()],
         },
         |_| {},
@@ -220,6 +229,7 @@ fn range_check_runs_between_two_open_requests_and_emits_scan_event() {
             target_table: "ORDERS".to_owned(),
             target: target(),
             write_mode: WriteMode::Append,
+            pre_sql: None,
             primary_key: vec!["ID".to_owned()],
         },
         |event| events.push(event),
@@ -276,6 +286,7 @@ fn a_sink_that_asks_for_a_range_check_twice_is_a_defect_and_no_batch_is_pushed()
             target_table: "ORDERS".to_owned(),
             target: target(),
             write_mode: WriteMode::Append,
+            pre_sql: None,
             primary_key: vec!["ID".to_owned()],
         },
         |_| {},
@@ -303,6 +314,7 @@ fn fetch_failure_aborts_and_does_not_commit() {
             target_table: "ORDERS".to_owned(),
             target: target(),
             write_mode: WriteMode::Append,
+            pre_sql: None,
             primary_key: vec!["ID".to_owned()],
         },
         |_| {},
@@ -330,6 +342,7 @@ fn byte_budget_splits_wide_rows_before_the_row_limit() {
             target_table: "ORDERS".to_owned(),
             target: target(),
             write_mode: WriteMode::Append,
+            pre_sql: None,
             primary_key: vec!["ID".to_owned()],
         },
         |_| {},
@@ -360,6 +373,7 @@ fn commit_diagnostic_distinguishes_discarded_and_unknown() {
                 target_table: "ORDERS".to_owned(),
                 target: target(),
                 write_mode: WriteMode::Append,
+                pre_sql: None,
                 primary_key: vec!["ID".to_owned()],
             },
             |_| {},
@@ -400,6 +414,7 @@ fn rows_written_mismatch_aborts_before_commit() {
             target_table: "ORDERS".to_owned(),
             target: target(),
             write_mode: WriteMode::Append,
+            pre_sql: None,
             primary_key: vec!["ID".to_owned()],
         },
         |_| {},
@@ -459,6 +474,7 @@ fn a_commit_response_outside_the_shared_verdict_is_a_defect_not_a_verify_failure
                 target_table: "ORDERS".to_owned(),
                 target: target(),
                 write_mode: WriteMode::Append,
+                pre_sql: None,
                 primary_key: vec!["ID".to_owned()],
             },
             |_| {},
@@ -487,6 +503,7 @@ fn abort_failure_is_reported_before_the_failed_stage() {
             target_table: "ORDERS".to_owned(),
             target: target(),
             write_mode: WriteMode::Append,
+            pre_sql: None,
             primary_key: vec!["ID".to_owned()],
         },
         |event| events.push(event),
@@ -587,6 +604,7 @@ struct RecordingSink {
     commit_counts: Option<(u64, u64)>,
     range_check_columns: Option<Vec<RangeCheckColumn>>,
     range_check_requests: Vec<Option<Vec<RangeCheckResult>>>,
+    opened_pre_sql: Vec<Option<String>>,
     wrong_batch_count: bool,
     abort_error: bool,
     /// 让 commit 回一份**与 sink 自己的判据不相容**的数字。生产里回不出这种数字：
@@ -597,6 +615,7 @@ struct RecordingSink {
 impl SinkClient for RecordingSink {
     fn open_attempt(&mut self, request: &OpenRunRequest) -> Result<OpenOutcome, SinkError> {
         self.calls.push("open");
+        self.opened_pre_sql.push(request.pre_sql.clone());
         self.range_check_requests
             .push(request.range_check_results.clone());
         if request.range_check_results.is_none() {

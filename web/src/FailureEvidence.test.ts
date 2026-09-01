@@ -46,15 +46,41 @@ const UNKNOWN_RUN: RunHistory = {
   mapping_issues: [],
 };
 
-function evidenceHtml(run: RunHistory): string {
+function evidenceHtml(run: RunHistory, variant: "failure" | "unknown" = "unknown"): string {
   return renderToStaticMarkup(createElement(FailureEvidence, {
     run,
-    variant: "unknown",
+    variant,
     onEditTask: () => undefined,
   }));
 }
 
 describe("unknown-outcome clues", () => {
+  it("shows immutable preSQL evidence and states that failed cleanup did not commit", () => {
+    const sql = "/* exact */\nDELETE FROM customer WHERE id = 7;";
+    const html = evidenceHtml({
+      ...UNKNOWN_RUN,
+      outcome: "FAILED",
+      unknown_reason: null,
+      evidence: {
+        source: { datasource_id: "s", connect_string: "db", username: "u", client_lib_dir: "lib" },
+        target: { datasource_id: "t", host: "db", port: 3306, database: "app", username: "u" },
+        agent: { agent_id: "a", name: "agent", base_url: "http://agent", instance_id: "i" },
+        parameters: {
+          target_table: "customer",
+          columns: [{ source: "ID", target: "ID" }],
+          primary_key: ["ID"],
+          write_mode: "APPEND",
+          source_sql: "SELECT ID FROM APP.CUSTOMER",
+          pre_sql: sql,
+        },
+      },
+    }, "failure");
+    expect(html).toContain("preSQL 清理未提交");
+    expect(html).toContain("已随运行失败回滚");
+    expect(html).toContain("DELETE");
+    expect(html).toContain("customer");
+  });
+
   // The two facts below are about *how far this run got*, not about which machine it
   // connected to, so they must not ride along with the connection snapshot. A record
   // written before snapshots existed — and PROCESS_DISAPPEARED is the likeliest one —

@@ -91,6 +91,7 @@ pub struct TransferRequest {
     pub primary_key: Vec<String>,
     /// 任务定义里的写入模式（#261），原样过线。
     pub write_mode: WriteMode,
+    pub pre_sql: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,6 +267,7 @@ pub fn run_transfer(
         target_table: request.target_table,
         target: request.target,
         write_mode: request.write_mode,
+        pre_sql: request.pre_sql,
         primary_key: request.primary_key.clone(),
         source_columns: source.columns().to_vec(),
         range_check_results: None,
@@ -628,6 +630,20 @@ fn diagnose_commit(
             format!(
                 "目标端报告该 run 已切换成功（swapped_rows={}），目标表已是新数据，重跑前请先确认",
                 swapped_rows
+            ),
+        ),
+        Ok(RunResponse {
+            run_id: response_run_id,
+            terminal: Some(Terminal::CleanedAndSwapped),
+            swapped_rows: Some(swapped_rows),
+            purged_rows,
+            ..
+        }) if response_run_id == run_id => (
+            Some(Terminal::CleanedAndSwapped),
+            format!(
+                "目标端报告该 run 已完成 preSQL 清理与导入（清理 {} 行、导入 {swapped_rows} 行），清理与导入已在同一事务中提交，重跑前请先确认",
+                purged_rows
+                    .map_or_else(|| "?".to_owned(), |rows| rows.to_string()),
             ),
         ),
         // 整表被替换是另一件事，不能并进上面那一支（#264）：那一句说的是「已按主键合并」，

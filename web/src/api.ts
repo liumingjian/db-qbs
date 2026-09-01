@@ -15,6 +15,8 @@ export interface ColumnMapping {
 
 export interface TaskSpec {
   source_sql?: string;
+  /** Optional APPEND-only target cleanup. Nonblank text is stored exactly as authored. */
+  pre_sql?: string;
   dblink?: string;
   owner: string;
   table: string;
@@ -363,6 +365,8 @@ export interface RunEvidence {
      * `primary_key`，不是任务此刻的定义。
      */
     write_mode?: WriteMode;
+    /** Exact cleanup SQL accepted for this run, independent of later task edits. */
+    pre_sql?: string;
     source_sql: string;
   } | null;
 }
@@ -395,14 +399,16 @@ export interface RunHistory {
   finished_at: string | null;
   outcome: "SUCCEEDED" | "FAILED" | null;
   /**
-   * 目标表最后被怎么了。`SWAPPED`「按主键合并进目标表」、`REPLACED`「整表被替换」
-   * （先清空再导入，#264）、`DISCARDED`「没被触碰」，外加 `UNKNOWN`「说不清」。
+   * 目标表最后被怎么了。`SWAPPED`「按主键合并进目标表」、`CLEANED_AND_SWAPPED`
+   * 「preSQL 清理与导入一起提交」、`REPLACED`「整表被替换」（先清空再导入，#264）、
+   * `DISCARDED`「没有目标效果提交」，外加 `UNKNOWN`「说不清」。
    *
    * `string` 那一支不是偷懒：服务端这一列原样搬运它不认识的拼写，前端也不能吞掉
    * ——「后端比前端新」正是最该被看见的时候。
    */
   target_table_effect:
     | "SWAPPED"
+    | "CLEANED_AND_SWAPPED"
     | "REPLACED"
     | "DISCARDED"
     | "UNKNOWN"
