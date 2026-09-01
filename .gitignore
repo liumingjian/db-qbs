@@ -1,4 +1,5 @@
 /target/
+.DS_Store
 /config/*.toml
 !/config/database.toml
 node_modules/
