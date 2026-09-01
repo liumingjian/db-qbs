@@ -6,6 +6,7 @@
 #   packaging/centos7/build.sh --platform linux/arm64   # 只编一个平台（可重复给）
 #   packaging/centos7/build.sh --no-verify           # 只编不验
 #   packaging/centos7/build.sh --skip-web            # 复用已有的 web/dist，不重跑前端构建
+#   packaging/centos7/build.sh --rebuild-image       # 强制重出 centos:7 构建镜像（改了 Dockerfile 时）
 #
 # 产物在 packaging/centos7/out/bin/<linux-amd64|linux-arm64>/，不进版本库。
 # 依赖：docker（在 mac 上跑，服务器内存不够）。
@@ -23,6 +24,7 @@ BASE_IMAGE="${BASE_IMAGE:-centos:7}"
 BASE_IMAGE="${BASE_IMAGE:-centos:7}"
 DO_VERIFY=1
 DO_WEB=1
+REBUILD_IMAGE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -31,6 +33,7 @@ while [[ $# -gt 0 ]]; do
     --rust-version) [[ $# -ge 2 ]] || { echo "--rust-version 要跟一个值，如 1.90.0" >&2; exit 2; }
                 RUST_VERSION="$2"; shift 2 ;;
     --no-verify) DO_VERIFY=0; shift ;;
+    --rebuild-image) REBUILD_IMAGE=1; shift ;;
     --skip-web) DO_WEB=0; shift ;;
     -h|--help) sed -n '2,13p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "未知参数：$1" >&2; exit 2 ;;
@@ -60,6 +63,10 @@ if (( DO_WEB )); then
       mkdir -p /build/docs && cd /build
       cp -a /src/package.json /src/package-lock.json /src/tsconfig.json /src/vite.config.ts /build/
       cp -a /src/web /build/web
+      # `mock/` 也要进来：`vite.config.ts` 顶上无条件 import 它（假后端只在
+      # VITE_MOCK=1 时才真的挂上去，但那句 import 本身是加载配置就要解析的）。
+      # 少这一行，容器里连 vite 配置都读不出来，构建停在 UNRESOLVED_IMPORT。
+      cp -a /src/mock /build/mock
       cp -a /src/docs/design-system /build/docs/
       rm -rf /build/web/dist
       npm ci --no-audit --no-fund
@@ -96,16 +103,32 @@ for platform in "${PLATFORMS[@]}"; do
   # 先把基础镜像拉到本地：buildkit 直接解析 centos:7 的 manifest 在 Docker Desktop 上
   # 会偶发 `failed size validation`（两个平台各撞过一次），而 docker pull 走的是另一条路，
   # 拉下来之后 build 就正常了。
-  echo "==> 拉基础镜像 ${BASE_IMAGE}（${platform}）"
-  docker pull --platform "$platform" "$BASE_IMAGE" >/dev/null
+  # 本地已经有同架构的构建镜像时**整段跳过**（拉基础镜像 + docker build）。
+  # 这不是省时间，是能不能编出来的问题：centos:7 早已 EOL，装机现场与任何一条到
+  # Docker Hub 不通的网络上都拉不动它，而构建镜像里装的是工具链、不含本仓库的代码，
+  # 手上那一份照样能用。Dockerfile 改了要重新出镜像时给 `--rebuild-image`。
+  have_image=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image" 2>/dev/null || true)
+  if (( ! REBUILD_IMAGE )) && [[ "$have_image" == "$platform" ]]; then
+    echo "==> 复用已有的构建镜像 ${image}（${have_image}）"
+  else
+    echo "==> 拉基础镜像 ${BASE_IMAGE}（${platform}）"
+    if ! docker pull --platform "$platform" "$BASE_IMAGE" >/dev/null 2>&1; then
+      have_base=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$BASE_IMAGE" 2>/dev/null || true)
+      [[ "$have_base" == "$platform" ]] || {
+        echo "!! 拉不到 ${BASE_IMAGE}（${platform}），本地也没有同架构的一份（本地：${have_base:-无}）" >&2
+        exit 1
+      }
+      echo "   拉取失败，改用本地已有的 ${BASE_IMAGE}（${have_base}）"
+    fi
 
-  echo "==> 构建 centos:7 构建镜像 ${image}（yum 源 ${vault_base}，后备 ${vault_mirrors}）"
-  docker build --platform "$platform" \
-    --build-arg "BASE_IMAGE=$BASE_IMAGE" \
-    --build-arg "RUST_VERSION=$RUST_VERSION" \
-    --build-arg "VAULT_BASE=$vault_base" \
-    --build-arg "VAULT_MIRRORS=$vault_mirrors" \
-    -t "$image" "$HERE"
+    echo "==> 构建 centos:7 构建镜像 ${image}（yum 源 ${vault_base}，后备 ${vault_mirrors}）"
+    docker build --platform "$platform" \
+      --build-arg "BASE_IMAGE=$BASE_IMAGE" \
+      --build-arg "RUST_VERSION=$RUST_VERSION" \
+      --build-arg "VAULT_BASE=$vault_base" \
+      --build-arg "VAULT_MIRRORS=$vault_mirrors" \
+      -t "$image" "$HERE"
+  fi
 
   echo "==> 在 centos:7 里 cargo build --release --locked"
   # target 与 registry 各平台一份：同一个 target 目录在两个架构间来回用会整棵重编。
