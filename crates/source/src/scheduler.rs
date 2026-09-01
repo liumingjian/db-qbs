@@ -399,6 +399,7 @@ mod tests {
                 target_table: "t".to_owned(),
                 where_clause: None,
                 write_mode: WriteMode::Append,
+                pre_sql: None,
                 schedule_cron: cron.map(str::to_owned),
                 schedule_enabled: enabled,
                 primary_key: vec!["id".to_owned()],

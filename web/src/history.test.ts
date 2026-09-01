@@ -150,6 +150,17 @@ describe("run history presentation", () => {
     });
   });
 
+  it("recognizes cleanup success and reports the committed deletion count", () => {
+    const presented = historyPresentation(history({
+      outcome: "SUCCEEDED",
+      target_table_effect: "CLEANED_AND_SWAPPED",
+      purged_rows: 1234,
+      sink_code: null,
+    }));
+    expect(knownTerminalEffect(presented.terminalEffect)).toBe("CLEANED_AND_SWAPPED");
+    expect(presented.conclusion).toContain("preSQL 已清理 1,234 行并完成导入");
+  });
+
   // #264：整表替换与按主键合并是两件事，结论条上必须分得开。
   it("整表替换那一档的结论条说的是整表替换，不是按主键合并", () => {
     expect(

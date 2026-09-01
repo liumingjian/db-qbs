@@ -726,7 +726,7 @@ pub fn routes() -> &'static [Route] {
                 handle_list_tasks(state.tasks)
             }),
             Route::new(Post, "/api/tasks", |state, request, _id| {
-                handle_create_task(request, state.tasks)
+                handle_create_task(request, state)
             }),
             Route::new(Get, "/api/tasks/{}", |state, _request, id| {
                 handle_get_task(state.tasks, id)
@@ -735,7 +735,7 @@ pub fn routes() -> &'static [Route] {
                 handle_task_curl(request, state, id)
             }),
             Route::new(Put, "/api/tasks/{}", |state, request, id| {
-                handle_update_task(request, state.tasks, id)
+                handle_update_task(request, state, id)
             }),
             Route::new(Delete, "/api/tasks/{}", |state, _request, id| {
                 handle_delete_task(state, id)
@@ -1496,6 +1496,7 @@ fn start_run(
             columns: task.spec.columns.clone(),
             primary_key: task.spec.primary_key.clone(),
             write_mode: task.spec.write_mode,
+            pre_sql: task.spec.pre_sql.clone(),
             source_sql: task.spec.source_sql(),
         }),
     };
@@ -2172,18 +2173,18 @@ fn handle_list_tasks(store: &TaskStore) -> HttpResponse {
     }
 }
 
-fn handle_create_task(request: &Request, store: &TaskStore) -> HttpResponse {
-    let input: TaskInput = match read_json_body(request) {
+fn handle_create_task(request: &Request, state: &Api<'_>) -> HttpResponse {
+    let mut input: TaskInput = match read_json_body(request) {
         Ok(input) => input,
         Err(error) => return bad_request(error),
     };
     // 校验先判一次，好让它落在 400 上。`store.create` 里还会再判一次——那一次是存储层
     // 自己的门，不依赖任何调用方记得先问；这一次只为把「你写错了」和「服务端坏了」
     // 分成两个状态码。500 会让人去看服务端日志找一个根本不在那里的故障。
-    if let Err(error) = input.validate() {
+    if let Err(error) = validate_task_input_for_target(state, &mut input) {
         return bad_request(error);
     }
-    match store.create(input) {
+    match state.tasks.create(input) {
         Ok(task) => json_response(201, &task),
         Err(error) => internal_error(error),
     }
@@ -2247,19 +2248,44 @@ fn request_origin(request: &Request, fallback_listen: &str) -> Result<String, St
     Ok(origin.as_str().trim_end_matches('/').to_owned())
 }
 
-fn handle_update_task(request: &Request, store: &TaskStore, task_id: &str) -> HttpResponse {
-    let input: TaskInput = match read_json_body(request) {
+fn handle_update_task(request: &Request, state: &Api<'_>, task_id: &str) -> HttpResponse {
+    let mut input: TaskInput = match read_json_body(request) {
         Ok(input) => input,
         Err(error) => return bad_request(error),
     };
-    if let Err(error) = input.validate() {
+    if let Err(error) = validate_task_input_for_target(state, &mut input) {
         return bad_request(error);
     }
-    match store.update(task_id, input) {
+    match state.tasks.update(task_id, input) {
         Ok(Some(task)) => json_response(200, &task),
         Ok(None) => not_found(),
         Err(error) => internal_error(error),
     }
+}
+
+fn validate_task_input_for_target(state: &Api<'_>, input: &mut TaskInput) -> Result<(), String> {
+    input.validate()?;
+    let Some(pre_sql) = input
+        .spec
+        .pre_sql
+        .as_deref()
+        .filter(|sql| !sql.trim().is_empty())
+    else {
+        input.spec.pre_sql = None;
+        return Ok(());
+    };
+    let target = state
+        .datasources
+        .target_connection(&input.target_datasource_id)?;
+    let pre_sql = db_qbs_shared::validate_pre_sql(
+        Some(pre_sql),
+        &target.database,
+        &input.spec.target_table,
+        input.spec.write_mode,
+    )
+    .map_err(|error| error.to_string())?;
+    debug_assert!(pre_sql.is_some());
+    Ok(())
 }
 
 /// 删任务：还有运行没结束就拒（#270），与删数据源 / 删 agent 同一形态的 409。
@@ -3425,6 +3451,7 @@ mod tests {
             target_table: "orders".to_owned(),
             where_clause: Some(where_clause.to_owned()),
             write_mode: WriteMode::Append,
+            pre_sql: None,
             schedule_cron: None,
             schedule_enabled: false,
             primary_key: vec!["BIZ_ID".to_owned()],

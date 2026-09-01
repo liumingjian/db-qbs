@@ -74,6 +74,7 @@ interface HandMade {
   sql: boolean;
   targetTable: boolean;
   taskName: boolean;
+  preSql: boolean;
   /** Source columns whose target field was typed rather than matched. */
   mappings: readonly string[];
 }
@@ -126,6 +127,7 @@ export type Change =
   | { type: "rename-target"; source: string; target: string }
   | { type: "toggle-primary-key"; target: string }
   | { type: "write-mode"; mode: WriteMode }
+  | { type: "pre-sql"; sql: string }
   | { type: "schedule-cron"; cron: string }
   | { type: "schedule-enabled"; enabled: boolean }
   | { type: "where"; clause: string }
@@ -152,6 +154,7 @@ export type Cleared =
   | "where"
   | "sql"
   | "target-table"
+  | "pre-sql"
   | "mappings"
   | "draft";
 
@@ -206,6 +209,7 @@ function noneHandMade(): HandMade {
     sql: false,
     targetTable: false,
     taskName: false,
+    preSql: false,
     mappings: [],
   };
 }
@@ -219,6 +223,7 @@ function allHandMade(): HandMade {
     sql: true,
     targetTable: true,
     taskName: true,
+    preSql: true,
     mappings: [],
   };
 }
@@ -570,11 +575,34 @@ function reduce(draft: Draft, change: Change): Reduced {
       // 它曾经在切到清空模式时把手勾的主键收回去重推（#264 那一版把主键当成
       // 「清空模式下不归人做的决定」）。那条已经撤销：主键任何时候都归人做，
       // 于是切换模式再把它改掉就成了一次背着人的改写。
+      const clearsPreSql =
+        change.mode === "CLEAR_THEN_IMPORT" && (draft.spec.pre_sql ?? "").trim() !== "";
       return {
-        draft: { ...draft, spec: { ...draft.spec, write_mode: change.mode } },
-        cleared: [],
+        draft: {
+          ...draft,
+          spec: {
+            ...draft.spec,
+            write_mode: change.mode,
+            pre_sql: change.mode === "CLEAR_THEN_IMPORT" ? undefined : draft.spec.pre_sql,
+          },
+          hand:
+            change.mode === "CLEAR_THEN_IMPORT"
+              ? { ...draft.hand, preSql: false }
+              : draft.hand,
+        },
+        cleared: clearsPreSql ? ["pre-sql"] : [],
       };
     }
+
+    case "pre-sql":
+      return {
+        draft: {
+          ...draft,
+          spec: { ...draft.spec, pre_sql: change.sql },
+          hand: { ...draft.hand, preSql: true },
+        },
+        cleared: [],
+      };
 
     // 调度（#265）：和写入模式一样是纯粹的记录，不清空任何东西，也不牵动任何一列。
     // 表达式与开关是两个 change，因为它们是两件事——把表达式清空来「暂停」，
@@ -885,6 +913,7 @@ const LOSS_LINES: Record<Exclude<Cleared, "draft">, (draft: Draft) => string> = 
   sql: () => "手写的自定义 SQL",
   "target-table": (draft) => `已选的目标表 ${draft.spec.target_table}`,
   mappings: (draft) => `手动改过的 ${draft.hand.mappings.length} 行字段映射`,
+  "pre-sql": () => "手写的 preSQL 清理语句",
 };
 
 /**
@@ -931,6 +960,8 @@ function handMade(draft: Draft, kind: Exclude<Cleared, "draft">): boolean {
       return draft.hand.targetTable && draft.spec.target_table !== "";
     case "mappings":
       return draft.hand.mappings.length > 0;
+    case "pre-sql":
+      return draft.hand.preSql && (draft.spec.pre_sql ?? "").trim() !== "";
   }
 }
 
@@ -1289,7 +1320,7 @@ function writeView(draft: Draft): WriteView {
     mode: draft.spec.write_mode,
     statement,
     statementLabel: writeStatementLabel(statement),
-    note: writeSemanticsNote(statement, draft.spec.write_mode),
+    note: writeSemanticsNote(statement, draft.spec.write_mode, draft.spec.pre_sql),
   };
 }
 
@@ -1510,6 +1541,10 @@ export function toSpec(draft: Draft): TaskSpec {
     primary_key: [...draft.spec.primary_key],
     where_clause: draft.fetchMode === "sql" ? "" : (draft.spec.where_clause ?? ""),
   };
+  const preSql = draft.spec.pre_sql;
+  if (draft.spec.write_mode === "APPEND" && preSql !== undefined && preSql.trim() !== "") {
+    spec.pre_sql = preSql;
+  }
   if (draft.fetchMode === "sql") {
     spec.source_sql = draft.spec.source_sql ?? "";
   } else if (draft.spec.dblink !== undefined) {

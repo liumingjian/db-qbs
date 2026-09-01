@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import type { RunHistory, Task } from "./api";
 import { JobCenterScreen, queuedTitle } from "./JobCenterScreen";
+import { RunDrawer } from "./RunDrawer";
 
 const NEVER_RUN_TASK: Task = {
   task_id: "task-1",
@@ -253,6 +254,53 @@ describe("清单上不再复述写入方式（主界面从简）", () => {
       spec: { ...NEVER_RUN_TASK.spec, write_mode: "CLEAR_THEN_IMPORT" },
     });
     expect(clearing).not.toContain("先清空再导入");
+  });
+
+  it("marks only APPEND tasks whose preSQL cleanup is nonblank", () => {
+    const cleanup = render({
+      ...NEVER_RUN_TASK,
+      spec: { ...NEVER_RUN_TASK.spec, pre_sql: "DELETE FROM customer WHERE id = 7" },
+    });
+    expect(cleanup).toContain("追加写 + preSQL 清理");
+    expect(render(NEVER_RUN_TASK)).not.toContain("追加写 + preSQL 清理");
+  });
+});
+
+describe("completed preSQL run evidence", () => {
+  it("renders the accepted SQL snapshot, cleanup count, and distinct terminal effect", () => {
+    const preSql = `/* immutable */\nDELETE FROM customer WHERE id IN (${"7,".repeat(120)}8);`;
+    const run: RunHistory = {
+      ...LATEST_RUN,
+      target_table_effect: "CLEANED_AND_SWAPPED",
+      purged_rows: 12,
+      evidence: {
+        source: { datasource_id: "source-1", connect_string: "prod", username: "u", client_lib_dir: "lib" },
+        target: { datasource_id: "target-1", host: "db", port: 3306, database: "app", username: "u" },
+        agent: { agent_id: "agent-1", name: "sink", base_url: "http://sink", instance_id: "instance-1" },
+        parameters: {
+          target_table: "customer",
+          columns: [{ source: "ID", target: "ID" }],
+          primary_key: ["ID"],
+          write_mode: "APPEND",
+          source_sql: "SELECT ID FROM APP.CUSTOMER",
+          pre_sql: preSql,
+        },
+      },
+    };
+    const html = renderToStaticMarkup(createElement(RunDrawer, {
+      task: NEVER_RUN_TASK,
+      run,
+      tasks: [NEVER_RUN_TASK],
+      onClose: () => undefined,
+      onRerun: () => undefined,
+      onEditTask: () => undefined,
+    }));
+    expect(html).toContain("CLEANED_AND_SWAPPED");
+    expect(html).toContain("追加写 + preSQL 清理");
+    expect(html).toContain("当次执行的 preSQL");
+    expect(html).toContain("immutable");
+    expect(html).toContain("清理行数");
+    expect(html).toContain(">12<");
   });
 });
 

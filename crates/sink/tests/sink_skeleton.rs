@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use db_qbs_sink::test_support::InMemoryDestination;
 use db_qbs_sink::{
     build_staging_ddl, check_connection_settings, precheck, precheck_with_primary_key,
-    CreateStagingError, DropStagingError, OpenOutcome, OpenRunRequest, RangeCheckColumn,
+    BatchPayload, CreateStagingError, DropStagingError, OpenOutcome, OpenRunRequest, RangeCheckColumn,
     RangeCheckResult, SinkConfig, SinkService, SourceColumn, TargetCheckKind, TargetCheckRequest,
     TargetColumn, TargetConnection, TargetKey, WriteMode,
 };
@@ -705,6 +705,7 @@ fn open_request(source_columns: Vec<SourceColumn>) -> OpenRunRequest {
             database: "qbs".to_owned(),
         },
         write_mode: WriteMode::Append,
+        pre_sql: None,
         primary_key: vec!["D_BIZ".to_owned()],
         source_columns,
         range_check_results: None,
@@ -869,6 +870,63 @@ fn open_creates_staging_then_abort_is_idempotent() {
             .staging_dropped
     );
     assert_eq!(destination.dropped.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn open_revalidates_pre_sql_against_the_connected_target_before_transfer() {
+    let (sources, targets) = valid_columns();
+
+    for (label, request) in [
+        (
+            "stale database",
+            OpenRunRequest {
+                target: TargetConnection {
+                    database: "old_qbs".to_owned(),
+                    ..open_request(sources.clone()).target
+                },
+                pre_sql: Some(
+                    "DELETE FROM old_qbs.T_POSITION WHERE D_BIZ < CURRENT_DATE".to_owned(),
+                ),
+                ..open_request(sources.clone())
+            },
+        ),
+        (
+            "clear mode",
+            OpenRunRequest {
+                write_mode: WriteMode::ClearThenImport,
+                pre_sql: Some("DELETE FROM qbs.T_POSITION WHERE D_BIZ < CURRENT_DATE".to_owned()),
+                ..open_request(sources.clone())
+            },
+        ),
+    ] {
+        let destination = Arc::new(InMemoryDestination {
+            columns: targets.clone(),
+            ..InMemoryDestination::default()
+        });
+        // The fixed factory reports qbs as the database actually connected to. The
+        // stale request above must not make old_qbs the runtime validation target.
+        let service = SinkService::new("qbs", destination.clone());
+
+        let error = service.open(request).unwrap_err();
+
+        assert_eq!((error.status, error.code), (400, "BAD_REQUEST"), "{label}");
+        assert!(
+            destination.created.lock().unwrap().is_empty(),
+            "{label}: runtime rejection must happen before staging"
+        );
+        let transfer = service.write_batch(
+            RUN_ID,
+            BatchPayload {
+                seq: 1,
+                rows: Vec::new(),
+            },
+        );
+        assert_eq!(
+            transfer.unwrap_err().code,
+            "RUN_UNKNOWN",
+            "{label}: a rejected open must never become transferable"
+        );
+    }
 }
 
 #[test]

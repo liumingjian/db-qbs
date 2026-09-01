@@ -94,6 +94,11 @@ export function FailureEvidence({
           </dl>
         </>
       )}
+      {!unknown && (parameters?.pre_sql ?? "").trim() !== "" && (
+        <p className="clue-safety">
+          <strong>preSQL 清理未提交</strong>——本次清理与导入位于同一事务；若清理语句已执行，其效果已随运行失败回滚。
+        </p>
+      )}
       {missing ? (
         <div className="drawer-note">此运行记录创建时尚未记录连接快照。</div>
       ) : (
@@ -116,6 +121,12 @@ export function FailureEvidence({
             />
           </dl>
           <pre className="evidence-sql"><HighlightedSql sql={parameters.source_sql} /></pre>
+          {(parameters.pre_sql ?? "").trim() !== "" && (
+            <>
+              <h4>当次执行的 preSQL</h4>
+              <pre className="evidence-sql"><HighlightedSql sql={parameters.pre_sql!} /></pre>
+            </>
+          )}
         </>
       )}
     </section>

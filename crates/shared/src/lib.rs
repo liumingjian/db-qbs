@@ -7,6 +7,7 @@ use regex::Regex;
 use serde::{Serialize, Serializer};
 
 mod open_outcome;
+mod pre_sql;
 mod protocol;
 mod run_stage;
 mod target_shape;
@@ -14,6 +15,7 @@ mod verification;
 mod write_mode;
 
 pub use open_outcome::OpenOutcome;
+pub use pre_sql::{validate_pre_sql, PreSqlValidationError};
 pub use protocol::{
     AbortResponse, AgentInfo, BatchPayload, BatchResponse, ColumnSupport, CommitRequest,
     CommitResponse, ErrorBody, ErrorEnvelope, MysqlServerInfo, OpenRunRequest, OpenRunResponse,

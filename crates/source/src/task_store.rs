@@ -347,6 +347,7 @@ mod tests {
             owner: "HTBR45".to_owned(),
             table: "T_R_FR_ASTSTAT".to_owned(),
             write_mode: WriteMode::Append,
+            pre_sql: None,
             schedule_cron: None,
             schedule_enabled: false,
             columns: vec![mapping("ID"), mapping("D_BIZ")],
@@ -494,6 +495,39 @@ mod tests {
         let store = TaskStore::open(&directory).unwrap();
         assert!(store.list().unwrap().is_empty());
         assert_eq!(store.get("pre-write-mode").unwrap(), None);
+
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_task_row_that_predates_pre_sql_loads_as_an_ordinary_append_task() {
+        let directory = temp_directory();
+        let database = directory.join(DATABASE_FILE);
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE tasks (
+                    task_id              TEXT PRIMARY KEY NOT NULL,
+                    name                 TEXT NOT NULL,
+                    source_datasource_id TEXT NOT NULL,
+                    target_datasource_id TEXT NOT NULL,
+                    spec                 TEXT NOT NULL
+                );
+                INSERT INTO tasks VALUES (
+                    'pre-presql', 'ordinary append', 'src1', 'tgt1',
+                    '{\"owner\":\"HTBR45\",\"table\":\"T\",\"target_table\":\"M\",\"write_mode\":\"APPEND\",\"schedule_enabled\":false,\"columns\":[{\"source\":\"ID\",\"target\":\"ID\"}],\"primary_key\":[\"ID\"]}'
+                );",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = TaskStore::open(&directory).unwrap();
+        let task = store.get("pre-presql").unwrap().unwrap();
+        assert_eq!(task.spec.pre_sql, None);
+        assert_eq!(task.spec.write_mode, WriteMode::Append);
+        assert_eq!(task.spec.source_sql(), "SELECT a.ID AS ID\n  FROM HTBR45.T a");
+        task.spec.validate().unwrap();
 
         drop(store);
         std::fs::remove_dir_all(directory).unwrap();
