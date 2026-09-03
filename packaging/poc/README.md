@@ -23,13 +23,17 @@
 
 ## 服务约定
 
-POC 沿用仓库 customer packaging 的默认端口：
+POC 使用可信内网直连拓扑，沿用仓库 customer packaging 的默认端口：
 
 - source HTTP：`0.0.0.0:18088`。
 - sink HTTP：`0.0.0.0:18080`，只允许 source 主机 `10.250.0.24` 访问；sink 没有登录层，防火墙白名单是必要条件。
 
 source 端只部署 source 服务及其 `db-qbs-source-run` 子进程；sink 端只部署 sink 服务。两端都从各自的
 `/opt/tools/db-qbs/conf/` 读取服务配置，运行数据和日志留在该目录下的持久化子目录中。
+
+直接模式不启用 stunnel：sink 监听 `0.0.0.0:18080`，由 sink 主机防火墙只允许 source 主机
+`10.250.0.24` 访问；如需跨不可信网络传输，改用安装包内的 stunnel 模板，并按 stunnel 形态配置
+sink 回环监听和白名单口。
 
 目标端 agent 的地址不写进全局数据库配置。启动 sink 后，在 source 的「目标端 Agent」界面注册
 `http://10.250.0.202:18080`，再为 MySQL 数据源绑定这台 agent。
@@ -54,7 +58,7 @@ source 端只部署 source 服务及其 `db-qbs-source-run` 子进程；sink 端
 在 source 端执行：
 
 ```sh
-QBS_ORACLE_HOST=10.250.0.222 QBS_ORACLE_PORT=1522 \
+QBS_DIRECT_MODE=1 QBS_ORACLE_HOST=10.250.0.222 QBS_ORACLE_PORT=1522 \
 QBS_SINK_BASE_URL=http://10.250.0.202:18080 \
 QBS_SOURCE_CONFIG=/opt/tools/db-qbs/conf/source.toml \
 ./preflight-source.sh
@@ -63,7 +67,7 @@ QBS_SOURCE_CONFIG=/opt/tools/db-qbs/conf/source.toml \
 在 sink 端针对两个 MySQL 端口分别执行（密码文件中放对应目标的口令）：
 
 ```sh
-QBS_SINK_CONFIG=/opt/tools/db-qbs/conf/sink.toml \
+QBS_DIRECT_MODE=1 QBS_SINK_CONFIG=/opt/tools/db-qbs/conf/sink.toml \
 QBS_SINK_LISTEN=0.0.0.0:18080 QBS_MYSQL_HOST=10.250.0.24 \
 QBS_MYSQL_PORT=3306 QBS_MYSQL_USER=root QBS_MYSQL_DATABASE=mysql \
 QBS_MYSQL_PASSWORD_FILE=/root/.qbs-mysql-pass ./preflight-target.sh

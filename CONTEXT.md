@@ -467,6 +467,18 @@ branches on the version.
    whole worker thread. Rendering a line as a sentence is the display layer's job; the wire format
    stays structured, or the parent would be regex-matching prose.
 
+**Email Event Log**
+   The source also persists email lifecycle events in the same 0600 SQLite file. Each line uses the
+   Run Log JSON Lines shape (`ts`, `level`, `event`, nullable `run_id`/`task`, and event fields), so
+   administrators can inspect configuration changes, test results, queueing, attempts, manual
+   retries, retry-window expiry, suppressed or unsent deliveries, and worker errors through
+   `GET /api/email-logs?after=<seq>`. Transport failures carry a stable safe error code beside the
+   sanitized message. The settings screen surfaces only a compact error notice and a friendly detail
+   dialog; the full structured stream remains available through the administrator endpoint for
+   backend troubleshooting. It retains 30 days of lines, contains sanitized errors only, and never
+   stores an SMTP secret or raw SMTP server response. Operators remain limited to the aggregate
+   delivery state on run details.
+
 **Run History**
    A row the long-running `source` parent process writes for **every submission**, and the only basis
    on which the UI can answer "did the month-end run go through?". The parent builds it by parsing
@@ -514,7 +526,9 @@ branches on the version.
    the immediate attempt. Only a terminal `FAILED` delivery can be retried manually, and doing so
    starts a new window while preserving its original recipient and lifetime attempt count.
    Administrator delivery history contains recipient, attempts, timestamps, and the latest
-   sanitized error. Run details contain only the aggregate and expose none of those diagnostics.
+   sanitized error. The email event log additionally records the lifecycle around those rows in
+   the same structured format. Run details contain only the aggregate and expose none of those
+   diagnostics.
 
    Creating an Alert while email is disabled or incomplete records final `NOT_SENT` evidence;
    enabling email later does not backfill it. Disabling email atomically turns pending deliveries
@@ -526,7 +540,9 @@ branches on the version.
    Administrator-only system configuration stored in source-side SQLite. It holds the editable
    Tencent Exmail preset or generic SMTP connection, sender, up to 50 deduplicated recipients, retry
    window, instance name, and optional external origin. Saving validates shape without network IO;
-   a separate test-email action records its latest sanitized result and creates no Alert.
+   a separate test-email action records its latest sanitized result and creates no Alert. When a test
+   or delivery fails, the Administrator view shows a compact notice and a friendly detail dialog;
+   the persisted Email Event Log remains a backend troubleshooting surface.
 
    The SMTP secret is write-only through the API: responses expose only whether one is present, and
    an empty value on update preserves it. It is encrypted at rest with the same local SecretBox

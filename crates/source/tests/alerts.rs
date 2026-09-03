@@ -11,6 +11,7 @@ use db_qbs_source::{
     EmailProviderPreset, HistoryStore, MailTransport, MailTransportError, OutgoingMail, RunHistory,
     RunTrigger, ScheduledRefusalReason, SmtpSecurity, UnknownReason,
 };
+use serde_json::Value;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -102,6 +103,16 @@ fn temp_directory() -> PathBuf {
         std::env::temp_dir().join(format!("db-qbs-alert-test-{}-{suffix}", std::process::id()));
     std::fs::create_dir(&path).unwrap();
     path
+}
+
+fn email_events(outbox: &AlertOutboxStore) -> Vec<Value> {
+    outbox
+        .email_logs()
+        .lines_after(0)
+        .unwrap()
+        .into_iter()
+        .map(|line| serde_json::from_str(&line.line).unwrap())
+        .collect()
 }
 
 fn settings(recipients: Vec<&str>) -> EmailAlertSettingsInput {
@@ -475,6 +486,126 @@ fn retries_use_persisted_exponential_due_times_and_survive_reopen() {
     assert_eq!(sent.state, db_qbs_source::EmailDeliveryState::Sent);
     assert_eq!(sent.attempt_count, 3);
     assert!(sent.next_attempt_at.is_none());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn email_logs_cover_retry_expiry_manual_retry_and_admin_disable() {
+    let directory = temp_directory();
+    let started = Utc.with_ymd_and_hms(2026, 8, 31, 10, 0, 0).unwrap();
+    let clock = MutableClock::new(started);
+    let email = EmailAlertStore::open(&directory).unwrap();
+    let mut email_input = settings(vec!["ops@example.com"]);
+    email_input.max_retry_hours = 1;
+    email.update(email_input).unwrap();
+    let history_store = HistoryStore::open(&directory).unwrap();
+    let outbox = AlertOutboxStore::open(&directory).unwrap();
+    history_store
+        .finalize(
+            &failure("logged-lifecycle", "NETWORK", RunTrigger::Manual, started),
+            started,
+            90,
+        )
+        .unwrap();
+
+    let transport = RecordingTransport::default();
+    *transport.failure.lock().unwrap() = Some(MailTransportError::Timeout);
+    assert_eq!(
+        outbox.run_due_attempts(&email, &transport, &clock).unwrap(),
+        1
+    );
+    clock.set(started + TimeDelta::hours(2));
+    assert_eq!(
+        outbox.run_due_attempts(&email, &transport, &clock).unwrap(),
+        0
+    );
+
+    let failed = outbox.delivery_history(None).unwrap().remove(0);
+    assert_eq!(failed.state, db_qbs_source::EmailDeliveryState::Failed);
+    assert!(matches!(
+        outbox
+            .manual_retry(&failed.delivery_id, clock.now(), &email)
+            .unwrap(),
+        db_qbs_source::ManualRetryOutcome::Retried(_)
+    ));
+
+    let mut disabled = settings(vec!["ops@example.com"]);
+    disabled.enabled = false;
+    email.update(disabled).unwrap();
+
+    let events = email_events(&outbox);
+    assert!(events.iter().any(|event| {
+        event["event"] == "email_delivery_completed"
+            && event["state"] == "FAILED"
+            && event["reason"] == "retry_window_expired"
+    }));
+    assert!(events.iter().any(|event| {
+        event["event"] == "email_delivery_queued" && event["reason"] == "manual_retry"
+    }));
+    assert!(events.iter().any(|event| {
+        event["event"] == "email_delivery_not_sent" && event["reason"] == "管理员已停用邮件告警"
+    }));
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[derive(Clone)]
+struct BlockingTransport {
+    started: std::sync::Arc<std::sync::Barrier>,
+    release: std::sync::Arc<std::sync::Barrier>,
+}
+
+impl MailTransport for BlockingTransport {
+    fn send(
+        &self,
+        _settings: &db_qbs_source::EmailDeliverySettings,
+        _mail: &OutgoingMail,
+    ) -> Result<(), MailTransportError> {
+        self.started.wait();
+        self.release.wait();
+        Ok(())
+    }
+}
+
+#[test]
+fn disabling_during_send_never_logs_a_false_success() {
+    let directory = temp_directory();
+    let now = Utc.with_ymd_and_hms(2026, 8, 31, 10, 0, 0).unwrap();
+    let email = std::sync::Arc::new(EmailAlertStore::open(&directory).unwrap());
+    email.update(settings(vec!["ops@example.com"])).unwrap();
+    let history_store = HistoryStore::open(&directory).unwrap();
+    let outbox = std::sync::Arc::new(AlertOutboxStore::open(&directory).unwrap());
+    history_store
+        .finalize(
+            &failure("disable-race", "NETWORK", RunTrigger::Manual, now),
+            now,
+            90,
+        )
+        .unwrap();
+
+    let started = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let transport = BlockingTransport {
+        started: started.clone(),
+        release: release.clone(),
+    };
+    let worker_outbox = outbox.clone();
+    let worker_email = email.clone();
+    let worker = std::thread::spawn(move || {
+        worker_outbox.run_due_attempts(worker_email.as_ref(), &transport, &FixedClock(now))
+    });
+    started.wait();
+
+    let mut disabled = settings(vec!["ops@example.com"]);
+    disabled.enabled = false;
+    email.update(disabled).unwrap();
+    release.wait();
+    assert!(worker.join().unwrap().is_err());
+
+    let delivery = outbox.delivery_history(None).unwrap().remove(0);
+    assert_eq!(delivery.state, db_qbs_source::EmailDeliveryState::NotSent);
+    assert!(!email_events(&outbox)
+        .iter()
+        .any(|event| { event["event"] == "email_delivery_completed" && event["state"] == "SENT" }));
     std::fs::remove_dir_all(directory).unwrap();
 }
 

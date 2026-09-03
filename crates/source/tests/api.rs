@@ -315,10 +315,7 @@ impl Rig {
 
     fn api_with_describer(
         &self,
-        describe_source: fn(
-            &OracleAccess,
-            &TaskSpec,
-        ) -> Result<Vec<SourceColumn>, SourceReadError>,
+        describe_source: fn(&OracleAccess, &TaskSpec) -> Result<Vec<SourceColumn>, SourceReadError>,
     ) -> Api<'_> {
         Api {
             config: &self.config,
@@ -402,17 +399,10 @@ impl Rig {
         &self,
         url: &str,
         body: &str,
-        describe_source: fn(
-            &OracleAccess,
-            &TaskSpec,
-        ) -> Result<Vec<SourceColumn>, SourceReadError>,
+        describe_source: fn(&OracleAccess, &TaskSpec) -> Result<Vec<SourceColumn>, SourceReadError>,
     ) -> Response {
         self.api_with_describer(describe_source)
-            .handle(&self.authorized(Request::new(
-                Method::Post,
-                url,
-                body.as_bytes().to_vec(),
-            )))
+            .handle(&self.authorized(Request::new(Method::Post, url, body.as_bytes().to_vec())))
     }
 
     fn put(&self, url: &str, body: &str) -> Response {
@@ -440,7 +430,10 @@ impl Rig {
             &format!(r#"{{"name":"{name}","base_url":"{base_url}"}}"#),
         );
         assert_eq!(response.status, 201, "{}", response.body_text());
-        self.json(&response)["agent_id"].as_str().unwrap().to_owned()
+        self.json(&response)["agent_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
     }
 
     /// 等到这个任务名下**再没有在飞的运行**。
@@ -490,7 +483,12 @@ impl Rig {
         (agent_id, source_id, target_id)
     }
 
-    fn create_task(&self, name: &str, target_table: &str, datasources: &(String, String)) -> String {
+    fn create_task(
+        &self,
+        name: &str,
+        target_table: &str,
+        datasources: &(String, String),
+    ) -> String {
         let response = self.post("/api/tasks", &task_json(name, target_table, datasources));
         assert_eq!(response.status, 201, "{}", response.body_text());
         self.json(&response)["task_id"].as_str().unwrap().to_owned()
@@ -522,7 +520,8 @@ fn task_json_with_pre_sql(
     datasources: &(String, String),
     pre_sql: &str,
 ) -> String {
-    let mut task: Value = serde_json::from_str(&task_json(name, target_table, datasources)).unwrap();
+    let mut task: Value =
+        serde_json::from_str(&task_json(name, target_table, datasources)).unwrap();
     task["spec"]["pre_sql"] = Value::String(pre_sql.to_owned());
     serde_json::to_string(&task).unwrap()
 }
@@ -534,9 +533,13 @@ fn custom_task_json_with_pre_sql(
     source_sql: &str,
     pre_sql: &str,
 ) -> String {
-    let mut task: Value =
-        serde_json::from_str(&task_json_with_pre_sql(name, target_table, datasources, pre_sql))
-            .unwrap();
+    let mut task: Value = serde_json::from_str(&task_json_with_pre_sql(
+        name,
+        target_table,
+        datasources,
+        pre_sql,
+    ))
+    .unwrap();
     task["spec"]["source_sql"] = Value::String(source_sql.to_owned());
     task["spec"].as_object_mut().unwrap().remove("where_clause");
     serde_json::to_string(&task).unwrap()
@@ -631,11 +634,18 @@ fn every_route_reaches_its_handler() {
     let source_id = rig.create_oracle_datasource("源库");
     let target_id = rig.create_mysql_datasource("目标库", &agent_id);
     let doomed_id = rig.create_mysql_datasource("待删数据源", &agent_id);
-    let task_id = rig.create_task("搬一次", "HOLDINGS", &(source_id.clone(), target_id.clone()));
+    let task_id = rig.create_task(
+        "搬一次",
+        "HOLDINGS",
+        &(source_id.clone(), target_id.clone()),
+    );
     // 删任务那一格另开一个任务：`task_id` 下面要起一次运行、而且这条假子进程会一直睡到
     // 这条用例跑完，删它只会被 #270 那道拒绝挡回来（409），走不到 handler 的 200 分支。
-    let doomed_task_id =
-        rig.create_task("待删任务", "HOLDINGS_DOOMED", &(source_id.clone(), target_id.clone()));
+    let doomed_task_id = rig.create_task(
+        "待删任务",
+        "HOLDINGS_DOOMED",
+        &(source_id.clone(), target_id.clone()),
+    );
 
     let started = rig.post("/api/runs", &format!(r#"{{"task_id":"{task_id}"}}"#));
     assert_eq!(started.status, 202, "{}", started.body_text());
@@ -666,8 +676,20 @@ fn every_route_reaches_its_handler() {
 
     // (方法, 路由样式, 实打实的 URL, 请求体, 期望状态码)
     let checks: Vec<(Method, &str, String, String, u16)> = vec![
-        (Method::Post, "/api/columns", "/api/columns".into(), "{}".into(), 400),
-        (Method::Post, "/api/builder/tables", "/api/builder/tables".into(), "{}".into(), 400),
+        (
+            Method::Post,
+            "/api/columns",
+            "/api/columns".into(),
+            "{}".into(),
+            400,
+        ),
+        (
+            Method::Post,
+            "/api/builder/tables",
+            "/api/builder/tables".into(),
+            "{}".into(),
+            400,
+        ),
         (
             Method::Post,
             "/api/builder/dblinks",
@@ -675,7 +697,13 @@ fn every_route_reaches_its_handler() {
             r#"{"datasource_id":"no-such-datasource"}"#.into(),
             400,
         ),
-        (Method::Post, "/api/builder/sql-columns", "/api/builder/sql-columns".into(), "{}".into(), 400),
+        (
+            Method::Post,
+            "/api/builder/sql-columns",
+            "/api/builder/sql-columns".into(),
+            "{}".into(),
+            400,
+        ),
         (
             Method::Post,
             "/api/builder/columns",
@@ -711,8 +739,20 @@ fn every_route_reaches_its_handler() {
             String::new(),
             200,
         ),
-        (Method::Get, "/api/agents", "/api/agents".into(), String::new(), 200),
-        (Method::Post, "/api/agents", "/api/agents".into(), "{}".into(), 400),
+        (
+            Method::Get,
+            "/api/agents",
+            "/api/agents".into(),
+            String::new(),
+            200,
+        ),
+        (
+            Method::Post,
+            "/api/agents",
+            "/api/agents".into(),
+            "{}".into(),
+            400,
+        ),
         (
             Method::Post,
             "/api/agents/{}/probe",
@@ -724,7 +764,10 @@ fn every_route_reaches_its_handler() {
             Method::Put,
             "/api/agents/{}",
             format!("/api/agents/{agent_id}"),
-            format!(r#"{{"name":"改过名的目标端","base_url":"{}"}}"#, agent_stub_url()),
+            format!(
+                r#"{{"name":"改过名的目标端","base_url":"{}"}}"#,
+                agent_stub_url()
+            ),
             200,
         ),
         (
@@ -734,8 +777,20 @@ fn every_route_reaches_its_handler() {
             String::new(),
             200,
         ),
-        (Method::Get, "/api/datasources", "/api/datasources".into(), String::new(), 200),
-        (Method::Post, "/api/datasources", "/api/datasources".into(), "{}".into(), 400),
+        (
+            Method::Get,
+            "/api/datasources",
+            "/api/datasources".into(),
+            String::new(),
+            200,
+        ),
+        (
+            Method::Post,
+            "/api/datasources",
+            "/api/datasources".into(),
+            "{}".into(),
+            400,
+        ),
         (
             Method::Post,
             "/api/datasources/test-connection",
@@ -789,7 +844,9 @@ fn every_route_reaches_its_handler() {
             Method::Post,
             "/api/target/check",
             "/api/target/check".into(),
-            format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"]}}}}"#),
+            format!(
+                r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"]}}}}"#
+            ),
             502,
         ),
         (
@@ -814,7 +871,13 @@ fn every_route_reaches_its_handler() {
             String::new(),
             404,
         ),
-        (Method::Get, "/api/runs", "/api/runs".into(), String::new(), 200),
+        (
+            Method::Get,
+            "/api/runs",
+            "/api/runs".into(),
+            String::new(),
+            200,
+        ),
         (
             Method::Get,
             "/api/runs/{}",
@@ -829,8 +892,20 @@ fn every_route_reaches_its_handler() {
             String::new(),
             200,
         ),
-        (Method::Get, "/api/tasks", "/api/tasks".into(), String::new(), 200),
-        (Method::Post, "/api/tasks", "/api/tasks".into(), "{}".into(), 400),
+        (
+            Method::Get,
+            "/api/tasks",
+            "/api/tasks".into(),
+            String::new(),
+            200,
+        ),
+        (
+            Method::Post,
+            "/api/tasks",
+            "/api/tasks".into(),
+            "{}".into(),
+            400,
+        ),
         (
             Method::Get,
             "/api/tasks/{}",
@@ -849,7 +924,11 @@ fn every_route_reaches_its_handler() {
             Method::Put,
             "/api/tasks/{}",
             format!("/api/tasks/{task_id}"),
-            task_json("改过名的任务", "HOLDINGS", &(source_id.clone(), target_id.clone())),
+            task_json(
+                "改过名的任务",
+                "HOLDINGS",
+                &(source_id.clone(), target_id.clone()),
+            ),
             200,
         ),
         (
@@ -909,6 +988,13 @@ fn every_route_reaches_its_handler() {
             200,
         ),
         (
+            Method::Get,
+            "/api/email-logs",
+            "/api/email-logs".into(),
+            String::new(),
+            200,
+        ),
+        (
             Method::Post,
             "/api/email-deliveries/{}/retry",
             format!("/api/email-deliveries/{pending_delivery_id}/retry"),
@@ -917,7 +1003,13 @@ fn every_route_reaches_its_handler() {
         ),
         // 会话那三条**排在最末，而且退出排最后**：`DELETE /api/session` 会把 rig
         // 自己那张票销掉，排在中间会让它后面每一行都变成 401。
-        (Method::Get, "/api/session", "/api/session".into(), String::new(), 200),
+        (
+            Method::Get,
+            "/api/session",
+            "/api/session".into(),
+            String::new(),
+            200,
+        ),
         (
             Method::Post,
             "/api/session",
@@ -925,7 +1017,13 @@ fn every_route_reaches_its_handler() {
             r#"{"username":"admin","password":"admin"}"#.into(),
             200,
         ),
-        (Method::Delete, "/api/session", "/api/session".into(), String::new(), 200),
+        (
+            Method::Delete,
+            "/api/session",
+            "/api/session".into(),
+            String::new(),
+            200,
+        ),
     ];
 
     for (method, pattern, url, body, expected) in &checks {
@@ -935,7 +1033,8 @@ fn every_route_reaches_its_handler() {
             "{method:?} {pattern} 没有匹配上任何路由"
         );
         assert_eq!(
-            response.status, *expected,
+            response.status,
+            *expected,
             "{method:?} {url} 回的是 {}：{}",
             response.status,
             response.body_text()
@@ -987,7 +1086,9 @@ fn task_curl_is_complete_server_assembled_and_uses_the_public_request_origin() {
         )
     );
 
-    rig.auth.update_operator(true, Some("operator-secret")).unwrap();
+    rig.auth
+        .update_operator(true, Some("operator-secret"))
+        .unwrap();
     let operator = rig
         .auth
         .issue_session("operator", chrono::Utc::now())
@@ -1002,12 +1103,10 @@ fn task_curl_is_complete_server_assembled_and_uses_the_public_request_origin() {
         .with_header("Cookie", format!("{SESSION_COOKIE}={operator}")),
     );
     assert_eq!(operator_response.status, 200);
-    assert!(
-        rig.json(&operator_response)["command"]
-            .as_str()
-            .unwrap()
-            .contains(r#""username":"operator""#)
-    );
+    assert!(rig.json(&operator_response)["command"]
+        .as_str()
+        .unwrap()
+        .contains(r#""username":"operator""#));
 }
 
 #[test]
@@ -1104,7 +1203,10 @@ fn static_assets_are_served_off_the_api_tree() {
 
     let index = rig.get("/");
     assert_eq!(index.status, 200);
-    assert_eq!(index.header("Content-Type"), Some("text/html; charset=utf-8"));
+    assert_eq!(
+        index.header("Content-Type"),
+        Some("text/html; charset=utf-8")
+    );
     assert_eq!(index.header("Cache-Control"), Some("no-cache"));
     assert!(index.body.starts_with(b"<!doctype html>"));
 
@@ -1142,10 +1244,28 @@ fn datasource_by_id_round_trips() {
     );
     assert_eq!(refused.status, 400, "{}", refused.body_text());
 
-    assert_eq!(rig.delete(&format!("/api/datasources/{datasource_id}")).status, 200);
-    assert_eq!(rig.get(&format!("/api/datasources/{datasource_id}")).status, 404);
-    assert_eq!(rig.put(&format!("/api/datasources/{datasource_id}"), &mysql_datasource_json("已删", &agent_id)).status, 404);
-    assert_eq!(rig.delete(&format!("/api/datasources/{datasource_id}")).status, 404);
+    assert_eq!(
+        rig.delete(&format!("/api/datasources/{datasource_id}"))
+            .status,
+        200
+    );
+    assert_eq!(
+        rig.get(&format!("/api/datasources/{datasource_id}")).status,
+        404
+    );
+    assert_eq!(
+        rig.put(
+            &format!("/api/datasources/{datasource_id}"),
+            &mysql_datasource_json("已删", &agent_id)
+        )
+        .status,
+        404
+    );
+    assert_eq!(
+        rig.delete(&format!("/api/datasources/{datasource_id}"))
+            .status,
+        404
+    );
 }
 
 /// 还被任务引着的数据源删不掉，措辞里点名是哪几个任务。
@@ -1170,7 +1290,10 @@ fn agent_update_repins_identity() {
 
     let renamed = rig.put(
         &format!("/api/agents/{agent_id}"),
-        &format!(r#"{{"name":"改过名的目标端","base_url":"{}"}}"#, agent_stub_url()),
+        &format!(
+            r#"{{"name":"改过名的目标端","base_url":"{}"}}"#,
+            agent_stub_url()
+        ),
     );
     assert_eq!(renamed.status, 200, "{}", renamed.body_text());
     assert_eq!(rig.json(&renamed)["name"], "改过名的目标端");
@@ -1188,7 +1311,14 @@ fn agent_update_repins_identity() {
     let still = rig.get("/api/agents");
     assert!(rig.json(&still)[0]["name"] == "改过名的目标端");
 
-    assert_eq!(rig.put("/api/agents/no-such-agent", &format!(r#"{{"name":"没有","base_url":"{}"}}"#, agent_stub_url())).status, 404);
+    assert_eq!(
+        rig.put(
+            "/api/agents/no-such-agent",
+            &format!(r#"{{"name":"没有","base_url":"{}"}}"#, agent_stub_url())
+        )
+        .status,
+        404
+    );
 }
 
 /// 构建器那两条从没被测过的入口：请求体先过一遍，数据源不认就 400，
@@ -1208,7 +1338,9 @@ fn builder_dblinks_and_columns_reject_before_reaching_oracle() {
         r#"{"datasource_id":"no-such-datasource","dblink":null,"owner":" ","table":"HOLDINGS"}"#,
     );
     assert_eq!(missing_owner.status, 400, "{}", missing_owner.body_text());
-    assert!(missing_owner.body_text().contains("owner and table are required"));
+    assert!(missing_owner
+        .body_text()
+        .contains("owner and table are required"));
 
     let bad_dblink = rig.post(
         "/api/builder/columns",
@@ -1330,7 +1462,10 @@ fn task_crud_persists_stable_identity_without_exposing_credentials() {
     let (_agent_id, source_id, target_id) = rig.seed();
     let datasources = (source_id, target_id);
 
-    let created = rig.post("/api/tasks", &task_json("持仓明细", "HOLDINGS", &datasources));
+    let created = rig.post(
+        "/api/tasks",
+        &task_json("持仓明细", "HOLDINGS", &datasources),
+    );
     assert_eq!(created.status, 201, "{}", created.body_text());
     let created = rig.json(&created);
     assert_task_fields(&created);
@@ -1475,7 +1610,12 @@ fn task_writes_reject_client_identity_and_incomplete_definitions() {
             &task_json("持仓明细", "HOLDINGS", &datasources)[1..]
         ),
     );
-    assert_eq!(client_identity.status, 400, "{}", client_identity.body_text());
+    assert_eq!(
+        client_identity.status,
+        400,
+        "{}",
+        client_identity.body_text()
+    );
 
     let missing_name = rig.post(
         "/api/tasks",
@@ -1613,7 +1753,9 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"info","event":"run_fin
     assert!(detail["evidence"].is_object());
     detail.as_object_mut().unwrap().remove("evidence");
     // 发起时刻是跑的时候生成的，断不出字面量，只断它在且是个时间戳。
-    assert!(detail["started_at"].as_str().is_some_and(|at| at.ends_with('Z')));
+    assert!(detail["started_at"]
+        .as_str()
+        .is_some_and(|at| at.ends_with('Z')));
     detail.as_object_mut().unwrap().remove("started_at");
     assert_eq!(
         detail,
@@ -1817,11 +1959,22 @@ while [ ! -f '{}' ]; do sleep 0.02; done
     assert_eq!(accepted["evidence"]["agent"]["name"], "目标端");
     assert_eq!(accepted["evidence"]["agent"]["base_url"], agent_stub_url());
     assert_eq!(accepted["evidence"]["agent"]["instance_id"], "stub-agent");
-    assert_eq!(accepted["evidence"]["parameters"]["target_table"], "HOLDINGS");
-    assert_eq!(accepted["evidence"]["parameters"]["primary_key"], serde_json::json!(["ID"]));
-    assert_eq!(accepted["evidence"]["parameters"]["source_sql"], EXPECTED_SOURCE_SQL);
+    assert_eq!(
+        accepted["evidence"]["parameters"]["target_table"],
+        "HOLDINGS"
+    );
+    assert_eq!(
+        accepted["evidence"]["parameters"]["primary_key"],
+        serde_json::json!(["ID"])
+    );
+    assert_eq!(
+        accepted["evidence"]["parameters"]["source_sql"],
+        EXPECTED_SOURCE_SQL
+    );
     assert_eq!(accepted["evidence"]["parameters"]["pre_sql"], pre_sql);
-    assert!(!serde_json::to_string(&accepted).unwrap().contains("change-me"));
+    assert!(!serde_json::to_string(&accepted)
+        .unwrap()
+        .contains("change-me"));
     assert!(!serde_json::to_string(&accepted).unwrap().contains("secret"));
     assert_eq!(accepted["seq"], 0);
     assert_eq!(accepted["rows_pushed"], 0);
@@ -1902,7 +2055,12 @@ fn run_launch_rejects_a_second_run_of_the_same_task_until_child_reap() {
         "/api/runs",
         &format!(r#"{{"task_id":"{second_task_id}","run_params":{{"d_biz":"2026-08-14"}}}}"#),
     );
-    assert_eq!(with_run_params.status, 400, "{}", with_run_params.body_text());
+    assert_eq!(
+        with_run_params.status,
+        400,
+        "{}",
+        with_run_params.body_text()
+    );
 
     fs::write(release, "").unwrap();
     for run_record_id in [&first, &other_task] {
@@ -1968,7 +2126,12 @@ fi
             body["stage"] == stage
         });
         let canceled_response = rig.post(&format!("/api/runs/{run_record_id}/cancel"), "");
-        assert_eq!(canceled_response.status, 202, "{}", canceled_response.body_text());
+        assert_eq!(
+            canceled_response.status,
+            202,
+            "{}",
+            canceled_response.body_text()
+        );
         wait_for_file_text(&canceled, |text| text.lines().any(|line| line == stage));
         wait_for_json(&rig, &format!("/api/runs/{run_record_id}"), |body| {
             body["live"] == false
@@ -1982,7 +2145,12 @@ fi
         body["stage"] == "COMMITTING"
     });
     let rejected_response = rig.post(&format!("/api/runs/{committing}/cancel"), "");
-    assert_eq!(rejected_response.status, 409, "{}", rejected_response.body_text());
+    assert_eq!(
+        rejected_response.status,
+        409,
+        "{}",
+        rejected_response.body_text()
+    );
     let rejected_body = rig.json(&rejected_response);
     assert_eq!(rejected_body["error"]["message"], "已过封口点，停不了");
     assert!(rejected_body.get("code").is_none());
@@ -2047,7 +2215,10 @@ while :; do sleep 0.02; done
     wait_for_file_text(&stopped, |text| text.contains("caught"));
     thread::sleep(Duration::from_millis(100));
     let too_early = aborts.lock().unwrap().clone();
-    assert!(too_early.is_empty(), "子进程还活着就发了 abort：{too_early:?}");
+    assert!(
+        too_early.is_empty(),
+        "子进程还活着就发了 abort：{too_early:?}"
+    );
 
     // 这段窗口界面上写的是「停止中…」，而且**发起运行这条路是关着的**（#271）：
     // 占用还在目标端挂着，这时候放一次新运行进去只会撞回一个 `TARGET_TABLE_BUSY`。
@@ -2129,7 +2300,8 @@ while :; do sleep 0.02; done
         body["stage"] == "STREAMING"
     });
     assert_eq!(
-        rig.post(&format!("/api/runs/{run_record_id}/cancel"), "").status,
+        rig.post(&format!("/api/runs/{run_record_id}/cancel"), "")
+            .status,
         202
     );
     rig.wait_until_idle(&task_id);
@@ -2741,7 +2913,11 @@ fn recording_agent() -> (String, Arc<Mutex<Vec<String>>>) {
             } else {
                 r#"{"error":{"code":"BAD_REQUEST","message":"桩只认 /v1/agent/info","run_id":null,"details":{}}}"#
             };
-            let status = if info { "200 OK" } else { "503 Service Unavailable" };
+            let status = if info {
+                "200 OK"
+            } else {
+                "503 Service Unavailable"
+            };
             let _ = write!(
                 stream,
                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
@@ -2839,7 +3015,8 @@ impl StoppableAgent {
                         stream.set_nonblocking(false).unwrap();
                         let mut head = [0_u8; 1024];
                         let _ = stream.read(&mut head);
-                        let body = r#"{"agent_id":"stub-agent","name":"桩 agent","version":"0.0.0-test"}"#;
+                        let body =
+                            r#"{"agent_id":"stub-agent","name":"桩 agent","version":"0.0.0-test"}"#;
                         let _ = write!(
                             stream,
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
@@ -2947,7 +3124,10 @@ fn builder_sql_is_derived_from_the_spec_and_never_travels_back() {
     );
 
     // 形状预检那个端点整段没了，不是改了语义。
-    assert_eq!(rig.post("/api/sql-shape", &generated.body_text()).status, 404);
+    assert_eq!(
+        rig.post("/api/sql-shape", &generated.body_text()).status,
+        404
+    );
 
     let tasks = rig.get("/api/tasks");
     assert_eq!(tasks.status, 200);
@@ -3112,7 +3292,9 @@ fn target_check_proxies_every_typed_kind_and_attaches_ddl_only_when_failed() {
         .unwrap()
         .to_owned();
     let target_id = rig.create_mysql_datasource("目标库", &agent_id);
-    let request = format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"]}}}}"#);
+    let request = format!(
+        r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"]}}}}"#
+    );
 
     let response = rig.post_with_describer("/api/target/check", &request, described_id);
     assert_eq!(response.status, 200, "{}", response.body_text());
@@ -3126,7 +3308,11 @@ fn target_check_proxies_every_typed_kind_and_attaches_ddl_only_when_failed() {
         "primary_key_mismatch",
         "type_not_whitelisted",
     ] {
-        assert!(body["findings"].as_array().unwrap().iter().any(|finding| finding["kind"] == kind));
+        assert!(body["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == kind));
     }
     assert!(body["suggested_ddl"]
         .as_str()
@@ -3142,10 +3328,7 @@ fn target_check_proxies_every_typed_kind_and_attaches_ddl_only_when_failed() {
         "/api/agents",
         &format!(r#"{{"name":"目标检查通过","base_url":"{ok_url}"}}"#),
     );
-    let ok_agent_id = rig.json(&ok_agent)["agent_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let ok_agent_id = rig.json(&ok_agent)["agent_id"].as_str().unwrap().to_owned();
     let ok_target_id = rig.create_mysql_datasource("目标库通过", &ok_agent_id);
     let ok_request = request.replace(&target_id, &ok_target_id);
     let ok = rig.post_with_describer("/api/target/check", &ok_request, described_id);
@@ -3159,7 +3342,11 @@ fn target_check_maps_request_datasource_agent_and_sink_failures_at_their_boundar
     assert_eq!(rig.post("/api/target/check", "{}").status, 400);
 
     let source_id = rig.create_oracle_datasource("源库");
-    let check_body = |target_id: &str| format!(r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"]}}}}"#);
+    let check_body = |target_id: &str| {
+        format!(
+            r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"]}}}}"#
+        )
+    };
     let invalid_target = check_body(&source_id);
     let wrong_kind = rig.post_with_describer("/api/target/check", &invalid_target, described_id);
     assert_eq!(wrong_kind.status, 400, "{}", wrong_kind.body_text());
@@ -3208,7 +3395,11 @@ fn the_draft_test_connection_reads_the_form_values_and_writes_nothing() {
         ),
     );
     assert_eq!(empty_host.status, 400, "{}", empty_host.body_text());
-    assert!(empty_host.body_text().contains("host"), "{}", empty_host.body_text());
+    assert!(
+        empty_host.body_text().contains("host"),
+        "{}",
+        empty_host.body_text()
+    );
 
     // 没选 agent 的草稿：连测都不该测。
     let no_agent = rig.post(
@@ -3216,7 +3407,11 @@ fn the_draft_test_connection_reads_the_form_values_and_writes_nothing() {
         r#"{"name":"草稿","kind":"mysql","host":"127.0.0.1","port":3306,"username":"u","password":"p","database":"dw_stage"}"#,
     );
     assert_eq!(no_agent.status, 400, "{}", no_agent.body_text());
-    assert!(no_agent.body_text().contains("agent"), "{}", no_agent.body_text());
+    assert!(
+        no_agent.body_text().contains("agent"),
+        "{}",
+        no_agent.body_text()
+    );
 
     // 目标端草稿：source 不建 MySQL 连接，测连经 agent 转给 sink。
     // agent 活着但不认这个端点 → 502。
@@ -3294,7 +3489,10 @@ fn agent_registration_requires_a_live_agent_and_pins_its_identity() {
     assert_eq!(rig.json(&probed)["status"], "online");
 
     // 被数据源引用就删不掉。
-    let bound = rig.post("/api/datasources", &mysql_datasource_json("目标库", &agent_id));
+    let bound = rig.post(
+        "/api/datasources",
+        &mysql_datasource_json("目标库", &agent_id),
+    );
     assert_eq!(bound.status, 201, "{}", bound.body_text());
     assert_eq!(rig.json(&bound)["agent_id"], agent_id);
     let refused_delete = rig.delete(&format!("/api/agents/{agent_id}"));
@@ -3306,7 +3504,10 @@ fn agent_registration_requires_a_live_agent_and_pins_its_identity() {
     );
 
     // 绑一台不在注册表里的 agent：写入面当场拒。
-    let dangling = rig.post("/api/datasources", &mysql_datasource_json("野的", "nonexistent"));
+    let dangling = rig.post(
+        "/api/datasources",
+        &mysql_datasource_json("野的", "nonexistent"),
+    );
     assert_eq!(dangling.status, 400, "{}", dangling.body_text());
 }
 
@@ -3322,7 +3523,10 @@ fn a_stopped_agent_breaks_every_target_side_link() {
         &format!(r#"{{"name":"目标端","base_url":"{}"}}"#, agent.url),
     );
     assert_eq!(registered.status, 201, "{}", registered.body_text());
-    let agent_id = rig.json(&registered)["agent_id"].as_str().unwrap().to_owned();
+    let agent_id = rig.json(&registered)["agent_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let source_datasource_id = rig.create_oracle_datasource("源库");
     let target_datasource_id = rig.create_mysql_datasource("目标库", &agent_id);
     let task_id = rig.create_task(
@@ -3358,9 +3562,17 @@ fn a_stopped_agent_breaks_every_target_side_link() {
         let response = rig.send(method, &path, &body);
         assert_eq!(response.status, 502, "{path}: {}", response.body_text());
         let parsed = rig.json(&response);
-        assert_eq!(parsed["error"]["kind"], "agent", "{path}: {}", response.body_text());
+        assert_eq!(
+            parsed["error"]["kind"],
+            "agent",
+            "{path}: {}",
+            response.body_text()
+        );
         assert!(
-            parsed["error"]["message"].as_str().unwrap().contains("不在线"),
+            parsed["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("不在线"),
             "{path}: {}",
             response.body_text()
         );
@@ -3405,13 +3617,14 @@ fn every_route_declares_its_access() {
             "{method:?} {pattern} 应当是公开的"
         );
     }
-    let administrator: [(Method, &str); 16] = [
+    let administrator: [(Method, &str); 17] = [
         (Method::Get, "/api/operator-account"),
         (Method::Put, "/api/operator-account"),
         (Method::Get, "/api/email-alert-settings"),
         (Method::Put, "/api/email-alert-settings"),
         (Method::Post, "/api/email-alert-settings/test"),
         (Method::Get, "/api/email-deliveries"),
+        (Method::Get, "/api/email-logs"),
         (Method::Post, "/api/email-deliveries/{}/retry"),
         (Method::Post, "/api/agents"),
         (Method::Post, "/api/agents/{}/probe"),
@@ -3432,7 +3645,11 @@ fn every_route_declares_its_access() {
         } else {
             Access::Session
         };
-        assert_eq!(route.access, expected, "{:?} {} 权限档位不对", route.method, route.pattern);
+        assert_eq!(
+            route.access, expected,
+            "{:?} {} 权限档位不对",
+            route.method, route.pattern
+        );
     }
 }
 
@@ -3485,7 +3702,10 @@ fn the_default_credentials_open_the_door_and_a_wrong_one_does_not() {
     );
     assert_eq!(refused.status, 401);
     assert_eq!(rig.json(&refused)["error"]["message"], "账号或口令不正确");
-    assert!(refused.header("Set-Cookie").is_none(), "被拒的登录不许发票据");
+    assert!(
+        refused.header("Set-Cookie").is_none(),
+        "被拒的登录不许发票据"
+    );
 
     // 账号不存在与口令不对**一字不差**：分开报只会告诉试口令的人账号叫什么。
     let unknown_account = rig.send_anonymous(
@@ -3550,7 +3770,11 @@ fn existing_admin_hash_migrates_unchanged_and_operator_starts_disabled() {
     drop(first);
     let bootstrap_database = rusqlite::Connection::open(bootstrap.join("db-qbs.sqlite3")).unwrap();
     let legacy: String = bootstrap_database
-        .query_row("SELECT password_hash FROM credentials WHERE id = 1", [], |row| row.get(0))
+        .query_row(
+            "SELECT password_hash FROM credentials WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     drop(bootstrap_database);
     fs::remove_dir_all(bootstrap).unwrap();
@@ -3588,7 +3812,11 @@ fn existing_admin_hash_migrates_unchanged_and_operator_starts_disabled() {
     let reopened = AuthStore::open(&directory).unwrap();
     let database = rusqlite::Connection::open(directory.join("db-qbs.sqlite3")).unwrap();
     let migrated: String = database
-        .query_row("SELECT password_hash FROM accounts WHERE username = 'admin'", [], |row| row.get(0))
+        .query_row(
+            "SELECT password_hash FROM accounts WHERE username = 'admin'",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(migrated, legacy, "迁移不该重新散列管理员口令");
     drop(database);
@@ -3640,13 +3868,7 @@ fn administrator_activates_operator_and_session_reports_the_fixed_identity() {
     assert_eq!(rig.json(&login)["username"], "operator");
     assert_eq!(rig.json(&login)["role"], "OPERATOR");
     let cookie = login.header("Set-Cookie").unwrap();
-    let token = cookie
-        .split(';')
-        .next()
-        .unwrap()
-        .split_once('=')
-        .unwrap()
-        .1;
+    let token = cookie.split(';').next().unwrap().split_once('=').unwrap().1;
     let state = rig.send_with_session(token, Method::Get, "/api/session", "");
     assert_eq!(rig.json(&state)["username"], "operator");
     assert_eq!(rig.json(&state)["role"], "OPERATOR");
@@ -3655,7 +3877,9 @@ fn administrator_activates_operator_and_session_reports_the_fixed_identity() {
 #[test]
 fn operator_can_use_daily_work_routes_but_admin_routes_return_stable_403() {
     let rig = Rig::new();
-    rig.auth.update_operator(true, Some("operator-secret")).unwrap();
+    rig.auth
+        .update_operator(true, Some("operator-secret"))
+        .unwrap();
     let token = rig
         .auth
         .issue_session("operator", chrono::Utc::now())
@@ -3717,7 +3941,10 @@ fn email_alert_settings_persist_encrypted_with_write_only_blank_preserve() {
     let saved_json = rig.json(&saved);
     assert_eq!(saved_json["provider_preset"], "GENERIC");
     assert_eq!(saved_json["smtp_security"], "STARTTLS");
-    assert_eq!(saved_json["recipients"], serde_json::json!(["Ops@example.com", "audit@example.org"]));
+    assert_eq!(
+        saved_json["recipients"],
+        serde_json::json!(["Ops@example.com", "audit@example.org"])
+    );
     assert_eq!(saved_json["external_base_url"], "https://qbs.example.com");
     assert_eq!(saved_json["has_smtp_secret"], true);
     assert!(saved_json.get("smtp_secret").is_none());
@@ -3745,21 +3972,36 @@ fn email_alert_settings_validate_shape_without_smtp_io() {
     let rig = Rig::new();
 
     for (name, body) in [
-        ("plaintext security", email_alert_settings_json(false, "secret", 24).replace("STARTTLS", "PLAINTEXT")),
-        ("invalid recipient", email_alert_settings_json(false, "secret", 24).replace("audit@example.org", "not-an-email")),
-        ("retry too long", email_alert_settings_json(false, "secret", 169)),
-        ("URL path", email_alert_settings_json(false, "secret", 24).replace("https://qbs.example.com", "https://qbs.example.com/app")),
+        (
+            "plaintext security",
+            email_alert_settings_json(false, "secret", 24).replace("STARTTLS", "PLAINTEXT"),
+        ),
+        (
+            "invalid recipient",
+            email_alert_settings_json(false, "secret", 24)
+                .replace("audit@example.org", "not-an-email"),
+        ),
+        (
+            "retry too long",
+            email_alert_settings_json(false, "secret", 169),
+        ),
+        (
+            "URL path",
+            email_alert_settings_json(false, "secret", 24)
+                .replace("https://qbs.example.com", "https://qbs.example.com/app"),
+        ),
     ] {
         let response = rig.put("/api/email-alert-settings", &body);
         assert_eq!(response.status, 400, "{name}: {}", response.body_text());
     }
 
-    let recipients: Vec<_> = (0..51).map(|index| format!("ops{index}@example.com")).collect();
-    let too_many = email_alert_settings_json(false, "secret", 24)
-        .replace(
-            r#"["Ops@example.com"," ops@example.com ","audit@example.org"]"#,
-            &serde_json::to_string(&recipients).unwrap(),
-        );
+    let recipients: Vec<_> = (0..51)
+        .map(|index| format!("ops{index}@example.com"))
+        .collect();
+    let too_many = email_alert_settings_json(false, "secret", 24).replace(
+        r#"["Ops@example.com"," ops@example.com ","audit@example.org"]"#,
+        &serde_json::to_string(&recipients).unwrap(),
+    );
     let response = rig.put("/api/email-alert-settings", &too_many);
     assert_eq!(response.status, 400, "{}", response.body_text());
 
@@ -3782,7 +4024,10 @@ fn test_email_uses_saved_settings_sends_each_recipient_and_persists_success() {
 
     assert_eq!(response.status, 200, "{}", response.body_text());
     assert_eq!(rig.json(&response)["status"], "SUCCESS");
-    assert_eq!(rig.json(&response)["tested_at"], "2026-08-31T10:00:00+00:00");
+    assert_eq!(
+        rig.json(&response)["tested_at"],
+        "2026-08-31T10:00:00+00:00"
+    );
     assert_eq!(rig.json(&response)["error"], Value::Null);
     let sent = rig.mail_transport.sent.lock().unwrap();
     assert_eq!(sent.len(), 2);
@@ -3813,6 +4058,119 @@ fn test_email_uses_saved_settings_sends_each_recipient_and_persists_success() {
 }
 
 #[test]
+fn email_logs_use_common_json_lines_and_cover_test_lifecycle_without_secret() {
+    let rig = Rig::new();
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(false, "SMTP-secret-marker", 24),
+        )
+        .status,
+        200
+    );
+    assert_eq!(rig.post("/api/email-alert-settings/test", "").status, 200);
+
+    let response = rig.get("/api/email-logs");
+    assert_eq!(response.status, 200, "{}", response.body_text());
+    let body = rig.json(&response);
+    let lines = body["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 5);
+    let events: Vec<_> = lines
+        .iter()
+        .map(|entry| {
+            let line: Value = serde_json::from_str(entry["line"].as_str().unwrap()).unwrap();
+            assert!(line["ts"].is_string());
+            assert!(line["level"].is_string());
+            assert!(line["run_id"].is_null());
+            assert!(line["task"].is_null());
+            assert!(!line.to_string().contains("SMTP-secret-marker"));
+            line
+        })
+        .collect();
+    assert_eq!(
+        events
+            .iter()
+            .map(|line| line["event"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "email_settings_updated",
+            "email_test_started",
+            "email_test_recipient_completed",
+            "email_test_recipient_completed",
+            "email_test_completed",
+        ]
+    );
+    assert_eq!(events[1]["smtp_host"], "mail.example.com");
+    assert_eq!(events[1]["smtp_port"], 587);
+    assert_eq!(events[2]["recipient"], "Ops@example.com");
+    assert_eq!(events[2]["status"], "SUCCESS");
+    assert_eq!(events[4]["success_count"], 2);
+    assert_eq!(events[4]["failure_count"], 0);
+}
+
+#[test]
+fn email_logs_cover_queued_delivery_attempt_and_retry_diagnostic() {
+    let rig = Rig::new();
+    assert_eq!(
+        rig.put(
+            "/api/email-alert-settings",
+            &email_alert_settings_json(true, "SMTP-secret-marker", 24),
+        )
+        .status,
+        200
+    );
+    let now = rig.clock.now();
+    let mut failed = RunHistory::accepted("logged-alert", "task-logged", "SELECT 1", now);
+    failed.outcome = Some("FAILED".to_owned());
+    failed.finished_at = Some(now.to_rfc3339());
+    failed.failure_kind = Some("NETWORK".to_owned());
+    rig.history.finalize(&failed, now, 90).unwrap();
+    *rig.mail_transport.failure.lock().unwrap() = Some(MailTransportError::Timeout);
+
+    assert_eq!(
+        rig.alert_outbox
+            .run_due_attempts(
+                &rig.email_alerts,
+                rig.mail_transport.as_ref(),
+                rig.clock.as_ref(),
+            )
+            .unwrap(),
+        2
+    );
+
+    let response = rig.get("/api/email-logs");
+    assert_eq!(response.status, 200, "{}", response.body_text());
+    let body = rig.json(&response);
+    let lines = body["lines"].as_array().unwrap();
+    let parsed: Vec<Value> = lines
+        .iter()
+        .map(|entry| serde_json::from_str(entry["line"].as_str().unwrap()).unwrap())
+        .collect();
+    assert_eq!(
+        parsed
+            .iter()
+            .filter(|line| line["event"] == "email_delivery_queued")
+            .count(),
+        2
+    );
+    let attempted = parsed
+        .iter()
+        .find(|line| line["event"] == "email_delivery_attempted")
+        .unwrap();
+    assert_eq!(attempted["attempt"], 1);
+    assert_eq!(attempted["smtp_port"], 587);
+    let completed = parsed
+        .iter()
+        .find(|line| line["event"] == "email_delivery_completed")
+        .unwrap();
+    assert_eq!(completed["state"], "PENDING");
+    assert_eq!(completed["error_code"], "SMTP_TIMEOUT");
+    assert_eq!(completed["error"], "SMTP 连接或响应超时");
+    assert_eq!(completed["attempt"], 1);
+    assert!(!response.body_text().contains("SMTP-secret-marker"));
+}
+
+#[test]
 fn test_email_persists_only_a_sanitized_failure() {
     let rig = Rig::new();
     assert_eq!(
@@ -3836,7 +4194,10 @@ fn test_email_persists_only_a_sanitized_failure() {
     let reopened = rig.second_life();
     let settings = reopened.json(&reopened.get("/api/email-alert-settings"));
     assert_eq!(settings["latest_test_result"]["status"], "FAILED");
-    assert_eq!(settings["latest_test_result"]["error"], "SMTP 连接或响应超时");
+    assert_eq!(
+        settings["latest_test_result"]["error"],
+        "SMTP 连接或响应超时"
+    );
     assert!(!settings.to_string().contains("SMTP-secret-marker"));
     assert!(reopened.history.list(None).unwrap().is_empty());
 }
@@ -3908,7 +4269,12 @@ fn disabled_and_incomplete_alerts_are_final_not_sent_without_fake_recipients() {
     let run = rig.get("/api/runs/disabled-alert");
     assert_eq!(run.status, 200);
     assert_eq!(rig.json(&run)["alert"]["delivery_state"], "NOT_SENT");
-    for private in ["recipient", "attempt_count", "last_error", "retry_deadline_at"] {
+    for private in [
+        "recipient",
+        "attempt_count",
+        "last_error",
+        "retry_deadline_at",
+    ] {
         assert!(!run.body_text().contains(private));
     }
     assert_eq!(
@@ -3931,9 +4297,7 @@ fn disabled_and_incomplete_alerts_are_final_not_sent_without_fake_recipients() {
     configured_disabled.finished_at = Some(now.to_rfc3339());
     configured_disabled.failure_kind = Some("NETWORK".to_owned());
     rig.history.finalize(&configured_disabled, now, 90).unwrap();
-    let deliveries = rig.json(
-        &rig.get("/api/email-deliveries?run_record_id=configured-disabled"),
-    );
+    let deliveries = rig.json(&rig.get("/api/email-deliveries?run_record_id=configured-disabled"));
     assert_eq!(deliveries.as_array().unwrap().len(), 2);
     assert!(deliveries
         .as_array()
@@ -3954,11 +4318,8 @@ fn disabled_and_incomplete_alerts_are_final_not_sent_without_fake_recipients() {
         )
         .unwrap();
     assert_eq!(
-        rig.post(
-            &format!("/api/email-deliveries/{suppressed_id}/retry"),
-            "",
-        )
-        .status,
+        rig.post(&format!("/api/email-deliveries/{suppressed_id}/retry"), "",)
+            .status,
         400
     );
 }
@@ -3997,9 +4358,7 @@ fn disabling_terminates_pending_work_and_reenabling_never_backfills_it() {
         &email_alert_settings_json(false, "", 24),
     );
     assert_eq!(disabled.status, 200, "{}", disabled.body_text());
-    let terminated = rig.json(
-        &rig.get("/api/email-deliveries?run_record_id=terminated-alert"),
-    );
+    let terminated = rig.json(&rig.get("/api/email-deliveries?run_record_id=terminated-alert"));
     assert!(terminated.as_array().unwrap().iter().all(|delivery| {
         delivery["state"] == "NOT_SENT"
             && delivery["last_error"] == "管理员已停用邮件告警"
@@ -4026,9 +4385,8 @@ fn disabling_terminates_pending_work_and_reenabling_never_backfills_it() {
             .unwrap(),
         0
     );
-    let still_terminated = rig.json(
-        &rig.get("/api/email-deliveries?run_record_id=terminated-alert"),
-    );
+    let still_terminated =
+        rig.json(&rig.get("/api/email-deliveries?run_record_id=terminated-alert"));
     assert!(still_terminated
         .as_array()
         .unwrap()
@@ -4079,11 +4437,7 @@ fn only_administrators_can_diagnose_and_retry_exhausted_email_deliveries() {
     rig.auth
         .update_operator(true, Some("operator-secret"))
         .unwrap();
-    let operator = rig
-        .auth
-        .issue_session("operator", now)
-        .unwrap()
-        .token;
+    let operator = rig.auth.issue_session("operator", now).unwrap().token;
     let private_path = "/api/email-deliveries?run_record_id=delivery-diagnostics";
     let refused = rig.send_with_session(&operator, Method::Get, private_path, "");
     assert_eq!(refused.status, 403);
@@ -4259,9 +4613,21 @@ fn email_alert_settings_json(enabled: bool, secret: &str, retry_hours: u8) -> St
 fn operator_password_reset_and_disable_invalidate_only_operator_sessions() {
     let rig = Rig::new();
     rig.auth.update_operator(true, Some("first")).unwrap();
-    let current = rig.auth.issue_session("operator", chrono::Utc::now()).unwrap().token;
-    let elsewhere = rig.auth.issue_session("operator", chrono::Utc::now()).unwrap().token;
-    let admin = rig.auth.issue_session("admin", chrono::Utc::now()).unwrap().token;
+    let current = rig
+        .auth
+        .issue_session("operator", chrono::Utc::now())
+        .unwrap()
+        .token;
+    let elsewhere = rig
+        .auth
+        .issue_session("operator", chrono::Utc::now())
+        .unwrap()
+        .token;
+    let admin = rig
+        .auth
+        .issue_session("admin", chrono::Utc::now())
+        .unwrap()
+        .token;
 
     let changed = rig.send_with_session(
         &current,
@@ -4270,21 +4636,49 @@ fn operator_password_reset_and_disable_invalidate_only_operator_sessions() {
         r#"{"current_password":"first","new_password":"second"}"#,
     );
     assert_eq!(changed.status, 200, "{}", changed.body_text());
-    assert_eq!(rig.send_with_session(&current, Method::Get, "/api/tasks", "").status, 200);
-    assert_eq!(rig.send_with_session(&elsewhere, Method::Get, "/api/tasks", "").status, 401);
-    assert_eq!(rig.send_with_session(&admin, Method::Get, "/api/tasks", "").status, 200);
+    assert_eq!(
+        rig.send_with_session(&current, Method::Get, "/api/tasks", "")
+            .status,
+        200
+    );
+    assert_eq!(
+        rig.send_with_session(&elsewhere, Method::Get, "/api/tasks", "")
+            .status,
+        401
+    );
+    assert_eq!(
+        rig.send_with_session(&admin, Method::Get, "/api/tasks", "")
+            .status,
+        200
+    );
 
     let reset = rig.put(
         "/api/operator-account",
         r#"{"enabled":true,"password":"third"}"#,
     );
     assert_eq!(reset.status, 200);
-    assert_eq!(rig.send_with_session(&current, Method::Get, "/api/tasks", "").status, 401);
+    assert_eq!(
+        rig.send_with_session(&current, Method::Get, "/api/tasks", "")
+            .status,
+        401
+    );
     assert!(rig.auth.verify_password("operator", "third").unwrap());
 
-    let active = rig.auth.issue_session("operator", chrono::Utc::now()).unwrap().token;
-    assert_eq!(rig.put("/api/operator-account", r#"{"enabled":false}"#).status, 200);
-    assert_eq!(rig.send_with_session(&active, Method::Get, "/api/tasks", "").status, 401);
+    let active = rig
+        .auth
+        .issue_session("operator", chrono::Utc::now())
+        .unwrap()
+        .token;
+    assert_eq!(
+        rig.put("/api/operator-account", r#"{"enabled":false}"#)
+            .status,
+        200
+    );
+    assert_eq!(
+        rig.send_with_session(&active, Method::Get, "/api/tasks", "")
+            .status,
+        401
+    );
     assert!(!rig.auth.verify_password("operator", "third").unwrap());
 }
 
@@ -4292,7 +4686,11 @@ fn operator_password_reset_and_disable_invalidate_only_operator_sessions() {
 #[test]
 fn logging_out_burns_one_ticket_and_leaves_the_others_alone() {
     let rig = Rig::new();
-    let elsewhere = rig.auth.issue_session("admin", chrono::Utc::now()).unwrap().token;
+    let elsewhere = rig
+        .auth
+        .issue_session("admin", chrono::Utc::now())
+        .unwrap()
+        .token;
     let elsewhere_cookie = format!("db_qbs_session={elsewhere}");
 
     let goodbye = rig.delete("/api/session");
@@ -4312,7 +4710,11 @@ fn logging_out_burns_one_ticket_and_leaves_the_others_alone() {
 fn logging_out_twice_is_not_an_error() {
     let rig = Rig::new();
     assert_eq!(rig.delete("/api/session").status, 200);
-    assert_eq!(rig.send_anonymous(Method::Delete, "/api/session", "").status, 200);
+    assert_eq!(
+        rig.send_anonymous(Method::Delete, "/api/session", "")
+            .status,
+        200
+    );
 }
 
 /// 每一次带票据的请求都把 cookie 续一次期。
@@ -4325,15 +4727,24 @@ fn every_authenticated_request_slides_the_cookie_forward() {
     let response = rig.get("/api/tasks");
     assert_eq!(response.status, 200);
     let cookie = response.header("Set-Cookie").unwrap();
-    assert!(cookie.contains(&format!("Max-Age={}", 8 * 60 * 60)), "{cookie}");
+    assert!(
+        cookie.contains(&format!("Max-Age={}", 8 * 60 * 60)),
+        "{cookie}"
+    );
 }
 
 /// 改口令：要先输当前口令，改完**除了这一张之外的会话全部失效**。
 #[test]
 fn changing_the_password_keeps_this_session_and_burns_the_rest() {
     let rig = Rig::new();
-    let elsewhere = rig.auth.issue_session("admin", chrono::Utc::now()).unwrap().token;
-    rig.auth.update_operator(true, Some("operator-secret")).unwrap();
+    let elsewhere = rig
+        .auth
+        .issue_session("admin", chrono::Utc::now())
+        .unwrap()
+        .token;
+    rig.auth
+        .update_operator(true, Some("operator-secret"))
+        .unwrap();
     let operator = rig
         .auth
         .issue_session("operator", chrono::Utc::now())
@@ -4369,7 +4780,8 @@ fn changing_the_password_keeps_this_session_and_burns_the_rest() {
     // 而**发起这次改密的这一张留着**：改完口令立刻被自己踢出去毫无道理。
     assert_eq!(rig.get("/api/tasks").status, 200);
     assert_eq!(
-        rig.send_with_session(&operator, Method::Get, "/api/tasks", "").status,
+        rig.send_with_session(&operator, Method::Get, "/api/tasks", "")
+            .status,
         200,
         "管理员改密不该清掉操作员会话"
     );
@@ -4406,9 +4818,15 @@ fn a_session_expires_only_after_eight_idle_hours() {
     let token = rig.auth.issue_session("admin", start).unwrap().token;
     let hours = |n: i64| start + chrono::Duration::hours(n);
 
-    assert!(rig.auth.authenticate(&token, hours(7)).unwrap(), "7 小时就被踢了");
+    assert!(
+        rig.auth.authenticate(&token, hours(7)).unwrap(),
+        "7 小时就被踢了"
+    );
     // 上一句把窗口推到了第 7 小时，所以第 14 小时仍在窗口内——这就是「滑动」。
-    assert!(rig.auth.authenticate(&token, hours(14)).unwrap(), "窗口没有跟着往前滑");
+    assert!(
+        rig.auth.authenticate(&token, hours(14)).unwrap(),
+        "窗口没有跟着往前滑"
+    );
     assert!(
         !rig.auth.authenticate(&token, hours(23)).unwrap(),
         "闲置超过 8 小时还认"
@@ -4421,16 +4839,20 @@ fn a_session_expires_only_after_eight_idle_hours() {
 #[test]
 fn resetting_the_password_returns_to_the_factory_default_and_burns_every_session() {
     let rig = Rig::new();
-    rig.auth.change_password("admin", "admin", "新口令", "").unwrap();
-    let token = rig.auth.issue_session("admin", chrono::Utc::now()).unwrap().token;
+    rig.auth
+        .change_password("admin", "admin", "新口令", "")
+        .unwrap();
+    let token = rig
+        .auth
+        .issue_session("admin", chrono::Utc::now())
+        .unwrap()
+        .token;
 
     rig.auth.reset_password().unwrap();
 
     assert!(rig.auth.verify_password("admin", "admin").unwrap());
     assert!(
-        !rig.auth
-            .authenticate(&token, chrono::Utc::now())
-            .unwrap(),
+        !rig.auth.authenticate(&token, chrono::Utc::now()).unwrap(),
         "重置之后旧会话还认——而跑这条命令的人正是进不去的那个"
     );
 }
@@ -4483,13 +4905,18 @@ fn a_slow_oracle_fetch_does_not_block_another_client_listing_tasks() {
     // 作用域线程只借，不搬：`Rig` 得活到 `thread::scope` 之外（`Drop` 要清临时目录）。
     let rig = &rig;
     let (_agent_id, source_id, target_id) = rig.seed();
-    rig.create_task("holdings", "HOLDINGS", &(source_id.clone(), target_id.clone()));
+    rig.create_task(
+        "holdings",
+        "HOLDINGS",
+        &(source_id.clone(), target_id.clone()),
+    );
     let check = format!(
         r#"{{"source_datasource_id":"{source_id}","target_datasource_id":"{target_id}","target_table":"HOLDINGS","spec":{{"owner":"APP","table":"HOLDINGS","target_table":"HOLDINGS","columns":[{{"source":"ID","target":"ID"}}],"write_mode":"APPEND","schedule_enabled":false,"primary_key":["ID"]}}}}"#
     );
 
     thread::scope(|scope| {
-        let slow = scope.spawn(|| rig.post_with_describer("/api/target/check", &check, slow_describe));
+        let slow =
+            scope.spawn(|| rig.post_with_describer("/api/target/check", &check, slow_describe));
 
         // 等它真的进到取数里，再计时——否则量到的可能只是线程还没起来。
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -4625,7 +5052,10 @@ fn concurrent_starts_of_one_task_elect_exactly_one_winner() {
 
     let accepted = statuses.iter().filter(|status| **status == 202).count();
     let rejected = statuses.iter().filter(|status| **status == 409).count();
-    assert_eq!(accepted, 1, "同一条任务并发发起被放进去 {accepted} 次：{statuses:?}");
+    assert_eq!(
+        accepted, 1,
+        "同一条任务并发发起被放进去 {accepted} 次：{statuses:?}"
+    );
     assert_eq!(rejected, STARTERS - 1, "{statuses:?}");
 
     fs::write(&release, "").unwrap();
@@ -4751,9 +5181,11 @@ printf '%s\n' '{{"ts":"2026-08-15T10:00:07.000Z","level":"error","event":"run_fi
     });
 
     // 结束之后同一条路照旧走得通，终态那一行也在里面。
-    let finished = wait_for_json(&rig, &format!("/api/runs/{run_record_id}/logs?after=3"), |body| {
-        !body["lines"].as_array().unwrap().is_empty()
-    });
+    let finished = wait_for_json(
+        &rig,
+        &format!("/api/runs/{run_record_id}/logs?after=3"),
+        |body| !body["lines"].as_array().unwrap().is_empty(),
+    );
     assert_eq!(finished["live"], false);
     let terminal: Value =
         serde_json::from_str(finished["lines"][0]["line"].as_str().unwrap()).unwrap();
@@ -4883,7 +5315,9 @@ fn the_cron_instant_starts_a_run_that_history_marks_as_scheduled() {
         REPRESENTATIVE_PRE_SQL
     );
     // 真发出去了：有运行标识那一半由子进程补，但临时任务文件此刻已经在磁盘上。
-    assert!(listed[0]["run_record_id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert!(listed[0]["run_record_id"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty()));
     let task_files = directory_entries(&rig.directory.join("run-tasks"));
     assert_eq!(task_files.len(), 1);
     assert_eq!(
@@ -5041,7 +5475,11 @@ fn repeated_busy_schedule_alerts_expose_fixed_window_suppression() {
         .iter()
         .map(|row| row["alert"]["alert_id"].as_str().unwrap())
         .collect::<std::collections::HashSet<_>>();
-    assert_eq!(alert_ids.len(), 4, "each occurrence needs distinct Alert evidence");
+    assert_eq!(
+        alert_ids.len(),
+        4,
+        "each occurrence needs distinct Alert evidence"
+    );
     assert!(skipped.iter().all(|row| row.get("recipient").is_none()));
     assert_eq!(
         rig.alert_outbox

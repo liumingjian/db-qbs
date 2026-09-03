@@ -12,6 +12,7 @@ mod auth;
 mod cron;
 mod datasource;
 mod email_alert;
+mod email_log;
 mod failure_kind;
 pub mod http;
 mod oracle_source;
@@ -20,8 +21,8 @@ mod run_history;
 mod run_log_store;
 mod runtime;
 mod scheduler;
-pub mod server;
 mod secret;
+pub mod server;
 mod smtp;
 mod sql_builder;
 mod target_ddl;
@@ -56,15 +57,16 @@ pub use datasource::{
     Datasource, DatasourceInput, DatasourceSettings, DatasourceSettingsView, DatasourceStore,
     DatasourceView,
 };
-pub use email_alert::{
-    EmailAlertSettings, EmailAlertSettingsInput, EmailAlertStore, EmailDeliverySettings,
-    EmailProviderPreset, EmailTestResult, EmailTestStatus, SmtpSecurity,
-};
-pub use smtp::{multipart_mail, SmtpMailTransport};
 pub use db_qbs_shared::{
     classify_column, column_support, derive_number_shape, is_business_date_column,
     is_supported_decimal_shape, ColumnShape, ShapeRejection, TargetShape,
 };
+pub use email_alert::{
+    EmailAlertSettings, EmailAlertSettingsInput, EmailAlertStore, EmailDeliverySettings,
+    EmailProviderPreset, EmailTestResult, EmailTestStatus, SmtpSecurity,
+};
+pub use email_log::{EmailLogLine, EmailLogStore, EMAIL_LOG_PAGE_LIMIT};
+pub use smtp::{multipart_mail, SmtpMailTransport};
 // 校验门禁的判据同样只有一份定义，与 sink 共用（`shared::verification`）。
 pub use db_qbs_shared::{swap_rows_consistent, RowCounts, Verdict, WriteMode, WriteStatement};
 pub use failure_kind::{oracle_kind, FailureKind};
@@ -74,19 +76,19 @@ pub use protocol::{
 };
 pub use run_history::{
     expired_history_indices, fold_history_lines, AgentEvidence, FinalizeOutcome, HistoryChange,
-    HistoryStore, RunEvidence, RunHistory, RunParametersEvidence, RunTrigger, SourceEvidence,
-    ScheduledRefusalReason, TargetEvidence, UnknownReason,
+    HistoryStore, RunEvidence, RunHistory, RunParametersEvidence, RunTrigger,
+    ScheduledRefusalReason, SourceEvidence, TargetEvidence, UnknownReason,
 };
 // 到点派活的那条常驻线程（#266）。行为定义在 `scheduler.rs` 模块头。
-pub use scheduler::{
-    evaluate as run_scheduler_pass, scheduler_loop, DueOccurrence, QueuedOccurrence,
-    ScheduleRegistry, ScheduleState,
-};
 pub use run_log_store::{
     truncate_business_values, RunLogLine, RunLogStore, RunLogWriter, BUSINESS_VALUE_MAX_CHARS,
     RUN_LOG_PAGE_LIMIT, RUN_LOG_RETENTION_DAYS, RUN_LOG_RETENTION_RUNS_PER_TASK,
 };
 pub use runtime::{Clock, MailTransport, MailTransportError, OutgoingMail, SystemClock};
+pub use scheduler::{
+    evaluate as run_scheduler_pass, scheduler_loop, DueOccurrence, QueuedOccurrence,
+    ScheduleRegistry, ScheduleState,
+};
 pub use sql_builder::{
     builder_column_query, builder_dblink_query, builder_table_query, validate_builder_dblink,
     BuilderColumn, BuilderTable,

@@ -5,8 +5,9 @@ import { describe, expect, it } from "vitest";
 import { AgentScreen } from "./AgentScreen";
 import { navigationItemsFor } from "./App";
 import { DatasourceScreen } from "./DatasourceScreen";
-import { EmailAlertSettingsView, EmailDeliveryHistoryView, OperatorAccountView, SystemSettingsScreen } from "./SystemSettingsScreen";
+import { EmailAlertSettingsView, EmailDeliveryHistoryView, EmailErrorDialog, OperatorAccountView, SystemSettingsScreen } from "./SystemSettingsScreen";
 import type { Agent, Datasource, EmailAlertSettings, EmailDeliveryHistory, OperatorAccount } from "./api";
+import type { EmailErrorDetail } from "./SystemSettingsScreen";
 
 const AGENT: Agent = {
   agent_id: "agent-1",
@@ -148,6 +149,7 @@ describe("role-specific rendering", () => {
     expect(email).toContain("STARTTLS");
     expect(email).toContain("最大重试小时数");
     expect(email).toContain("发送测试邮件");
+    expect(email).not.toContain("邮件日志");
     expect(email).not.toContain("最新测试结果");
 
     const failedTest = renderToStaticMarkup(createElement(EmailAlertSettingsView, {
@@ -169,7 +171,39 @@ describe("role-specific rendering", () => {
     }));
     expect(failedTest).toContain("最新测试结果");
     expect(failedTest).toContain("发送失败");
-    expect(failedTest).toContain("SMTP 连接或响应超时");
+    expect(failedTest).toContain("邮件服务器没有及时响应");
+    expect(failedTest).toContain("查看详情");
+    expect(failedTest).not.toContain("SMTP 连接或响应超时");
+  });
+
+  it("explains an email failure in a friendly detail dialog", () => {
+    const detail: EmailErrorDetail = {
+      id: "email-test",
+      source: "测试邮件",
+      severity: "error",
+      error: "无法连接 SMTP 服务器或完成邮件传输",
+      occurredAt: "2026-08-31T10:00:00+00:00",
+      taskName: null,
+      runRecordId: null,
+      recipient: null,
+      state: null,
+      attemptCount: null,
+      nextAttemptAt: null,
+      retryDeadlineAt: null,
+      smtpHost: "smtp.example.com",
+      smtpPort: 465,
+      smtpSecurity: "IMPLICIT_TLS",
+    };
+    const markup = renderToStaticMarkup(createElement(EmailErrorDialog, {
+      details: [detail],
+      onClose: () => undefined,
+    }));
+
+    expect(markup).toContain("邮件错误详情");
+    expect(markup).toContain("无法连接邮件服务器");
+    expect(markup).toContain("在 source 主机上检查 DNS 和 SMTP 端口");
+    expect(markup).toContain("SMTP_NETWORK");
+    expect(markup).toContain("smtp.example.com:465");
   });
 
   it("requires an explicit acknowledgement before disabling email delivery", () => {
@@ -220,7 +254,8 @@ describe("role-specific rendering", () => {
 
     expect(markup).toContain("投递历史");
     expect(markup).toContain("failed@example.com");
-    expect(markup).toContain("SMTP 服务器暂时拒绝请求");
+    expect(markup).toContain("失败");
+    expect(markup).not.toContain("SMTP 服务器暂时拒绝请求");
     expect(markup).toContain("重新发送给 failed@example.com");
     expect(markup).not.toContain("重新发送给 sent@example.com");
     expect(markup).toContain("alert-record-1");

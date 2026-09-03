@@ -152,10 +152,20 @@ pub enum LogEvent {
     SinkStarted,
     SinkUnavailable,
     HttpResponseFailed,
+    EmailSettingsUpdated,
+    EmailTestStarted,
+    EmailTestRecipientCompleted,
+    EmailTestCompleted,
+    EmailDeliveryQueued,
+    EmailDeliveryNotSent,
+    EmailDeliverySuppressed,
+    EmailDeliveryAttempted,
+    EmailDeliveryCompleted,
+    EmailWorkerError,
 }
 
 impl LogEvent {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 29] = [
         Self::CliFailed,
         Self::SourceStarted,
         Self::BusinessDateInvalid,
@@ -175,6 +185,16 @@ impl LogEvent {
         Self::SinkStarted,
         Self::SinkUnavailable,
         Self::HttpResponseFailed,
+        Self::EmailSettingsUpdated,
+        Self::EmailTestStarted,
+        Self::EmailTestRecipientCompleted,
+        Self::EmailTestCompleted,
+        Self::EmailDeliveryQueued,
+        Self::EmailDeliveryNotSent,
+        Self::EmailDeliverySuppressed,
+        Self::EmailDeliveryAttempted,
+        Self::EmailDeliveryCompleted,
+        Self::EmailWorkerError,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -198,6 +218,16 @@ impl LogEvent {
             Self::SinkStarted => "sink_started",
             Self::SinkUnavailable => "sink_unavailable",
             Self::HttpResponseFailed => "http_response_failed",
+            Self::EmailSettingsUpdated => "email_settings_updated",
+            Self::EmailTestStarted => "email_test_started",
+            Self::EmailTestRecipientCompleted => "email_test_recipient_completed",
+            Self::EmailTestCompleted => "email_test_completed",
+            Self::EmailDeliveryQueued => "email_delivery_queued",
+            Self::EmailDeliveryNotSent => "email_delivery_not_sent",
+            Self::EmailDeliverySuppressed => "email_delivery_suppressed",
+            Self::EmailDeliveryAttempted => "email_delivery_attempted",
+            Self::EmailDeliveryCompleted => "email_delivery_completed",
+            Self::EmailWorkerError => "email_worker_error",
         }
     }
 }

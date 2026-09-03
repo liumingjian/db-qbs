@@ -53,6 +53,7 @@ fn safe_failure_explanation(kind: Option<&str>) -> &'static str {
 pub(super) struct PendingDelivery {
     pub delivery_id: String,
     pub recipient: String,
+    pub attempt_count: u64,
     pub alert_id: String,
     pub run_record_id: String,
     pub run_id: Option<String>,

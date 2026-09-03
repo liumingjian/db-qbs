@@ -60,6 +60,7 @@ if (( DO_WEB )); then
       mkdir -p /build/docs && cd /build
       cp -a /src/package.json /src/package-lock.json /src/tsconfig.json /src/vite.config.ts /build/
       cp -a /src/web /build/web
+      cp -a /src/mock /build/mock
       cp -a /src/docs/design-system /build/docs/
       rm -rf /build/web/dist
       npm ci --no-audit --no-fund

@@ -58,6 +58,14 @@ retry controls. Administrators may inspect those details and manually retry a fa
 Administrators manage these controls on a top-level System Settings screen with separate Email Alert
 and Operator Account views; Operators cannot navigate to or call its configuration APIs.
 
+The source persists the email lifecycle as structured JSON Lines in its local SQLite file. The log
+uses the same `ts`, `level`, `event`, optional `run_id`/`task`, and event-field convention as source
+runtime logs, and is read by administrators through a cursor-based `/api/email-logs` endpoint. It
+covers settings changes, test-email results, queueing, attempts, manual retries, retry-window expiry,
+suppressed or unsent deliveries, and worker errors. Transport failures include a stable safe error
+code alongside the sanitized diagnostic. It retains these diagnostics for 30 days and never stores
+the SMTP secret or a raw SMTP response.
+
 Each recipient has an independent delivery record and retry lifecycle. A rejected recipient neither
 blocks nor hides successful deliveries to the others, and the run-level status can therefore be
 sent, partially failed, or failed. Alert and delivery records have no independent retention setting:

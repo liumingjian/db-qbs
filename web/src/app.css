@@ -440,10 +440,33 @@ pre.drawer-sql { margin: 0; padding: 12px var(--pad); overflow: auto; max-height
 .settings-actions { display: flex; align-items: center; gap: 10px; padding-top: 18px; border-top: 1px solid var(--line); }
 .email-test-result { display: grid; gap: 10px; padding-top: 18px; border-top: 1px solid var(--line); }
 .email-test-result h3 { margin: 0; font-size: var(--size-body); letter-spacing: 0; }
+.email-test-result-note { margin: 0; color: var(--mute); font-size: var(--size-meta); }
 .email-delivery-history { display: grid; gap: 10px; padding-top: 18px; border-top: 1px solid var(--line); }
 .email-delivery-history h3 { margin: 0; font-size: var(--size-body); letter-spacing: 0; }
-.email-delivery-grid { min-width: 940px; }
+.email-delivery-grid { min-width: 820px; }
 .email-delivery-grid td { vertical-align: top; }
+.email-error-notice { margin-bottom: 0; }
+.email-error-notice > div:first-child { min-width: 0; }
+.email-error-details-button { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.email-error-dialog-body { display: grid; gap: 16px; }
+.email-error-dialog-intro { margin: 0; color: var(--mute); font-size: var(--size-meta); }
+.email-error-detail-list { display: grid; gap: 18px; }
+.email-error-detail { padding-top: 18px; border-top: 1px solid var(--line); }
+.email-error-detail:first-child { padding-top: 0; border-top: 0; }
+.email-error-detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--gap); }
+.email-error-source { display: block; margin-bottom: 4px; color: var(--mute); font-size: var(--size-cap); }
+.email-error-detail h3 { margin: 0; font-size: var(--size-body); letter-spacing: 0; }
+.email-error-explanation { margin: 10px 0 0; color: var(--dim); line-height: var(--lh-prose); }
+.email-error-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; margin: 14px 0 0; padding: 12px; border: 1px solid var(--line); background: var(--mute-bg); }
+.email-error-facts > div { min-width: 0; }
+.email-error-facts dt { color: var(--mute); font-size: var(--size-cap); }
+.email-error-facts dd { margin: 3px 0 0; overflow-wrap: anywhere; color: var(--text); font-size: var(--size-meta); }
+.email-error-section { margin-top: 14px; }
+.email-error-section h4 { margin: 0 0 5px; font-size: var(--size-meta); font-weight: var(--weight-em); }
+.email-error-section ul { margin: 0; padding-left: 20px; color: var(--dim); font-size: var(--size-meta); line-height: var(--lh-prose); }
+.email-error-diagnostic { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-top: 14px; padding: 9px 12px; border-left: 3px solid var(--line-strong); background: var(--mute-bg); color: var(--mute); font-size: var(--size-cap); }
+.email-error-diagnostic code { color: var(--dim); overflow-wrap: anywhere; font-family: var(--font-num); }
+.email-error-diagnostic small { color: var(--mute); font-family: var(--font-num); }
 .delete-copy p { margin: 0 0 6px; }
 .delete-copy strong { font-weight: var(--weight-em); }
 /* 批量删除的二次确认把要删的任务名**逐条列全**，不是「确定删除 3 个任务？」（ADR-0043 §6）。 */
@@ -1180,6 +1203,9 @@ select, .page-size {
   .evidence-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .settings-layout { grid-template-columns: minmax(0, 1fr); }
   .settings-nav { border-right: 0; border-bottom: 1px solid var(--line); }
+  .email-error-notice { align-items: flex-start; }
+  .email-error-notice .notice-side { display: block; margin: 4px 0 0; }
+  .email-error-facts { grid-template-columns: minmax(0, 1fr); }
   .account-facts { grid-template-columns: minmax(0, 1fr); }
   .account-facts > div { border-right: 0; border-bottom: 1px solid var(--line); }
   .account-facts > div:last-child { border-bottom: 0; }

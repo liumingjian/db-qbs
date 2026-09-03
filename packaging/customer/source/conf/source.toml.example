@@ -1,14 +1,12 @@
 # Copy to /opt/tools/db-qbs/conf/source.toml and edit before starting.
+# This file contains service settings only. Database credentials live in the
+# source data directory after they are saved from the web UI.
 
-# Web UI and source orchestration service.
-# Use 0.0.0.0 only when the customer firewall allows trusted admin hosts.
+# Web UI and source orchestration service. Restrict this port to trusted admin
+# hosts with the host firewall or an existing reverse proxy.
 listen = "0.0.0.0:18088"
 
-# The sink service address as seen from the source server.
-# Example: http://10.250.0.202:18080
-sink_base_url = "http://<SINK_SERVER_IP>:18080"
-
-# Oracle Instant Client directory on the source server.
+# Oracle Instant Client directory installed by this package.
 oracle_client_lib_dir = "/opt/tools/db-qbs/oracle/instantclient"
 
 # Runtime data and run history. Keep this directory persistent.

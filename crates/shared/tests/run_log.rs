@@ -96,6 +96,16 @@ fn event_vocabulary_is_closed_and_stable() {
             "sink_started",
             "sink_unavailable",
             "http_response_failed",
+            "email_settings_updated",
+            "email_test_started",
+            "email_test_recipient_completed",
+            "email_test_completed",
+            "email_delivery_queued",
+            "email_delivery_not_sent",
+            "email_delivery_suppressed",
+            "email_delivery_attempted",
+            "email_delivery_completed",
+            "email_worker_error",
         ]
     );
 }

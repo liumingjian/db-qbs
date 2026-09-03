@@ -19,6 +19,7 @@ set -uo pipefail
 MIN_PACKET=67108864     # 64 MiB —— 与 crates/sink/src/mysql_destination.rs 的 MIN_PACKET 同值
 STUNNEL_PIDFILE=${QBS_STUNNEL_PIDFILE:-/var/run/db-qbs-stunnel-sink.pid}
 STUNNEL_CONF=${QBS_STUNNEL_CONF:-/etc/stunnel/db-qbs/stunnel-sink.conf}
+DIRECT_MODE=${QBS_DIRECT_MODE:-0}
 
 usage() {
   cat <<'USAGE'
@@ -36,6 +37,7 @@ usage() {
   QBS_MYSQL_PASSWORD_FILE  存着口令的文件，读第一行
   QBS_MYSQL_DATABASE       目标库库名
   QBS_HOST_IP              本机的非回环地址（判「sink 没越出回环」用），默认自动取
+  QBS_DIRECT_MODE          设为 1 时按可信内网直连 sink，跳过 stunnel 服务端检查
   QBS_STUNNEL_PIDFILE      stunnel 服务端 pid 文件，默认 /var/run/db-qbs-stunnel-sink.pid
   QBS_STUNNEL_CONF         stunnel 服务端配置，默认 /etc/stunnel/db-qbs/stunnel-sink.conf
 
@@ -157,7 +159,9 @@ fi
 # **先判 listen 本身**：目标端是双网卡（对外白名单口 + 内网 MySQL），
 # `listen = "10.0.0.5:8080"` 而 hostname 恰好解析到另一张网卡时，反向探针会「不通」，
 # 这一条就为一个绑在可路由地址上的、没有鉴权的 sink 判绿。地址是白纸黑字的，先按它判。
-if [[ ! "$sink_host" =~ ^(127\.|localhost$|::1$) ]]; then
+if [[ "$DIRECT_MODE" == 1 ]]; then
+  report D3 PASS "直连模式按 POC 防火墙保护 sink" "${sink_host}:${sink_port}（需另核对 source 白名单）"
+elif [[ ! "$sink_host" =~ ^(127\.|localhost$|::1$) ]]; then
   report D3 FAIL "sink 没越出回环" "listen 绑的是 ${sink_host}，不是回环" \
     "把 sink.toml 的 listen 改回 127.0.0.1:${sink_port} —— 它没有鉴权，露到网上等于把目标库交出去（ADR-0024）"
 elif ! grep -q 'RUN_UNKNOWN' <<<"$sink_body"; then
@@ -274,36 +278,42 @@ ritual_report D6 "sql_mode 设得成 STRICT_ALL_TABLES" 2 'sql_mode' \
 ritual_report D7 "max_allowed_packet ≥ 64 MiB" 3 'max_allowed_packet' \
   "MySQL 5.7 的默认值是 4 MiB，未调参的 5.7 一定红在这里；8.0 的默认值刚好够。两条都做：在库上执行 \`SET GLOBAL max_allowed_packet = ${MIN_PACKET};\`（当场生效，之后新建的连接才拿得到），再把 my.cnf 的 [mysqld] 段写上 \`max_allowed_packet = 64M\` 让它在重启后仍然成立。这是环境配置，不是业务数据问题"
 
-# ---------------------------------------------------------------- D8–D9 stunnel 服务端
-echo "==> D8–D9 stunnel 服务端（公网上露出来的只有这一个口）"
-stunnel_pid=$(cat "$STUNNEL_PIDFILE" 2>/dev/null)
-if [[ -n "$stunnel_pid" && -d "/proc/$stunnel_pid" ]]; then
-  report D8 PASS "stunnel 服务端进程在跑" "pid=$stunnel_pid"
+# ---------------------------------------------------------------- D8–D9 stunnel 服务端或直连
+if [[ "$DIRECT_MODE" == 1 ]]; then
+  echo "==> D8–D9 可信内网直连（显式跳过 stunnel 服务端）"
+  report D8 PASS "直连模式不使用 stunnel 服务端" "QBS_DIRECT_MODE=1"
+  report D9 PASS "直连模式不使用 stunnel 白名单口" "QBS_DIRECT_MODE=1"
 else
-  leftover=""
-  [[ -f "$STUNNEL_CONF" ]] \
-    && leftover=$(grep -vE '^[[:space:]]*;' "$STUNNEL_CONF" | grep -oE '@@[A-Z_]+@@' | sort -u | paste -sd, -)
-  if [[ ! -f "$STUNNEL_CONF" ]]; then
-    hint="配置还没铺：照 packaging/stunnel/README.md 把 target-side/ 那套装到 $STUNNEL_CONF"
-  elif [[ -n "$leftover" ]]; then
-    hint="配置里还留着占位符（${leftover}），填完再起 stunnel"
+  echo "==> D8–D9 stunnel 服务端（公网上露出来的只有这一个口）"
+  stunnel_pid=$(cat "$STUNNEL_PIDFILE" 2>/dev/null)
+  if [[ -n "$stunnel_pid" && -d "/proc/$stunnel_pid" ]]; then
+    report D8 PASS "stunnel 服务端进程在跑" "pid=$stunnel_pid"
   else
-    hint="配置在位但进程没起：systemctl start db-qbs-stunnel（或直接 stunnel ${STUNNEL_CONF}），日志看 /var/log/db-qbs-stunnel-sink.log"
+    leftover=""
+    [[ -f "$STUNNEL_CONF" ]] \
+      && leftover=$(grep -vE '^[[:space:]]*;' "$STUNNEL_CONF" | grep -oE '@@[A-Z_]+@@' | sort -u | paste -sd, -)
+    if [[ ! -f "$STUNNEL_CONF" ]]; then
+      hint="配置还没铺：照 packaging/stunnel/README.md 把 target-side/ 那套装到 $STUNNEL_CONF"
+    elif [[ -n "$leftover" ]]; then
+      hint="配置里还留着占位符（${leftover}），填完再起 stunnel"
+    else
+      hint="配置在位但进程没起：systemctl start db-qbs-stunnel（或直接 stunnel ${STUNNEL_CONF}），日志看 /var/log/db-qbs-stunnel-sink.log"
+    fi
+    report D8 FAIL "stunnel 服务端进程在跑" "$STUNNEL_PIDFILE 指不到活进程" "$hint"
   fi
-  report D8 FAIL "stunnel 服务端进程在跑" "$STUNNEL_PIDFILE 指不到活进程" "$hint"
-fi
 
-# 白名单口从配置里读，不写死：真机上那个端口由客户给，写死的话现场改一处就漏一处。
-whitelist_port=""
-[[ -f "$STUNNEL_CONF" ]] \
-  && whitelist_port=$(sed -n 's/^[[:space:]]*accept[[:space:]]*=[[:space:]]*[^:]*:\([0-9]\+\).*/\1/p' "$STUNNEL_CONF" | head -1)
-if [[ -z "$whitelist_port" ]]; then
-  report D9 FAIL "白名单口在听" "$STUNNEL_CONF 里读不到 accept 端口" "先按 D8 处置（配置铺好、占位符填完）"
-elif [[ "$(tcp_open 127.0.0.1 "$whitelist_port")" == 通 ]]; then
-  report D9 PASS "白名单口 $whitelist_port 在听" 通
-else
-  report D9 FAIL "白名单口 $whitelist_port 在听" 不通 \
-    "stunnel 服务端没 bind 上：看 /var/log/db-qbs-stunnel-sink.log，多半是端口被占或证书路径不对"
+  # 白名单口从配置里读，不写死：真机上那个端口由客户给，写死的话现场改一处就漏一处。
+  whitelist_port=""
+  [[ -f "$STUNNEL_CONF" ]] \
+    && whitelist_port=$(sed -n 's/^[[:space:]]*accept[[:space:]]*=[[:space:]]*[^:]*:\([0-9]\+\).*/\1/p' "$STUNNEL_CONF" | head -1)
+  if [[ -z "$whitelist_port" ]]; then
+    report D9 FAIL "白名单口在听" "$STUNNEL_CONF 里读不到 accept 端口" "先按 D8 处置（配置铺好、占位符填完）"
+  elif [[ "$(tcp_open 127.0.0.1 "$whitelist_port")" == 通 ]]; then
+    report D9 PASS "白名单口 $whitelist_port 在听" 通
+  else
+    report D9 FAIL "白名单口 $whitelist_port 在听" 不通 \
+      "stunnel 服务端没 bind 上：看 /var/log/db-qbs-stunnel-sink.log，多半是端口被占或证书路径不对"
+  fi
 fi
 
 echo

@@ -1,4 +1,4 @@
-import { KeyRound, Mail, RefreshCw, Save, Send, Settings, UserRoundCheck } from "lucide-react";
+import { Info, KeyRound, Mail, RefreshCw, Save, Send, Settings, UserRoundCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 
@@ -14,7 +14,7 @@ import {
 import type { EmailAlertSettings, EmailAlertSettingsInput, EmailDeliveryHistory, OperatorAccount } from "./api";
 import { ICON } from "./components/DesignSystem";
 import { messageFrom } from "./errors";
-import { FormField } from "./ui";
+import { FormField, Modal } from "./ui";
 
 type SettingsView = "email" | "operator";
 
@@ -87,7 +87,7 @@ function EmailAlertSettingsPane() {
         ...current,
         latest_test_result: result,
       });
-      setSaved(result.status === "SUCCESS" ? "测试邮件已发送。" : "测试邮件发送失败，请查看最新结果。");
+      setSaved(result.status === "SUCCESS" ? "测试邮件已发送。" : "测试邮件发送失败，已生成详情。");
     } catch (testError) {
       setError(messageFrom(testError));
     } finally {
@@ -135,13 +135,15 @@ export function EmailAlertSettingsView({ settings, draft, deliveries = [], busy,
   const patch = (change: Partial<EmailAlertSettingsInput>) => {
     if (draft !== null) onChange({ ...draft, ...change });
   };
+  const [errorDetailsOpen, setErrorDetailsOpen] = useState(false);
+  const errorDetails = emailErrorDetails(settings, deliveries, error);
   return (
     <div className="settings-pane">
       <header className="settings-pane-header">
         <div><h2>邮件告警</h2><p>失败运行的全局 SMTP 连接、发件人和收件人设置。</p></div>
         {settings !== null && <span className={`state ${settings.enabled ? "is-succeeded" : "is-unknown"}`}>{settings.enabled ? "已启用" : "未启用"}</span>}
       </header>
-      {error !== null && <div className="form-error" role="alert">{error}</div>}
+      {errorDetails.length > 0 && <EmailErrorNotice details={errorDetails} onDetails={() => setErrorDetailsOpen(true)} />}
       {saved !== null && <div className="inline-result" role="status">{saved}</div>}
       {draft !== null && (
         <form className="email-settings-form" onSubmit={onSubmit}>
@@ -222,10 +224,11 @@ export function EmailAlertSettingsView({ settings, draft, deliveries = [], busy,
               {settings.latest_test_result.status === "SUCCESS" ? "发送成功" : "发送失败"}
             </span>
           </div>
-          {settings.latest_test_result.error !== null && <div className="form-error" role="status">{settings.latest_test_result.error}</div>}
+          {settings.latest_test_result.error !== null && <p className="email-test-result-note" role="status">失败原因已收进“查看详情”。</p>}
         </section>
       )}
       <EmailDeliveryHistoryView deliveries={deliveries} busy={busy} onRetry={onRetry} />
+      {errorDetailsOpen && errorDetails.length > 0 && <EmailErrorDialog details={errorDetails} onClose={() => setErrorDetailsOpen(false)} />}
     </div>
   );
 }
@@ -238,14 +241,14 @@ export function EmailDeliveryHistoryView({ deliveries, busy, onRetry }: {
   return (
     <section className="email-delivery-history" aria-labelledby="email-delivery-history-title">
       <div className="settings-pane-header">
-        <div><h3 id="email-delivery-history-title">投递历史</h3><p>按收件人显示发送状态与重试诊断。</p></div>
+        <div><h3 id="email-delivery-history-title">投递历史</h3><p>按收件人显示发送状态与重试进度，异常详情通过提示查看。</p></div>
       </div>
       {deliveries.length === 0 ? (
         <div className="empty-state">暂无邮件投递记录</div>
       ) : (
         <div className="table-wrap">
           <table className="data-grid email-delivery-grid">
-            <thead><tr><th>告警 / 任务</th><th>收件人</th><th>状态</th><th>尝试</th><th>最近尝试 / 下次尝试</th><th>诊断</th><th><span className="visually-hidden">操作</span></th></tr></thead>
+            <thead><tr><th>告警 / 任务</th><th>收件人</th><th>状态</th><th>尝试</th><th>最近尝试 / 下次尝试</th><th><span className="visually-hidden">操作</span></th></tr></thead>
             <tbody>{deliveries.map((delivery) => (
               <tr key={delivery.delivery_id}>
                 <td><strong>{delivery.task_name}</strong><span className="table-side mono">{delivery.alert_id}</span></td>
@@ -253,7 +256,6 @@ export function EmailDeliveryHistoryView({ deliveries, busy, onRetry }: {
                 <td><span className={`state ${deliveryStateClass(delivery.state)}`}>{deliveryStateLabel(delivery.state)}</span></td>
                 <td>{delivery.attempt_count}</td>
                 <td><span className="table-cell">{delivery.last_attempt_at ?? "尚未尝试"}</span><span className="table-side">{delivery.next_attempt_at === null ? `截止 ${delivery.retry_deadline_at}` : `下次 ${delivery.next_attempt_at}`}</span></td>
-                <td>{delivery.last_error ?? "-"}</td>
                 <td>{delivery.state === "FAILED" && <button className="icon-button" type="button" disabled={busy} title="重新发送" aria-label={`重新发送给 ${delivery.recipient}`} onClick={() => onRetry(delivery.delivery_id)}><RefreshCw size={ICON.sm} aria-hidden="true" /></button>}</td>
               </tr>
             ))}</tbody>
@@ -261,6 +263,256 @@ export function EmailDeliveryHistoryView({ deliveries, busy, onRetry }: {
         </div>
       )}
     </section>
+  );
+}
+
+export interface EmailErrorDetail {
+  id: string;
+  source: "邮件操作" | "测试邮件" | "后台投递";
+  severity: "error" | "warn";
+  error: string;
+  occurredAt: string | null;
+  taskName: string | null;
+  runRecordId: string | null;
+  recipient: string | null;
+  state: EmailDeliveryHistory["state"] | null;
+  attemptCount: number | null;
+  nextAttemptAt: string | null;
+  retryDeadlineAt: string | null;
+  smtpHost: string | null;
+  smtpPort: number | null;
+  smtpSecurity: EmailAlertSettings["smtp_security"] | null;
+}
+
+function emailErrorDetails(
+  settings: EmailAlertSettings | null,
+  deliveries: EmailDeliveryHistory[],
+  requestError: string | null,
+): EmailErrorDetail[] {
+  const details: EmailErrorDetail[] = [];
+  const smtp = settings === null ? null : {
+    smtpHost: settings.smtp_host,
+    smtpPort: settings.smtp_port,
+    smtpSecurity: settings.smtp_security,
+  };
+  if (requestError !== null) {
+    details.push({
+      id: "email-request",
+      source: "邮件操作",
+      severity: "error",
+      error: requestError,
+      occurredAt: null,
+      taskName: null,
+      runRecordId: null,
+      recipient: null,
+      state: null,
+      attemptCount: null,
+      nextAttemptAt: null,
+      retryDeadlineAt: null,
+      smtpHost: smtp?.smtpHost ?? null,
+      smtpPort: smtp?.smtpPort ?? null,
+      smtpSecurity: smtp?.smtpSecurity ?? null,
+    });
+  }
+  const test = settings?.latest_test_result;
+  if (test?.status === "FAILED") {
+    details.push({
+      id: "email-test",
+      source: "测试邮件",
+      severity: "error",
+      error: test.error ?? "测试邮件未发送成功",
+      occurredAt: test.tested_at,
+      taskName: null,
+      runRecordId: null,
+      recipient: null,
+      state: null,
+      attemptCount: null,
+      nextAttemptAt: null,
+      retryDeadlineAt: null,
+      smtpHost: smtp?.smtpHost ?? null,
+      smtpPort: smtp?.smtpPort ?? null,
+      smtpSecurity: smtp?.smtpSecurity ?? null,
+    });
+  }
+  for (const delivery of deliveries) {
+    if (delivery.last_error === null || (delivery.state !== "FAILED" && delivery.state !== "PENDING")) {
+      continue;
+    }
+    details.push({
+      id: delivery.delivery_id,
+      source: "后台投递",
+      severity: delivery.state === "PENDING" ? "warn" : "error",
+      error: delivery.last_error,
+      occurredAt: delivery.last_attempt_at ?? delivery.failed_at,
+      taskName: delivery.task_name,
+      runRecordId: delivery.run_record_id,
+      recipient: delivery.recipient,
+      state: delivery.state,
+      attemptCount: delivery.attempt_count,
+      nextAttemptAt: delivery.next_attempt_at,
+      retryDeadlineAt: delivery.retry_deadline_at,
+      smtpHost: smtp?.smtpHost ?? null,
+      smtpPort: smtp?.smtpPort ?? null,
+      smtpSecurity: smtp?.smtpSecurity ?? null,
+    });
+  }
+  return details;
+}
+
+function emailErrorGuide(error: string): {
+  title: string;
+  notice: string;
+  explanation: string;
+  causes: string[];
+  actions: string[];
+} {
+  if (error.includes("必须保存完整")) {
+    return {
+      title: "邮件配置还不完整",
+      notice: "请先补齐 SMTP、发件人和收件人信息。",
+      explanation: "系统还没有足够的配置来尝试发送邮件。",
+      causes: ["SMTP 密钥尚未保存", "发件人或收件人地址为空或格式不正确"],
+      actions: ["补齐带星号的邮件配置", "点击“保存设置”后再发送测试邮件"],
+    };
+  }
+  if (error.includes("TLS")) {
+    return {
+      title: "安全连接没有建立",
+      notice: "邮件服务器的加密连接没有建立成功。",
+      explanation: "source 已连接到邮件发送流程，但 TLS 握手或证书校验没有完成。",
+      causes: ["端口与加密方式不匹配", "邮件服务器证书名称与 SMTP 主机不一致"],
+      actions: ["465 端口使用隐式 SSL/TLS，587 端口使用 STARTTLS", "确认 SMTP 主机名与服务器证书一致"],
+    };
+  }
+  if (error.includes("超时")) {
+    return {
+      title: "邮件服务器没有及时响应",
+      notice: "连接或发送等待超时，邮件没有完成投递。",
+      explanation: "source 在等待邮件服务器时超过了允许时间。",
+      causes: ["source 主机到 SMTP 服务器的网络不通", "防火墙或邮件服务器当前响应缓慢"],
+      actions: ["从运行 source 的机器检查 SMTP 主机和端口连通性", "确认出口防火墙允许该 SMTP 端口"],
+    };
+  }
+  if (error.includes("暂时拒绝")) {
+    return {
+      title: "邮件服务器暂时拒绝发送",
+      notice: "邮件会按当前重试策略再次尝试。",
+      explanation: "邮件服务器返回了暂时性拒绝，当前投递仍可能处于等待重试状态。",
+      causes: ["服务器限流或暂时繁忙", "发件策略要求稍后重试"],
+      actions: ["等待下一次自动重试", "如果持续失败，请联系邮件服务商确认限流策略"],
+    };
+  }
+  if (error.includes("服务器拒绝") || error.includes("认证")) {
+    return {
+      title: "邮件服务器拒绝了请求",
+      notice: "请检查 SMTP 账号和发件设置。",
+      explanation: "source 已到达邮件服务器，但服务器没有接受这次认证或发信请求。",
+      causes: ["SMTP 用户名或密钥不正确", "发件地址不符合服务商的发信策略"],
+      actions: ["确认用户名和 SMTP 密钥有效", "确认发件地址已被邮件服务商允许"],
+    };
+  }
+  if (error.includes("无法连接")) {
+    return {
+      title: "无法连接邮件服务器",
+      notice: "source 没有连通配置的 SMTP 主机。",
+      explanation: "邮件发送请求没有完成与 SMTP 服务器的连接。",
+      causes: ["SMTP 主机名解析失败或端口未开放", "source 主机的网络出口被拦截"],
+      actions: ["在 source 主机上检查 DNS 和 SMTP 端口", "确认主机、端口和安全模式与服务商文档一致"],
+    };
+  }
+  return {
+    title: "邮件操作没有完成",
+    notice: "请打开详情查看系统给出的诊断信息。",
+    explanation: "系统没有完成这次邮件操作，但保留了可供排查的安全诊断。",
+    causes: ["配置、网络或邮件服务器状态异常"],
+    actions: ["核对邮件配置后重新测试", "如果问题持续，请提供此处的系统诊断给管理员"],
+  };
+}
+
+function emailErrorCode(error: string): string | null {
+  if (error.includes("超时")) return "SMTP_TIMEOUT";
+  if (error.includes("TLS")) return "SMTP_TLS";
+  if (error.includes("暂时拒绝")) return "SMTP_TRANSIENT";
+  if (error.includes("服务器拒绝") || error.includes("认证")) return "SMTP_PERMANENT";
+  if (error.includes("无法连接")) return "SMTP_NETWORK";
+  return null;
+}
+
+function emailSecurityLabel(security: EmailAlertSettings["smtp_security"]): string {
+  return security === "IMPLICIT_TLS" ? "隐式 SSL/TLS" : "STARTTLS";
+}
+
+function emailErrorStateLabel(state: EmailErrorDetail["state"]): string {
+  return state === "PENDING" ? "等待重试" : "发送失败";
+}
+
+function EmailErrorNotice({ details, onDetails }: {
+  details: EmailErrorDetail[];
+  onDetails: () => void;
+}) {
+  const failed = details.some((detail) => detail.severity === "error");
+  const guide = emailErrorGuide(details[0].error);
+  const title = details.length === 1
+    ? guide.title
+    : failed ? "邮件发送存在异常" : "邮件投递等待重试";
+  const notice = details.length === 1
+    ? guide.notice
+    : `检测到 ${details.length} 条邮件记录需要关注。`;
+  return (
+    <div className={`notice email-error-notice ${failed ? "" : "is-warn"}`} role="alert">
+      <div>
+        <strong>{title}</strong>
+        <span className="notice-side">{notice}</span>
+      </div>
+      <div className="notice-actions">
+        <button className="text-button email-error-details-button" type="button" onClick={onDetails}>
+          <Info size={ICON.sm} aria-hidden="true" />查看详情
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export function EmailErrorDialog({ details, onClose }: {
+  details: EmailErrorDetail[];
+  onClose: () => void;
+}) {
+  return (
+    <Modal title="邮件错误详情" onClose={onClose} busy={false}>
+      <div className="modal-body email-error-dialog-body">
+        <p className="email-error-dialog-intro">下面的信息用于定位邮件发送问题，不包含 SMTP 密钥或服务器原始响应。</p>
+        <div className="email-error-detail-list">
+          {details.map((detail) => {
+            const guide = emailErrorGuide(detail.error);
+            const code = emailErrorCode(detail.error);
+            return (
+              <section className="email-error-detail" key={detail.id}>
+                <header className="email-error-detail-header">
+                  <div><span className="email-error-source">{detail.source}</span><h3>{guide.title}</h3></div>
+                  <span className={`state ${detail.severity === "error" ? "is-failed" : "is-unknown"}`}>{emailErrorStateLabel(detail.state)}</span>
+                </header>
+                <p className="email-error-explanation">{guide.explanation}</p>
+                <dl className="email-error-facts">
+                  <div><dt>发生时间</dt><dd className="mono">{detail.occurredAt ?? "本次操作"}</dd></div>
+                  {detail.taskName !== null && <div><dt>任务</dt><dd>{detail.taskName}</dd></div>}
+                  {detail.runRecordId !== null && <div><dt>运行记录</dt><dd className="mono">{detail.runRecordId}</dd></div>}
+                  {detail.recipient !== null && <div><dt>收件人</dt><dd className="mono">{detail.recipient}</dd></div>}
+                  {detail.state !== null && <div><dt>当前状态</dt><dd>{emailErrorStateLabel(detail.state)}</dd></div>}
+                  {detail.attemptCount !== null && <div><dt>已尝试</dt><dd>{detail.attemptCount} 次</dd></div>}
+                  {detail.nextAttemptAt !== null && <div><dt>下次尝试</dt><dd className="mono">{detail.nextAttemptAt}</dd></div>}
+                  {detail.retryDeadlineAt !== null && <div><dt>重试截止</dt><dd className="mono">{detail.retryDeadlineAt}</dd></div>}
+                  {detail.smtpHost !== null && <div><dt>连接目标</dt><dd className="mono">{detail.smtpHost}:{detail.smtpPort}</dd></div>}
+                  {detail.smtpSecurity !== null && <div><dt>安全方式</dt><dd>{emailSecurityLabel(detail.smtpSecurity)}</dd></div>}
+                </dl>
+                <div className="email-error-section"><h4>可能原因</h4><ul>{guide.causes.map((cause) => <li key={cause}>{cause}</li>)}</ul></div>
+                <div className="email-error-section"><h4>建议处理</h4><ul>{guide.actions.map((action) => <li key={action}>{action}</li>)}</ul></div>
+                <div className="email-error-diagnostic"><span>系统诊断</span><code>{detail.error}</code>{code !== null && <small>{code}</small>}</div>
+              </section>
+            );
+          })}
+        </div>
+      </div>
+    </Modal>
   );
 }
 

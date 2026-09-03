@@ -23,6 +23,7 @@ set -uo pipefail
 MIN_GLIBC=2.17          # ADR-0041 / #151：客户机是 CentOS 7，这是硬下界
 STUNNEL_PIDFILE=${QBS_STUNNEL_PIDFILE:-/var/run/db-qbs-stunnel-sink.pid}
 STUNNEL_CONF=${QBS_STUNNEL_CONF:-/etc/stunnel/db-qbs/stunnel-sink.conf}
+DIRECT_MODE=${QBS_DIRECT_MODE:-0}
 
 usage() {
   cat <<'USAGE'
@@ -40,6 +41,7 @@ usage() {
                              但那个字段已退役（ADR-0037 §10），多半是空的——空的时候
                              S5 记「未判定」，**不猜 127.0.0.1**
   QBS_ORACLE_PORT            Oracle 监听端口，默认 1521
+  QBS_DIRECT_MODE            设为 1 时按可信内网直连 sink，跳过 stunnel 客户端检查
   QBS_STUNNEL_PIDFILE        stunnel 客户端 pid 文件，默认 /var/run/db-qbs-stunnel-sink.pid
   QBS_STUNNEL_CONF           stunnel 客户端配置，默认 /etc/stunnel/db-qbs/stunnel-sink.conf
 
@@ -254,34 +256,47 @@ fi
 echo "       注：账号 / 口令 / 服务名对不对不在本项内，装完 source 后用界面的「测试连接」证一次"
 
 # ---------------------------------------------------------------- S6–S8 隧道
-echo "==> S6–S8 隧道（stunnel 客户端 → 目标端的 sink）"
-stunnel_pid=$(cat "$STUNNEL_PIDFILE" 2>/dev/null)
-if [[ -n "$stunnel_pid" && -d "/proc/$stunnel_pid" ]]; then
-  report S6 PASS "stunnel 客户端进程在跑" "pid=$stunnel_pid"
+if [[ "$DIRECT_MODE" == 1 ]]; then
+  echo "==> S6–S8 可信内网直连（显式跳过 stunnel 客户端）"
+  report S6 PASS "直连模式不使用 stunnel 客户端" "QBS_DIRECT_MODE=1"
 else
-  leftover=""
-  [[ -f "$STUNNEL_CONF" ]] \
-    && leftover=$(grep -vE '^[[:space:]]*;' "$STUNNEL_CONF" | grep -oE '@@[A-Z_]+@@' | sort -u | paste -sd, -)
-  if [[ ! -f "$STUNNEL_CONF" ]]; then
-    hint="配置还没铺：照 packaging/stunnel/README.md 把 source-side/ 那套装到 $STUNNEL_CONF"
-  elif [[ -n "$leftover" ]]; then
-    hint="配置里还留着占位符（${leftover}），填完再起 stunnel"
+  echo "==> S6–S8 隧道（stunnel 客户端 → 目标端的 sink）"
+  stunnel_pid=$(cat "$STUNNEL_PIDFILE" 2>/dev/null)
+  if [[ -n "$stunnel_pid" && -d "/proc/$stunnel_pid" ]]; then
+    report S6 PASS "stunnel 客户端进程在跑" "pid=$stunnel_pid"
   else
-    hint="配置在位但进程没起：systemctl start db-qbs-stunnel（或直接 stunnel ${STUNNEL_CONF}），日志看 /var/log/db-qbs-stunnel-sink.log"
+    leftover=""
+    [[ -f "$STUNNEL_CONF" ]] \
+      && leftover=$(grep -vE '^[[:space:]]*;' "$STUNNEL_CONF" | grep -oE '@@[A-Z_]+@@' | sort -u | paste -sd, -)
+    if [[ ! -f "$STUNNEL_CONF" ]]; then
+      hint="配置还没铺：照 packaging/stunnel/README.md 把 source-side/ 那套装到 $STUNNEL_CONF"
+    elif [[ -n "$leftover" ]]; then
+      hint="配置里还留着占位符（${leftover}），填完再起 stunnel"
+    else
+      hint="配置在位但进程没起：systemctl start db-qbs-stunnel（或直接 stunnel ${STUNNEL_CONF}），日志看 /var/log/db-qbs-stunnel-sink.log"
+    fi
+    report S6 FAIL "stunnel 客户端进程在跑" "$STUNNEL_PIDFILE 指不到活进程" "$hint"
   fi
-  report S6 FAIL "stunnel 客户端进程在跑" "$STUNNEL_PIDFILE 指不到活进程" "$hint"
+fi
+
+if [[ "$DIRECT_MODE" == 1 ]]; then
+  s7_label="直连 sink"
+  s8_label="直连摸得到目标端的 sink"
+else
+  s7_label="隧道入口"
+  s8_label="经隧道摸得到目标端的 sink"
 fi
 
 if [[ "$sink_scheme" != http ]]; then
-  report S7 FAIL "隧道入口 $sink_host:$sink_port 在听" "sink_base_url 的 scheme 是 $sink_scheme" \
+  report S7 FAIL "$s7_label $sink_host:$sink_port 在听" "sink_base_url 的 scheme 是 $sink_scheme" \
     "产品只收 http 的 sink_base_url（明文只在回环上走，出机器之前已进 stunnel 的 TLS）；改回 http://"
-  report S8 FAIL "经隧道摸得到目标端的 sink" "前提未满足（S7 先红）" "先按 S7 处置"
+  report S8 FAIL "$s8_label" "前提未满足（S7 先红）" "先按 S7 处置"
 else
   tunnel_tcp=$(tcp_open "$sink_host" "$sink_port")
   if [[ "$tunnel_tcp" == 通 ]]; then
-    report S7 PASS "隧道入口 $sink_host:$sink_port 在听" 通
+    report S7 PASS "$s7_label $sink_host:$sink_port 在听" 通
   else
-    report S7 FAIL "隧道入口 $sink_host:$sink_port 在听" 不通 \
+    report S7 FAIL "$s7_label $sink_host:$sink_port 在听" 不通 \
       "stunnel 客户端的 accept 口没起来或端口对不上；核对 $STUNNEL_CONF 的 accept 与 source.toml 的 sink_base_url"
   fi
 
@@ -290,16 +305,16 @@ else
   if [[ "$tunnel_tcp" == 通 ]]; then
     body=$(http_get "$sink_host" "$sink_port" /v1/runs/__preflight__)
     if grep -q 'RUN_UNKNOWN' <<<"$body"; then
-      report S8 PASS "经隧道摸得到目标端的 sink" "sink 应答 RUN_UNKNOWN"
+      report S8 PASS "$s8_label" "sink 应答 RUN_UNKNOWN"
     elif [[ -n "$body" ]]; then
-      report S8 FAIL "经隧道摸得到目标端的 sink" "应答不是 sink（首行：$(head -1 <<<"$body" | tr -d '\r')）" \
+      report S8 FAIL "$s8_label" "应答不是 sink（首行：$(head -1 <<<"$body" | tr -d '\r')）" \
         "隧道通到了别的服务：核对 $STUNNEL_CONF 的 connect 与目标端 accept 口、目标端 stunnel 的 connect 是不是落在 sink 的回环口上"
     else
-      report S8 FAIL "经隧道摸得到目标端的 sink" "隧道口连得上但没有应答" \
+      report S8 FAIL "$s8_label" "隧道口连得上但没有应答" \
         "多半是目标端那一头没通：先在目标端跑 preflight-target.sh（sink 与 stunnel 服务端是否都在位）"
     fi
   else
-    report S8 FAIL "经隧道摸得到目标端的 sink" "前提未满足（S7 先红）" "先按 S7 处置"
+    report S8 FAIL "$s8_label" "前提未满足（S7 先红）" "先按 S7 处置"
   fi
 fi
 

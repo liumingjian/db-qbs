@@ -1,18 +1,7 @@
 # Store the real source.toml outside version control and chmod it 0600.
-# oracle_connect_string / oracle_username / oracle_password 已退役（ADR-0037 §10）：
-# 数据源的真相源是 data_dir 下的 SQLite，口令加密落盘。三个字段只在**首次启动、
-# 且数据源表为空**时被迁成一条名为「默认」的 Oracle 数据源，迁完请删掉它们。
-oracle_connect_string = "//oracle:1521/XE"
-oracle_username = "source_user"
-oracle_password = "replace-me"
-# 不退役：ODPI-C 的 client 库一个进程只初始化一次，做成数据源级字段时
-# 第二个值会被静默忽略（ADR-0037 §6）。
+# Database credentials are entered through the source UI and encrypted in
+# data_dir. Do not put Oracle credentials or a sink URL in this file.
 oracle_client_lib_dir = "/opt/oracle/instantclient"
-# sink_base_url 已退役（ADR-0044 §5）：目标端地址不再是进程级配置，而是**逐条数据源绑定的
-# 目标端 agent**。它只在**首次启动、且 agent 表为空**时被迁成一条名为「默认」的 agent，
-# 并把当时还没绑定 agent 的 MySQL 数据源指向它；迁完请删掉这一行，然后在
-# 「目标端 Agent」屏确认它在线。新装的部署直接不写它，在界面上注册即可。
-sink_base_url = "http://127.0.0.1:8080"
 listen = "127.0.0.1:8088"
 data_dir = "/var/lib/db-qbs-source"
 # history_retention_days defaults to 90.

@@ -5,10 +5,13 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
+use db_qbs_shared::{LogEvent, LogLevel};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use url::Url;
 
+use crate::email_log::{initialize_email_log_table, insert_log_in_transaction};
 use crate::secret::SecretBox;
 
 const DATABASE_FILE: &str = "db-qbs.sqlite3";
@@ -97,6 +100,17 @@ struct StoredSettings {
     sealed_secret: String,
 }
 
+struct PendingDeliveryForDisable {
+    delivery_id: String,
+    alert_id: String,
+    run_record_id: String,
+    run_id: Option<String>,
+    task_id: String,
+    task_name: String,
+    recipient: String,
+    attempt_count: u64,
+}
+
 pub struct EmailAlertStore {
     connection: Mutex<Connection>,
     secrets: SecretBox,
@@ -150,6 +164,7 @@ impl EmailAlertStore {
         add_column_if_missing(&connection, "latest_test_status", "TEXT")?;
         add_column_if_missing(&connection, "latest_test_at", "TEXT")?;
         add_column_if_missing(&connection, "latest_test_error", "TEXT")?;
+        initialize_email_log_table(&connection)?;
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|error| format!("配置 SQLite 忙等待失败：{error}"))?;
@@ -188,6 +203,66 @@ impl EmailAlertStore {
         if input.enabled {
             validate_complete(&input, !sealed_secret.is_empty())?;
         }
+        let settings_log = json!({
+            "enabled": input.enabled,
+            "provider_preset": input.provider_preset,
+            "smtp_host": &input.smtp_host,
+            "smtp_port": input.smtp_port,
+            "smtp_security": input.smtp_security,
+            "smtp_username": &input.smtp_username,
+            "has_smtp_secret": !sealed_secret.is_empty(),
+            "sender_address": &input.sender_address,
+            "sender_name": &input.sender_name,
+            "recipient_count": input.recipients.len(),
+            "max_retry_hours": input.max_retry_hours,
+            "instance_name": &input.instance_name,
+            "external_base_url": &input.external_base_url,
+            "was_enabled": was_enabled,
+        });
+        let (has_deliveries, pending_deliveries) = if was_enabled && !input.enabled {
+            let has_deliveries: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                                      WHERE type = 'table' AND name = 'email_deliveries')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| format!("检查 SQLite 告警投递表失败：{error}"))?;
+            if has_deliveries {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT d.delivery_id, d.alert_id, a.run_record_id, a.run_id,
+                                a.task_id, a.task_name, d.recipient_snapshot, d.attempt_count
+                           FROM email_deliveries d
+                           JOIN alerts a ON a.alert_id = d.alert_id
+                          WHERE d.state = 'PENDING'",
+                    )
+                    .map_err(|error| format!("准备 SQLite 待终止投递查询失败：{error}"))?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok(PendingDeliveryForDisable {
+                            delivery_id: row.get(0)?,
+                            alert_id: row.get(1)?,
+                            run_record_id: row.get(2)?,
+                            run_id: row.get(3)?,
+                            task_id: row.get(4)?,
+                            task_name: row.get(5)?,
+                            recipient: row.get(6)?,
+                            attempt_count: row.get(7)?,
+                        })
+                    })
+                    .map_err(|error| format!("读取 SQLite 待终止投递失败：{error}"))?;
+                (
+                    true,
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(|error| format!("读取 SQLite 待终止投递失败：{error}"))?,
+                )
+            } else {
+                (false, Vec::new())
+            }
+        } else {
+            (false, Vec::new())
+        };
         transaction
             .execute(
                 "UPDATE email_alert_settings SET
@@ -213,25 +288,42 @@ impl EmailAlertStore {
                 ],
             )
             .map_err(|error| format!("更新 SQLite 邮件告警设置失败：{error}"))?;
-        if was_enabled && !input.enabled {
-            let has_deliveries: bool = transaction
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM sqlite_master
-                                      WHERE type = 'table' AND name = 'email_deliveries')",
-                    [],
-                    |row| row.get(0),
+        if has_deliveries {
+            transaction
+                .execute(
+                    "UPDATE email_deliveries
+                        SET state = 'NOT_SENT', next_attempt_at = NULL, last_error = ?1
+                      WHERE state = 'PENDING'",
+                    [ADMIN_DISABLED_REASON],
                 )
-                .map_err(|error| format!("检查 SQLite 告警投递表失败：{error}"))?;
-            if has_deliveries {
-                transaction
-                    .execute(
-                        "UPDATE email_deliveries
-                            SET state = 'NOT_SENT', next_attempt_at = NULL, last_error = ?1
-                          WHERE state = 'PENDING'",
-                        [ADMIN_DISABLED_REASON],
-                    )
-                    .map_err(|error| format!("终止 SQLite 待发送告警失败：{error}"))?;
-            }
+                .map_err(|error| format!("终止 SQLite 待发送告警失败：{error}"))?;
+        }
+        let _ = insert_log_in_transaction(
+            &transaction,
+            LogLevel::Info,
+            LogEvent::EmailSettingsUpdated,
+            None,
+            None,
+            settings_log,
+        );
+        for delivery in pending_deliveries {
+            let _ = insert_log_in_transaction(
+                &transaction,
+                LogLevel::Warn,
+                LogEvent::EmailDeliveryNotSent,
+                delivery.run_id.as_deref(),
+                Some(&delivery.task_name),
+                json!({
+                    "alert_id": delivery.alert_id,
+                    "delivery_id": delivery.delivery_id,
+                    "run_record_id": delivery.run_record_id,
+                    "task_id": delivery.task_id,
+                    "recipient": delivery.recipient,
+                    "attempt": delivery.attempt_count,
+                    "state": "NOT_SENT",
+                    "reason": ADMIN_DISABLED_REASON,
+                }),
+            );
         }
         transaction
             .commit()

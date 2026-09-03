@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT=${DB_QBS_HOME:-/opt/tools/db-qbs}
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-install -d "$ROOT/bin" "$ROOT/conf" "$ROOT/logs" "$ROOT/data/source"
+install -d -m 0755 "$ROOT/bin"
+install -d -m 0700 "$ROOT/conf" "$ROOT/logs" "$ROOT/data/source"
 install -m 0755 "$HERE/bin/db-qbs-source" "$HERE/bin/db-qbs-source-run" "$ROOT/bin/"
 
 oracle_zip=$(find "$HERE/oracle" -maxdepth 1 -type f -name 'instantclient-basic-linux.x64-19*.zip' 2>/dev/null | sort | tail -1 || true)
@@ -36,6 +37,13 @@ if [[ ! -f "$ROOT/conf/source.toml" ]]; then
   echo "Created $ROOT/conf/source.toml. Please edit it before starting."
 else
   echo "Keeping existing $ROOT/conf/source.toml"
+fi
+
+if [[ -f "$HERE/conf/database.toml" ]]; then
+  install -m 0600 "$HERE/conf/database.toml" "$ROOT/conf/database.toml"
+  echo "Installed $ROOT/conf/database.toml with mode 0600."
+else
+  echo "No database.toml in this package; keeping any existing database configuration."
 fi
 
 if command -v systemctl >/dev/null 2>&1 && [[ -d /etc/systemd/system ]]; then

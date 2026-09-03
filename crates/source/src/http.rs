@@ -41,7 +41,8 @@ use crate::{
     RunParametersEvidence, RunTrigger, ScheduleRegistry,
     SourceColumn, SourceConfig, SourceEvidence, SourceReadError, TargetCheckRequest,
     TargetCheckResult, TargetConnection, TargetEvidence, Task, TaskConfig, TaskInput, TaskSpec,
-    TaskStore, UnknownReason, RUN_LOG_PAGE_LIMIT, SESSION_IDLE_SECONDS, USERNAME,
+    TaskStore, UnknownReason, EMAIL_LOG_PAGE_LIMIT, RUN_LOG_PAGE_LIMIT, SESSION_IDLE_SECONDS,
+    USERNAME,
 };
 
 const MAX_REQUEST_BODY_BYTES: u64 = 1024 * 1024;
@@ -652,6 +653,9 @@ pub fn routes() -> &'static [Route] {
             Route::administrator(Get, "/api/email-deliveries", |state, request, _id| {
                 handle_list_email_deliveries(state, request.query())
             }),
+            Route::administrator(Get, "/api/email-logs", |state, request, _id| {
+                handle_list_email_logs(state, request.query())
+            }),
             Route::administrator(
                 Post,
                 "/api/email-deliveries/{}/retry",
@@ -1035,13 +1039,49 @@ fn handle_test_email_alert_settings(state: &Api<'_>) -> HttpResponse {
         Ok(settings) => settings,
         Err(error) => return internal_error(error),
     };
+    record_email_log(
+        state,
+        LogLevel::Info,
+        LogEvent::EmailTestStarted,
+        None,
+        None,
+        json!({
+            "enabled": settings.enabled,
+            "provider_preset": settings.provider_preset,
+            "smtp_host": &settings.smtp_host,
+            "smtp_port": settings.smtp_port,
+            "smtp_security": settings.smtp_security,
+            "smtp_username": &settings.smtp_username,
+            "has_smtp_secret": settings.has_smtp_secret,
+            "sender_address": &settings.sender_address,
+            "recipient_count": settings.recipients.len(),
+        }),
+    );
     let delivery = match state.email_alerts.test_delivery_settings() {
         Ok(delivery) => delivery,
-        Err(error) => return persist_test_result(state, EmailTestStatus::Failed, Some(error)),
+        Err(error) => {
+            record_email_log(
+                state,
+                LogLevel::Error,
+                LogEvent::EmailTestCompleted,
+                None,
+                None,
+                json!({
+                    "status": "FAILED",
+                    "recipient_count": settings.recipients.len(),
+                    "success_count": 0,
+                    "failure_count": 0,
+                    "error": &error,
+                }),
+            );
+            return persist_test_result(state, EmailTestStatus::Failed, Some(error));
+        }
     };
 
     let subject = format!("[db-qbs][{}][测试] 邮件配置验证", settings.instance_name);
     let mut latest_error = None;
+    let mut success_count = 0;
+    let mut failure_count = 0;
     for recipient in &settings.recipients {
         let plain = format!(
             "db-qbs 测试邮件\n\n实例：{}\n收件人：{}\n\n收到此邮件表示已保存的 SMTP 配置可以发送邮件。",
@@ -1062,12 +1102,59 @@ fn handle_test_email_alert_settings(state: &Api<'_>) -> HttpResponse {
         ) {
             Ok(mail) => mail,
             Err(_) => {
-                latest_error = Some("生成测试邮件失败".to_owned());
+                failure_count += 1;
+                let error = "生成测试邮件失败".to_owned();
+                latest_error = Some(error.clone());
+                record_email_log(
+                    state,
+                    LogLevel::Error,
+                    LogEvent::EmailTestRecipientCompleted,
+                    None,
+                    None,
+                    json!({
+                        "recipient": recipient,
+                        "status": "FAILED",
+                        "error": error,
+                    }),
+                );
                 continue;
             }
         };
-        if let Err(error) = state.mail_transport.send(&delivery, &mail) {
-            latest_error = Some(error.sanitized_message().to_owned());
+        match state.mail_transport.send(&delivery, &mail) {
+            Ok(()) => {
+                success_count += 1;
+                record_email_log(
+                    state,
+                    LogLevel::Info,
+                    LogEvent::EmailTestRecipientCompleted,
+                    None,
+                    None,
+                    json!({
+                        "recipient": recipient,
+                        "status": "SUCCESS",
+                        "error": null,
+                    }),
+                );
+            }
+            Err(error) => {
+                failure_count += 1;
+                let code = error.code();
+                let message = error.sanitized_message().to_owned();
+                latest_error = Some(message.clone());
+                record_email_log(
+                    state,
+                    LogLevel::Error,
+                    LogEvent::EmailTestRecipientCompleted,
+                    None,
+                    None,
+                    json!({
+                        "recipient": recipient,
+                        "status": "FAILED",
+                        "error_code": code,
+                        "error": message,
+                    }),
+                );
+            }
         }
     }
 
@@ -1076,6 +1163,27 @@ fn handle_test_email_alert_settings(state: &Api<'_>) -> HttpResponse {
     } else {
         EmailTestStatus::Success
     };
+    record_email_log(
+        state,
+        if status == EmailTestStatus::Success {
+            LogLevel::Info
+        } else {
+            LogLevel::Error
+        },
+        LogEvent::EmailTestCompleted,
+        None,
+        None,
+        json!({
+            "status": match status {
+                EmailTestStatus::Success => "SUCCESS",
+                EmailTestStatus::Failed => "FAILED",
+            },
+            "recipient_count": settings.recipients.len(),
+            "success_count": success_count,
+            "failure_count": failure_count,
+            "error": &latest_error,
+        }),
+    );
     persist_test_result(state, status, latest_error)
 }
 
@@ -1090,6 +1198,34 @@ fn handle_list_email_deliveries(state: &Api<'_>, query: Option<&str>) -> HttpRes
         Ok(deliveries) => json_response(200, &deliveries),
         Err(error) => internal_error(error),
     }
+}
+
+fn handle_list_email_logs(state: &Api<'_>, query: Option<&str>) -> HttpResponse {
+    let mut after: i64 = 0;
+    for (key, value) in url::form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
+        if key.as_ref() != "after" {
+            continue;
+        }
+        match value.parse::<i64>() {
+            Ok(parsed) if parsed >= 0 => after = parsed,
+            _ => return bad_request("查询参数 after 必须是非负整数".to_owned()),
+        }
+    }
+    let lines = match state.alert_outbox.email_logs().lines_after(after) {
+        Ok(lines) => lines,
+        Err(error) => return internal_error(error),
+    };
+    let has_more = lines.len() >= EMAIL_LOG_PAGE_LIMIT;
+    let next_after = lines.last().map_or(after, |line| line.seq);
+    json_response(
+        200,
+        &json!({
+            "after": after,
+            "next_after": next_after,
+            "has_more": has_more,
+            "lines": lines,
+        }),
+    )
 }
 
 fn handle_retry_email_delivery(state: &Api<'_>, delivery_id: &str) -> HttpResponse {
@@ -1120,6 +1256,20 @@ fn persist_test_result(
         Ok(()) => json_response(200, &result),
         Err(error) => internal_error(error),
     }
+}
+
+fn record_email_log(
+    state: &Api<'_>,
+    level: LogLevel,
+    event: LogEvent,
+    run_id: Option<&str>,
+    task: Option<&str>,
+    fields: serde_json::Value,
+) {
+    let _ = state
+        .alert_outbox
+        .email_logs()
+        .append(level, event, run_id, task, fields);
 }
 
 fn escape_html(value: &str) -> String {

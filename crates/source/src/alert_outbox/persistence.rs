@@ -2,7 +2,9 @@ use std::fs;
 use std::path::Path;
 
 use chrono::{DateTime, TimeDelta, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use db_qbs_shared::{LogEvent, LogLevel};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use serde_json::json;
 
 use super::message::{is_alertable, safe_explanation, PendingDelivery};
 use super::{
@@ -10,6 +12,7 @@ use super::{
     ManualRetryOutcome, RunAlertSummary, BUSY_SKIP_SUPPRESSION_HOURS, DATABASE_FILE,
     RETRY_BASE_SECONDS, RETRY_CAP_SECONDS,
 };
+use crate::email_log::{initialize_email_log_table, insert_log_in_transaction};
 use crate::{EmailAlertStore, RunHistory};
 
 impl AlertOutboxStore {
@@ -18,6 +21,7 @@ impl AlertOutboxStore {
             .map_err(|error| format!("创建 source 数据目录失败：{error}"))?;
         let store = Self {
             database_path: data_dir.join(DATABASE_FILE),
+            email_logs: crate::EmailLogStore::open(data_dir)?,
         };
         let connection = store.connection()?;
         initialize_alert_tables(&connection)?;
@@ -98,8 +102,11 @@ impl AlertOutboxStore {
         let max_retry_hours = settings_store.get()?.max_retry_hours;
         let started_at = now.to_rfc3339();
         let deadline = retry_deadline(now, max_retry_hours).to_rfc3339();
-        let changed = self
-            .connection()?
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("开启 SQLite 手动重试事务失败：{error}"))?;
+        let changed = transaction
             .execute(
                 "UPDATE email_deliveries
                     SET state = 'PENDING', next_attempt_at = ?1,
@@ -111,6 +118,28 @@ impl AlertOutboxStore {
         if changed == 0 {
             return Ok(ManualRetryOutcome::Ineligible);
         }
+        let _ = insert_log_in_transaction(
+            &transaction,
+            LogLevel::Info,
+            LogEvent::EmailDeliveryQueued,
+            None,
+            Some(&delivery.task_name),
+            json!({
+                "alert_id": delivery.alert_id,
+                "delivery_id": delivery.delivery_id,
+                "run_record_id": delivery.run_record_id,
+                "task_id": delivery.task_id,
+                "recipient": delivery.recipient,
+                "attempt": delivery.attempt_count + 1,
+                "state": "PENDING",
+                "reason": "manual_retry",
+                "next_attempt_at": started_at,
+                "retry_deadline_at": deadline,
+            }),
+        );
+        transaction
+            .commit()
+            .map_err(|error| format!("提交 SQLite 手动重试事务失败：{error}"))?;
         let history = self
             .delivery_by_id(delivery_id)?
             .ok_or_else(|| "重新安排后的告警投递不存在".to_owned())?;
@@ -143,7 +172,7 @@ impl AlertOutboxStore {
             .prepare(
                 "SELECT d.delivery_id, d.recipient_snapshot, a.alert_id, a.run_record_id,
                         a.run_id, a.task_id, a.task_name, a.run_trigger, a.failed_at,
-                        a.failure_category, a.safe_explanation
+                        a.failure_category, a.safe_explanation, d.attempt_count
                    FROM email_deliveries d
                    JOIN alerts a ON a.alert_id = d.alert_id
                   WHERE d.state = 'PENDING'
@@ -157,6 +186,7 @@ impl AlertOutboxStore {
                 Ok(PendingDelivery {
                     delivery_id: row.get(0)?,
                     recipient: row.get(1)?,
+                    attempt_count: row.get(11)?,
                     alert_id: row.get(2)?,
                     run_record_id: row.get(3)?,
                     run_id: row.get(4)?,
@@ -179,7 +209,7 @@ impl AlertOutboxStore {
         now: DateTime<Utc>,
         max_retry_hours: u8,
         result: Result<(), crate::MailTransportError>,
-    ) -> Result<(), String> {
+    ) -> Result<RecordedAttempt, String> {
         let connection = self.connection()?;
         let (attempt_count, started_at, deadline): (u64, Option<String>, Option<String>) =
             connection
@@ -196,22 +226,24 @@ impl AlertOutboxStore {
             .transpose()?
             .unwrap_or_else(|| retry_deadline(now, max_retry_hours));
         let next_count = attempt_count + 1;
-        let (state, next_attempt_at, error) = match result {
-            Ok(()) => ("SENT", None, None),
+        let (state, next_attempt_at, error, error_code) = match result {
+            Ok(()) => ("SENT", None, None, None),
             Err(error) => {
+                let code = Some(error.code());
                 let next = now + retry_delay(next_count);
                 if next <= deadline {
                     (
                         "PENDING",
                         Some(next.to_rfc3339()),
                         Some(error.sanitized_message()),
+                        code,
                     )
                 } else {
-                    ("FAILED", None, Some(error.sanitized_message()))
+                    ("FAILED", None, Some(error.sanitized_message()), code)
                 }
             }
         };
-        connection
+        let changed = connection
             .execute(
                 "UPDATE email_deliveries
                     SET state = ?1, attempt_count = attempt_count + 1,
@@ -232,11 +264,56 @@ impl AlertOutboxStore {
                 ],
             )
             .map_err(|error| format!("记录告警发送结果失败：{error}"))?;
-        Ok(())
+        if changed != 1 {
+            return Err("记录告警发送结果时投递已被其他操作终止".to_owned());
+        }
+        Ok(RecordedAttempt {
+            attempt_count: next_count,
+            state,
+            next_attempt_at,
+            error,
+            error_code,
+            retry_deadline_at: deadline.to_rfc3339(),
+        })
     }
 
     pub(super) fn expire_overdue(&self, now: DateTime<Utc>) -> Result<(), String> {
-        self.connection()?
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("开启 SQLite 超期投递事务失败：{error}"))?;
+        let overdue = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT d.delivery_id, a.alert_id, a.run_record_id, a.run_id,
+                            a.task_id, a.task_name, d.recipient_snapshot, d.attempt_count,
+                            d.last_error, d.retry_deadline_at
+                       FROM email_deliveries d
+                       JOIN alerts a ON a.alert_id = d.alert_id
+                      WHERE d.state = 'PENDING' AND d.attempt_count > 0
+                        AND d.retry_deadline_at < ?1",
+                )
+                .map_err(|error| format!("准备 SQLite 超期投递查询失败：{error}"))?;
+            let rows = statement
+                .query_map([now.to_rfc3339()], |row| {
+                    Ok(ExpiredDelivery {
+                        delivery_id: row.get(0)?,
+                        alert_id: row.get(1)?,
+                        run_record_id: row.get(2)?,
+                        run_id: row.get(3)?,
+                        task_id: row.get(4)?,
+                        task_name: row.get(5)?,
+                        recipient: row.get(6)?,
+                        attempt_count: row.get(7)?,
+                        last_error: row.get(8)?,
+                        retry_deadline_at: row.get(9)?,
+                    })
+                })
+                .map_err(|error| format!("读取 SQLite 超期投递失败：{error}"))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("读取 SQLite 超期投递失败：{error}"))?
+        };
+        transaction
             .execute(
                 "UPDATE email_deliveries SET state = 'FAILED', next_attempt_at = NULL
                   WHERE state = 'PENDING' AND attempt_count > 0
@@ -244,6 +321,31 @@ impl AlertOutboxStore {
                 [now.to_rfc3339()],
             )
             .map_err(|error| format!("结束超期告警投递失败：{error}"))?;
+        for delivery in overdue {
+            let _ = insert_log_in_transaction(
+                &transaction,
+                LogLevel::Error,
+                LogEvent::EmailDeliveryCompleted,
+                delivery.run_id.as_deref(),
+                Some(&delivery.task_name),
+                json!({
+                    "alert_id": delivery.alert_id,
+                    "delivery_id": delivery.delivery_id,
+                    "run_record_id": delivery.run_record_id,
+                    "task_id": delivery.task_id,
+                    "recipient": delivery.recipient,
+                    "attempt": delivery.attempt_count,
+                    "state": "FAILED",
+                    "error": delivery.last_error,
+                    "reason": "retry_window_expired",
+                    "next_attempt_at": null,
+                    "retry_deadline_at": delivery.retry_deadline_at,
+                }),
+            );
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("提交 SQLite 超期投递事务失败：{error}"))?;
         Ok(())
     }
 
@@ -292,6 +394,28 @@ fn retry_delay(attempt_count: u64) -> TimeDelta {
 
 pub(super) fn retry_deadline(started_at: DateTime<Utc>, max_retry_hours: u8) -> DateTime<Utc> {
     started_at + TimeDelta::hours(i64::from(max_retry_hours))
+}
+
+pub(super) struct RecordedAttempt {
+    pub attempt_count: u64,
+    pub state: &'static str,
+    pub next_attempt_at: Option<String>,
+    pub error: Option<&'static str>,
+    pub error_code: Option<&'static str>,
+    pub retry_deadline_at: String,
+}
+
+struct ExpiredDelivery {
+    delivery_id: String,
+    alert_id: String,
+    run_record_id: String,
+    run_id: Option<String>,
+    task_id: String,
+    task_name: String,
+    recipient: String,
+    attempt_count: u64,
+    last_error: Option<String>,
+    retry_deadline_at: Option<String>,
 }
 
 fn parse_timestamp(value: &str) -> Result<DateTime<Utc>, String> {
@@ -376,6 +500,7 @@ pub(crate) fn initialize_alert_tables(connection: &Connection) -> Result<(), Str
                  ON email_deliveries(state, attempt_count);",
         )
         .map_err(|error| format!("初始化 SQLite 告警表失败：{error}"))?;
+    initialize_email_log_table(connection)?;
     let has_delivery_state: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('alerts') WHERE name = 'delivery_state')",
@@ -519,6 +644,35 @@ pub(crate) fn insert_alert_in_transaction(
             )
             .map_err(|error| format!("记录 SQLite 告警投递候选状态失败：{error}"))?;
     }
+    let initial_event = if !delivery_available {
+        LogEvent::EmailDeliveryNotSent
+    } else if suppressed {
+        LogEvent::EmailDeliverySuppressed
+    } else {
+        LogEvent::EmailDeliveryQueued
+    };
+    let initial_level = if !delivery_available {
+        LogLevel::Warn
+    } else {
+        LogLevel::Info
+    };
+    if recipients.is_empty() {
+        let _ = insert_log_in_transaction(
+            transaction,
+            initial_level,
+            initial_event,
+            history.run_id.as_deref(),
+            Some(&history.task_name),
+            json!({
+                "alert_id": alert_id,
+                "run_record_id": history.run_record_id,
+                "task_id": history.task_id,
+                "recipient_count": 0,
+                "state": delivery_state,
+                "reason": (!delivery_available).then_some(unavailable_reason),
+            }),
+        );
+    }
     for (index, recipient) in recipients.iter().enumerate() {
         transaction
             .execute(
@@ -538,6 +692,29 @@ pub(crate) fn insert_alert_in_transaction(
                 ],
             )
             .map_err(|error| format!("创建 SQLite 告警投递失败：{error}"))?;
+        let _ = insert_log_in_transaction(
+            transaction,
+            initial_level,
+            initial_event,
+            history.run_id.as_deref(),
+            Some(&history.task_name),
+            json!({
+                "alert_id": alert_id,
+                "delivery_id": format!("{alert_id}-{index}"),
+                "run_record_id": history.run_record_id,
+                "task_id": history.task_id,
+                "recipient": recipient,
+                "recipient_count": recipients.len(),
+                "state": delivery_state,
+                "reason": if !delivery_available {
+                    Some(unavailable_reason)
+                } else if suppressed {
+                    Some("重复调度抑制窗口")
+                } else {
+                    None
+                },
+            }),
+        );
     }
     Ok(())
 }

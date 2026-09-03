@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT=${DB_QBS_HOME:-/opt/tools/db-qbs}
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-install -d "$ROOT/bin" "$ROOT/conf" "$ROOT/logs"
+install -d -m 0755 "$ROOT/bin"
+install -d -m 0700 "$ROOT/conf" "$ROOT/logs"
 install -m 0755 "$HERE/bin/db-qbs-sink" "$ROOT/bin/"
 
 if [[ ! -f "$ROOT/conf/sink.toml" ]]; then

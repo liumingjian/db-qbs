@@ -70,4 +70,11 @@ pub enum ManualRetryOutcome {
 #[derive(Debug, Clone)]
 pub struct AlertOutboxStore {
     database_path: PathBuf,
+    email_logs: crate::EmailLogStore,
+}
+
+impl AlertOutboxStore {
+    pub fn email_logs(&self) -> &crate::EmailLogStore {
+        &self.email_logs
+    }
 }

@@ -12,6 +12,16 @@ pub enum MailTransportError {
 }
 
 impl MailTransportError {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Timeout => "SMTP_TIMEOUT",
+            Self::Tls => "SMTP_TLS",
+            Self::Transient => "SMTP_TRANSIENT",
+            Self::Permanent => "SMTP_PERMANENT",
+            Self::Network => "SMTP_NETWORK",
+        }
+    }
+
     pub fn sanitized_message(self) -> &'static str {
         match self {
             Self::Timeout => "SMTP 连接或响应超时",
